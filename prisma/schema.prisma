@@ -1,0 +1,220 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Case {
+  id           String      @id @default(uuid())
+  name         String
+  path         String      @unique
+  caseNumber   String?
+  jurisdiction String?
+  country      String?     @default("United States")
+  state        String?
+  county       String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  documents    Document[]
+  filings      Filing[]
+
+  @@index([path])
+  @@index([caseNumber])
+}
+
+model Filing {
+  id          String     @id @default(uuid())
+  caseId      String
+  case        Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  filingType  String
+  title       String
+  slug        String
+  filingDate  DateTime?
+  description  String?
+  volumeNumber Int?
+  createdAt    DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  documents   Document[]
+  motions     Motion[]
+
+  @@unique([caseId, slug])
+  @@index([caseId])
+  @@index([filingType])
+}
+
+model Document {
+  id                String    @id @default(uuid())
+  caseId            String
+  case              Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  filingId          String?
+  filing            Filing?   @relation(fields: [filingId], references: [id], onDelete: SetNull)
+  filePath          String    @unique
+  fileName          String
+  hash              String    @unique
+  status            String    @default("QUEUED")
+  documentType      String?
+  documentSummary   String?
+  exhibitLabel      String?
+  errorMessage      String?
+  pageCount         Int?
+  detectedExhibits  Int       @default(0)
+  embeddingModel    String?
+  ingestCheckpoint  String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([caseId])
+  @@index([filingId])
+  @@index([status])
+  @@index([hash])
+  @@index([documentType])
+  @@index([embeddingModel])
+}
+
+model JobLog {
+  id                  String    @id @default(uuid())
+  startedAt           DateTime  @default(now())
+  completedAt         DateTime?
+  documentsQueued     Int
+  documentsProcessed  Int
+  documentsFailed     Int
+  errorSummary        String?
+
+  @@index([startedAt])
+}
+
+model Config {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model ModelDownload {
+  id                String    @id @default(uuid())
+  modelName         String    @unique
+  provider          String
+  status            String
+  downloadProgress  Float     @default(0)
+  sizeBytes         BigInt?
+  downloadedAt      DateTime?
+  errorMessage      String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([provider])
+  @@index([status])
+}
+
+model PageCache {
+  id          String   @id @default(uuid())
+  documentId  String
+  pageNumber  Int
+  text        String
+  textDensity Int
+  source      String   // 'extract' or 'ocr'
+  confidence  Float?
+  createdAt   DateTime @default(now())
+
+  @@unique([documentId, pageNumber])
+  @@index([documentId])
+  @@index([source])
+}
+
+model ActionLog {
+  id          String   @id @default(uuid())
+  caseId      String?
+  action      String
+  target      String
+  status      String   @default("pending")
+  detail      String?
+  logType     String   @default("general")
+  createdAt   DateTime @default(now())
+
+  @@index([caseId])
+  @@index([logType])
+  @@index([createdAt])
+  @@index([status])
+}
+
+model Motion {
+  id          String    @id @default(uuid())
+  filingId    String
+  filing      Filing    @relation(fields: [filingId], references: [id], onDelete: Cascade)
+  title       String
+  startPage   Int
+  endPage     Int?
+  description String?
+  exhibits    Exhibit[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([filingId])
+}
+
+model Exhibit {
+  id          String    @id @default(uuid())
+  motionId    String
+  motion      Motion    @relation(fields: [motionId], references: [id], onDelete: Cascade)
+  label       String
+  title       String?
+  startPage   Int
+  endPage     Int?
+  description String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([motionId])
+}
+
+model WorkflowTemplate {
+  id           String     @id @default(uuid())
+  name         String     @unique
+  jurisdiction String?
+  category     String?
+  tags         String     @default("[]")
+  description  String?
+  content      String
+  workflows    Workflow[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([category])
+}
+
+model Workflow {
+  id          String             @id @default(uuid())
+  caseId      String
+  templateId  String?
+  template    WorkflowTemplate?  @relation(fields: [templateId], references: [id])
+  title       String
+  slug        String
+  content     String             @default("")
+  status      String             @default("draft")
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@unique([caseId, slug])
+  @@index([caseId])
+}
+
+model SidecarCommand {
+  id          String   @id @default(uuid())
+  sidecarUrl  String
+  action      String
+  payload     String   @default("{}")
+  status      String   @default("pending")
+  result      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  expiresAt   DateTime
+
+  @@index([sidecarUrl, status])
+  @@index([status, expiresAt])
+}

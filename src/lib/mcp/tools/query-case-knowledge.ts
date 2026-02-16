@@ -1,0 +1,336 @@
+import { BaseMCPTool } from './base-tool';
+import {
+  ToolMetadata,
+  ToolExecutionContext,
+  ToolConfigEntry,
+} from '../tool-types';
+import { SearchQuery, MatchQuery, BooleanQuery, Occur, Operator } from '../../vector/vector-store';
+import type { FullTextQuery } from '../../vector/vector-store';
+import { getCitationFormatter, CitationInput } from '../../citations/citation-formatter';
+import { detectLineNumbers } from '../../citations/line-number-detector';
+import { QueryPreprocessor } from '../../search/query-preprocessor';
+import { rerank } from '../../search/reranker';
+
+export interface QueryCaseKnowledgeParams {
+  query: string;
+  caseId?: string;
+  limit?: number;
+  searchMode?: 'vector' | 'hybrid' | 'keyword';
+}
+
+export interface QueryCaseKnowledgeResult {
+  results: Array<{
+    text: string;
+    document: string;
+    page: number;
+    score: number;
+    citation?: string;
+    citationShort?: string;
+    filingType?: string;
+    volumeNumber?: number;
+    caseNumber?: string;
+    annotations?: string;
+  }>;
+}
+
+export class QueryCaseKnowledgeTool extends BaseMCPTool<
+  QueryCaseKnowledgeParams,
+  QueryCaseKnowledgeResult
+> {
+  getMetadata(): ToolMetadata {
+    return {
+      name: 'query_case_knowledge',
+      displayName: 'Query Case Knowledge',
+      description:
+        'Perform semantic search on legal documents using natural language queries',
+      version: '1.1.0',
+      category: 'search',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Natural language query to search for',
+          },
+          caseId: {
+            type: 'string',
+            description: 'Optional case ID to filter results',
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of results to return (default: 10)',
+          },
+          searchMode: {
+            type: 'string',
+            description: 'Search mode: vector, hybrid, or keyword (default: hybrid)',
+            enum: ['vector', 'hybrid', 'keyword'],
+          },
+        },
+        required: ['query'],
+      },
+    };
+  }
+
+  validateParams(params: QueryCaseKnowledgeParams): void {
+    if (!params.query || typeof params.query !== 'string') {
+      const err: any = new Error('Missing or invalid query parameter');
+      err.code = 'INVALID_PARAMS';
+      throw err;
+    }
+  }
+
+  async executeImpl(
+    params: QueryCaseKnowledgeParams,
+    context: ToolExecutionContext,
+    _config: ToolConfigEntry,
+  ): Promise<QueryCaseKnowledgeResult> {
+    const { query, caseId, limit = 10, searchMode = 'hybrid' } = params;
+
+    // Over-fetch candidates so the cross-encoder reranker has a larger pool to judge.
+    // The reranker is far better at relevance scoring than embedding similarity,
+    // so casting a wider retrieval net dramatically improves recall.
+    const retrievalLimit = limit * 3;
+
+    // Preprocess the query to extract keywords, entities, legal terms, page references
+    const processed = QueryPreprocessor.process(query);
+
+    context.logger.info('Handling query_case_knowledge', {
+      query,
+      caseId,
+      limit,
+      retrievalLimit,
+      searchMode,
+      keywords: processed.keywords,
+      entities: processed.entities,
+      legalTerms: processed.legalTerms,
+      pageRef: processed.pageReferences,
+    });
+
+    // Generate embedding for query (needed for vector and hybrid modes)
+    let queryEmbedding: number[] | undefined;
+    if (searchMode !== 'keyword') {
+      const embeddings = await context.embeddingProvider.embed([query]);
+      queryEmbedding = embeddings[0];
+    }
+
+    // Build FTS query from extracted keywords using BooleanQuery
+    let ftsQuery: FullTextQuery | undefined;
+    if (searchMode === 'hybrid' || searchMode === 'keyword') {
+      if (processed.keywords.length > 0) {
+        const clauses: [Occur, FullTextQuery][] = processed.keywords.map((kw) => [
+          Occur.Should,
+          new MatchQuery(kw, 'text') as FullTextQuery,
+        ]);
+        ftsQuery = new BooleanQuery(clauses);
+      }
+    }
+
+    // Build search query with expanded candidate pool
+    const searchQuery: SearchQuery = {
+      limit: retrievalLimit,
+    };
+
+    if (queryEmbedding) {
+      searchQuery.vector = queryEmbedding;
+    }
+
+    if (ftsQuery) {
+      searchQuery.ftsQuery = ftsQuery;
+    } else if (searchMode === 'hybrid' || searchMode === 'keyword') {
+      // Fallback: pass raw query for legacy text search
+      searchQuery.hybridQuery = query;
+    }
+
+    // Apply case filter if provided
+    if (caseId) {
+      searchQuery.filter = { caseId };
+    }
+
+    // Perform primary search
+    let searchResults = await context.vectorStore.search(searchQuery);
+
+    // If page references were extracted, run a secondary metadata-filtered search and merge
+    if (processed.pageReferences && searchResults.length < retrievalLimit) {
+      const pageRef = processed.pageReferences;
+      const metadataFilter: Record<string, any> = { ...(caseId ? { caseId } : {}) };
+      if (pageRef.page !== undefined) metadataFilter.pageNumber = pageRef.page;
+      if (pageRef.filingType) metadataFilter.filingType = pageRef.filingType;
+
+      const secondaryQuery: SearchQuery = {
+        limit: retrievalLimit - searchResults.length,
+        filter: metadataFilter,
+      };
+      if (queryEmbedding) secondaryQuery.vector = queryEmbedding;
+      if (ftsQuery) secondaryQuery.ftsQuery = ftsQuery;
+
+      try {
+        const secondaryResults = await context.vectorStore.search(secondaryQuery);
+        // Merge, avoiding duplicates
+        const existingIds = new Set(searchResults.map(r => r.chunkId));
+        for (const sr of secondaryResults) {
+          if (!existingIds.has(sr.chunkId)) {
+            searchResults.push(sr);
+          }
+        }
+      } catch {
+        // Secondary search failure is non-fatal
+      }
+    }
+
+    // Post-process: boost results containing ALL extracted entities
+    if (processed.entities.length > 0) {
+      searchResults = searchResults.map((result) => {
+        const textLower = result.text.toLowerCase();
+        const allEntitiesPresent = processed.entities.every(
+          (entity) => textLower.includes(entity.toLowerCase())
+        );
+        if (allEntitiesPresent) {
+          return { ...result, score: result.score * 1.5 };
+        }
+        return result;
+      });
+      // Re-sort by score (higher is better for RRF/BM25 scores)
+      searchResults.sort((a, b) => b.score - a.score);
+      searchResults = searchResults.slice(0, retrievalLimit);
+    }
+
+    // Rerank results using cross-encoder if enabled.
+    // Pass explicit topN = limit so the reranker trims from the expanded pool.
+    searchResults = await rerank(query, searchResults, limit);
+
+    // Safety trim: if reranking was disabled, ensure we return at most `limit` results
+    if (searchResults.length > limit) {
+      searchResults = searchResults.slice(0, limit);
+    }
+
+    // Look up case metadata for citation formatter selection
+    let caseData: { jurisdiction?: string | null; state?: string | null; country?: string | null; caseNumber?: string | null } | null = null;
+    if (caseId) {
+      caseData = await context.database.case.findUnique({
+        where: { id: caseId },
+        select: { jurisdiction: true, state: true, country: true, caseNumber: true },
+      });
+    }
+
+    // Count distinct volumes per filing type for this case (to decide whether to show vol number)
+    const volumeCountMap = new Map<string, number>(); // filingType -> distinct volume count
+    if (caseId) {
+      try {
+        const filings = await (context.database as any).filing.findMany({
+          where: { caseId },
+          select: { filingType: true, volumeNumber: true },
+        });
+        const typeVolumes = new Map<string, Set<number>>();
+        for (const f of filings) {
+          if (!f.filingType) continue;
+          const key = f.filingType;
+          if (!typeVolumes.has(key)) typeVolumes.set(key, new Set());
+          typeVolumes.get(key)!.add(f.volumeNumber ?? 1);
+        }
+        for (const [type, vols] of typeVolumes) {
+          volumeCountMap.set(type, vols.size);
+        }
+      } catch { /* filings may not exist for all cases */ }
+
+      // Supplement volume counts from document filenames (for docs without Filing records)
+      // e.g. TRAVIS-D-1-FM-25-004488-RR-VOL002.pdf → "Reporter's Record" vol 2
+      try {
+        const caseDocs = await context.database.document.findMany({
+          where: { caseId },
+          select: { fileName: true, documentType: true },
+        });
+        const docTypeVolumes = new Map<string, Set<number>>();
+        for (const doc of caseDocs) {
+          const dt = doc.documentType;
+          if (!dt) continue;
+          const volMatch = doc.fileName?.match(/-VOL(\d+)/i);
+          const vol = volMatch ? parseInt(volMatch[1], 10) : 1;
+          if (!docTypeVolumes.has(dt)) docTypeVolumes.set(dt, new Set());
+          docTypeVolumes.get(dt)!.add(vol);
+        }
+        for (const [type, vols] of docTypeVolumes) {
+          // Only update if we have more volumes than currently known
+          const current = volumeCountMap.get(type) ?? 0;
+          if (vols.size > current) volumeCountMap.set(type, vols.size);
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Select citation formatter based on case metadata
+    const formatter = getCitationFormatter({
+      jurisdiction: caseData?.jurisdiction || undefined,
+      state: caseData?.state || undefined,
+      country: caseData?.country || undefined,
+    });
+
+    // Enrich results with document names and citations
+    const enrichedResults = await Promise.all(
+      searchResults.map(async (result) => {
+        const document = await context.database.document.findUnique({
+          where: { id: result.metadata.documentId },
+          select: { fileName: true, filing: true, case: true, documentType: true },
+        });
+
+        // Use metadata from LanceDB first, fall back to Prisma lookup for legacy rows,
+        // then fall back to document.documentType (set during filing detection even without a Filing record)
+        const filingType = result.metadata.filingType
+          || (document as any)?.filing?.filingType
+          || document?.documentType
+          || undefined;
+        let volumeNumber: number | undefined = result.metadata.volumeNumber || (document as any)?.filing?.volumeNumber;
+        // Extract volume number from filename as fallback (e.g. "-VOL002" or "-VOL2")
+        if (!volumeNumber && document?.fileName) {
+          const volMatch = document.fileName.match(/-VOL(\d+)/i);
+          if (volMatch) volumeNumber = parseInt(volMatch[1], 10);
+        }
+        const caseNumber = result.metadata.caseNumber || (document as any)?.case?.caseNumber || caseData?.caseNumber;
+
+        // Build citation input
+        const totalVolumes = filingType ? (volumeCountMap.get(filingType) ?? 1) : 1;
+        const citationInput: CitationInput = {
+          filingType,
+          volumeNumber,
+          totalVolumes,
+          caseNumber: caseNumber || undefined,
+          pageNumber: result.metadata.pageNumber,
+          fileName: document?.fileName,
+        };
+
+        // Line numbers for Reporter's Record filings: prefer stored metadata, fall back to detection
+        if (filingType) {
+          const ft = filingType.toLowerCase();
+          if (ft.includes("reporter") || ft === 'rr') {
+            if (result.metadata.startLine && result.metadata.endLine) {
+              citationInput.lineStart = result.metadata.startLine;
+              citationInput.lineEnd = result.metadata.endLine;
+            } else {
+              const lineRange = detectLineNumbers(result.text);
+              citationInput.lineStart = lineRange.startLine;
+              citationInput.lineEnd = lineRange.endLine;
+            }
+          }
+        }
+
+        const formatted = formatter.format(citationInput);
+
+        return {
+          text: result.text,
+          document: document?.fileName || 'Unknown',
+          page: result.metadata.pageNumber,
+          score: result.score,
+          citation: formatted.full,
+          citationShort: formatted.short,
+          filingType,
+          volumeNumber,
+          caseNumber: caseNumber || undefined,
+          filingSlug: (document as any)?.filing?.slug || undefined,
+          annotations: result.metadata.annotations || undefined,
+        };
+      }),
+    );
+
+    context.logger.info('Query completed', { resultCount: enrichedResults.length, formatter: formatter.id });
+
+    return { results: enrichedResults };
+  }
+}

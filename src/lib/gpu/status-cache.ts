@@ -1,0 +1,189 @@
+/**
+ * Sidecar Status Cache — Server-Side Cache of Sidecar State
+ *
+ * Instead of pushing `/status` to sidecars, the server caches status
+ * reported by sidecars via heartbeat (WS or HTTP).
+ *
+ * Admin UI reads from this cache — zero outbound connections needed.
+ */
+
+import { createLogger } from '@/lib/logger';
+
+const logger = createLogger('StatusCache');
+
+export interface CachedSidecarStatus {
+  agentUrl: string;
+  hostname: string;
+  version?: string;
+  mode: string;
+  uptime: number;
+  containers: Record<string, {
+    status: string;
+    name: string;
+    image?: string;
+    port?: number;
+    vram?: number;
+    type?: string;
+    model?: string | null;
+    exists?: boolean;
+    loadedModels?: Array<{ name: string; size: string; sizeBytes?: number; sizeVram?: number; gpuPercent?: number; processor: string; until: string }>;
+  }>;
+  activeRequests: number;
+  idleTimeouts: Record<string, number>;
+  roles: Record<string, {
+    activeRequests: number;
+    idleTimerActive: boolean;
+    lastAcquire?: string | null;
+    lastRelease?: string | null;
+  }>;
+  peakDemand: Record<string, number>;
+  gpus: Array<{
+    index: number;
+    name: string;
+    memoryTotal: number;
+    memoryUsed: number;
+    memoryFree: number;
+    temperature: number;
+  }>;
+  wsConnected: boolean;
+  tasks?: Array<{
+    id: string;
+    type: string;
+    label: string;
+    role?: string;
+    status: 'running' | 'completed' | 'failed';
+    progress?: number;
+    detail?: string;
+    startedAt: number;
+    completedAt?: number;
+    error?: string;
+  }>;
+  lastSeen: number; // timestamp
+}
+
+// Use globalThis to survive Next.js module isolation between worker-init and API routes.
+// Without this, the WS relay (in worker-init context) writes to one Map instance
+// while API routes read from a different (empty) Map instance.
+const CACHE_KEY = '__soundsuite_sidecar_status_cache__';
+
+function getCache(): Map<string, CachedSidecarStatus> {
+  const g = globalThis as any;
+  if (!g[CACHE_KEY]) {
+    g[CACHE_KEY] = new Map<string, CachedSidecarStatus>();
+  }
+  return g[CACHE_KEY];
+}
+
+// Proxy for backward compat — all reads/writes go through getCache()
+const cache = new Proxy({} as Map<string, CachedSidecarStatus>, {
+  get(_target, prop: string | symbol) {
+    const realMap = getCache();
+    const value = (realMap as any)[prop];
+    return typeof value === 'function' ? value.bind(realMap) : value;
+  },
+});
+
+// Stale threshold: consider a sidecar disconnected if no heartbeat for 30s
+const STALE_THRESHOLD_MS = 30_000;
+
+/**
+ * Update cached status from a sidecar heartbeat.
+ * Called from heartbeat endpoint and WS relay heartbeat handler.
+ */
+export function updateSidecarStatus(agentUrl: string, status: Partial<CachedSidecarStatus>): void {
+  const normalized = agentUrl.replace(/\/+$/, '');
+  const existing = cache.get(normalized);
+
+  cache.set(normalized, {
+    agentUrl: normalized,
+    hostname: status.hostname || existing?.hostname || 'unknown',
+    version: status.version || existing?.version,
+    mode: status.mode || existing?.mode || 'searching',
+    uptime: status.uptime ?? existing?.uptime ?? 0,
+    containers: status.containers || existing?.containers || {},
+    activeRequests: status.activeRequests ?? existing?.activeRequests ?? 0,
+    idleTimeouts: status.idleTimeouts || existing?.idleTimeouts || {},
+    roles: status.roles || existing?.roles || {},
+    peakDemand: status.peakDemand || existing?.peakDemand || {},
+    gpus: status.gpus || existing?.gpus || [],
+    wsConnected: status.wsConnected ?? existing?.wsConnected ?? false,
+    tasks: status.tasks || existing?.tasks || [],
+    lastSeen: Date.now(),
+  });
+}
+
+/**
+ * Get cached status for a specific sidecar.
+ */
+export function getSidecarStatus(agentUrl: string): CachedSidecarStatus | null {
+  const normalized = agentUrl.replace(/\/+$/, '');
+  return cache.get(normalized) || null;
+}
+
+/**
+ * Get all cached sidecar statuses.
+ */
+export function getAllSidecarStatuses(): CachedSidecarStatus[] {
+  return Array.from(cache.values());
+}
+
+/**
+ * Check if a sidecar is considered "connected" (recent heartbeat).
+ */
+export function isSidecarConnected(agentUrl: string): boolean {
+  const normalized = agentUrl.replace(/\/+$/, '');
+  const entry = cache.get(normalized);
+  if (!entry) return false;
+  return (Date.now() - entry.lastSeen) < STALE_THRESHOLD_MS;
+}
+
+/**
+ * Get aggregated peak demand across all connected sidecars.
+ */
+export function getAggregatedPeakDemand(): Record<string, number> {
+  const demand: Record<string, number> = { embedding: 0, completion: 0, ocr: 0, reranker: 0 };
+  for (const status of cache.values()) {
+    if ((Date.now() - status.lastSeen) > STALE_THRESHOLD_MS) continue;
+    for (const [role, peak] of Object.entries(status.peakDemand)) {
+      demand[role] = (demand[role] || 0) + (peak || 0);
+    }
+  }
+  return demand;
+}
+
+/**
+ * Find sidecars with a specific container role in a given state.
+ */
+export function findSidecarsWithRole(
+  role: string,
+  containerStatus?: string
+): CachedSidecarStatus[] {
+  const results: CachedSidecarStatus[] = [];
+  for (const status of cache.values()) {
+    if ((Date.now() - status.lastSeen) > STALE_THRESHOLD_MS) continue;
+    const container = status.containers[role];
+    if (!container) continue;
+    if (containerStatus && container.status !== containerStatus) continue;
+    results.push(status);
+  }
+  return results;
+}
+
+/**
+ * Remove a sidecar from the cache.
+ */
+export function removeSidecarFromCache(agentUrl: string): void {
+  const normalized = agentUrl.replace(/\/+$/, '');
+  cache.delete(normalized);
+}
+
+/**
+ * Mark a sidecar as disconnected (e.g., WS closed).
+ */
+export function markSidecarDisconnected(agentUrl: string): void {
+  const normalized = agentUrl.replace(/\/+$/, '');
+  const entry = cache.get(normalized);
+  if (entry) {
+    entry.wsConnected = false;
+  }
+}

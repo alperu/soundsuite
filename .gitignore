@@ -1,0 +1,72 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# local env files
+.env*.local
+.env
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# prisma
+/prisma/migrations
+/prisma/data/
+
+# data (databases, vectors, backups)
+/data
+
+# exhibits
+/public/exhibits
+
+# sidecar
+/sideCar/.next/
+/sideCar/node_modules/
+/public/sideCar/builds
+
+# IDE
+.idea/
+.vscode/
+.kiro/
+
+# runtime
+/.pids/
+/logs/
+eng.traineddata
+
+# backups
+/backups/
+
+# personal / dev artifacts
+/marketing/
+/screenshots/
+chat.txt
+
+# Claude Code (user-specific)
+.claude/
