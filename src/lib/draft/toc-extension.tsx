@@ -90,7 +90,7 @@ function headerClass(style: TOCStyle): string {
 
 function entryClass(style: TOCStyle, level: number): string {
   const indent = `pl-${(level - 1) * 4}`;
-  const base = 'overflow-hidden min-w-0';
+  const base = 'overflow-hidden min-w-0 break-words';
   switch (style) {
     case 'default':
       return `${indent} ${base} py-0.5 text-blue-600 hover:text-blue-800 cursor-pointer`;
@@ -193,14 +193,14 @@ function TOCNodeView({ editor, node }: any) {
           >
             {tocStyle === 'dotted' ? (
               <>
-                <span className="truncate shrink min-w-0">
+                <span className="break-words min-w-0">
                   {numbers ? `${numbers[i]} ` : ''}
                   {h.text}
                 </span>
-                <span className="flex-1 mx-2 border-b border-dotted border-gray-400 shrink-0 min-w-[20px]" />
+                <span className="flex-1 mx-2 border-b border-dotted border-gray-400 shrink-0 min-w-[20px] self-end mb-1" />
               </>
             ) : (
-              <span className="block truncate">
+              <span className="block break-words">
                 {numbers ? `${numbers[i]} ` : ''}
                 {h.text}
               </span>

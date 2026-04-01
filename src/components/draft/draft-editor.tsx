@@ -200,7 +200,28 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
               .replace(/^-|-$/g, '')
               .slice(0, 80);
             if (headingSlug === slug) {
-              editor.chain().setTextSelection(pos).scrollIntoView().run();
+              // Set cursor at heading
+              editor.chain().setTextSelection(pos).run();
+
+              // Scroll heading to TOP of editor (not just into view)
+              try {
+                const domAtPos = editor.view.domAtPos(pos);
+                const domNode = domAtPos.node instanceof HTMLElement
+                  ? domAtPos.node
+                  : domAtPos.node.parentElement;
+                if (domNode) {
+                  const scrollContainer = editor.view.dom.closest('.overflow-auto, .overflow-y-auto') || editor.view.dom.parentElement;
+                  if (scrollContainer) {
+                    const nodeRect = domNode.getBoundingClientRect();
+                    const containerRect = scrollContainer.getBoundingClientRect();
+                    const offset = nodeRect.top - containerRect.top - 20;
+                    scrollContainer.scrollBy({ top: offset, behavior: 'smooth' });
+                  }
+                }
+              } catch {
+                // Fallback to TipTap's scroll
+                editor.chain().setTextSelection(pos).scrollIntoView().run();
+              }
               return false;
             }
           }
