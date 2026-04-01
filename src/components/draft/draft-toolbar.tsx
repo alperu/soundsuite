@@ -1113,17 +1113,17 @@ export default function DraftToolbar({
             onChange={(e) => {
               const val = e.target.value;
               if (val === 'fit') {
-                // Measure the middle panel (flex-1 column that contains toolbar + editor)
-                // Go up from the editor to find the middle panel container
-                const wrapper = editor?.view?.dom?.closest?.('.draft-editor-wrapper');
-                const middlePanel = wrapper?.parentElement; // the flex-1 flex-col div
+                // Find the middle panel column (the flex-1 flex-col parent of the editor area)
+                const editorDom = editor?.view?.dom;
+                // Walk up: ProseMirror -> zoom-inner -> draft-editor-wrapper -> editor-area-div -> middle-panel
+                const middlePanel = editorDom?.closest?.('.draft-editor-wrapper')?.parentElement?.parentElement;
                 if (middlePanel) {
-                  const availableW = middlePanel.clientWidth - 32; // small padding buffer
-                  // Get actual page width from pagination config or use defaults
-                  const PAGE_WIDTHS: Record<string, number> = { letter: 818, a4: 794, legal: 818 };
+                  const availableW = middlePanel.clientWidth - 40;
+                  const PAGE_WIDTHS: Record<string, number> = { letter: 816, a4: 794, legal: 816 };
                   const pageSize = document.querySelector('[data-page-size]')?.getAttribute('data-page-size') || 'letter';
-                  const pageW = PAGE_WIDTHS[pageSize] || 818;
-                  const fitZoom = Math.min(2, Math.max(0.5, availableW / pageW));
+                  const pageW = PAGE_WIDTHS[pageSize] || 816;
+                  // Fit means page should fit within available width
+                  const fitZoom = Math.min(1.5, Math.max(0.3, availableW / pageW));
                   onZoomChange(Math.round(fitZoom * 100) / 100);
                 }
               } else {

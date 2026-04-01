@@ -370,11 +370,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         `}</style>
         <div
           className="draft-zoom-inner"
-          style={zoom !== 1 ? {
-            transform: `scale(${zoom})`,
-            transformOrigin: 'top center',
-            width: `${100 / zoom}%`,
-          } : undefined}
+          style={zoom !== 1 ? { zoom } : undefined}
         >
           <EditorContent editor={editor} />
         </div>
