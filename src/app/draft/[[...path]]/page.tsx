@@ -8,6 +8,7 @@ import { usePersistedState } from '@/hooks/use-persisted-state';
 import DraftSettingsPanel from '@/components/draft/draft-settings-panel';
 import DraftChatPanel from '@/components/draft/draft-chat-panel';
 import { DraftContextMenu } from '@/components/draft/draft-context-menu';
+import { TOCContextMenu } from '@/components/draft/toc-context-menu';
 import type { DraftSummary, DraftFull } from '@/lib/draft/draft-types';
 import { useDraftStream } from '@/hooks/use-draft-stream';
 import { AI_PROVIDERS, type AIProviderKey } from '@/lib/ai/models';
@@ -209,6 +210,19 @@ export default function DraftPage() {
       editorRef.current.replaceSelection(transform.result.text);
     }
   }, [transform.result]);
+
+  // Listen for TOC context menu events
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail) {
+        setTocContextMenu({ x: detail.x, y: detail.y, attrs: detail.attrs });
+        setContextMenu(null); // close regular menu if open
+      }
+    };
+    document.addEventListener('toc-contextmenu', handler);
+    return () => document.removeEventListener('toc-contextmenu', handler);
+  }, []);
 
   // ---- Resize handlers ----
 
@@ -470,6 +484,36 @@ export default function DraftPage() {
           onClose={() => setContextMenu(null)}
           onAction={handleContextMenuAction}
           hasSelection={editorSelection.hasSelection}
+        />
+      )}
+
+      {/* TOC Context Menu */}
+      {tocContextMenu && (
+        <TOCContextMenu
+          x={tocContextMenu.x}
+          y={tocContextMenu.y}
+          attrs={tocContextMenu.attrs}
+          onClose={() => setTocContextMenu(null)}
+          onUpdateAttrs={(attrs) => {
+            const editor = editorRef.current?.editor;
+            if (editor) {
+              editor.chain().focus().updateAttributes('tableOfContents', attrs).run();
+            }
+            setTocContextMenu(prev => prev ? { ...prev, attrs: { ...prev.attrs, ...attrs } } : null);
+          }}
+          onRemove={() => {
+            const editor = editorRef.current?.editor;
+            if (editor) {
+              // Find and delete the TOC node
+              editor.state.doc.descendants((node: any, pos: number) => {
+                if (node.type.name === 'tableOfContents') {
+                  editor.chain().focus().deleteRange({ from: pos, to: pos + node.nodeSize }).run();
+                  return false;
+                }
+              });
+            }
+            setTocContextMenu(null);
+          }}
         />
       )}
     </div>
