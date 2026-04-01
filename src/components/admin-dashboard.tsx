@@ -21,7 +21,7 @@ interface Props {
   initialTab?: TabKey;
 }
 
-type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'ocr' | 'localai' | 'aikeys' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog';
+type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'ocr' | 'localai' | 'aikeys' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts';
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'general', label: 'General', icon: '⊞' },

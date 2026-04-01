@@ -83,7 +83,7 @@ export default function DraftPage() {
   // Formatting marks & page view (persisted)
   const [showMarks, setShowMarks] = usePersistedState<boolean>('draft.editor.showMarks', false);
   const [pageView, setPageView] = usePersistedState<boolean>('draft.editor.pageView', false);
-  const [pageSettings, setPageSettings] = useState({ pageSize: 'letter' as const, marginTop: 96, marginBottom: 96, marginLeft: 96, marginRight: 96 });
+  const [pageSettings, setPageSettings] = useState<{ pageSize: 'letter' | 'a4' | 'legal'; marginTop: number; marginBottom: number; marginLeft: number; marginRight: number }>({ pageSize: 'letter', marginTop: 96, marginBottom: 96, marginLeft: 96, marginRight: 96 });
 
   // Load page settings from config
   useEffect(() => {
