@@ -61,6 +61,7 @@ export default function DraftVersionHistory({
   const [restoring, setRestoring] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [compacting, setCompacting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleExport = async () => {
@@ -100,6 +101,25 @@ export default function DraftVersionHistory({
     }
     setImporting(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleCompact = async () => {
+    if (versions.length <= 1) return;
+    const confirmed = window.confirm(
+      `Delete ${versions.length - 1} older version${versions.length - 1 === 1 ? '' : 's'}? Only the latest version (v${currentVersion}) will be kept. This cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setCompacting(true);
+    try {
+      const res = await fetch(`/api/drafts/${draftId}/versions/compact`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Compact failed');
+      fetchVersions();
+    } catch (e) {
+      alert('Compact failed: ' + (e instanceof Error ? e.message : 'Unknown error'));
+    }
+    setCompacting(false);
   };
 
   const fetchVersions = useCallback(() => {
@@ -268,6 +288,25 @@ export default function DraftVersionHistory({
           onChange={handleImport}
           className="hidden"
         />
+        <button
+          onClick={handleCompact}
+          disabled={compacting || versions.length <= 1}
+          title={versions.length <= 1 ? 'No older versions to delete' : `Delete ${versions.length - 1} older version${versions.length - 1 === 1 ? '' : 's'}`}
+          className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+        >
+          {compacting ? (
+            <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+          ) : (
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 7l-7 7-7-7" />
+              <path d="M19 13l-7 7-7-7" />
+            </svg>
+          )}
+          Compact
+        </button>
       </div>
 
       {/* Version list */}
