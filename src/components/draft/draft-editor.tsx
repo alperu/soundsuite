@@ -298,25 +298,19 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         });
       };
 
-      // Capture mousedown too — browsers can start navigation on mousedown
-      const handleAnchorMousedown = (e: Event) => {
-        const target = (e as MouseEvent).target as HTMLElement;
-        const link = target.closest('a');
-        if (link && link.getAttribute('href')?.startsWith('#')) {
-          e.preventDefault();
-        }
-      };
+      // Register on both capture and bubble phases, and on parent + editor DOM
+      // to ensure we catch the click regardless of ProseMirror event handling
+      el.addEventListener('click', handleAnchorClick, true);   // capture on editor
+      el.addEventListener('click', handleAnchorClick, false);  // bubble on editor
 
-      // Capture phase (3rd arg = true) ensures we run before ProseMirror
-      el.addEventListener('click', handleAnchorClick, true);
-      el.addEventListener('mousedown', handleAnchorMousedown, true);
-      // Also intercept on the parent to catch any bubbling
-      el.parentElement?.addEventListener('click', handleAnchorClick, true);
+      // Also listen on the scroll container (parent) to catch clicks that bubble past ProseMirror
+      const wrapper = el.closest('.draft-editor-wrapper');
+      wrapper?.addEventListener('click', handleAnchorClick, true);
 
       return () => {
         el.removeEventListener('click', handleAnchorClick, true);
-        el.removeEventListener('mousedown', handleAnchorMousedown, true);
-        el.parentElement?.removeEventListener('click', handleAnchorClick, true);
+        el.removeEventListener('click', handleAnchorClick, false);
+        wrapper?.removeEventListener('click', handleAnchorClick, true);
       };
     }, [editor]);
 
