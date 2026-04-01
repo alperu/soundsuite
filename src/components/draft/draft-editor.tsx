@@ -317,6 +317,28 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06);
             border: 1px solid #d1d5db;
             margin: 0 auto;
+            /* Repeating page boundary lines every page-height */
+            background-image:
+              linear-gradient(to bottom,
+                transparent 0px,
+                transparent ${dims.h - 2}px,
+                #d1d5db ${dims.h - 2}px,
+                #d1d5db ${dims.h - 1}px,
+                #e5e7eb ${dims.h - 1}px,
+                #e5e7eb ${dims.h + 31}px,
+                #d1d5db ${dims.h + 31}px,
+                #d1d5db ${dims.h + 32}px,
+                transparent ${dims.h + 32}px
+              );
+            background-size: 100% ${dims.h + 32}px;
+            background-repeat: repeat-y;
+            background-color: white;
+          }
+          /* Page number labels at each break */
+          .draft-editor-wrapper.page-view .ProseMirror::before {
+            content: '';
+            display: block;
+            height: 0;
           }
           .draft-editor-wrapper.page-view hr {
             margin: 0 -${ps.marginRight}px;

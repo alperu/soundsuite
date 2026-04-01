@@ -496,76 +496,12 @@ export default function ImageInsertModal({
 
           {/* ---- Step: Page Navigator ---- */}
           {step === 'page' && selectedDoc && (
-            <div className="flex flex-col">
-              {/* Page controls */}
-              <div className="flex items-center justify-center gap-3 px-4 py-2 border-b border-gray-100">
-                <button
-                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                  disabled={currentPage <= 1}
-                  className="px-2 py-1 text-sm rounded hover:bg-gray-100 disabled:opacity-30"
-                >
-                  &larr; Prev
-                </button>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-sm text-gray-500">Page</span>
-                  <input
-                    type="number"
-                    value={currentPage}
-                    onChange={e => {
-                      const v = parseInt(e.target.value, 10);
-                      if (v >= 1 && v <= numPages) setCurrentPage(v);
-                    }}
-                    min={1}
-                    max={numPages}
-                    className="w-14 px-1.5 py-0.5 text-sm text-center border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
-                  />
-                  <span className="text-sm text-gray-500">of {numPages}</span>
-                </div>
-                <button
-                  onClick={() => setCurrentPage(p => Math.min(numPages, p + 1))}
-                  disabled={currentPage >= numPages}
-                  className="px-2 py-1 text-sm rounded hover:bg-gray-100 disabled:opacity-30"
-                >
-                  Next &rarr;
-                </button>
-              </div>
-
-              {/* Page preview */}
-              <div className="flex items-center justify-center p-4 bg-gray-50 min-h-[400px]">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={pageImageUrl}
-                  alt={`Page ${currentPage}`}
-                  className="max-h-[400px] max-w-full shadow-lg border border-gray-200 rounded"
-                />
-              </div>
-
-              {/* Thumbnail strip */}
-              <div className="flex gap-1.5 px-4 py-2 overflow-x-auto border-t border-gray-100 bg-gray-50">
-                {Array.from({ length: Math.min(numPages, 20) }, (_, i) => i + 1).map(page => (
-                  <button
-                    key={page}
-                    onClick={() => setCurrentPage(page)}
-                    className={`shrink-0 rounded border-2 transition-colors overflow-hidden ${
-                      page === currentPage ? 'border-blue-500' : 'border-transparent hover:border-gray-300'
-                    }`}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={`/api/documents/${selectedDoc.id}/page-image/${page}?scale=0.3`}
-                      alt={`Page ${page}`}
-                      className="h-16 w-auto"
-                      loading="lazy"
-                    />
-                  </button>
-                ))}
-                {numPages > 20 && (
-                  <div className="shrink-0 flex items-center px-2 text-xs text-gray-400">
-                    +{numPages - 20} more
-                  </div>
-                )}
-              </div>
-            </div>
+            <PageNavigator
+              docId={selectedDoc.id}
+              numPages={numPages}
+              currentPage={currentPage}
+              onPageChange={setCurrentPage}
+            />
           )}
 
           {/* ---- Step: Describe + Insert ---- */}
