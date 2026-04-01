@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { getPreference, setPreference } from '@/lib/indexed-db';
@@ -74,7 +74,7 @@ export default function DraftPage() {
 
   // Editor
   const editorRef = useRef<any>(null);
-  const [editorReady, setEditorReady] = useState(0); // increment to trigger re-render when editor mounts
+  const [editorInstance, setEditorInstance] = useState<any>(null);
   const [trackChanges, setTrackChanges] = usePersistedState<boolean>('draft.editor.trackChanges', false);
   const [editorSelection, setEditorSelection] = useState({ selectedText: '', hasSelection: false });
 
@@ -194,20 +194,16 @@ export default function DraftPage() {
 
   // ---- Auto-save ----
 
-  // Signal editor ready for toolbar after ref populates
+  // Reset editor instance when switching drafts
   useEffect(() => {
-    if (!activeDraft) return;
-    const interval = setInterval(() => {
-      if (editorRef.current?.editor) {
-        setEditorReady(v => v + 1);
-        clearInterval(interval);
-      }
-    }, 100);
-    return () => clearInterval(interval);
+    setEditorInstance(null);
   }, [activeDraft?.id]);
 
+  const activeDraftIdRef = useRef(activeDraft?.id);
+  activeDraftIdRef.current = activeDraft?.id;
+
   const handleEditorUpdate = useCallback((json: string) => {
-    if (!activeDraft) return;
+    if (!activeDraftIdRef.current) return;
     if (json === lastSavedContent.current) return;
     setSaveStatus('unsaved');
 
@@ -215,7 +211,7 @@ export default function DraftPage() {
     saveTimer.current = setTimeout(async () => {
       setSaveStatus('saving');
       try {
-        await fetch(`/api/drafts/${activeDraft.id}`, {
+        await fetch(`/api/drafts/${activeDraftIdRef.current}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: json }),
@@ -226,13 +222,17 @@ export default function DraftPage() {
         setSaveStatus('unsaved');
       }
     }, 1500);
-  }, [activeDraft]);
+  }, []); // stable — uses ref for draft ID
 
   // ---- Selection change ----
 
   const handleSelectionChange = useCallback((sel: { selectedText: string; hasSelection: boolean }) => {
     setEditorSelection(sel);
-  }, []);
+    // Signal editor is ready on first callback (replaces polling interval)
+    if (!editorInstance && editorRef.current?.editor) {
+      setEditorInstance(editorRef.current.editor);
+    }
+  }, [editorInstance]);
 
   // ---- Context menu actions ----
 
@@ -362,12 +362,20 @@ export default function DraftPage() {
 
   // ---- Parse initial content ----
 
-  const rawContent = previewContent ?? activeDraft?.content ?? '';
-  // Parse JSON string back to object for TipTap (content is stored as JSON.stringify'd TipTap JSON)
-  let editorContent: string | object = rawContent;
-  if (rawContent && typeof rawContent === 'string' && rawContent.startsWith('{')) {
-    try { editorContent = JSON.parse(rawContent); } catch {}
-  }
+  // Memoize context menu handler to prevent editor re-renders
+  const handleEditorContextMenu = useCallback((e: MouseEvent) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  }, []);
+
+  // Memoize editorContent to prevent new reference every render (fixes content sync loop)
+  const editorContent = useMemo(() => {
+    const raw = previewContent ?? activeDraft?.content ?? '';
+    if (raw && typeof raw === 'string' && raw.startsWith('{')) {
+      try { return JSON.parse(raw); } catch {}
+    }
+    return raw;
+  }, [previewContent, activeDraft?.content]);
 
   return (
     <div className="flex h-full overflow-hidden bg-white">
@@ -427,7 +435,7 @@ export default function DraftPage() {
         {/* Toolbar */}
         {activeDraft && (
           <DraftToolbar
-            editor={editorReady ? editorRef.current?.editor || null : null}
+            editor={editorInstance || null}
             saveStatus={saveStatus}
             trackChanges={trackChanges}
             onToggleTrackChanges={() => setTrackChanges(t => !t)}
@@ -482,10 +490,7 @@ export default function DraftPage() {
               pageSettings={pageSettings}
               zoom={zoom}
               onZoomChange={handleZoomChange}
-              onContextMenu={(e: MouseEvent) => {
-                e.preventDefault();
-                setContextMenu({ x: e.clientX, y: e.clientY });
-              }}
+              onContextMenu={handleEditorContextMenu}
             />
             {/* Transform loading overlay */}
             {transform.isStreaming && (

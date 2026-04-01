@@ -1,6 +1,6 @@
 'use client';
 
-import React, { forwardRef, useImperativeHandle, useEffect, useCallback, useRef } from 'react';
+import React, { forwardRef, useImperativeHandle, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useEditor, EditorContent, type Editor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
@@ -55,17 +55,22 @@ interface DraftEditorProps {
 
 const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
   ({ content, onUpdate, onSelectionChange, onContextMenu, className, showMarks, pageView, pageSettings, zoom = 1, onZoomChange }, ref) => {
-    // Compute page size config for pagination
+    // Stable page settings ref
     const ps = pageSettings || { pageSize: 'letter', marginTop: 96, marginBottom: 96, marginLeft: 96, marginRight: 96 };
-    const pageSizeMap: Record<string, any> = {
-      letter: PAGE_SIZES.LETTER,
-      a4: PAGE_SIZES.A4,
-      legal: PAGE_SIZES.LEGAL,
-    };
-    const paginationConfig = pageSizeMap[ps.pageSize] || PAGE_SIZES.LETTER;
+
+    // Memoize pagination config to prevent re-creation every render
+    const paginationConfig = useMemo(() => {
+      const map: Record<string, any> = {
+        letter: PAGE_SIZES.LETTER,
+        a4: PAGE_SIZES.A4,
+        legal: PAGE_SIZES.LEGAL,
+      };
+      return map[ps.pageSize] || PAGE_SIZES.LETTER;
+    }, [ps.pageSize]);
 
     const editor = useEditor({
       immediatelyRender: false,
+      shouldRerenderOnTransaction: false,
       extensions: [
         StarterKit.configure({
           heading: { levels: [1, 2, 3, 4, 5] },
@@ -277,19 +282,24 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
 
     // Zoom wrapper ref + Ctrl+scroll handler (must be before early returns)
     const wrapperRef = useRef<HTMLDivElement>(null);
+    const zoomRef = useRef(zoom);
+    zoomRef.current = zoom;
+    const onZoomChangeRef = useRef(onZoomChange);
+    onZoomChangeRef.current = onZoomChange;
+
     useEffect(() => {
       const el = wrapperRef.current;
-      if (!el || !onZoomChange) return;
+      if (!el) return;
       const handler = (e: WheelEvent) => {
-        if (e.ctrlKey || e.metaKey) {
+        if ((e.ctrlKey || e.metaKey) && onZoomChangeRef.current) {
           e.preventDefault();
           const delta = e.deltaY > 0 ? -0.05 : 0.05;
-          onZoomChange(Math.min(2, Math.max(0.5, zoom + delta)));
+          onZoomChangeRef.current(Math.min(2, Math.max(0.5, zoomRef.current + delta)));
         }
       };
       el.addEventListener('wheel', handler, { passive: false });
       return () => el.removeEventListener('wheel', handler);
-    }, [zoom, onZoomChange]);
+    }, []); // stable — no deps, uses refs
 
     if (!editor) {
       return (
