@@ -537,6 +537,7 @@ export default function DraftPage() {
               pageSettings={pageSettings}
               zoom={zoom}
               onZoomChange={handleZoomChange}
+              styleDefaults={styleDefaults}
               onContextMenu={handleEditorContextMenu}
             />
             {/* Transform loading overlay */}
