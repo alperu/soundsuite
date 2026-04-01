@@ -115,7 +115,7 @@ const DraftHeadingNav: React.FC<HeadingNavProps> = ({ editor, scrollContainer })
   );
 
   return (
-    <div ref={navRef} className="flex flex-col h-full min-w-[140px] border-r border-gray-200">
+    <div ref={navRef} className="flex flex-col h-full overflow-hidden">
       {/* Title */}
       <div className="px-3 py-2 text-xs font-semibold text-gray-500 border-b border-gray-100">
         Outline

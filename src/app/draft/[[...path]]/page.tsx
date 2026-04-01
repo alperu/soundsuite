@@ -33,8 +33,18 @@ const RIGHT_MIN = 280;
 const RIGHT_MAX = 500;
 const RIGHT_DEFAULT = 360;
 
+// Collapsed mode panel sizes
+const OUTLINE_MIN = 140;
+const OUTLINE_MAX = 400;
+const OUTLINE_DEFAULT = 200;
+const MINIMAP_MIN = 36;
+const MINIMAP_MAX = 80;
+const MINIMAP_DEFAULT = 48;
+
 const LS_LEFT_WIDTH = 'draft-left-width';
 const LS_RIGHT_WIDTH = 'draft-right-width';
+const LS_OUTLINE_WIDTH = 'draft-outline-width';
+const LS_MINIMAP_WIDTH = 'draft-minimap-width';
 const PREF_LAST_STATE = 'draft.lastState';
 const PREF_CASE_ID = 'draft.selectedCaseId';
 
@@ -72,6 +82,12 @@ export default function DraftPage() {
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const [minimapHtml, setMinimapHtml] = useState('');
 
+  // Collapsed mode panel widths
+  const [outlineWidth, setOutlineWidth] = useState(OUTLINE_DEFAULT);
+  const [minimapWidth, setMinimapWidth] = useState(MINIMAP_DEFAULT);
+  const isResizingOutline = useRef(false);
+  const isResizingMinimap = useRef(false);
+
   useEffect(() => {
     try { setSidebarCollapsed(localStorage.getItem('nav-collapsed') === 'true'); } catch {}
     const handler = (e: Event) => {
@@ -79,6 +95,13 @@ export default function DraftPage() {
       setSidebarCollapsed(detail?.collapsed ?? localStorage.getItem('nav-collapsed') === 'true');
     };
     window.addEventListener('nav-collapse-toggle', handler);
+    // Load collapsed-mode panel widths
+    try {
+      const ow = Number(localStorage.getItem(LS_OUTLINE_WIDTH));
+      if (ow >= OUTLINE_MIN && ow <= OUTLINE_MAX) setOutlineWidth(ow);
+      const mw = Number(localStorage.getItem(LS_MINIMAP_WIDTH));
+      if (mw >= MINIMAP_MIN && mw <= MINIMAP_MAX) setMinimapWidth(mw);
+    } catch {}
     return () => window.removeEventListener('nav-collapse-toggle', handler);
   }, []);
 
@@ -252,6 +275,14 @@ export default function DraftPage() {
         setSaveStatus('saved');
         // Load linked cases
         setLinkedCaseIds(draft.linkedCases?.map((c: any) => c.id) || []);
+        // Update minimap after editor renders the content
+        setTimeout(() => {
+          const html = editorRef.current?.editor?.getHTML?.();
+          if (html) setMinimapHtml(html);
+          if (!editorInstance && editorRef.current?.editor) {
+            setEditorInstance(editorRef.current.editor);
+          }
+        }, 300);
       }
     } catch {}
   }, []);
@@ -278,6 +309,10 @@ export default function DraftPage() {
 
   const handleEditorUpdate = useCallback((json: string) => {
     updateMinimap();
+    // Ensure editor instance is available for outline/minimap
+    if (!editorInstance && editorRef.current?.editor) {
+      setEditorInstance(editorRef.current.editor);
+    }
     if (!activeDraftIdRef.current) return;
     if (json === lastSavedContent.current) return;
     setSaveStatus('unsaved');
@@ -405,6 +440,60 @@ export default function DraftPage() {
     document.addEventListener('mouseup', onUp);
   }, [rightWidth]);
 
+  // ---- Outline resize ----
+  const handleOutlineResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizingOutline.current = true;
+    const startX = e.clientX;
+    const startW = outlineWidth;
+    const onMove = (ev: MouseEvent) => {
+      if (!isResizingOutline.current) return;
+      setOutlineWidth(Math.min(OUTLINE_MAX, Math.max(OUTLINE_MIN, startW + ev.clientX - startX)));
+    };
+    const onUp = () => {
+      isResizingOutline.current = false;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      setOutlineWidth(prev => {
+        try { localStorage.setItem(LS_OUTLINE_WIDTH, String(prev)); } catch {}
+        return prev;
+      });
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [outlineWidth]);
+
+  // ---- Minimap resize ----
+  const handleMinimapResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizingMinimap.current = true;
+    const startX = e.clientX;
+    const startW = minimapWidth;
+    const onMove = (ev: MouseEvent) => {
+      if (!isResizingMinimap.current) return;
+      setMinimapWidth(Math.min(MINIMAP_MAX, Math.max(MINIMAP_MIN, startW + ev.clientX - startX)));
+    };
+    const onUp = () => {
+      isResizingMinimap.current = false;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      setMinimapWidth(prev => {
+        try { localStorage.setItem(LS_MINIMAP_WIDTH, String(prev)); } catch {}
+        return prev;
+      });
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [minimapWidth]);
+
   // ---- Case change ----
 
   const handleCaseChange = useCallback((caseId: string) => {
@@ -476,17 +565,33 @@ export default function DraftPage() {
           />
         </>
       ) : (
-        /* Collapsed: Minimap + Heading Navigator */
-        <div className="flex shrink-0 border-r border-gray-200 h-full">
-          <DraftMinimap
-            editorHtml={minimapHtml}
-            scrollContainer={editorScrollRef.current}
+        /* Collapsed: Outline | resize | Minimap */
+        <>
+          {/* Outline */}
+          <div style={{ width: outlineWidth }} className="shrink-0 border-r border-gray-200 flex flex-col overflow-hidden">
+            <DraftHeadingNav
+              editor={editorInstance}
+              scrollContainer={editorScrollRef.current}
+            />
+          </div>
+          {/* Outline resize handle */}
+          <div
+            className="w-1 cursor-col-resize hover:bg-blue-300 active:bg-blue-400 transition-colors shrink-0"
+            onMouseDown={handleOutlineResizeStart}
           />
-          <DraftHeadingNav
-            editor={editorInstance}
-            scrollContainer={editorScrollRef.current}
+          {/* Minimap */}
+          <div style={{ width: minimapWidth }} className="shrink-0 border-r border-gray-200 overflow-hidden">
+            <DraftMinimap
+              editorHtml={minimapHtml}
+              scrollContainer={editorScrollRef.current}
+            />
+          </div>
+          {/* Minimap resize handle */}
+          <div
+            className="w-1 cursor-col-resize hover:bg-blue-300 active:bg-blue-400 transition-colors shrink-0"
+            onMouseDown={handleMinimapResizeStart}
           />
-        </div>
+        </>
       )}
 
       {/* Middle Panel - Editor */}
