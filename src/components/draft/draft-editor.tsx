@@ -58,47 +58,15 @@ import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table
 import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
 import { Extension } from '@tiptap/core';
-import { Plugin, PluginKey } from '@tiptap/pm/state';
-import { Decoration, DecorationSet } from '@tiptap/pm/view';
-
-// ProseMirror decoration plugin: adds ↵ widget before every hardBreak node
-const hardBreakMarkerKey = new PluginKey('hardBreakMarker');
-const HardBreakMarkerPlugin = Extension.create({
-  name: 'hardBreakMarker',
-  addProseMirrorPlugins() {
-    return [
-      new Plugin({
-        key: hardBreakMarkerKey,
-        props: {
-          decorations(state) {
-            const decorations: Decoration[] = [];
-            state.doc.descendants((node, pos) => {
-              if (node.type.name === 'hardBreak') {
-                const widget = Decoration.widget(pos, () => {
-                  const span = document.createElement('span');
-                  span.className = 'hard-break-mark';
-                  span.textContent = '↵';
-                  return span;
-                }, { side: -1 });
-                decorations.push(widget);
-              }
-            });
-            return DecorationSet.create(state.doc, decorations);
-          },
-        },
-      }),
-    ];
-  },
-});
 
 // Cmd+Enter / Ctrl+Enter → insert page break (horizontal rule)
 const PageBreakShortcut = Extension.create({
   name: 'pageBreakShortcut',
+  priority: 1000, // high priority to override other Enter handlers
   addKeyboardShortcuts() {
     return {
       'Mod-Enter': ({ editor }) => {
-        editor.chain().focus().setHorizontalRule().run();
-        return true;
+        return editor.chain().focus().setHorizontalRule().run();
       },
     };
   },
@@ -157,7 +125,6 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         StarterKit.configure({
           heading: { levels: [1, 2, 3, 4, 5] },
         }),
-        HardBreakMarkerPlugin,
         PageBreakShortcut,
         Underline,
         TextStyle,
@@ -504,16 +471,16 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             user-select: none;
             pointer-events: none;
           }
-          /* Hard break (Shift+Enter) marker — br is void so we style the wrapper span */
-          .draft-editor-wrapper.show-marks .ProseMirror span.hard-break-mark {
+          /* Hard break (Shift+Enter) marker — uses ::after on br (works in Chromium) */
+          .draft-editor-wrapper.show-marks .ProseMirror br:not(.ProseMirror-trailingBreak)::after {
+            content: '↵';
             color: #93c5fd;
             font-size: 0.75em;
             font-family: sans-serif;
             user-select: none;
             pointer-events: none;
-          }
-          .draft-editor-wrapper:not(.show-marks) .ProseMirror span.hard-break-mark {
-            display: none;
+            position: relative;
+            top: -0.5em;
           }
           /* Empty paragraphs: show ¶ on same line as cursor (like Word) */
           .draft-editor-wrapper.show-marks .ProseMirror p:empty::after,
