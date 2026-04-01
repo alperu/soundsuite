@@ -57,6 +57,19 @@ const Image = BaseImage.extend({
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
+import HardBreak from '@tiptap/extension-hard-break';
+
+// Custom HardBreak that renders ↵ marker before the <br> for formatting marks view
+const HardBreakWithMarker = HardBreak.extend({
+  renderHTML() {
+    return [
+      'span',
+      { style: 'white-space: normal;' },
+      ['span', { class: 'hard-break-mark' }, '↵'],
+      ['br'],
+    ];
+  },
+});
 
 export interface SelectionInfo {
   selectedText: string;
@@ -110,7 +123,9 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       extensions: [
         StarterKit.configure({
           heading: { levels: [1, 2, 3, 4, 5] },
+          hardBreak: false, // replaced by HardBreakWithMarker
         }),
+        HardBreakWithMarker,
         Underline,
         TextStyle,
         FontFamily,
@@ -167,9 +182,55 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         attributes: {
           class: 'prose prose-sm max-w-none focus:outline-none min-h-full px-4 py-3',
         },
-        // Strip font-family from pasted HTML so the editor's set font is used
         transformPastedHTML(html: string) {
           return html.replace(/font-family\s*:\s*[^;"]+;?/gi, '');
+        },
+        // Intercept anchor link clicks at ProseMirror level — before TipTap Link plugin and browser
+        handleClick(view, _pos, event) {
+          const target = event.target as HTMLElement;
+          const link = target.closest('a');
+          if (!link) return false;
+          const href = link.getAttribute('href');
+          if (!href || !href.startsWith('#')) return false;
+
+          event.preventDefault();
+          event.stopPropagation();
+
+          const slug = href.slice(1);
+          const { doc } = view.state;
+
+          doc.descendants((node, nodePos) => {
+            if (node.type.name === 'heading') {
+              const headingSlug = node.textContent
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-|-$/g, '')
+                .slice(0, 80);
+              if (headingSlug === slug) {
+                view.dispatch(view.state.tr.setSelection(
+                  (view.state.selection.constructor as any).near(doc.resolve(nodePos))
+                ));
+                // Scroll heading to top of viewport
+                try {
+                  const domAtPos = view.domAtPos(nodePos);
+                  const domNode = domAtPos.node instanceof HTMLElement
+                    ? domAtPos.node : domAtPos.node.parentElement;
+                  if (domNode) {
+                    const scrollContainer = view.dom.closest('.overflow-auto, .overflow-y-auto') || view.dom.parentElement;
+                    if (scrollContainer) {
+                      const nodeRect = domNode.getBoundingClientRect();
+                      const containerRect = scrollContainer.getBoundingClientRect();
+                      scrollContainer.scrollBy({ top: nodeRect.top - containerRect.top - 20, behavior: 'smooth' });
+                    }
+                  }
+                } catch {
+                  // fallback
+                }
+                return false;
+              }
+            }
+          });
+          return true; // handled — prevent TipTap/browser from opening new tab
         },
       },
     });
@@ -482,13 +543,16 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             user-select: none;
             pointer-events: none;
           }
-          .draft-editor-wrapper.show-marks .ProseMirror br::before {
-            content: '↵';
+          /* Hard break (Shift+Enter) marker — br is void so we style the wrapper span */
+          .draft-editor-wrapper.show-marks .ProseMirror span.hard-break-mark {
             color: #93c5fd;
             font-size: 0.75em;
             font-family: sans-serif;
             user-select: none;
             pointer-events: none;
+          }
+          .draft-editor-wrapper:not(.show-marks) .ProseMirror span.hard-break-mark {
+            display: none;
           }
           /* Empty paragraphs: show ¶ on same line as cursor (like Word) */
           .draft-editor-wrapper.show-marks .ProseMirror p:empty::after,
