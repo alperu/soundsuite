@@ -143,9 +143,8 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       extensions: [
         StarterKit.configure({
           heading: { levels: [1, 2, 3, 4, 5] },
-          hardBreak: false, // replaced by HardBreakWithMarker
         }),
-        HardBreakWithMarker,
+        HardBreakMarkerPlugin,
         Underline,
         TextStyle,
         FontFamily,
