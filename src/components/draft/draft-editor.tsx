@@ -9,6 +9,7 @@ import Highlight from '@tiptap/extension-highlight';
 import { TextStyle } from '@tiptap/extension-text-style';
 import FontFamily from '@tiptap/extension-font-family';
 import Link from '@tiptap/extension-link';
+import Image from '@tiptap/extension-image';
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
@@ -30,16 +31,27 @@ export interface DraftEditorHandle {
   getMarkdown: () => string;
 }
 
+interface PageSettings {
+  pageSize: 'letter' | 'a4' | 'legal';
+  marginTop: number;
+  marginBottom: number;
+  marginLeft: number;
+  marginRight: number;
+}
+
 interface DraftEditorProps {
   content: string | object;
   onUpdate: (json: string) => void;
   onSelectionChange?: (sel: { selectedText: string; hasSelection: boolean }) => void;
   onContextMenu?: (e: MouseEvent) => void;
   className?: string;
+  showMarks?: boolean;
+  pageView?: boolean;
+  pageSettings?: PageSettings;
 }
 
 const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
-  ({ content, onUpdate, onSelectionChange, onContextMenu, className }, ref) => {
+  ({ content, onUpdate, onSelectionChange, onContextMenu, className, showMarks, pageView, pageSettings }, ref) => {
     const editor = useEditor({
       immediatelyRender: false,
       extensions: [
@@ -71,6 +83,13 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         }),
         Table.configure({
           resizable: true,
+        }),
+        Image.configure({
+          inline: false,
+          allowBase64: false,
+          HTMLAttributes: {
+            class: 'max-w-full rounded border border-gray-200 my-2',
+          },
         }),
         TableRow,
         TableCell,
@@ -215,9 +234,28 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       );
     }
 
+    // Page dimensions at 96 DPI
+    const PAGE_DIMS: Record<string, { w: number; h: number }> = {
+      letter: { w: 816, h: 1056 },  // 8.5 x 11 in
+      a4: { w: 794, h: 1123 },      // 210 x 297 mm
+      legal: { w: 816, h: 1344 },   // 8.5 x 14 in
+    };
+
+    const ps = pageSettings || { pageSize: 'letter', marginTop: 96, marginBottom: 96, marginLeft: 96, marginRight: 96 };
+    const dims = PAGE_DIMS[ps.pageSize] || PAGE_DIMS.letter;
+
+    const wrapperClasses = [
+      'draft-editor-wrapper',
+      'overflow-auto flex-1',
+      showMarks ? 'show-marks' : '',
+      pageView ? 'page-view' : 'bg-white',
+      className ?? '',
+    ].filter(Boolean).join(' ');
+
     return (
-      <div className={`draft-editor-wrapper bg-white overflow-auto flex-1 ${className ?? ''}`}>
+      <div className={wrapperClasses}>
         <style>{`
+          /* --- Page breaks --- */
           .draft-editor-wrapper hr {
             border: none;
             border-top: 2px dashed #d1d5db;
@@ -236,8 +274,68 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             color: #9ca3af;
             white-space: nowrap;
           }
-          .draft-editor-wrapper.hide-breaks hr {
-            display: none;
+
+          /* --- Formatting marks (¶ ↵ ·) --- */
+          .draft-editor-wrapper.show-marks .ProseMirror p::after,
+          .draft-editor-wrapper.show-marks .ProseMirror h1::after,
+          .draft-editor-wrapper.show-marks .ProseMirror h2::after,
+          .draft-editor-wrapper.show-marks .ProseMirror h3::after,
+          .draft-editor-wrapper.show-marks .ProseMirror li > p::after {
+            content: '¶';
+            color: #93c5fd;
+            font-size: 0.75em;
+            margin-left: 2px;
+            font-family: sans-serif;
+            user-select: none;
+            pointer-events: none;
+          }
+          .draft-editor-wrapper.show-marks .ProseMirror br::before {
+            content: '↵';
+            color: #93c5fd;
+            font-size: 0.75em;
+            font-family: sans-serif;
+            user-select: none;
+            pointer-events: none;
+          }
+          .draft-editor-wrapper.show-marks .ProseMirror {
+            word-spacing: 0.15em;
+          }
+
+          /* --- Page view --- */
+          .draft-editor-wrapper.page-view {
+            background: #e5e7eb;
+            padding: 32px 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+          }
+          .draft-editor-wrapper.page-view .ProseMirror {
+            background: white;
+            width: ${dims.w}px;
+            min-height: ${dims.h}px;
+            padding: ${ps.marginTop}px ${ps.marginRight}px ${ps.marginBottom}px ${ps.marginLeft}px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06);
+            border: 1px solid #d1d5db;
+            margin: 0 auto;
+          }
+          .draft-editor-wrapper.page-view hr {
+            margin: 0 -${ps.marginRight}px;
+            padding: 0;
+            border-top: none;
+            height: ${ps.marginBottom + 32 + ps.marginTop}px;
+            background: #e5e7eb;
+            position: relative;
+          }
+          .draft-editor-wrapper.page-view hr::after {
+            content: 'Page Break';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #e5e7eb;
+            padding: 0 0.75rem;
+            font-size: 11px;
+            color: #9ca3af;
           }
         `}</style>
         <EditorContent editor={editor} />

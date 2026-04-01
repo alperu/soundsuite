@@ -78,6 +78,12 @@ export interface AppConfig {
   ocrResize: boolean;
   ocrMaxWidth: number;
   ocrPngCompression: number;
+  // Draft settings
+  draftPageSize: 'letter' | 'a4' | 'legal';
+  draftMarginTop: number;
+  draftMarginBottom: number;
+  draftMarginLeft: number;
+  draftMarginRight: number;
 }
 
 export interface ModelDownloadInfo {
@@ -137,6 +143,12 @@ export async function getConfig(): Promise<AppConfig> {
     ocrResize: configMap.get('pipeline.ocrResize') !== 'false',
     ocrMaxWidth: parseInt(configMap.get('pipeline.ocrMaxWidth') || '2048', 10),
     ocrPngCompression: parseInt(configMap.get('pipeline.ocrPngCompression') || '6', 10),
+    // Draft settings
+    draftPageSize: (configMap.get('draft.pageSize') as any) || 'letter',
+    draftMarginTop: parseInt(configMap.get('draft.marginTop') || '96', 10),
+    draftMarginBottom: parseInt(configMap.get('draft.marginBottom') || '96', 10),
+    draftMarginLeft: parseInt(configMap.get('draft.marginLeft') || '96', 10),
+    draftMarginRight: parseInt(configMap.get('draft.marginRight') || '96', 10),
     // Reranking
     rerankEnabled: configMap.get('rerank.enabled') === 'true',
     rerankProvider: (configMap.get('rerank.provider') as any) || 'vllm',
@@ -422,6 +434,23 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.rerankUseOrchestrator !== undefined) {
     updates.push({ key: 'rerank.useOrchestrator', value: String(config.rerankUseOrchestrator) });
+  }
+
+  // Draft settings
+  if (config.draftPageSize !== undefined) {
+    updates.push({ key: 'draft.pageSize', value: config.draftPageSize });
+  }
+  if (config.draftMarginTop !== undefined) {
+    updates.push({ key: 'draft.marginTop', value: String(config.draftMarginTop) });
+  }
+  if (config.draftMarginBottom !== undefined) {
+    updates.push({ key: 'draft.marginBottom', value: String(config.draftMarginBottom) });
+  }
+  if (config.draftMarginLeft !== undefined) {
+    updates.push({ key: 'draft.marginLeft', value: String(config.draftMarginLeft) });
+  }
+  if (config.draftMarginRight !== undefined) {
+    updates.push({ key: 'draft.marginRight', value: String(config.draftMarginRight) });
   }
 
   // Execute all updates

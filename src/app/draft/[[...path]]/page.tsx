@@ -80,6 +80,29 @@ export default function DraftPage() {
   // Font family (persisted)
   const [fontFamily, setFontFamily] = usePersistedState<string>('draft.editor.fontFamily', '');
 
+  // Formatting marks & page view (persisted)
+  const [showMarks, setShowMarks] = usePersistedState<boolean>('draft.editor.showMarks', false);
+  const [pageView, setPageView] = usePersistedState<boolean>('draft.editor.pageView', false);
+  const [pageSettings, setPageSettings] = useState({ pageSize: 'letter' as const, marginTop: 96, marginBottom: 96, marginLeft: 96, marginRight: 96 });
+
+  // Load page settings from config
+  useEffect(() => {
+    fetch('/api/config')
+      .then(r => r.json())
+      .then(cfg => {
+        if (cfg.draftPageSize || cfg.draftMarginTop) {
+          setPageSettings({
+            pageSize: (cfg.draftPageSize || 'letter') as 'letter' | 'a4' | 'legal',
+            marginTop: Number(cfg.draftMarginTop) || 96,
+            marginBottom: Number(cfg.draftMarginBottom) || 96,
+            marginLeft: Number(cfg.draftMarginLeft) || 96,
+            marginRight: Number(cfg.draftMarginRight) || 96,
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // Version preview
   const [previewContent, setPreviewContent] = useState<string | null>(null);
 
@@ -385,11 +408,17 @@ export default function DraftPage() {
             onFontFamilyChange={setFontFamily}
             caseId={selectedCaseId}
             onImportComplete={() => {
-              // Trigger draft list refresh by re-setting case
               const cid = selectedCaseId;
               setSelectedCaseId('');
               setTimeout(() => setSelectedCaseId(cid), 50);
             }}
+            showMarks={showMarks}
+            onToggleShowMarks={() => setShowMarks(v => !v)}
+            pageView={pageView}
+            onTogglePageView={() => setPageView(v => !v)}
+            draftId={activeDraft?.id}
+            provider={provider}
+            model={model}
           />
         )}
 
@@ -419,6 +448,9 @@ export default function DraftPage() {
               content={editorContent}
               onUpdate={handleEditorUpdate}
               onSelectionChange={handleSelectionChange}
+              showMarks={showMarks}
+              pageView={pageView}
+              pageSettings={pageSettings}
               onContextMenu={(e: MouseEvent) => {
                 e.preventDefault();
                 setContextMenu({ x: e.clientX, y: e.clientY });

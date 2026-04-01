@@ -38,6 +38,7 @@ const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'filings', label: 'Filing Types', icon: '▤' },
   { key: 'jobs', label: 'Jobs', icon: '▶' },
   { key: 'actionlog', label: 'Action Log', icon: '☰' },
+  { key: 'drafts', label: 'Drafts', icon: '✎' },
 ];
 
 const TAB_DOCS: Record<TabKey, { title: string; description: string; details: string[] }> = {
@@ -245,6 +246,7 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
           {activeTab === 'filings' && <FilingTypesPanel />}
           {activeTab === 'jobs' && <JobsPanel />}
           {activeTab === 'actionlog' && <ActionLogPanel />}
+          {activeTab === 'drafts' && <DraftAdminPanel initialConfig={initialConfig} />}
         </div>
 
         {/* Right: Documentation panel */}

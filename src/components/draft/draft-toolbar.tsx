@@ -1,7 +1,9 @@
 'use client';
 
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, lazy, Suspense } from 'react';
 import type { Editor } from '@tiptap/react';
+
+const ImageInsertModal = lazy(() => import('./image-insert-modal'));
 
 const FONT_FAMILIES = [
   { value: '', label: 'Default' },
@@ -41,6 +43,14 @@ interface DraftToolbarProps {
   caseId?: string;
   onImportComplete?: () => void;
   onWordImport?: (html: string) => void;
+  showMarks?: boolean;
+  onToggleShowMarks?: () => void;
+  pageView?: boolean;
+  onTogglePageView?: () => void;
+  draftId?: string;
+  provider?: string;
+  model?: string;
+  onImageInsert?: (url: string, alt: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +671,14 @@ export default function DraftToolbar({
   caseId,
   onImportComplete,
   onWordImport,
+  showMarks,
+  onToggleShowMarks,
+  pageView,
+  onTogglePageView,
+  draftId,
+  provider,
+  model,
+  onImageInsert,
 }: DraftToolbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wordInputRef = useRef<HTMLInputElement>(null);
@@ -668,6 +686,7 @@ export default function DraftToolbar({
   const [wordImporting, setWordImporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [imageModalOpen, setImageModalOpen] = useState(false);
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [tocOpen, setTocOpen] = useState(false);
 
@@ -900,20 +919,57 @@ export default function DraftToolbar({
         </svg>
       </ToolbarButton>
 
-      {/* Show/Hide Page Breaks */}
+      {/* Show/Hide Formatting Marks (¶) */}
       <ToolbarButton
-        onClick={() => {
-          const el = editor.view.dom.closest('.draft-editor-wrapper');
-          if (el) el.classList.toggle('hide-breaks');
-        }}
-        title="Show/Hide Page Breaks"
+        onClick={() => onToggleShowMarks?.()}
+        active={showMarks}
+        title={showMarks ? 'Hide Formatting Marks' : 'Show Formatting Marks (¶ ↵ ·)'}
       >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          {/* eye icon */}
-          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-          <circle cx="12" cy="12" r="3" />
+        <span className="text-sm font-bold leading-none" style={{ fontFamily: 'serif' }}>¶</span>
+      </ToolbarButton>
+
+      {/* Page View Toggle */}
+      <ToolbarButton
+        onClick={() => onTogglePageView?.()}
+        active={pageView}
+        title={pageView ? 'Switch to Continuous View' : 'Switch to Page View'}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="1" width="10" height="6" rx="1" />
+          <rect x="3" y="9" width="10" height="6" rx="1" />
         </svg>
       </ToolbarButton>
+
+      <Separator />
+
+      {/* Insert Image / Exhibit */}
+      <ToolbarButton
+        onClick={() => setImageModalOpen(true)}
+        title="Insert Image / Exhibit"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+          <circle cx="8.5" cy="8.5" r="1.5" />
+          <polyline points="21 15 16 10 5 21" />
+        </svg>
+      </ToolbarButton>
+
+      {imageModalOpen && caseId && draftId && (
+        <Suspense fallback={null}>
+          <ImageInsertModal
+            caseId={caseId}
+            draftId={draftId}
+            provider={provider || 'ollama'}
+            model={model || ''}
+            onInsert={(url, alt) => {
+              editor.chain().focus().setImage({ src: url, alt }).run();
+              onImageInsert?.(url, alt);
+              setImageModalOpen(false);
+            }}
+            onClose={() => setImageModalOpen(false)}
+          />
+        </Suspense>
+      )}
 
       <Separator />
 
