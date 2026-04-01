@@ -171,18 +171,24 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
     }, [editor, onContextMenu]);
 
     // Internal anchor link click handler — scroll to matching heading
+    // Uses capturing phase to fire BEFORE ProseMirror/browser default navigation
     useEffect(() => {
       if (!editor) return;
       const el = editor.view.dom;
-      const handler = (e: MouseEvent) => {
-        const target = e.target as HTMLElement;
+
+      const handleAnchorClick = (e: Event) => {
+        const me = e as MouseEvent;
+        const target = me.target as HTMLElement;
         const link = target.closest('a');
         if (!link) return;
         const href = link.getAttribute('href');
         if (!href || !href.startsWith('#')) return;
 
+        // Block all default behavior — prevent new tab / navigation
         e.preventDefault();
         e.stopPropagation();
+        e.stopImmediatePropagation();
+
         const slug = href.slice(1);
 
         // Find heading whose text slugifies to match
@@ -195,13 +201,32 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
               .slice(0, 80);
             if (headingSlug === slug) {
               editor.chain().setTextSelection(pos).scrollIntoView().run();
-              return false; // stop traversal
+              return false;
             }
           }
         });
       };
-      el.addEventListener('click', handler);
-      return () => el.removeEventListener('click', handler);
+
+      // Capture mousedown too — browsers can start navigation on mousedown
+      const handleAnchorMousedown = (e: Event) => {
+        const target = (e as MouseEvent).target as HTMLElement;
+        const link = target.closest('a');
+        if (link && link.getAttribute('href')?.startsWith('#')) {
+          e.preventDefault();
+        }
+      };
+
+      // Capture phase (3rd arg = true) ensures we run before ProseMirror
+      el.addEventListener('click', handleAnchorClick, true);
+      el.addEventListener('mousedown', handleAnchorMousedown, true);
+      // Also intercept on the parent to catch any bubbling
+      el.parentElement?.addEventListener('click', handleAnchorClick, true);
+
+      return () => {
+        el.removeEventListener('click', handleAnchorClick, true);
+        el.removeEventListener('mousedown', handleAnchorMousedown, true);
+        el.parentElement?.removeEventListener('click', handleAnchorClick, true);
+      };
     }, [editor]);
 
     const getSelection = useCallback((): SelectionInfo => {
