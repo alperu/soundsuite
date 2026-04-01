@@ -8,6 +8,7 @@ import TextAlign from '@tiptap/extension-text-align';
 import Highlight from '@tiptap/extension-highlight';
 import { TextStyle } from '@tiptap/extension-text-style';
 import FontFamily from '@tiptap/extension-font-family';
+import Link from '@tiptap/extension-link';
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 
 export interface SelectionInfo {
@@ -46,6 +47,16 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         Underline,
         TextStyle,
         FontFamily,
+        Link.configure({
+          openOnClick: false,
+          autolink: true,
+          linkOnPaste: true,
+          HTMLAttributes: {
+            class: 'text-blue-600 underline cursor-pointer',
+            rel: 'noopener noreferrer nofollow',
+            target: '_blank',
+          },
+        }),
         TextAlign.configure({
           types: ['heading', 'paragraph'],
         }),
@@ -80,22 +91,40 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       },
     });
 
-    // Sync content when prop changes (e.g. switching drafts, version preview)
-    const contentRef = useRef(content);
+    // Sync content only on external changes (draft switch, version preview).
+    // Track whether the editor itself triggered the update to avoid fighting user input.
+    const isInternalUpdate = useRef(false);
+    const lastExternalContent = useRef(content);
+
+    // Wrap onUpdate to flag internal edits
     useEffect(() => {
       if (!editor || editor.isDestroyed) return;
-      // Only update if content actually changed (avoid loops from our own onUpdate)
-      const newContent = content;
-      if (newContent === contentRef.current) return;
-      contentRef.current = newContent;
+      const handler = () => { isInternalUpdate.current = true; };
+      editor.on('update', handler);
+      return () => { editor.off('update', handler); };
+    }, [editor]);
 
-      // Parse if it's a JSON string that got double-encoded
-      let parsed = newContent;
+    useEffect(() => {
+      if (!editor || editor.isDestroyed) return;
+      // Skip if this change came from the editor's own typing
+      if (isInternalUpdate.current) {
+        isInternalUpdate.current = false;
+        lastExternalContent.current = content;
+        return;
+      }
+      // Skip if content hasn't actually changed
+      const contentStr = typeof content === 'object' ? JSON.stringify(content) : content;
+      const lastStr = typeof lastExternalContent.current === 'object' ? JSON.stringify(lastExternalContent.current) : lastExternalContent.current;
+      if (contentStr === lastStr) return;
+      lastExternalContent.current = content;
+
+      // Parse JSON string if needed
+      let parsed = content;
       if (typeof parsed === 'string' && parsed.startsWith('{')) {
         try { parsed = JSON.parse(parsed); } catch {}
       }
 
-      editor.commands.setContent(parsed, false);
+      editor.commands.setContent(parsed);
     }, [editor, content]);
 
     // Context menu listener

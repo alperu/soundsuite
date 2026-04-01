@@ -363,6 +363,13 @@ export default function DraftPage() {
             onToggleTrackChanges={() => setTrackChanges(t => !t)}
             fontFamily={fontFamily}
             onFontFamilyChange={setFontFamily}
+            caseId={selectedCaseId}
+            onImportComplete={() => {
+              // Trigger draft list refresh by re-setting case
+              const cid = selectedCaseId;
+              setSelectedCaseId('');
+              setTimeout(() => setSelectedCaseId(cid), 50);
+            }}
           />
         )}
 

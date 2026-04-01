@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useRef, useState } from 'react';
 import type { Editor } from '@tiptap/react';
 
 const FONT_FAMILIES = [
@@ -21,6 +21,8 @@ interface DraftToolbarProps {
   onToggleTrackChanges: () => void;
   fontFamily: string;
   onFontFamilyChange: (font: string) => void;
+  caseId?: string;
+  onImportComplete?: () => void;
 }
 
 function ToolbarButton({
@@ -209,6 +211,210 @@ const HighlightIcon = () => (
   </svg>
 );
 
+const LinkIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+  </svg>
+);
+
+const UnlinkIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    <line x1="2" y1="2" x2="22" y2="22" />
+  </svg>
+);
+
+const TOCIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+    <rect x="2" y="2" width="3" height="2" rx="0.5" /><rect x="6" y="2" width="8" height="2" rx="0.5" />
+    <rect x="3" y="7" width="2" height="2" rx="0.5" /><rect x="6" y="7" width="7" height="2" rx="0.5" />
+    <rect x="3" y="12" width="2" height="2" rx="0.5" /><rect x="6" y="12" width="6" height="2" rx="0.5" />
+  </svg>
+);
+
+// ---------------------------------------------------------------------------
+// Link Dialog (inline popover)
+// ---------------------------------------------------------------------------
+
+function LinkDialog({
+  editor,
+  onClose,
+  anchorRef,
+}: {
+  editor: Editor;
+  onClose: () => void;
+  anchorRef: React.RefObject<HTMLButtonElement | null>;
+}) {
+  const currentHref = editor.getAttributes('link').href || '';
+  const [url, setUrl] = useState(currentHref);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  // Close on click outside
+  React.useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (dialogRef.current && !dialogRef.current.contains(e.target as Node) &&
+          anchorRef.current && !anchorRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleEsc);
+    };
+  }, [onClose, anchorRef]);
+
+  const apply = () => {
+    const trimmed = url.trim();
+    if (trimmed) {
+      editor.chain().focus().extendMarkRange('link').setLink({ href: trimmed }).run();
+    } else {
+      editor.chain().focus().extendMarkRange('link').unsetLink().run();
+    }
+    onClose();
+  };
+
+  const remove = () => {
+    editor.chain().focus().extendMarkRange('link').unsetLink().run();
+    onClose();
+  };
+
+  return (
+    <div
+      ref={dialogRef}
+      className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-2 flex items-center gap-1.5"
+      style={{ minWidth: 320 }}
+    >
+      <input
+        ref={inputRef}
+        type="url"
+        value={url}
+        onChange={e => setUrl(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') apply(); }}
+        placeholder="https://..."
+        className="flex-1 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+      />
+      <button
+        onClick={apply}
+        className="px-2 py-1 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700"
+      >
+        Apply
+      </button>
+      {currentHref && (
+        <button
+          onClick={remove}
+          className="px-2 py-1 text-xs font-medium text-red-600 border border-red-300 rounded hover:bg-red-50"
+        >
+          Remove
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// TOC Modal
+// ---------------------------------------------------------------------------
+
+interface TOCEntry {
+  level: 1 | 2 | 3;
+  text: string;
+  pos: number;
+}
+
+function TOCModal({ editor, onClose }: { editor: Editor; onClose: () => void }) {
+  const [entries, setEntries] = useState<TOCEntry[]>([]);
+  const modalRef = useRef<HTMLDivElement>(null);
+
+  // Extract headings
+  React.useEffect(() => {
+    const extract = () => {
+      const found: TOCEntry[] = [];
+      editor.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'heading') {
+          found.push({
+            level: node.attrs.level as 1 | 2 | 3,
+            text: node.textContent || '(empty)',
+            pos,
+          });
+        }
+      });
+      setEntries(found);
+    };
+    extract();
+    editor.on('update', extract);
+    return () => { editor.off('update', extract); };
+  }, [editor]);
+
+  // Close on click outside / escape
+  React.useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (modalRef.current && !modalRef.current.contains(e.target as Node)) onClose();
+    };
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleEsc);
+    };
+  }, [onClose]);
+
+  const scrollTo = (pos: number) => {
+    editor.chain().focus().setTextSelection(pos).scrollIntoView().run();
+    onClose();
+  };
+
+  return (
+    <div
+      ref={modalRef}
+      className="fixed z-50 bg-white rounded-lg shadow-xl border border-gray-200 w-80 max-h-[60vh] overflow-y-auto"
+      style={{ top: 80, right: 40 }}
+    >
+      <div className="sticky top-0 bg-white border-b border-gray-200 px-3 py-2 flex items-center justify-between">
+        <span className="text-sm font-semibold text-gray-700">Table of Contents</span>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+      {entries.length === 0 ? (
+        <div className="px-3 py-4 text-xs text-gray-400 text-center">
+          No headings found. Add headings (H1, H2, H3) to see the document structure.
+        </div>
+      ) : (
+        <div className="py-1">
+          {entries.map((e, i) => (
+            <button
+              key={i}
+              onClick={() => scrollTo(e.pos)}
+              className={`w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50 transition-colors truncate ${
+                e.level === 1 ? 'font-semibold text-gray-800' :
+                e.level === 2 ? 'pl-6 font-medium text-gray-700' :
+                'pl-9 text-gray-600'
+              }`}
+              title={e.text}
+            >
+              {e.text}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DraftToolbar({
   editor,
   saveStatus,
@@ -216,7 +422,55 @@ export default function DraftToolbar({
   onToggleTrackChanges,
   fontFamily,
   onFontFamilyChange,
+  caseId,
+  onImportComplete,
 }: DraftToolbarProps) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const linkBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [linkDialogOpen, setLinkDialogOpen] = useState(false);
+  const [tocOpen, setTocOpen] = useState(false);
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const url = caseId ? `/api/drafts/export?caseId=${caseId}` : '/api/drafts/export';
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Export failed');
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `drafts-export-${new Date().toISOString().slice(0, 10)}.zip`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      alert('Export failed: ' + (e instanceof Error ? e.message : 'Unknown error'));
+    }
+    setExporting(false);
+  };
+
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch('/api/drafts/import', { method: 'POST', body: form });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || 'Import failed');
+      const msg = `Imported: ${result.imported}, Skipped: ${result.skipped}` +
+        (result.errors?.length ? `\n\nWarnings:\n${result.errors.join('\n')}` : '');
+      alert(msg);
+      onImportComplete?.();
+    } catch (e) {
+      alert('Import failed: ' + (e instanceof Error ? e.message : 'Unknown error'));
+    }
+    setImporting(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   if (!editor) return null;
 
   return (
@@ -329,6 +583,44 @@ export default function DraftToolbar({
 
       <Separator />
 
+      {/* Hyperlink */}
+      <div className="relative">
+        <button
+          ref={linkBtnRef}
+          type="button"
+          onClick={() => setLinkDialogOpen(!linkDialogOpen)}
+          title={editor.isActive('link') ? 'Edit Link (Ctrl+K)' : 'Insert Link (Ctrl+K)'}
+          className={`w-8 h-8 flex items-center justify-center rounded text-sm font-medium transition-colors cursor-pointer
+            ${editor.isActive('link') ? 'bg-blue-500 text-white' : 'text-gray-700 hover:bg-gray-200'}`}
+        >
+          <LinkIcon />
+        </button>
+        {linkDialogOpen && (
+          <LinkDialog editor={editor} onClose={() => setLinkDialogOpen(false)} anchorRef={linkBtnRef} />
+        )}
+      </div>
+
+      {editor.isActive('link') && (
+        <ToolbarButton
+          onClick={() => editor.chain().focus().extendMarkRange('link').unsetLink().run()}
+          title="Remove Link"
+        >
+          <UnlinkIcon />
+        </ToolbarButton>
+      )}
+
+      {/* Table of Contents */}
+      <ToolbarButton
+        onClick={() => setTocOpen(!tocOpen)}
+        active={tocOpen}
+        title="Table of Contents"
+      >
+        <TOCIcon />
+      </ToolbarButton>
+      {tocOpen && <TOCModal editor={editor} onClose={() => setTocOpen(false)} />}
+
+      <Separator />
+
       {/* Track Changes */}
       <ToolbarButton
         onClick={onToggleTrackChanges}
@@ -337,6 +629,51 @@ export default function DraftToolbar({
       >
         <span className="text-xs font-bold">TC</span>
       </ToolbarButton>
+
+      <Separator />
+
+      {/* Export */}
+      <ToolbarButton
+        onClick={handleExport}
+        active={false}
+        title={exporting ? 'Exporting...' : 'Export All Drafts'}
+      >
+        {exporting ? (
+          <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        ) : (
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 1v8m0 0l-3-3m3 3l3-3M3 12v1.5A1.5 1.5 0 004.5 15h7a1.5 1.5 0 001.5-1.5V12" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        )}
+      </ToolbarButton>
+
+      {/* Import */}
+      <ToolbarButton
+        onClick={() => fileInputRef.current?.click()}
+        active={false}
+        title={importing ? 'Importing...' : 'Import Drafts'}
+      >
+        {importing ? (
+          <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        ) : (
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 11V3m0 0l-3 3m3-3l3 3M3 12v1.5A1.5 1.5 0 004.5 15h7a1.5 1.5 0 001.5-1.5V12" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        )}
+      </ToolbarButton>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".zip"
+        onChange={handleImport}
+        className="hidden"
+      />
 
       {/* Spacer + Save status */}
       <div className="flex-1" />
