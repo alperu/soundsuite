@@ -89,7 +89,7 @@ export default function DraftPage() {
   // TOC context menu
   const [tocContextMenu, setTocContextMenu] = useState<{
     x: number; y: number;
-    attrs: { tocStyle: string; showNumbers: boolean; maxDepth: number };
+    attrs: { tocStyle: string; showNumbers: boolean; maxDepth: number; fontFamily?: string | null };
   } | null>(null);
 
   // AI transform stream

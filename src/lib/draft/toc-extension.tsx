@@ -111,7 +111,10 @@ function entryClass(style: TOCStyle, level: number): string {
 /* ------------------------------------------------------------------ */
 
 function TOCNodeView({ editor, node }: any) {
-  const { tocStyle, showNumbers, maxDepth } = node.attrs;
+  const { tocStyle, showNumbers, maxDepth, fontFamily } = node.attrs;
+
+  // Inherit font from editor if not explicitly set on TOC
+  const effectiveFont = fontFamily || editor?.getAttributes?.('textStyle')?.fontFamily || '';
 
   const extractHeadings = useCallback((): HeadingEntry[] => {
     const entries: HeadingEntry[] = [];
@@ -149,6 +152,7 @@ function TOCNodeView({ editor, node }: any) {
   return (
     <NodeViewWrapper
       data-type="table-of-contents"
+      style={effectiveFont ? { fontFamily: effectiveFont } : undefined}
       onContextMenu={(e: React.MouseEvent) => {
         e.preventDefault();
         e.stopPropagation();
@@ -227,6 +231,9 @@ export const TableOfContents = Node.create({
       },
       maxDepth: {
         default: 3,
+      },
+      fontFamily: {
+        default: null,
       },
     };
   },

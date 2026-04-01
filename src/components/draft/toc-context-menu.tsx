@@ -9,11 +9,23 @@ interface TOCContextMenuProps {
     tocStyle: string;
     showNumbers: boolean;
     maxDepth: number;
+    fontFamily?: string | null;
   };
   onClose: () => void;
-  onUpdateAttrs: (attrs: Partial<{ tocStyle: string; showNumbers: boolean; maxDepth: number }>) => void;
+  onUpdateAttrs: (attrs: Partial<{ tocStyle: string; showNumbers: boolean; maxDepth: number; fontFamily: string | null }>) => void;
   onRemove: () => void;
 }
+
+const fonts = [
+  { value: null, label: 'Default (inherit)' },
+  { value: 'Times New Roman', label: 'Times New Roman' },
+  { value: 'Arial', label: 'Arial' },
+  { value: 'Courier New', label: 'Courier New' },
+  { value: 'Georgia', label: 'Georgia' },
+  { value: 'Garamond', label: 'Garamond' },
+  { value: 'Calibri', label: 'Calibri' },
+  { value: 'Verdana', label: 'Verdana' },
+] as const;
 
 const styles = [
   { value: 'default', label: 'Default' },
@@ -47,10 +59,12 @@ function ChevronRight() {
 
 export function TOCContextMenu({ x, y, attrs, onClose, onUpdateAttrs, onRemove }: TOCContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
-  const [openSubmenu, setOpenSubmenu] = useState<'style' | 'depth' | null>(null);
+  const [openSubmenu, setOpenSubmenu] = useState<'style' | 'depth' | 'font' | null>(null);
   const [styleSubmenuFlip, setStyleSubmenuFlip] = useState(false);
   const [depthSubmenuFlip, setDepthSubmenuFlip] = useState(false);
+  const [fontSubmenuFlip, setFontSubmenuFlip] = useState(false);
   const styleSubmenuRef = useRef<HTMLDivElement>(null);
+  const fontSubmenuRef = useRef<HTMLDivElement>(null);
   const depthSubmenuRef = useRef<HTMLDivElement>(null);
 
   // Close on click outside, escape, scroll
@@ -97,6 +111,14 @@ export function TOCContextMenu({ x, y, attrs, onClose, onUpdateAttrs, onRemove }
     const menuRect = menuRef.current.getBoundingClientRect();
     const subRect = depthSubmenuRef.current.getBoundingClientRect();
     setDepthSubmenuFlip(menuRect.right + subRect.width > window.innerWidth);
+  }, [openSubmenu]);
+
+  // Viewport flip for font submenu
+  useEffect(() => {
+    if (openSubmenu !== 'font' || !fontSubmenuRef.current || !menuRef.current) return;
+    const menuRect = menuRef.current.getBoundingClientRect();
+    const subRect = fontSubmenuRef.current.getBoundingClientRect();
+    setFontSubmenuFlip(menuRect.right + subRect.width > window.innerWidth);
   }, [openSubmenu]);
 
   const itemBase = 'w-full text-left px-3 py-1.5 text-sm flex items-center gap-2';
@@ -219,6 +241,42 @@ export function TOCContextMenu({ x, y, attrs, onClose, onUpdateAttrs, onRemove }
                 </button>
               );
             })}
+          </div>
+        )}
+      </div>
+
+      {/* Font submenu */}
+      <div
+        className="relative"
+        onMouseEnter={() => setOpenSubmenu('font')}
+        onMouseLeave={() => setOpenSubmenu(prev => prev === 'font' ? null : prev)}
+      >
+        <button className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-700 hover:bg-blue-50">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="4 7 4 4 20 4 20 7" />
+            <line x1="9" y1="20" x2="15" y2="20" />
+            <line x1="12" y1="4" x2="12" y2="20" />
+          </svg>
+          <span className="flex-1 text-left">Font</span>
+          <span className="text-[10px] text-gray-400 mr-1">{attrs.fontFamily || 'Default'}</span>
+          <ChevronRight />
+        </button>
+        {openSubmenu === 'font' && (
+          <div
+            ref={fontSubmenuRef}
+            className={`absolute top-0 ${fontSubmenuFlip ? 'right-full mr-1' : 'left-full ml-1'} bg-white border border-gray-200 rounded-lg shadow-lg py-1 min-w-[160px] z-50`}
+          >
+            {fonts.map(f => (
+              <button
+                key={f.value ?? 'default'}
+                onClick={() => { onUpdateAttrs({ fontFamily: f.value }); onClose(); }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-700 hover:bg-blue-50"
+                style={f.value ? { fontFamily: f.value } : undefined}
+              >
+                <span className="w-3">{(attrs.fontFamily || null) === f.value ? <CheckIcon /> : null}</span>
+                {f.label}
+              </button>
+            ))}
           </div>
         )}
       </div>
