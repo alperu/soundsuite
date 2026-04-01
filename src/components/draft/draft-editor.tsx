@@ -13,7 +13,7 @@ import FontFamily from '@tiptap/extension-font-family';
 import Link from '@tiptap/extension-link';
 import BaseImage from '@tiptap/extension-image';
 
-// Extend Image to support width and wrapping attributes
+// Extend Image to support width and wrapping (alignment) attributes.
 const Image = BaseImage.extend({
   addAttributes() {
     return {
@@ -21,29 +21,38 @@ const Image = BaseImage.extend({
       width: {
         default: null,
         parseHTML: (el) => el.getAttribute('width') || el.style.width?.replace('px', '') || null,
-        renderHTML: (attrs) => {
-          if (!attrs.width) return {};
-          return { width: attrs.width, style: `width: ${attrs.width}px` };
-        },
+        renderHTML: () => ({}), // rendered in renderHTML below
       },
       wrapping: {
-        default: 'inline',  // 'inline' | 'float-left' | 'float-right' | 'block'
-        parseHTML: (el) => {
-          const float = el.style.float;
-          if (float === 'left') return 'float-left';
-          if (float === 'right') return 'float-right';
-          if (el.style.display === 'block') return 'block';
-          return 'inline';
-        },
-        renderHTML: (attrs) => {
-          if (attrs.wrapping === 'float-left') return { style: 'float: left; margin-right: 12px; margin-bottom: 8px;' };
-          if (attrs.wrapping === 'float-right') return { style: 'float: right; margin-left: 12px; margin-bottom: 8px;' };
-          if (attrs.wrapping === 'block') return { style: 'display: block; margin: 8px auto;' };
-          return {};
-        },
+        default: 'inline', // 'inline' | 'float-left' | 'float-right' | 'block'
+        parseHTML: (el) => el.getAttribute('data-wrapping') || 'inline',
+        renderHTML: () => ({}), // rendered in renderHTML below
       },
     };
   },
+  renderHTML({ HTMLAttributes, node }) {
+    const styleParts: string[] = [];
+    if (node.attrs.width) styleParts.push(`width: ${node.attrs.width}px`);
+
+    const wrap = node.attrs.wrapping || 'inline';
+    if (wrap === 'float-left') {
+      styleParts.push('float: left', 'margin-right: 16px', 'margin-bottom: 8px', 'clear: left');
+    } else if (wrap === 'float-right') {
+      styleParts.push('float: right', 'margin-left: 16px', 'margin-bottom: 8px', 'clear: right');
+    } else if (wrap === 'block') {
+      styleParts.push('display: block', 'margin-left: auto', 'margin-right: auto');
+    }
+
+    return ['img', {
+      ...HTMLAttributes,
+      'data-wrapping': wrap,
+      ...(styleParts.length ? { style: styleParts.join('; ') + ';' } : {}),
+    }];
+  },
+  // Make image inline when float modes are used so it can sit alongside text
+  group: 'block',
+  atom: true,
+  draggable: true,
 });
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 import { FontSize } from '@/lib/draft/font-size-extension';
@@ -397,6 +406,30 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
           }
           .draft-editor-wrapper .ProseMirror img.ProseMirror-selectednode {
             outline: 2px solid #3b82f6;
+          }
+          /* Float images: text in subsequent paragraphs wraps around them */
+          .draft-editor-wrapper .ProseMirror img[data-wrapping="float-left"] {
+            float: left !important;
+            margin-right: 16px !important;
+            margin-bottom: 8px !important;
+            clear: left;
+          }
+          .draft-editor-wrapper .ProseMirror img[data-wrapping="float-right"] {
+            float: right !important;
+            margin-left: 16px !important;
+            margin-bottom: 8px !important;
+            clear: right;
+          }
+          .draft-editor-wrapper .ProseMirror img[data-wrapping="block"] {
+            display: block !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+          }
+          /* Clearfix: ensure floated images don't overflow their container */
+          .draft-editor-wrapper .ProseMirror::after {
+            content: '';
+            display: table;
+            clear: both;
             outline-offset: 2px;
           }
 
