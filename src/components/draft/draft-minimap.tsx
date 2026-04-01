@@ -116,10 +116,15 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
       {/* Scaled content */}
       <div
         ref={contentRef}
-        className="pointer-events-none overflow-hidden select-none origin-top-left"
+        className="pointer-events-none overflow-hidden select-none origin-top-left prose prose-sm max-w-none"
         style={{
-          zoom: minimapRef.current ? minimapRef.current.clientWidth / 800 : 0.06,
-          width: '800px',
+          zoom: 0.06,
+          width: '816px',
+          padding: '96px',
+          fontFamily: 'Times New Roman, serif',
+          fontSize: '12px',
+          lineHeight: '1.5',
+          background: 'white',
         }}
         dangerouslySetInnerHTML={{ __html: editorHtml }}
       />

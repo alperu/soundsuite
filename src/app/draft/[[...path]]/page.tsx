@@ -307,6 +307,13 @@ export default function DraftPage() {
     }, 500);
   }, []);
 
+  // Sync minimap when editor instance becomes available
+  useEffect(() => {
+    if (!editorInstance) return;
+    const html = editorInstance.getHTML?.();
+    if (html) setMinimapHtml(html);
+  }, [editorInstance]);
+
   const handleEditorUpdate = useCallback((json: string) => {
     updateMinimap();
     // Ensure editor instance is available for outline/minimap
