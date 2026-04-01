@@ -22,9 +22,37 @@ async function uniqueSlug(caseId: string, base: string): Promise<string> {
   }
 }
 
+const LINKED_CASES_INCLUDE = {
+  draftCases: {
+    select: {
+      caseId: true,
+      case: { select: { id: true, name: true, caseNumber: true } },
+    },
+  },
+} as const;
+
+function mapLinkedCases(draft: any) {
+  if (!draft?.draftCases) return draft;
+  return {
+    ...draft,
+    linkedCases: draft.draftCases.map((dc: any) => ({
+      id: dc.case.id,
+      name: dc.case.name,
+      caseNumber: dc.case.caseNumber,
+    })),
+    draftCases: undefined,
+  };
+}
+
 export async function listDrafts(caseId: string) {
-  return prisma.draft.findMany({
-    where: { caseId },
+  // Find drafts where this case is either the primary case or a linked case
+  const drafts = await prisma.draft.findMany({
+    where: {
+      OR: [
+        { caseId },
+        { draftCases: { some: { caseId } } },
+      ],
+    },
     select: {
       id: true,
       caseId: true,
@@ -35,23 +63,27 @@ export async function listDrafts(caseId: string) {
       version: true,
       createdAt: true,
       updatedAt: true,
+      ...LINKED_CASES_INCLUDE,
     },
     orderBy: { updatedAt: 'desc' },
   });
+  return drafts.map(mapLinkedCases);
 }
 
 export async function getDraft(id: string) {
-  return prisma.draft.findUnique({
+  const draft = await prisma.draft.findUnique({
     where: { id },
     include: {
       case: { select: { id: true, name: true, caseNumber: true } },
+      ...LINKED_CASES_INCLUDE,
     },
   });
+  return mapLinkedCases(draft);
 }
 
 export async function createDraft(input: CreateDraftInput) {
   const slug = await uniqueSlug(input.caseId, input.title);
-  return prisma.draft.create({
+  const draft = await prisma.draft.create({
     data: {
       caseId: input.caseId,
       title: input.title,
@@ -60,8 +92,22 @@ export async function createDraft(input: CreateDraftInput) {
       content: '',
       status: 'draft',
       version: 1,
+      // Create linked cases (always include primary case + any additional)
+      draftCases: {
+        create: [
+          { caseId: input.caseId },
+          ...(input.additionalCaseIds || [])
+            .filter(id => id !== input.caseId)
+            .map(caseId => ({ caseId })),
+        ],
+      },
+    },
+    include: {
+      case: { select: { id: true, name: true, caseNumber: true } },
+      ...LINKED_CASES_INCLUDE,
     },
   });
+  return mapLinkedCases(draft);
 }
 
 export async function updateDraft(id: string, input: UpdateDraftInput) {
@@ -126,4 +172,26 @@ export async function restoreVersion(draftId: string, versionId: string) {
     content: version.content,
     changeSummary: `Restored from version ${version.version}`,
   });
+}
+
+// --- Linked cases management ---
+
+export async function addLinkedCase(draftId: string, caseId: string) {
+  return prisma.draftCase.create({
+    data: { draftId, caseId },
+  });
+}
+
+export async function removeLinkedCase(draftId: string, caseId: string) {
+  return prisma.draftCase.delete({
+    where: { draftId_caseId: { draftId, caseId } },
+  });
+}
+
+export async function getLinkedCaseIds(draftId: string): Promise<string[]> {
+  const links = await prisma.draftCase.findMany({
+    where: { draftId },
+    select: { caseId: true },
+  });
+  return links.map(l => l.caseId);
 }

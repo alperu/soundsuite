@@ -6,6 +6,8 @@ import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
 import TextAlign from '@tiptap/extension-text-align';
 import Highlight from '@tiptap/extension-highlight';
+import { TextStyle } from '@tiptap/extension-text-style';
+import FontFamily from '@tiptap/extension-font-family';
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 
 export interface SelectionInfo {
@@ -42,6 +44,8 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
           heading: { levels: [1, 2, 3] },
         }),
         Underline,
+        TextStyle,
+        FontFamily,
         TextAlign.configure({
           types: ['heading', 'paragraph'],
         }),

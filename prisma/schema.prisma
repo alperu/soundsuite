@@ -24,6 +24,7 @@ model Case {
   documents    Document[]
   filings      Filing[]
   drafts       Draft[]
+  draftCases   DraftCase[]
 
   @@index([path])
   @@index([caseNumber])
@@ -218,10 +219,24 @@ model Draft {
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
   versions      DraftVersion[]
+  draftCases    DraftCase[]
 
   @@unique([caseId, slug])
   @@index([caseId])
   @@index([documentType])
+}
+
+model DraftCase {
+  id        String   @id @default(uuid())
+  draftId   String
+  draft     Draft    @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  caseId    String
+  case      Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([draftId, caseId])
+  @@index([draftId])
+  @@index([caseId])
 }
 
 model DraftVersion {

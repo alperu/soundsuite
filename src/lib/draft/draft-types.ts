@@ -13,6 +13,12 @@ export type DocumentType = (typeof DOCUMENT_TYPES)[number];
 export const DRAFT_STATUSES = ['draft', 'review', 'final'] as const;
 export type DraftStatus = (typeof DRAFT_STATUSES)[number];
 
+export interface LinkedCase {
+  id: string;
+  name: string;
+  caseNumber?: string;
+}
+
 export interface DraftSummary {
   id: string;
   caseId: string;
@@ -23,11 +29,13 @@ export interface DraftSummary {
   version: number;
   createdAt: string;
   updatedAt: string;
+  linkedCases?: LinkedCase[];
 }
 
 export interface DraftFull extends DraftSummary {
   content: string;
   case?: { id: string; name: string; caseNumber?: string };
+  linkedCases?: LinkedCase[];
 }
 
 export interface DraftVersionSummary {
@@ -42,6 +50,7 @@ export interface CreateDraftInput {
   caseId: string;
   title: string;
   documentType: string;
+  additionalCaseIds?: string[];
 }
 
 export interface UpdateDraftInput {

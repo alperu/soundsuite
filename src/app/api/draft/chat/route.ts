@@ -15,6 +15,7 @@ export async function POST(request: NextRequest) {
     const {
       query,
       caseId,
+      caseIds,
       documentContent,
       selectedText,
       history,
@@ -23,12 +24,20 @@ export async function POST(request: NextRequest) {
     } = body as {
       query: string;
       caseId?: string;
+      caseIds?: string[];
       documentContent: string;
       selectedText?: string;
       history?: Array<{ role: 'user' | 'assistant'; content: string }>;
       provider: string;
       model: string;
     };
+
+    // Support both single caseId and array of caseIds
+    const effectiveCaseIds: string[] = caseIds?.length
+      ? caseIds
+      : caseId
+        ? [caseId]
+        : [];
 
     if (!query?.trim()) {
       return NextResponse.json({ error: 'Query is required' }, { status: 400 });
@@ -51,30 +60,36 @@ export async function POST(request: NextRequest) {
         };
 
         try {
-          // Optional RAG: fetch case knowledge if caseId is provided
+          // Optional RAG: fetch case knowledge from all linked cases
           let knowledgeContext: string | undefined;
 
-          if (caseId) {
-            send({ type: 'progress', message: 'Searching case documents...' });
+          if (effectiveCaseIds.length > 0) {
+            send({ type: 'progress', message: `Searching ${effectiveCaseIds.length} linked case(s)...` });
 
             try {
               const registry = await getToolRegistry();
-              const searchResult = await registry.execute('query_case_knowledge', {
-                query: query.trim(),
-                caseId,
-                limit: 10,
-              });
+              const allResults: Array<{ text: string; document: string; page: number; citation?: string; citationShort?: string }> = [];
 
-              if (searchResult.success && searchResult.data?.results?.length > 0) {
-                const results = searchResult.data.results as Array<{
-                  text: string;
-                  document: string;
-                  page: number;
-                  citation?: string;
-                  citationShort?: string;
-                }>;
+              // Search each linked case
+              for (const cid of effectiveCaseIds) {
+                const searchResult = await registry.execute('query_case_knowledge', {
+                  query: query.trim(),
+                  caseId: cid,
+                  limit: Math.max(5, Math.floor(15 / effectiveCaseIds.length)),
+                });
 
-                knowledgeContext = results
+                if (searchResult.success && searchResult.data?.results?.length > 0) {
+                  allResults.push(...(searchResult.data.results as any[]));
+                }
+              }
+
+              if (allResults.length > 0) {
+                // Sort by score if available, take top 15
+                const sorted = allResults
+                  .sort((a: any, b: any) => (b.score ?? 0) - (a.score ?? 0))
+                  .slice(0, 15);
+
+                knowledgeContext = sorted
                   .map((r) => {
                     const cite = r.citation || r.citationShort || `${r.document}, p.${r.page}`;
                     return `[${cite}]\n${r.text}`;
@@ -83,7 +98,7 @@ export async function POST(request: NextRequest) {
 
                 send({
                   type: 'progress',
-                  message: `Found ${results.length} relevant excerpts from case documents`,
+                  message: `Found ${sorted.length} relevant excerpts from ${effectiveCaseIds.length} case(s)`,
                 });
               }
             } catch (err) {

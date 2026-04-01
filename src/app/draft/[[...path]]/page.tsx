@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { getPreference, setPreference } from '@/lib/indexed-db';
+import { usePersistedState } from '@/hooks/use-persisted-state';
 import DraftSettingsPanel from '@/components/draft/draft-settings-panel';
 import DraftChatPanel from '@/components/draft/draft-chat-panel';
 import { DraftContextMenu } from '@/components/draft/draft-context-menu';
@@ -65,14 +66,18 @@ export default function DraftPage() {
   // Case & draft
   const [selectedCaseId, setSelectedCaseId] = useState(urlCaseId);
   const [activeDraft, setActiveDraft] = useState<DraftFull | null>(null);
+  const [linkedCaseIds, setLinkedCaseIds] = useState<string[]>([]);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving'>('saved');
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSavedContent = useRef('');
 
   // Editor
   const editorRef = useRef<any>(null);
-  const [trackChanges, setTrackChanges] = useState(false);
+  const [trackChanges, setTrackChanges] = usePersistedState<boolean>('draft.editor.trackChanges', false);
   const [editorSelection, setEditorSelection] = useState({ selectedText: '', hasSelection: false });
+
+  // Font family (persisted)
+  const [fontFamily, setFontFamily] = usePersistedState<string>('draft.editor.fontFamily', '');
 
   // Version preview
   const [previewContent, setPreviewContent] = useState<string | null>(null);
@@ -83,9 +88,9 @@ export default function DraftPage() {
   // AI transform stream
   const transform = useDraftStream();
 
-  // AI provider (defaults)
-  const [provider, setProvider] = useState<AIProviderKey>('ollama');
-  const [model, setModel] = useState('');
+  // AI provider (persisted)
+  const [provider, setProvider] = usePersistedState<AIProviderKey>('draft.transform.provider', 'ollama');
+  const [model, setModel] = usePersistedState<string>('draft.transform.model', '');
 
   // ---- Persist & restore ----
 
@@ -136,6 +141,8 @@ export default function DraftPage() {
         setActiveDraft(draft);
         lastSavedContent.current = draft.content || '';
         setSaveStatus('saved');
+        // Load linked cases
+        setLinkedCaseIds(draft.linkedCases?.map((c: any) => c.id) || []);
       }
     } catch {}
   }, []);
@@ -297,6 +304,8 @@ export default function DraftPage() {
           activeDraftId={activeDraft?.id || null}
           onDraftSelect={handleDraftSelect}
           onDraftCreated={handleDraftCreated}
+          linkedCaseIds={linkedCaseIds}
+          onLinkedCasesChange={setLinkedCaseIds}
         />
       </div>
 
@@ -347,6 +356,8 @@ export default function DraftPage() {
             saveStatus={saveStatus}
             trackChanges={trackChanges}
             onToggleTrackChanges={() => setTrackChanges(t => !t)}
+            fontFamily={fontFamily}
+            onFontFamilyChange={setFontFamily}
           />
         )}
 
@@ -420,6 +431,7 @@ export default function DraftPage() {
       <div style={{ width: rightWidth }} className="shrink-0 border-l border-gray-200 flex flex-col overflow-hidden">
         <DraftChatPanel
           caseId={selectedCaseId}
+          caseIds={linkedCaseIds}
           documentContent={editorRef.current?.getMarkdown?.() || ''}
           selectedText={editorSelection.selectedText}
           hasSelection={editorSelection.hasSelection}

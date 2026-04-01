@@ -19,6 +19,8 @@ interface DraftSettingsPanelProps {
   activeDraftId: string | null;
   onDraftSelect: (draft: DraftSummary) => void;
   onDraftCreated: (draft: DraftSummary) => void;
+  linkedCaseIds?: string[];
+  onLinkedCasesChange?: (caseIds: string[]) => void;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -43,6 +45,8 @@ export default function DraftSettingsPanel({
   activeDraftId,
   onDraftSelect,
   onDraftCreated,
+  linkedCaseIds = [],
+  onLinkedCasesChange,
 }: DraftSettingsPanelProps) {
   const [cases, setCases] = useState<Case[]>([]);
   const [drafts, setDrafts] = useState<DraftSummary[]>([]);
@@ -478,6 +482,68 @@ export default function DraftSettingsPanel({
           >
             {savingCase ? 'Saving...' : 'Save Changes'}
           </button>
+        </div>
+      )}
+
+      {/* Linked Cases */}
+      {activeDraftId && onLinkedCasesChange && (
+        <div className="px-3 py-2 border-b border-gray-200">
+          <label className="text-xs text-gray-500 font-medium mb-1 block">Linked Cases</label>
+          <div className="space-y-1 mb-1.5">
+            {linkedCaseIds.map(cid => {
+              const c = cases.find(x => x.id === cid);
+              return (
+                <div key={cid} className="flex items-center gap-1 text-xs bg-blue-50 rounded px-2 py-1">
+                  <span className="truncate flex-1 text-blue-700">
+                    {c?.caseNumber ? `${c.caseNumber} ` : ''}{c?.name || cid}
+                  </span>
+                  <button
+                    onClick={async () => {
+                      try {
+                        await fetch(`/api/drafts/${activeDraftId}/cases`, {
+                          method: 'DELETE',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ caseId: cid }),
+                        });
+                        onLinkedCasesChange(linkedCaseIds.filter(id => id !== cid));
+                      } catch {}
+                    }}
+                    className="text-gray-400 hover:text-red-500 shrink-0"
+                    title="Remove case"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          <select
+            value=""
+            onChange={async (e) => {
+              const newCaseId = e.target.value;
+              if (!newCaseId || linkedCaseIds.includes(newCaseId)) return;
+              try {
+                await fetch(`/api/drafts/${activeDraftId}/cases`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ caseId: newCaseId }),
+                });
+                onLinkedCasesChange([...linkedCaseIds, newCaseId]);
+              } catch {}
+            }}
+            className="w-full px-2 py-1 text-xs border border-gray-300 rounded bg-white"
+          >
+            <option value="">+ Add case...</option>
+            {cases
+              .filter(c => !linkedCaseIds.includes(c.id))
+              .map(c => (
+                <option key={c.id} value={c.id}>
+                  {c.caseNumber ? `${c.caseNumber} ` : ''}{c.name}
+                </option>
+              ))}
+          </select>
         </div>
       )}
 

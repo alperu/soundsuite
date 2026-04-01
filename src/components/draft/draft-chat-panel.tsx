@@ -4,9 +4,9 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useDraftStream } from '@/hooks/use-draft-stream';
 import { AI_PROVIDERS, AI_PROVIDER_KEYS, type AIProviderKey, type AIModelDef } from '@/lib/ai/models';
-import { getPreference, setPreference } from '@/lib/indexed-db';
 import { AIThinkingLog, type AIProgressEntry } from '@/components/search/ai-thinking-log';
 import DraftVersionHistory from '@/components/draft/draft-version-history';
+import { usePersistedState } from '@/hooks/use-persisted-state';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,6 +27,7 @@ interface WorkflowTemplate {
 
 interface DraftChatPanelProps {
   caseId: string;
+  caseIds?: string[];
   documentContent: string;
   selectedText: string;
   hasSelection: boolean;
@@ -39,30 +40,13 @@ interface DraftChatPanelProps {
 }
 
 // ---------------------------------------------------------------------------
-// usePersistedState -- useState backed by IndexedDB preferences
+// Chat input height persistence (localStorage, same pattern as panel widths)
 // ---------------------------------------------------------------------------
 
-function usePersistedState<T>(key: string, initialValue: T): [T, (v: T | ((prev: T) => T)) => void] {
-  const [value, setValue] = useState<T>(initialValue);
-  const initialized = useRef(false);
-
-  useEffect(() => {
-    getPreference<T>(key).then(stored => {
-      if (stored !== null) setValue(stored);
-      initialized.current = true;
-    }).catch(() => { initialized.current = true; });
-  }, [key]);
-
-  const setAndPersist = useCallback((v: T | ((prev: T) => T)) => {
-    setValue(prev => {
-      const next = typeof v === 'function' ? (v as (p: T) => T)(prev) : v;
-      if (initialized.current) setPreference(key, next).catch(() => {});
-      return next;
-    });
-  }, [key]);
-
-  return [value, setAndPersist];
-}
+const LS_CHAT_INPUT_HEIGHT = 'draft-chat-input-height';
+const CHAT_INPUT_MIN = 60;
+const CHAT_INPUT_MAX = 300;
+const CHAT_INPUT_DEFAULT = 100;
 
 // ---------------------------------------------------------------------------
 // Provider / model helpers
@@ -90,6 +74,7 @@ function getModels(
 
 export default function DraftChatPanel({
   caseId,
+  caseIds,
   documentContent,
   selectedText,
   hasSelection,
@@ -100,8 +85,19 @@ export default function DraftChatPanel({
   onDraftRestore,
   onPreviewVersion,
 }: DraftChatPanelProps) {
-  // Tabs
-  const [activeTab, setActiveTab] = useState<'chat' | 'workflows' | 'history'>('chat');
+  // Tabs (persisted)
+  const [activeTab, setActiveTab] = usePersistedState<'chat' | 'workflows' | 'history'>('draft.chat.activeTab', 'chat');
+
+  // Chat input height (localStorage)
+  const [chatInputHeight, setChatInputHeight] = useState(CHAT_INPUT_DEFAULT);
+  const isResizingInput = useRef(false);
+
+  useEffect(() => {
+    try {
+      const h = Number(localStorage.getItem(LS_CHAT_INPUT_HEIGHT));
+      if (h >= CHAT_INPUT_MIN && h <= CHAT_INPUT_MAX) setChatInputHeight(h);
+    } catch {}
+  }, []);
 
   // Provider / model
   const [provider, setProvider] = usePersistedState<string>('draft.chat.provider', 'ollama');
@@ -376,7 +372,7 @@ export default function DraftChatPanel({
 
       await send('/api/draft/chat', {
         query,
-        caseId: caseId || undefined,
+        caseIds: caseIds?.length ? caseIds : caseId ? [caseId] : undefined,
         documentContent: documentContent.slice(0, 12000),
         selectedText: hasSelection ? selectedText : undefined,
         history: history.slice(-10),
@@ -722,9 +718,41 @@ export default function DraftChatPanel({
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Input */}
-          <div className="px-3 py-2 border-t border-gray-200 shrink-0">
-            <div className="flex gap-1.5">
+          {/* Input — resizable with drag handle */}
+          <div className="border-t border-gray-200 shrink-0">
+            {/* Drag handle */}
+            <div
+              className="h-2 cursor-row-resize flex items-center justify-center hover:bg-blue-100 active:bg-blue-200 transition-colors group"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                isResizingInput.current = true;
+                const startY = e.clientY;
+                const startH = chatInputHeight;
+                const onMove = (ev: MouseEvent) => {
+                  if (!isResizingInput.current) return;
+                  const newH = Math.min(CHAT_INPUT_MAX, Math.max(CHAT_INPUT_MIN, startH - (ev.clientY - startY)));
+                  setChatInputHeight(newH);
+                };
+                const onUp = () => {
+                  isResizingInput.current = false;
+                  document.removeEventListener('mousemove', onMove);
+                  document.removeEventListener('mouseup', onUp);
+                  document.body.style.cursor = '';
+                  document.body.style.userSelect = '';
+                  setChatInputHeight(prev => {
+                    try { localStorage.setItem(LS_CHAT_INPUT_HEIGHT, String(prev)); } catch {}
+                    return prev;
+                  });
+                };
+                document.body.style.cursor = 'row-resize';
+                document.body.style.userSelect = 'none';
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+              }}
+            >
+              <div className="w-8 h-0.5 rounded bg-gray-300 group-hover:bg-blue-400" />
+            </div>
+            <div className="px-3 pb-2 flex gap-1.5">
               <textarea
                 value={input}
                 onChange={e => setInput(e.target.value)}
@@ -736,8 +764,8 @@ export default function DraftChatPanel({
                       ? 'Ask about selected text...'
                       : 'Ask about your document...'
                 }
-                className="flex-1 px-2.5 py-1.5 text-sm border border-gray-300 rounded-md resize-y min-h-[2.5rem] max-h-[12rem]"
-                rows={2}
+                style={{ height: chatInputHeight }}
+                className="flex-1 px-2.5 py-1.5 text-sm border border-gray-300 rounded-md resize-none"
               />
               <div className="flex flex-col gap-1">
                 <button

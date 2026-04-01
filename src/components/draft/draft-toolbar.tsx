@@ -3,11 +3,24 @@
 import React from 'react';
 import type { Editor } from '@tiptap/react';
 
+const FONT_FAMILIES = [
+  { value: '', label: 'Default' },
+  { value: 'Times New Roman', label: 'Times New Roman' },
+  { value: 'Arial', label: 'Arial' },
+  { value: 'Courier New', label: 'Courier New' },
+  { value: 'Georgia', label: 'Georgia' },
+  { value: 'Garamond', label: 'Garamond' },
+  { value: 'Calibri', label: 'Calibri' },
+  { value: 'Verdana', label: 'Verdana' },
+];
+
 interface DraftToolbarProps {
   editor: Editor | null;
   saveStatus: 'saved' | 'unsaved' | 'saving';
   trackChanges: boolean;
   onToggleTrackChanges: () => void;
+  fontFamily: string;
+  onFontFamilyChange: (font: string) => void;
 }
 
 function ToolbarButton({
@@ -40,6 +53,31 @@ function ToolbarButton({
 
 function Separator() {
   return <div className="w-px h-6 bg-gray-300 mx-1" />;
+}
+
+function FontFamilyDropdown({ editor, value, onChange }: { editor: Editor; value: string; onChange: (f: string) => void }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => {
+        const font = e.target.value;
+        onChange(font);
+        if (font) {
+          editor.chain().focus().setFontFamily(font).run();
+        } else {
+          editor.chain().focus().unsetFontFamily().run();
+        }
+      }}
+      title="Font family"
+      className="h-8 px-2 text-sm border border-gray-300 rounded bg-white text-gray-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-blue-400 max-w-[130px]"
+    >
+      {FONT_FAMILIES.map(f => (
+        <option key={f.value} value={f.value} style={f.value ? { fontFamily: f.value } : undefined}>
+          {f.label}
+        </option>
+      ))}
+    </select>
+  );
 }
 
 function HeadingDropdown({ editor }: { editor: Editor }) {
@@ -176,11 +214,16 @@ export default function DraftToolbar({
   saveStatus,
   trackChanges,
   onToggleTrackChanges,
+  fontFamily,
+  onFontFamilyChange,
 }: DraftToolbarProps) {
   if (!editor) return null;
 
   return (
     <div className="flex items-center gap-1 px-2 py-1 bg-gray-50 border border-b-0 rounded-t-lg flex-wrap">
+      {/* Font family dropdown */}
+      <FontFamilyDropdown editor={editor} value={fontFamily} onChange={onFontFamilyChange} />
+
       {/* Heading dropdown */}
       <HeadingDropdown editor={editor} />
 

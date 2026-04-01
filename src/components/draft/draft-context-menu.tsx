@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { usePersistedState } from '@/hooks/use-persisted-state';
 
 interface DraftContextMenuProps {
   x: number;
@@ -18,6 +19,10 @@ export function DraftContextMenu({ x, y, onClose, onAction, hasSelection }: Draf
   const [submenuFlipLeft, setSubmenuFlipLeft] = useState(false);
   const submenuRef = useRef<HTMLDivElement>(null);
   const toneItemRef = useRef<HTMLDivElement>(null);
+
+  // Persisted AI preferences
+  const [lastTone, setLastTone] = usePersistedState<string>('draft.contextMenu.lastTone', '');
+  const [lastAction, setLastAction] = usePersistedState<string>('draft.contextMenu.lastAction', '');
 
   // Close on click outside, escape, scroll
   useEffect(() => {
@@ -59,6 +64,8 @@ export function DraftContextMenu({ x, y, onClose, onAction, hasSelection }: Draf
   }, [submenuOpen]);
 
   const handleAction = (action: string, options?: { tone?: string }) => {
+    setLastAction(action);
+    if (options?.tone) setLastTone(options.tone);
     onAction(action, options);
     onClose();
   };
@@ -108,29 +115,39 @@ export function DraftContextMenu({ x, y, onClose, onAction, hasSelection }: Draf
               submenuFlipLeft ? 'right-full mr-1' : 'left-full ml-1'
             }`}
           >
-            {tones.map((tone) => (
-              <button
-                key={tone}
-                className={`${itemBase} ${enabledClass}`}
-                onClick={() => handleAction('adjust_tone', { tone: tone.toLowerCase() })}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  {tone === 'Formal' && <><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></>}
-                  {tone === 'Persuasive' && <><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></>}
-                  {tone === 'Neutral' && <><circle cx="12" cy="12" r="10" /><line x1="8" y1="15" x2="16" y2="15" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" /></>}
-                  {tone === 'Aggressive' && <><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></>}
-                  {tone === 'Sympathetic' && <><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" /></>}
-                </svg>
-                {tone}
-              </button>
-            ))}
+            {tones.map((tone) => {
+              const isLast = lastTone === tone.toLowerCase();
+              return (
+                <button
+                  key={tone}
+                  className={`${itemBase} ${enabledClass} ${isLast ? 'bg-blue-50 font-medium' : ''} justify-between`}
+                  onClick={() => handleAction('adjust_tone', { tone: tone.toLowerCase() })}
+                >
+                  <span className="flex items-center gap-2">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      {tone === 'Formal' && <><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></>}
+                      {tone === 'Persuasive' && <><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></>}
+                      {tone === 'Neutral' && <><circle cx="12" cy="12" r="10" /><line x1="8" y1="15" x2="16" y2="15" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" /></>}
+                      {tone === 'Aggressive' && <><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></>}
+                      {tone === 'Sympathetic' && <><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" /></>}
+                    </svg>
+                    {tone}
+                  </span>
+                  {isLast && (
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  )}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
 
       {/* Fix Spelling & Grammar */}
       <button
-        className={`${itemBase} ${hasSelection ? enabledClass : disabledClass}`}
+        className={`${itemBase} ${hasSelection ? enabledClass : disabledClass} ${lastAction === 'fix_grammar' ? 'bg-blue-50' : ''}`}
         onClick={() => handleAction('fix_grammar')}
         disabled={!hasSelection}
       >
@@ -142,7 +159,7 @@ export function DraftContextMenu({ x, y, onClose, onAction, hasSelection }: Draf
 
       {/* Extend Text */}
       <button
-        className={`${itemBase} ${hasSelection ? enabledClass : disabledClass}`}
+        className={`${itemBase} ${hasSelection ? enabledClass : disabledClass} ${lastAction === 'extend' ? 'bg-blue-50' : ''}`}
         onClick={() => handleAction('extend')}
         disabled={!hasSelection}
       >
@@ -155,7 +172,7 @@ export function DraftContextMenu({ x, y, onClose, onAction, hasSelection }: Draf
 
       {/* Simplify Text */}
       <button
-        className={`${itemBase} ${hasSelection ? enabledClass : disabledClass}`}
+        className={`${itemBase} ${hasSelection ? enabledClass : disabledClass} ${lastAction === 'simplify' ? 'bg-blue-50' : ''}`}
         onClick={() => handleAction('simplify')}
         disabled={!hasSelection}
       >
@@ -169,7 +186,7 @@ export function DraftContextMenu({ x, y, onClose, onAction, hasSelection }: Draf
 
       {/* Legalize Sentence */}
       <button
-        className={`${itemBase} ${hasSelection ? enabledClass : disabledClass}`}
+        className={`${itemBase} ${hasSelection ? enabledClass : disabledClass} ${lastAction === 'legalize' ? 'bg-blue-50' : ''}`}
         onClick={() => handleAction('legalize')}
         disabled={!hasSelection}
       >
