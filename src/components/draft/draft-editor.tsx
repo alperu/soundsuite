@@ -13,7 +13,6 @@ import Image from '@tiptap/extension-image';
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
-import { PaginationPlus, PAGE_SIZES } from 'tiptap-pagination-plus';
 
 export interface SelectionInfo {
   selectedText: string;
@@ -55,22 +54,8 @@ interface DraftEditorProps {
 
 const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
   ({ content, onUpdate, onSelectionChange, onContextMenu, className, showMarks, pageView, pageSettings, zoom = 1, onZoomChange }, ref) => {
-    // Stable page settings ref
-    const ps = pageSettings || { pageSize: 'letter', marginTop: 96, marginBottom: 96, marginLeft: 96, marginRight: 96 };
-
-    // Memoize pagination config to prevent re-creation every render
-    const paginationConfig = useMemo(() => {
-      const map: Record<string, any> = {
-        letter: PAGE_SIZES.LETTER,
-        a4: PAGE_SIZES.A4,
-        legal: PAGE_SIZES.LEGAL,
-      };
-      return map[ps.pageSize] || PAGE_SIZES.LETTER;
-    }, [ps.pageSize]);
-
     const editor = useEditor({
       immediatelyRender: false,
-      shouldRerenderOnTransaction: false,
       extensions: [
         StarterKit.configure({
           heading: { levels: [1, 2, 3, 4, 5] },
@@ -112,13 +97,6 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         TableCell,
         TableHeader,
         TableOfContents,
-        PaginationPlus.configure({
-          ...paginationConfig,
-          pageGap: 40,
-          pageGapBorderColor: '#d1d5db',
-          pageBreakBackground: '#e5e7eb',
-          footerRight: 'Page {page}',
-        }),
       ],
       content,
       onUpdate: ({ editor: ed }) => {
@@ -181,35 +159,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       editor.commands.setContent(parsed);
     }, [editor, content]);
 
-    // Toggle pagination on/off by changing page height
-    useEffect(() => {
-      if (!editor || editor.isDestroyed) return;
-      try {
-        if (pageView) {
-          (editor.commands as any).setPaginationOptions?.({
-            ...paginationConfig,
-            pageGap: 40,
-            pageGapBorderColor: '#d1d5db',
-            pageBreakBackground: '#e5e7eb',
-            footerRight: 'Page {page}',
-          });
-        } else {
-          (editor.commands as any).setPaginationOptions?.({
-            pageHeight: 99999,
-            pageWidth: 99999,
-            pageGap: 0,
-            marginTop: 0,
-            marginBottom: 0,
-            marginLeft: 0,
-            marginRight: 0,
-            footerRight: '',
-            footerLeft: '',
-            headerRight: '',
-            headerLeft: '',
-          });
-        }
-      } catch {}
-    }, [editor, pageView, paginationConfig]);
+    // Page view is CSS-only (no pagination plugin) until Tiptap Pages Pro is available
 
     // Context menu listener
     useEffect(() => {
@@ -309,6 +259,15 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       );
     }
 
+    // Page dimensions for CSS page view
+    const ps = pageSettings || { pageSize: 'letter', marginTop: 96, marginBottom: 96, marginLeft: 96, marginRight: 96 };
+    const PAGE_DIMS: Record<string, { w: number; h: number }> = {
+      letter: { w: 816, h: 1056 },
+      a4: { w: 794, h: 1123 },
+      legal: { w: 816, h: 1344 },
+    };
+    const dims = PAGE_DIMS[ps.pageSize] || PAGE_DIMS.letter;
+
     const wrapperClasses = [
       'draft-editor-wrapper',
       'overflow-auto flex-1',
@@ -372,9 +331,41 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             word-spacing: 0.15em;
           }
 
-          /* --- Page view background --- */
+          /* --- Page view --- */
           .draft-editor-wrapper.page-view {
             background: #e5e7eb;
+            padding: 32px 0;
+          }
+          .draft-editor-wrapper.page-view .ProseMirror {
+            background: white;
+            width: ${dims.w}px;
+            min-height: ${dims.h}px;
+            padding: ${ps.marginTop}px ${ps.marginRight}px ${ps.marginBottom}px ${ps.marginLeft}px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1), 0 0 1px rgba(0,0,0,0.08);
+            border: 1px solid #d1d5db;
+            margin: 0 auto;
+          }
+          .draft-editor-wrapper.page-view .ProseMirror > * {
+            max-width: 100%;
+            overflow-wrap: break-word;
+          }
+          .draft-editor-wrapper.page-view hr {
+            border: none;
+            margin: ${ps.marginBottom}px -${ps.marginRight}px ${ps.marginTop}px -${ps.marginLeft}px;
+            height: 40px;
+            background: #e5e7eb;
+            position: relative;
+          }
+          .draft-editor-wrapper.page-view hr::after {
+            content: 'Page Break';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #e5e7eb;
+            padding: 0 0.75rem;
+            font-size: 11px;
+            color: #9ca3af;
           }
         `}</style>
         <div
