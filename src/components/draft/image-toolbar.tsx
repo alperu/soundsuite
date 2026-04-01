@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import type { Editor } from '@tiptap/react';
 
 const ImageEditorModal = lazy(() => import('./image-editor-modal'));
@@ -11,48 +11,71 @@ interface ImageToolbarProps {
   onClose: () => void;
 }
 
+const MIN_WIDTH = 50;
+const MAX_WIDTH = 1200;
+
 /**
  * Floating toolbar that appears when an image is clicked in the editor.
- * Provides: width resize, edit (crop/annotate/redact), and delete.
+ * Provides: slider resize, edit (crop/annotate/redact), and delete.
  */
 export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarProps) {
   const [editorOpen, setEditorOpen] = useState(false);
-  const [width, setWidth] = useState(() => {
-    // Get current width from the image's style or natural size
-    return imageEl.getAttribute('width')
-      ? parseInt(imageEl.getAttribute('width')!, 10)
-      : imageEl.naturalWidth || imageEl.offsetWidth;
+  const [sliderValue, setSliderValue] = useState(() => {
+    const w = imageEl.getAttribute('width');
+    return w ? parseInt(w, 10) : (imageEl.naturalWidth || imageEl.offsetWidth || 400);
   });
+  const [inputValue, setInputValue] = useState(String(sliderValue));
   const toolbarRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ top: 0, left: 0 });
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Commit width to TipTap (debounced for slider, immediate for blur)
+  const commitWidth = useCallback((newWidth: number) => {
+    const clamped = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, newWidth));
+    const { state } = editor;
+    state.doc.descendants((node, nodePos) => {
+      if (node.type.name === 'image' && node.attrs.src === imageEl.getAttribute('src')) {
+        editor.view.dispatch(
+          state.tr.setNodeMarkup(nodePos, undefined, { ...node.attrs, width: clamped })
+        );
+        return false;
+      }
+    });
+  }, [editor, imageEl]);
 
   // Position toolbar above the image
   useEffect(() => {
-    const rect = imageEl.getBoundingClientRect();
-    setPos({
-      top: rect.top - 44,
-      left: rect.left + rect.width / 2,
-    });
-  }, [imageEl, width]);
+    const updatePos = () => {
+      const rect = imageEl.getBoundingClientRect();
+      setPos({
+        top: rect.top - 48,
+        left: rect.left + rect.width / 2,
+      });
+    };
+    updatePos();
+    // Reposition when slider changes (image size changes)
+    const raf = requestAnimationFrame(updatePos);
+    return () => cancelAnimationFrame(raf);
+  }, [imageEl, sliderValue]);
 
   // Close on click outside — but NOT when editor modal is open
   useEffect(() => {
-    if (editorOpen) return; // Don't register close handlers while modal is open
+    if (editorOpen) return;
 
     const handler = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      // Don't close if clicking inside toolbar, the image itself, or any modal overlay
       if (toolbarRef.current?.contains(target)) return;
       if (target === imageEl) return;
       if (target.closest('[data-image-editor-modal]')) return;
       onClose();
     };
-    const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    // Delay to avoid the initial click that opened this
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !editorOpen) onClose();
+    };
     const timer = setTimeout(() => {
       document.addEventListener('mousedown', handler);
       document.addEventListener('keydown', handleEsc);
-    }, 100);
+    }, 150);
     return () => {
       clearTimeout(timer);
       document.removeEventListener('mousedown', handler);
@@ -60,7 +83,7 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
     };
   }, [onClose, imageEl, editorOpen]);
 
-  // Add visual selection to image
+  // Visual selection outline
   useEffect(() => {
     imageEl.style.outline = '2px solid #3b82f6';
     imageEl.style.outlineOffset = '2px';
@@ -70,24 +93,36 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
     };
   }, [imageEl]);
 
-  const handleResize = (newWidth: number) => {
-    const clamped = Math.max(50, Math.min(1200, newWidth));
-    setWidth(clamped);
-    // Update the image in TipTap by finding its position and updating attrs
-    const { state } = editor;
-    state.doc.descendants((node, pos) => {
-      if (node.type.name === 'image' && node.attrs.src === imageEl.getAttribute('src')) {
-        editor.chain().setNodeSelection(pos).updateAttributes('image', { width: clamped }).run();
-        return false;
-      }
-    });
+  // Slider change — update preview immediately, debounce TipTap commit
+  const handleSliderChange = (val: number) => {
+    setSliderValue(val);
+    setInputValue(String(val));
+    // Live preview: update DOM directly for smooth feel
+    imageEl.style.width = `${val}px`;
+    imageEl.setAttribute('width', String(val));
+    // Debounce TipTap update
+    if (commitTimer.current) clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(() => commitWidth(val), 300);
+  };
+
+  // Text input — only commit on Enter or blur
+  const handleInputCommit = () => {
+    const parsed = parseInt(inputValue, 10);
+    if (!isNaN(parsed) && parsed >= MIN_WIDTH && parsed <= MAX_WIDTH) {
+      setSliderValue(parsed);
+      commitWidth(parsed);
+      imageEl.style.width = `${parsed}px`;
+      imageEl.setAttribute('width', String(parsed));
+    } else {
+      setInputValue(String(sliderValue));
+    }
   };
 
   const handleDelete = () => {
     const { state } = editor;
-    state.doc.descendants((node, pos) => {
+    state.doc.descendants((node, nodePos) => {
       if (node.type.name === 'image' && node.attrs.src === imageEl.getAttribute('src')) {
-        editor.chain().setNodeSelection(pos).deleteSelection().run();
+        editor.chain().setNodeSelection(nodePos).deleteSelection().run();
         return false;
       }
     });
@@ -95,11 +130,12 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
   };
 
   const handleEditSave = (dataUrl: string) => {
-    // Replace the image src with the edited version
     const { state } = editor;
-    state.doc.descendants((node, pos) => {
+    state.doc.descendants((node, nodePos) => {
       if (node.type.name === 'image' && node.attrs.src === imageEl.getAttribute('src')) {
-        editor.chain().setNodeSelection(pos).updateAttributes('image', { src: dataUrl }).run();
+        editor.view.dispatch(
+          state.tr.setNodeMarkup(nodePos, undefined, { ...node.attrs, src: dataUrl })
+        );
         return false;
       }
     });
@@ -111,31 +147,65 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
     <>
       <div
         ref={toolbarRef}
-        className="fixed z-[120] bg-white border border-gray-200 rounded-lg shadow-lg px-2 py-1.5 flex items-center gap-1.5 -translate-x-1/2"
+        className="fixed z-[120] bg-white border border-gray-200 rounded-lg shadow-lg px-3 py-2 flex items-center gap-2 -translate-x-1/2"
         style={{ top: Math.max(8, pos.top), left: pos.left }}
+        onMouseDown={e => e.stopPropagation()}
       >
-        {/* Resize controls */}
-        <button
-          onClick={() => handleResize(width - 50)}
-          className="w-7 h-7 flex items-center justify-center rounded text-gray-600 hover:bg-gray-100 text-xs font-bold"
-          title="Shrink"
-        >
-          &minus;
-        </button>
+        {/* Width input — scroll wheel to resize, type to set exact value */}
         <input
-          type="number"
-          value={width}
-          onChange={e => handleResize(parseInt(e.target.value, 10) || width)}
-          className="w-16 px-1.5 py-0.5 text-xs text-center border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
-          title="Width (px)"
+          type="text"
+          value={inputValue}
+          onChange={e => setInputValue(e.target.value)}
+          onBlur={handleInputCommit}
+          onKeyDown={e => {
+            if (e.key === 'Enter') handleInputCommit();
+            // Arrow keys for fine control
+            if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              const step = e.shiftKey ? 10 : 1;
+              handleSliderChange(sliderValue + step);
+            }
+            if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              const step = e.shiftKey ? 10 : 1;
+              handleSliderChange(sliderValue - step);
+            }
+          }}
+          onWheel={e => {
+            e.preventDefault();
+            const step = e.shiftKey ? 10 : 2;
+            const delta = e.deltaY < 0 ? step : -step;
+            handleSliderChange(sliderValue + delta);
+          }}
+          className="w-14 px-1.5 py-0.5 text-xs text-center border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+          title="Width — scroll to resize, arrows for fine control (Shift=10x)"
         />
-        <button
-          onClick={() => handleResize(width + 50)}
-          className="w-7 h-7 flex items-center justify-center rounded text-gray-600 hover:bg-gray-100 text-xs font-bold"
-          title="Grow"
+        {/* Draggable "px" label — hold and drag left/right to scale */}
+        <span
+          className="text-[10px] text-gray-400 cursor-ew-resize select-none hover:text-blue-500 font-medium px-0.5"
+          title="Drag left/right to resize"
+          onMouseDown={e => {
+            e.preventDefault();
+            const startX = e.clientX;
+            const startWidth = sliderValue;
+            const onMove = (ev: MouseEvent) => {
+              const dx = ev.clientX - startX;
+              handleSliderChange(startWidth + dx);
+            };
+            const onUp = () => {
+              document.removeEventListener('mousemove', onMove);
+              document.removeEventListener('mouseup', onUp);
+              document.body.style.cursor = '';
+              document.body.style.userSelect = '';
+            };
+            document.body.style.cursor = 'ew-resize';
+            document.body.style.userSelect = 'none';
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+          }}
         >
-          +
-        </button>
+          px
+        </span>
 
         <div className="w-px h-5 bg-gray-300 mx-0.5" />
 
