@@ -90,19 +90,20 @@ function headerClass(style: TOCStyle): string {
 
 function entryClass(style: TOCStyle, level: number): string {
   const indent = `pl-${(level - 1) * 4}`;
+  const base = 'overflow-hidden min-w-0';
   switch (style) {
     case 'default':
-      return `${indent} py-0.5 text-blue-600 hover:text-blue-800 cursor-pointer`;
+      return `${indent} ${base} py-0.5 text-blue-600 hover:text-blue-800 cursor-pointer`;
     case 'formal':
-      return `${indent} py-0.5 text-gray-700 cursor-pointer hover:text-gray-900`;
+      return `${indent} ${base} py-0.5 text-gray-700 cursor-pointer hover:text-gray-900`;
     case 'minimal':
-      return `${indent} py-px text-xs text-gray-500 cursor-pointer hover:text-gray-700`;
+      return `${indent} ${base} py-px text-xs text-gray-500 cursor-pointer hover:text-gray-700`;
     case 'dotted':
-      return `${indent} py-0.5 cursor-pointer text-gray-700 hover:text-gray-900 flex items-baseline`;
+      return `${indent} ${base} py-0.5 cursor-pointer text-gray-700 hover:text-gray-900 flex items-baseline`;
     case 'boxed':
-      return `${indent} py-0.5 text-gray-700 cursor-pointer hover:text-blue-600`;
+      return `${indent} ${base} py-0.5 text-gray-700 cursor-pointer hover:text-blue-600`;
     default:
-      return `${indent} py-0.5 cursor-pointer`;
+      return `${indent} ${base} py-0.5 cursor-pointer`;
   }
 }
 
@@ -164,8 +165,9 @@ function TOCNodeView({ editor, node }: any) {
       }}
     >
       <div
-        className={`${wrapperClass(tocStyle)} my-4 select-none`}
+        className={`${wrapperClass(tocStyle)} my-4 select-none overflow-hidden`}
         contentEditable={false}
+        style={{ maxWidth: '100%' }}
       >
         {/* Header */}
         <div className={headerClass(tocStyle)}>{headerText(tocStyle)}</div>
@@ -191,14 +193,14 @@ function TOCNodeView({ editor, node }: any) {
           >
             {tocStyle === 'dotted' ? (
               <>
-                <span className="whitespace-nowrap">
+                <span className="truncate shrink min-w-0">
                   {numbers ? `${numbers[i]} ` : ''}
                   {h.text}
                 </span>
-                <span className="flex-1 mx-2 border-b border-dotted border-gray-400" />
+                <span className="flex-1 mx-2 border-b border-dotted border-gray-400 shrink-0 min-w-[20px]" />
               </>
             ) : (
-              <span>
+              <span className="block truncate">
                 {numbers ? `${numbers[i]} ` : ''}
                 {h.text}
               </span>
