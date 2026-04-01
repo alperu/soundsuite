@@ -116,3 +116,14 @@ export async function listVersions(draftId: string) {
 export async function getVersion(versionId: string) {
   return prisma.draftVersion.findUnique({ where: { id: versionId } });
 }
+
+export async function restoreVersion(draftId: string, versionId: string) {
+  const version = await prisma.draftVersion.findUnique({ where: { id: versionId } });
+  if (!version || version.draftId !== draftId) {
+    throw new Error('Version not found');
+  }
+  return updateDraft(draftId, {
+    content: version.content,
+    changeSummary: `Restored from version ${version.version}`,
+  });
+}

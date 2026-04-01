@@ -74,6 +74,9 @@ export default function DraftPage() {
   const [trackChanges, setTrackChanges] = useState(false);
   const [editorSelection, setEditorSelection] = useState({ selectedText: '', hasSelection: false });
 
+  // Version preview
+  const [previewContent, setPreviewContent] = useState<string | null>(null);
+
   // Context menu
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
@@ -282,7 +285,7 @@ export default function DraftPage() {
 
   // ---- Parse initial content ----
 
-  const editorContent = activeDraft?.content || '';
+  const editorContent = previewContent ?? activeDraft?.content ?? '';
 
   return (
     <div className="flex h-full overflow-hidden bg-white">
@@ -347,6 +350,24 @@ export default function DraftPage() {
           />
         )}
 
+        {/* Preview banner */}
+        {previewContent !== null && (
+          <div className="px-3 py-1.5 bg-amber-50 border-b border-amber-200 text-xs text-amber-700 flex items-center gap-2 shrink-0">
+            <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            </svg>
+            <span className="font-medium">Previewing older version</span>
+            <span className="text-amber-500">(read-only)</span>
+            <button
+              onClick={() => setPreviewContent(null)}
+              className="ml-auto px-2 py-0.5 text-[11px] text-gray-600 border border-gray-300 rounded hover:bg-gray-100"
+            >
+              Back to current
+            </button>
+          </div>
+        )}
+
         {/* Editor area */}
         {activeDraft ? (
           <div className="flex-1 overflow-y-auto relative">
@@ -404,6 +425,10 @@ export default function DraftPage() {
           hasSelection={editorSelection.hasSelection}
           onInsertText={handleInsertText}
           onReplaceSelection={handleReplaceSelection}
+          draftId={activeDraft?.id}
+          currentVersion={activeDraft?.version}
+          onDraftRestore={() => { if (activeDraft) loadDraft(activeDraft.id); }}
+          onPreviewVersion={setPreviewContent}
         />
       </div>
 
