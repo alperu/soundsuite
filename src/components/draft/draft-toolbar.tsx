@@ -212,7 +212,11 @@ function HeadingDropdown({ editor }: { editor: Editor }) {
       ? 'h2'
       : editor.isActive('heading', { level: 3 })
         ? 'h3'
-        : 'p';
+        : editor.isActive('heading', { level: 4 })
+          ? 'h4'
+          : editor.isActive('heading', { level: 5 })
+            ? 'h5'
+            : 'p';
 
   return (
     <select
@@ -222,7 +226,7 @@ function HeadingDropdown({ editor }: { editor: Editor }) {
         if (val === 'p') {
           editor.chain().focus().setParagraph().run();
         } else {
-          const level = parseInt(val.replace('h', ''), 10) as 1 | 2 | 3;
+          const level = parseInt(val.replace('h', ''), 10) as 1 | 2 | 3 | 4 | 5;
           editor.chain().focus().toggleHeading({ level }).run();
         }
       }}
@@ -232,6 +236,8 @@ function HeadingDropdown({ editor }: { editor: Editor }) {
       <option value="h1">Heading 1</option>
       <option value="h2">Heading 2</option>
       <option value="h3">Heading 3</option>
+      <option value="h4">Heading 4</option>
+      <option value="h5">Heading 5</option>
     </select>
   );
 }
@@ -688,6 +694,7 @@ export default function DraftToolbar({
   const wordInputRef = useRef<HTMLInputElement>(null);
   const linkBtnRef = useRef<HTMLButtonElement | null>(null);
   const [wordImporting, setWordImporting] = useState(false);
+  const [paintFormat, setPaintFormat] = useState<Record<string, any> | null>(null);
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [imageModalOpen, setImageModalOpen] = useState(false);
@@ -736,7 +743,7 @@ export default function DraftToolbar({
   if (!editor) return null;
 
   return (
-    <div className="flex items-center gap-1 px-2 py-1 bg-gray-50 border border-b-0 rounded-t-lg flex-wrap">
+    <div className="flex items-center gap-1 px-2 py-1 bg-gray-50 border-b border-gray-200 shrink-0 overflow-x-auto">
       {/* Font family dropdown */}
       <Tooltip label="Font Family">
         <FontFamilyDropdown editor={editor} value={fontFamily} onChange={onFontFamilyChange} />
@@ -804,6 +811,43 @@ export default function DraftToolbar({
         shortcut="Ctrl+Shift+S"
       >
         <StrikethroughIcon />
+      </ToolbarButton>
+
+      {/* Paint Format */}
+      <ToolbarButton
+        onClick={() => {
+          if (paintFormat) {
+            // Apply stored format to current selection
+            const chain = editor.chain().focus();
+            if (paintFormat.bold) chain.setBold(); else chain.unsetBold();
+            if (paintFormat.italic) chain.setItalic(); else chain.unsetItalic();
+            if (paintFormat.underline) (chain as any).setUnderline(); else (chain as any).unsetUnderline();
+            if (paintFormat.strike) chain.setStrike(); else chain.unsetStrike();
+            if (paintFormat.highlight) chain.setHighlight(); else chain.unsetHighlight();
+            if (paintFormat.fontFamily) (chain as any).setFontFamily(paintFormat.fontFamily);
+            if (paintFormat.fontSize) (chain as any).setFontSize(paintFormat.fontSize);
+            chain.run();
+            setPaintFormat(null);
+          } else {
+            // Copy format from current position
+            const marks: Record<string, any> = {
+              bold: editor.isActive('bold'),
+              italic: editor.isActive('italic'),
+              underline: editor.isActive('underline'),
+              strike: editor.isActive('strike'),
+              highlight: editor.isActive('highlight'),
+              fontFamily: editor.getAttributes('textStyle').fontFamily || null,
+              fontSize: editor.getAttributes('textStyle').fontSize || null,
+            };
+            setPaintFormat(marks);
+          }
+        }}
+        active={!!paintFormat}
+        title={paintFormat ? 'Click text to apply format (Esc to cancel)' : 'Copy Format (Format Painter)'}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M10.5 1.5l2 2-1 1-2-2 1-1zM4 8l5-5 2 2-5 5H4V8zm-1 4h10v1.5H3V12z" />
+        </svg>
       </ToolbarButton>
 
       <Separator />
@@ -1062,17 +1106,41 @@ export default function DraftToolbar({
           <button
             onClick={() => onZoomChange(Math.max(0.5, zoom - 0.1))}
             className="w-6 h-6 flex items-center justify-center rounded text-xs text-gray-600 hover:bg-gray-200"
-            title="Zoom Out"
+            title="Zoom Out (Ctrl+Scroll)"
           >−</button>
-          <button
-            onClick={() => onZoomChange(1)}
-            className="px-1 h-6 flex items-center justify-center rounded text-[11px] text-gray-600 hover:bg-gray-200 min-w-[36px]"
-            title="Reset Zoom (click)"
-          >{Math.round(zoom * 100)}%</button>
+          <select
+            value=""
+            onChange={(e) => {
+              const val = e.target.value;
+              if (val === 'fit') {
+                // Calculate fit-to-width: page width vs viewport width
+                const wrapper = editor?.view?.dom?.closest?.('.draft-editor-wrapper');
+                if (wrapper) {
+                  const viewportW = wrapper.clientWidth - 64; // subtract padding
+                  const pageW = 816; // default Letter width
+                  const fitZoom = Math.min(2, Math.max(0.5, viewportW / pageW));
+                  onZoomChange(Math.round(fitZoom * 100) / 100);
+                }
+              } else if (val) {
+                onZoomChange(parseFloat(val));
+              }
+            }}
+            className="h-6 px-0.5 text-[11px] border border-gray-200 rounded bg-white text-gray-600 cursor-pointer min-w-[52px] text-center"
+            title="Zoom Level"
+          >
+            <option value="" disabled>{Math.round(zoom * 100)}%</option>
+            <option value="fit">Fit Width</option>
+            <option value="0.5">50%</option>
+            <option value="0.75">75%</option>
+            <option value="1">100%</option>
+            <option value="1.25">125%</option>
+            <option value="1.5">150%</option>
+            <option value="2">200%</option>
+          </select>
           <button
             onClick={() => onZoomChange(Math.min(2, zoom + 0.1))}
             className="w-6 h-6 flex items-center justify-center rounded text-xs text-gray-600 hover:bg-gray-200"
-            title="Zoom In"
+            title="Zoom In (Ctrl+Scroll)"
           >+</button>
         </div>
       )}
