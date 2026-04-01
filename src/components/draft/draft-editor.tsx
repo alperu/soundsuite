@@ -344,7 +344,11 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             box-shadow: 0 2px 8px rgba(0,0,0,0.1), 0 0 1px rgba(0,0,0,0.08);
             border: 1px solid #d1d5db;
             margin: 0 auto;
-          }
+            /* Estimated page boundary — thin blue line repeating at content page height */
+            background-color: white;
+            background-image:
+              linear-gradient(to bottom, transparent calc(100% - 1px), #93c5fd 1px);
+            background-size: 100% ${dims.h - ps.marginTop - ps.marginBottom}px;
           .draft-editor-wrapper.page-view .ProseMirror > * {
             max-width: 100%;
             overflow-wrap: break-word;
