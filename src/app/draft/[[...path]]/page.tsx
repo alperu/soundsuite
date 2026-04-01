@@ -266,7 +266,18 @@ export default function DraftPage() {
   const activeDraftIdRef = useRef(activeDraft?.id);
   activeDraftIdRef.current = activeDraft?.id;
 
+  // Debounced minimap HTML update
+  const minimapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const updateMinimap = useCallback(() => {
+    if (minimapTimer.current) clearTimeout(minimapTimer.current);
+    minimapTimer.current = setTimeout(() => {
+      const html = editorRef.current?.editor?.getHTML?.();
+      if (html) setMinimapHtml(html);
+    }, 500);
+  }, []);
+
   const handleEditorUpdate = useCallback((json: string) => {
+    updateMinimap();
     if (!activeDraftIdRef.current) return;
     if (json === lastSavedContent.current) return;
     setSaveStatus('unsaved');
@@ -443,24 +454,40 @@ export default function DraftPage() {
 
   return (
     <div className="flex h-full overflow-hidden bg-white">
-      {/* Left Panel - Settings */}
-      <div style={{ width: leftWidth }} className="shrink-0 border-r border-gray-200 flex flex-col overflow-hidden">
-        <DraftSettingsPanel
-          selectedCaseId={selectedCaseId}
-          onCaseChange={handleCaseChange}
-          activeDraftId={activeDraft?.id || null}
-          onDraftSelect={handleDraftSelect}
-          onDraftCreated={handleDraftCreated}
-          linkedCaseIds={linkedCaseIds}
-          onLinkedCasesChange={setLinkedCaseIds}
-        />
-      </div>
+      {!sidebarCollapsed ? (
+        <>
+          {/* Left Panel - Settings */}
+          <div style={{ width: leftWidth }} className="shrink-0 border-r border-gray-200 flex flex-col overflow-hidden">
+            <DraftSettingsPanel
+              selectedCaseId={selectedCaseId}
+              onCaseChange={handleCaseChange}
+              activeDraftId={activeDraft?.id || null}
+              onDraftSelect={handleDraftSelect}
+              onDraftCreated={handleDraftCreated}
+              linkedCaseIds={linkedCaseIds}
+              onLinkedCasesChange={setLinkedCaseIds}
+            />
+          </div>
 
-      {/* Left resize handle */}
-      <div
-        className="w-1 cursor-col-resize hover:bg-blue-300 active:bg-blue-400 transition-colors shrink-0"
-        onMouseDown={handleLeftResizeStart}
-      />
+          {/* Left resize handle */}
+          <div
+            className="w-1 cursor-col-resize hover:bg-blue-300 active:bg-blue-400 transition-colors shrink-0"
+            onMouseDown={handleLeftResizeStart}
+          />
+        </>
+      ) : (
+        /* Collapsed: Minimap + Heading Navigator */
+        <div className="flex shrink-0 border-r border-gray-200 h-full">
+          <DraftMinimap
+            editorHtml={minimapHtml}
+            scrollContainer={editorScrollRef.current}
+          />
+          <DraftHeadingNav
+            editor={editorInstance}
+            scrollContainer={editorScrollRef.current}
+          />
+        </div>
+      )}
 
       {/* Middle Panel - Editor */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -543,7 +570,7 @@ export default function DraftPage() {
 
         {/* Editor area */}
         {activeDraft ? (
-          <div className="flex-1 overflow-y-auto relative">
+          <div ref={editorScrollRef} className="flex-1 overflow-y-auto relative">
             <DraftEditor
               ref={editorRef}
               content={editorContent}

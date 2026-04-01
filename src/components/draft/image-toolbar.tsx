@@ -19,7 +19,7 @@ type WrapMode = 'inline' | 'float-left' | 'float-right' | 'block';
 const WRAP_OPTIONS: { value: WrapMode; label: string; icon: React.ReactNode }[] = [
   {
     value: 'inline',
-    label: 'Inline',
+    label: 'In line',
     icon: (
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" opacity="0.7">
         <rect x="1" y="2" width="4" height="4" rx="0.5" />
@@ -31,7 +31,7 @@ const WRAP_OPTIONS: { value: WrapMode; label: string; icon: React.ReactNode }[] 
   },
   {
     value: 'float-left',
-    label: 'Wrap right',
+    label: 'Left',
     icon: (
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" opacity="0.7">
         <rect x="1" y="1" width="5" height="5" rx="0.5" />
@@ -44,7 +44,7 @@ const WRAP_OPTIONS: { value: WrapMode; label: string; icon: React.ReactNode }[] 
   },
   {
     value: 'float-right',
-    label: 'Wrap left',
+    label: 'Right',
     icon: (
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" opacity="0.7">
         <rect x="10" y="1" width="5" height="5" rx="0.5" />
@@ -57,7 +57,7 @@ const WRAP_OPTIONS: { value: WrapMode; label: string; icon: React.ReactNode }[] 
   },
   {
     value: 'block',
-    label: 'Block (centered)',
+    label: 'Center',
     icon: (
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" opacity="0.7">
         <rect x="4" y="1" width="8" height="5" rx="0.5" />
@@ -94,75 +94,72 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
   const [pos, setPos] = useState({ top: 0, left: 0 });
   const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Commit width to TipTap (debounced for slider, immediate for blur)
-  const commitWidth = useCallback((newWidth: number) => {
-    const clamped = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, newWidth));
-    const { state } = editor;
-    state.doc.descendants((node, nodePos) => {
-      if (node.type.name === 'image' && node.attrs.src === imageEl.getAttribute('src')) {
-        editor.view.dispatch(
-          state.tr.setNodeMarkup(nodePos, undefined, { ...node.attrs, width: clamped })
-        );
+  // Helper: find image node position using FRESH editor state
+  const findImagePos = useCallback((): number => {
+    const src = imageEl.getAttribute('src');
+    let found = -1;
+    editor.view.state.doc.descendants((node, nodePos) => {
+      if (node.type.name === 'image' && node.attrs.src === src) {
+        found = nodePos;
         return false;
       }
     });
+    return found;
   }, [editor, imageEl]);
 
-  // Update wrapping mode in TipTap
+  // Update any image attribute using fresh state
+  const updateImageAttr = useCallback((attrs: Record<string, any>) => {
+    const pos = findImagePos();
+    if (pos < 0) return;
+    const state = editor.view.state;
+    const node = state.doc.nodeAt(pos);
+    if (!node) return;
+    editor.view.dispatch(
+      state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, ...attrs })
+    );
+  }, [editor, findImagePos]);
+
+  // Commit width to TipTap
+  const commitWidth = useCallback((newWidth: number) => {
+    updateImageAttr({ width: Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, newWidth)) });
+  }, [updateImageAttr]);
+
+  // Update wrapping mode
   const handleWrapChange = useCallback((mode: WrapMode) => {
     setWrapMode(mode);
-    const { state } = editor;
-    state.doc.descendants((node, nodePos) => {
-      if (node.type.name === 'image' && node.attrs.src === imageEl.getAttribute('src')) {
-        editor.view.dispatch(
-          state.tr.setNodeMarkup(nodePos, undefined, { ...node.attrs, wrapping: mode })
-        );
-        return false;
-      }
-    });
-  }, [editor, imageEl]);
+    updateImageAttr({ wrapping: mode });
+  }, [updateImageAttr]);
 
-  // Move image: cut from current position and insert at target
+  // Move image up or down
   const handleMoveImage = useCallback((direction: 'up' | 'down') => {
-    const { state } = editor;
-    let imgPos = -1;
-    let imgNode: any = null;
-    state.doc.descendants((node, nodePos) => {
-      if (node.type.name === 'image' && node.attrs.src === imageEl.getAttribute('src')) {
-        imgPos = nodePos;
-        imgNode = node;
-        return false;
-      }
-    });
-    if (imgPos < 0 || !imgNode) return;
-
-    // Find the parent block and swap with sibling
-    const resolved = state.doc.resolve(imgPos);
+    const pos = findImagePos();
+    if (pos < 0) return;
+    const state = editor.view.state;
+    const resolved = state.doc.resolve(pos);
     const parentDepth = resolved.depth;
-    const parentPos = resolved.before(parentDepth);
-    const parentEnd = resolved.after(parentDepth);
+    const blockStart = resolved.before(parentDepth);
+    const blockEnd = resolved.after(parentDepth);
 
-    if (direction === 'up' && parentPos > 0) {
-      const targetPos = state.doc.resolve(parentPos).before(parentDepth);
+    if (direction === 'up' && blockStart > 0) {
+      const prevResolved = state.doc.resolve(blockStart - 1);
+      const prevStart = prevResolved.before(prevResolved.depth);
       const tr = state.tr;
-      const slice = tr.doc.slice(parentPos, parentEnd);
-      tr.delete(parentPos, parentEnd);
-      tr.insert(targetPos, slice.content);
+      const block = tr.doc.slice(blockStart, blockEnd);
+      tr.delete(blockStart, blockEnd);
+      tr.insert(prevStart, block.content);
       editor.view.dispatch(tr);
-    } else if (direction === 'down') {
-      const afterNode = state.doc.resolve(parentEnd);
-      if (afterNode.pos < state.doc.content.size) {
-        const nextEnd = afterNode.pos + (state.doc.nodeAt(afterNode.pos)?.nodeSize || 0);
+    } else if (direction === 'down' && blockEnd < state.doc.content.size) {
+      const nextNode = state.doc.nodeAt(blockEnd);
+      if (nextNode) {
+        const nextEnd = blockEnd + nextNode.nodeSize;
         const tr = state.tr;
-        const slice = tr.doc.slice(parentPos, parentEnd);
-        tr.delete(parentPos, parentEnd);
-        // After deletion, position shifts
-        const insertAt = nextEnd - (parentEnd - parentPos);
-        tr.insert(Math.min(insertAt, tr.doc.content.size), slice.content);
+        const nextBlock = tr.doc.slice(blockEnd, nextEnd);
+        tr.delete(blockEnd, nextEnd);
+        tr.insert(blockStart, nextBlock.content);
         editor.view.dispatch(tr);
       }
     }
-  }, [editor, imageEl]);
+  }, [editor, findImagePos]);
 
   // Position toolbar above the image
   useEffect(() => {
@@ -204,37 +201,86 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
     };
   }, [onClose, imageEl, editorOpen]);
 
-  // Visual selection outline + move handle overlay
+  // Visual selection outline + make image draggable
   useEffect(() => {
     imageEl.style.outline = '2px solid #3b82f6';
     imageEl.style.outlineOffset = '2px';
+    imageEl.draggable = true;
     imageEl.style.cursor = 'grab';
 
-    // Add a move handle icon in the top-left corner
-    const parent = imageEl.parentElement;
-    if (parent) {
-      parent.style.position = 'relative';
-      const handle = document.createElement('div');
-      handle.className = 'image-move-handle';
-      handle.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>`;
-      handle.style.cssText = 'position:absolute;top:4px;left:4px;width:24px;height:24px;background:rgba(59,130,246,0.8);border-radius:4px;display:flex;align-items:center;justify-content:center;cursor:grab;z-index:5;';
-      handle.title = 'Move image (use ↑↓ buttons in toolbar)';
-      parent.appendChild(handle);
+    const handleDragStart = (e: DragEvent) => {
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', imageEl.getAttribute('src') || '');
+        imageEl.style.opacity = '0.5';
+      }
+    };
+    const handleDragEnd = () => {
+      imageEl.style.opacity = '1';
+    };
 
-      return () => {
-        imageEl.style.outline = '';
-        imageEl.style.outlineOffset = '';
-        imageEl.style.cursor = '';
-        handle.remove();
-      };
-    }
+    imageEl.addEventListener('dragstart', handleDragStart);
+    imageEl.addEventListener('dragend', handleDragEnd);
+
+    // Enable drop on the editor
+    const proseMirror = imageEl.closest('.ProseMirror');
+    const handleDragOver = (e: Event) => {
+      (e as DragEvent).preventDefault();
+      if ((e as DragEvent).dataTransfer) {
+        (e as DragEvent).dataTransfer!.dropEffect = 'move';
+      }
+    };
+    const handleDrop = (e: Event) => {
+      const de = e as DragEvent;
+      de.preventDefault();
+      const src = de.dataTransfer?.getData('text/plain');
+      if (!src || src !== imageEl.getAttribute('src')) return;
+
+      // Find drop position in the document
+      const view = editor.view;
+      const dropPos = view.posAtCoords({ left: de.clientX, top: de.clientY });
+      if (!dropPos) return;
+
+      // Find and remove the image from its current position
+      const imgPos = findImagePos();
+      if (imgPos < 0) return;
+
+      const state = view.state;
+      const node = state.doc.nodeAt(imgPos);
+      if (!node) return;
+
+      // Create transaction: delete old, insert at new position
+      let tr = state.tr;
+      const nodeSize = node.nodeSize;
+      tr = tr.delete(imgPos, imgPos + nodeSize);
+
+      // Adjust drop position if it's after the deleted node
+      let insertPos = dropPos.pos;
+      if (insertPos > imgPos) {
+        insertPos -= nodeSize;
+      }
+      // Clamp to valid range
+      insertPos = Math.max(0, Math.min(insertPos, tr.doc.content.size));
+
+      tr = tr.insert(insertPos, node);
+      view.dispatch(tr);
+      onClose(); // Close toolbar since image moved
+    };
+
+    proseMirror?.addEventListener('dragover', handleDragOver);
+    proseMirror?.addEventListener('drop', handleDrop);
 
     return () => {
       imageEl.style.outline = '';
       imageEl.style.outlineOffset = '';
       imageEl.style.cursor = '';
+      imageEl.draggable = false;
+      imageEl.removeEventListener('dragstart', handleDragStart);
+      imageEl.removeEventListener('dragend', handleDragEnd);
+      proseMirror?.removeEventListener('dragover', handleDragOver);
+      proseMirror?.removeEventListener('drop', handleDrop);
     };
-  }, [imageEl]);
+  }, [imageEl, editor, findImagePos, onClose]);
 
   // Slider change — update preview immediately, debounce TipTap commit
   const handleSliderChange = (val: number) => {
@@ -352,22 +398,26 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
 
         <div className="w-px h-5 bg-gray-300 mx-0.5" />
 
-        {/* Wrap mode */}
-        <div className="flex items-center gap-0.5">
-          {WRAP_OPTIONS.map(opt => (
-            <button
-              key={opt.value}
-              onClick={() => handleWrapChange(opt.value)}
-              className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
-                wrapMode === opt.value
-                  ? 'bg-blue-100 text-blue-700'
-                  : 'text-gray-500 hover:bg-gray-100'
-              }`}
-              title={opt.label}
-            >
-              {opt.icon}
-            </button>
-          ))}
+        {/* Wrap mode — with text labels */}
+        <div className="flex items-center">
+          <span className="text-[9px] text-gray-400 mr-1">Wrap:</span>
+          <div className="flex items-center gap-0.5">
+            {WRAP_OPTIONS.map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => handleWrapChange(opt.value)}
+                className={`h-6 px-1.5 flex items-center gap-1 rounded text-[10px] transition-colors ${
+                  wrapMode === opt.value
+                    ? 'bg-blue-100 text-blue-700 font-medium'
+                    : 'text-gray-500 hover:bg-gray-100'
+                }`}
+                title={opt.label}
+              >
+                {opt.icon}
+                <span className="hidden sm:inline">{opt.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="w-px h-5 bg-gray-300 mx-0.5" />
@@ -376,18 +426,18 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
         <button
           onClick={() => handleMoveImage('up')}
           className="w-7 h-7 flex items-center justify-center rounded text-gray-500 hover:bg-gray-100"
-          title="Move up"
+          title="Move image up"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="18 15 12 9 6 15" />
           </svg>
         </button>
         <button
           onClick={() => handleMoveImage('down')}
           className="w-7 h-7 flex items-center justify-center rounded text-gray-500 hover:bg-gray-100"
-          title="Move down"
+          title="Move image down"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="6 9 12 15 18 9" />
           </svg>
         </button>
