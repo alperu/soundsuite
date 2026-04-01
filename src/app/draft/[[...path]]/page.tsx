@@ -101,7 +101,16 @@ export default function DraftPage() {
     try { localStorage.setItem('draft-zoom-level', String(clamped)); } catch {}
   }, []);
 
-  // Load page settings from config
+  // Style defaults from admin config
+  const [styleDefaults, setStyleDefaults] = useState({
+    defaultFont: 'Times New Roman',
+    defaultFontSize: '12px',
+    h1Size: '24px', h2Size: '20px', h3Size: '16px', h4Size: '14px', h5Size: '12px',
+    lineSpacing: '1.5',
+    paragraphSpacing: '12px',
+  });
+
+  // Load page settings + style defaults from config
   useEffect(() => {
     fetch('/api/config')
       .then(r => r.json())
@@ -115,6 +124,17 @@ export default function DraftPage() {
             marginRight: Number(cfg.draftMarginRight) || 96,
           });
         }
+        setStyleDefaults({
+          defaultFont: cfg.draftDefaultFont || 'Times New Roman',
+          defaultFontSize: cfg.draftDefaultFontSize || '12px',
+          h1Size: cfg.draftH1Size || '24px',
+          h2Size: cfg.draftH2Size || '20px',
+          h3Size: cfg.draftH3Size || '16px',
+          h4Size: cfg.draftH4Size || '14px',
+          h5Size: cfg.draftH5Size || '12px',
+          lineSpacing: cfg.draftLineSpacing || '1.5',
+          paragraphSpacing: cfg.draftParagraphSpacing || '12px',
+        });
       })
       .catch(() => {});
   }, []);

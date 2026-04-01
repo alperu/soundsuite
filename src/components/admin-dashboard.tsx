@@ -2208,11 +2208,24 @@ function Stat({ label, value }: { label: string; value: string | number }) {
 // ---------------------------------------------------------------------------
 
 function DraftAdminPanel({ initialConfig }: { initialConfig: any }) {
+  // Page settings
   const [pageSize, setPageSize] = useState(initialConfig?.draftPageSize || 'letter');
   const [marginTop, setMarginTop] = useState(String(((initialConfig?.draftMarginTop || 96) / 96).toFixed(2)));
   const [marginBottom, setMarginBottom] = useState(String(((initialConfig?.draftMarginBottom || 96) / 96).toFixed(2)));
   const [marginLeft, setMarginLeft] = useState(String(((initialConfig?.draftMarginLeft || 96) / 96).toFixed(2)));
   const [marginRight, setMarginRight] = useState(String(((initialConfig?.draftMarginRight || 96) / 96).toFixed(2)));
+
+  // Style defaults
+  const [defaultFont, setDefaultFont] = useState(initialConfig?.draftDefaultFont || 'Times New Roman');
+  const [defaultFontSize, setDefaultFontSize] = useState(initialConfig?.draftDefaultFontSize || '12px');
+  const [h1Size, setH1Size] = useState(initialConfig?.draftH1Size || '24px');
+  const [h2Size, setH2Size] = useState(initialConfig?.draftH2Size || '20px');
+  const [h3Size, setH3Size] = useState(initialConfig?.draftH3Size || '16px');
+  const [h4Size, setH4Size] = useState(initialConfig?.draftH4Size || '14px');
+  const [h5Size, setH5Size] = useState(initialConfig?.draftH5Size || '12px');
+  const [lineSpacing, setLineSpacing] = useState(initialConfig?.draftLineSpacing || '1.5');
+  const [paragraphSpacing, setParagraphSpacing] = useState(initialConfig?.draftParagraphSpacing || '12px');
+
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -2232,6 +2245,15 @@ function DraftAdminPanel({ initialConfig }: { initialConfig: any }) {
           draftMarginBottom: Math.round(parseFloat(marginBottom) * 96),
           draftMarginLeft: Math.round(parseFloat(marginLeft) * 96),
           draftMarginRight: Math.round(parseFloat(marginRight) * 96),
+          draftDefaultFont: defaultFont,
+          draftDefaultFontSize: defaultFontSize,
+          draftH1Size: h1Size,
+          draftH2Size: h2Size,
+          draftH3Size: h3Size,
+          draftH4Size: h4Size,
+          draftH5Size: h5Size,
+          draftLineSpacing: lineSpacing,
+          draftParagraphSpacing: paragraphSpacing,
         }),
       });
       setSaved(true);
@@ -2241,9 +2263,12 @@ function DraftAdminPanel({ initialConfig }: { initialConfig: any }) {
   };
 
   const inputClass = 'w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md bg-white';
+  const sizeOptions = ['10px', '11px', '12px', '13px', '14px', '16px', '18px', '20px', '24px', '28px', '32px', '36px', '48px'];
+  const fontOptions = ['Times New Roman', 'Arial', 'Courier New', 'Georgia', 'Garamond', 'Calibri', 'Verdana', 'Helvetica'];
 
   return (
-    <div className="max-w-lg space-y-6">
+    <div className="max-w-2xl space-y-6">
+      {/* Page Settings */}
       <div>
         <h3 className="text-sm font-semibold text-gray-800 mb-3">Page Settings</h3>
         <div className="space-y-3">
@@ -2258,9 +2283,10 @@ function DraftAdminPanel({ initialConfig }: { initialConfig: any }) {
         </div>
       </div>
 
+      {/* Margins */}
       <div>
         <h3 className="text-sm font-semibold text-gray-800 mb-3">Margins (inches)</h3>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-4 gap-3">
           <div>
             <label className="text-xs text-gray-600 font-medium block mb-1">Top</label>
             <input type="number" step="0.1" min="0" max="3" value={marginTop} onChange={e => setMarginTop(e.target.value)} className={inputClass} />
@@ -2277,6 +2303,110 @@ function DraftAdminPanel({ initialConfig }: { initialConfig: any }) {
             <label className="text-xs text-gray-600 font-medium block mb-1">Right</label>
             <input type="number" step="0.1" min="0" max="3" value={marginRight} onChange={e => setMarginRight(e.target.value)} className={inputClass} />
           </div>
+        </div>
+      </div>
+
+      {/* Default Typography */}
+      <div>
+        <h3 className="text-sm font-semibold text-gray-800 mb-3">Default Typography</h3>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">Default Font</label>
+            <select value={defaultFont} onChange={e => setDefaultFont(e.target.value)} className={inputClass}>
+              {fontOptions.map(f => (
+                <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">Default Body Size</label>
+            <select value={defaultFontSize} onChange={e => setDefaultFontSize(e.target.value)} className={inputClass}>
+              {sizeOptions.map(s => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Heading Sizes */}
+      <div>
+        <h3 className="text-sm font-semibold text-gray-800 mb-3">Heading Sizes</h3>
+        <div className="grid grid-cols-5 gap-3">
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">H1</label>
+            <select value={h1Size} onChange={e => setH1Size(e.target.value)} className={inputClass}>
+              {sizeOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">H2</label>
+            <select value={h2Size} onChange={e => setH2Size(e.target.value)} className={inputClass}>
+              {sizeOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">H3</label>
+            <select value={h3Size} onChange={e => setH3Size(e.target.value)} className={inputClass}>
+              {sizeOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">H4</label>
+            <select value={h4Size} onChange={e => setH4Size(e.target.value)} className={inputClass}>
+              {sizeOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">H5</label>
+            <select value={h5Size} onChange={e => setH5Size(e.target.value)} className={inputClass}>
+              {sizeOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Spacing */}
+      <div>
+        <h3 className="text-sm font-semibold text-gray-800 mb-3">Spacing</h3>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">Line Spacing</label>
+            <select value={lineSpacing} onChange={e => setLineSpacing(e.target.value)} className={inputClass}>
+              <option value="1">Single (1.0)</option>
+              <option value="1.15">1.15</option>
+              <option value="1.5">1.5</option>
+              <option value="2">Double (2.0)</option>
+              <option value="2.5">2.5</option>
+              <option value="3">Triple (3.0)</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">Paragraph Spacing</label>
+            <select value={paragraphSpacing} onChange={e => setParagraphSpacing(e.target.value)} className={inputClass}>
+              <option value="0px">None</option>
+              <option value="6px">6px</option>
+              <option value="8px">8px</option>
+              <option value="12px">12px</option>
+              <option value="16px">16px</option>
+              <option value="24px">24px</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Preview */}
+      <div>
+        <h3 className="text-sm font-semibold text-gray-800 mb-3">Preview</h3>
+        <div className="border border-gray-200 rounded-lg p-4 bg-white" style={{ fontFamily: defaultFont, lineHeight: lineSpacing }}>
+          <div style={{ fontSize: h1Size, fontWeight: 'bold', marginBottom: paragraphSpacing }}>Heading 1</div>
+          <div style={{ fontSize: h2Size, fontWeight: 'bold', marginBottom: paragraphSpacing }}>Heading 2</div>
+          <div style={{ fontSize: h3Size, fontWeight: 'bold', marginBottom: paragraphSpacing }}>Heading 3</div>
+          <div style={{ fontSize: h4Size, fontWeight: 'bold', marginBottom: paragraphSpacing }}>Heading 4</div>
+          <div style={{ fontSize: h5Size, fontWeight: 'bold', marginBottom: paragraphSpacing }}>Heading 5</div>
+          <p style={{ fontSize: defaultFontSize, marginBottom: paragraphSpacing }}>
+            Body text paragraph. The quick brown fox jumps over the lazy dog. This demonstrates the default font, size, and spacing settings.
+          </p>
         </div>
       </div>
 

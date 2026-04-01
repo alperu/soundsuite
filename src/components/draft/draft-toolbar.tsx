@@ -1040,7 +1040,17 @@ export default function DraftToolbar({
             provider={provider || 'ollama'}
             model={model || ''}
             onInsert={(url, alt) => {
+              // Insert image
               editor.chain().focus().setImage({ src: url, alt }).run();
+              // Insert exhibit label + description as bold caption below the image
+              if (alt && alt !== 'Exhibit image') {
+                editor.commands.createParagraphNear();
+                editor.commands.insertContent({
+                  type: 'paragraph',
+                  attrs: { textAlign: 'center' },
+                  content: [{ type: 'text', marks: [{ type: 'bold' }], text: alt }],
+                });
+              }
               onImageInsert?.(url, alt);
               setImageModalOpen(false);
             }}

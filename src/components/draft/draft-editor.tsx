@@ -50,10 +50,17 @@ interface DraftEditorProps {
   pageSettings?: PageSettings;
   zoom?: number;
   onZoomChange?: (zoom: number) => void;
+  styleDefaults?: {
+    defaultFont: string;
+    defaultFontSize: string;
+    h1Size: string; h2Size: string; h3Size: string; h4Size: string; h5Size: string;
+    lineSpacing: string;
+    paragraphSpacing: string;
+  };
 }
 
 const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
-  ({ content, onUpdate, onSelectionChange, onContextMenu, className, showMarks, pageView, pageSettings, zoom = 1, onZoomChange }, ref) => {
+  ({ content, onUpdate, onSelectionChange, onContextMenu, className, showMarks, pageView, pageSettings, zoom = 1, onZoomChange, styleDefaults }, ref) => {
     const editor = useEditor({
       immediatelyRender: false,
       extensions: [

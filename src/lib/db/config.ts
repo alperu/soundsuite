@@ -84,6 +84,16 @@ export interface AppConfig {
   draftMarginBottom: number;
   draftMarginLeft: number;
   draftMarginRight: number;
+  // Draft style defaults
+  draftDefaultFont: string;
+  draftDefaultFontSize: string;
+  draftH1Size: string;
+  draftH2Size: string;
+  draftH3Size: string;
+  draftH4Size: string;
+  draftH5Size: string;
+  draftLineSpacing: string;
+  draftParagraphSpacing: string;
 }
 
 export interface ModelDownloadInfo {
@@ -149,6 +159,16 @@ export async function getConfig(): Promise<AppConfig> {
     draftMarginBottom: parseInt(configMap.get('draft.marginBottom') || '96', 10),
     draftMarginLeft: parseInt(configMap.get('draft.marginLeft') || '96', 10),
     draftMarginRight: parseInt(configMap.get('draft.marginRight') || '96', 10),
+    // Draft style defaults
+    draftDefaultFont: configMap.get('draft.defaultFont') || 'Times New Roman',
+    draftDefaultFontSize: configMap.get('draft.defaultFontSize') || '12px',
+    draftH1Size: configMap.get('draft.h1Size') || '24px',
+    draftH2Size: configMap.get('draft.h2Size') || '20px',
+    draftH3Size: configMap.get('draft.h3Size') || '16px',
+    draftH4Size: configMap.get('draft.h4Size') || '14px',
+    draftH5Size: configMap.get('draft.h5Size') || '12px',
+    draftLineSpacing: configMap.get('draft.lineSpacing') || '1.5',
+    draftParagraphSpacing: configMap.get('draft.paragraphSpacing') || '12px',
     // Reranking
     rerankEnabled: configMap.get('rerank.enabled') === 'true',
     rerankProvider: (configMap.get('rerank.provider') as any) || 'vllm',
@@ -451,6 +471,34 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.draftMarginRight !== undefined) {
     updates.push({ key: 'draft.marginRight', value: String(config.draftMarginRight) });
+  }
+  // Draft style defaults
+  if (config.draftDefaultFont !== undefined) {
+    updates.push({ key: 'draft.defaultFont', value: config.draftDefaultFont });
+  }
+  if (config.draftDefaultFontSize !== undefined) {
+    updates.push({ key: 'draft.defaultFontSize', value: config.draftDefaultFontSize });
+  }
+  if (config.draftH1Size !== undefined) {
+    updates.push({ key: 'draft.h1Size', value: config.draftH1Size });
+  }
+  if (config.draftH2Size !== undefined) {
+    updates.push({ key: 'draft.h2Size', value: config.draftH2Size });
+  }
+  if (config.draftH3Size !== undefined) {
+    updates.push({ key: 'draft.h3Size', value: config.draftH3Size });
+  }
+  if (config.draftH4Size !== undefined) {
+    updates.push({ key: 'draft.h4Size', value: config.draftH4Size });
+  }
+  if (config.draftH5Size !== undefined) {
+    updates.push({ key: 'draft.h5Size', value: config.draftH5Size });
+  }
+  if (config.draftLineSpacing !== undefined) {
+    updates.push({ key: 'draft.lineSpacing', value: config.draftLineSpacing });
+  }
+  if (config.draftParagraphSpacing !== undefined) {
+    updates.push({ key: 'draft.paragraphSpacing', value: config.draftParagraphSpacing });
   }
 
   // Execute all updates
