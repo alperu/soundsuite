@@ -71,7 +71,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       },
       editorProps: {
         attributes: {
-          class: 'prose prose-sm max-w-none focus:outline-none min-h-[400px] px-4 py-3',
+          class: 'prose prose-sm max-w-none focus:outline-none min-h-full px-4 py-3',
         },
       },
     });
@@ -113,14 +113,14 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
 
     if (!editor) {
       return (
-        <div className={`border rounded-b-lg bg-white min-h-[400px] flex items-center justify-center text-gray-400 ${className ?? ''}`}>
+        <div className={`bg-white flex-1 flex items-center justify-center text-gray-400 ${className ?? ''}`}>
           Loading editor...
         </div>
       );
     }
 
     return (
-      <div className={`border rounded-b-lg bg-white overflow-auto ${className ?? ''}`}>
+      <div className={`bg-white overflow-auto flex-1 ${className ?? ''}`}>
         <EditorContent editor={editor} />
       </div>
     );

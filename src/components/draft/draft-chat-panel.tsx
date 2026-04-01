@@ -717,7 +717,7 @@ export default function DraftChatPanel({
                       ? 'Ask about selected text...'
                       : 'Ask about your document...'
                 }
-                className="flex-1 px-2.5 py-1.5 text-sm border border-gray-300 rounded-md resize-none"
+                className="flex-1 px-2.5 py-1.5 text-sm border border-gray-300 rounded-md resize-y min-h-[2.5rem] max-h-[12rem]"
                 rows={2}
               />
               <div className="flex flex-col gap-1">

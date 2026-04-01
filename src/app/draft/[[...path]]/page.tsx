@@ -29,8 +29,8 @@ const RIGHT_MIN = 280;
 const RIGHT_MAX = 500;
 const RIGHT_DEFAULT = 360;
 
-const PREF_LEFT_WIDTH = 'draft.leftPanelWidth';
-const PREF_RIGHT_WIDTH = 'draft.rightPanelWidth';
+const LS_LEFT_WIDTH = 'draft-left-width';
+const LS_RIGHT_WIDTH = 'draft-right-width';
 const PREF_LAST_STATE = 'draft.lastState';
 const PREF_CASE_ID = 'draft.selectedCaseId';
 
@@ -87,12 +87,12 @@ export default function DraftPage() {
   // ---- Persist & restore ----
 
   useEffect(() => {
-    getPreference<number>(PREF_LEFT_WIDTH).then(v => {
-      if (v && v >= LEFT_MIN && v <= LEFT_MAX) setLeftWidth(v);
-    }).catch(() => {});
-    getPreference<number>(PREF_RIGHT_WIDTH).then(v => {
-      if (v && v >= RIGHT_MIN && v <= RIGHT_MAX) setRightWidth(v);
-    }).catch(() => {});
+    try {
+      const lw = Number(localStorage.getItem(LS_LEFT_WIDTH));
+      if (lw >= LEFT_MIN && lw <= LEFT_MAX) setLeftWidth(lw);
+      const rw = Number(localStorage.getItem(LS_RIGHT_WIDTH));
+      if (rw >= RIGHT_MIN && rw <= RIGHT_MAX) setRightWidth(rw);
+    } catch {}
   }, []);
 
   // Session restore (only when URL is bare /draft)
@@ -213,7 +213,7 @@ export default function DraftPage() {
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       setLeftWidth(prev => {
-        setPreference(PREF_LEFT_WIDTH, prev).catch(() => {});
+        try { localStorage.setItem(LS_LEFT_WIDTH, String(prev)); } catch {}
         return prev;
       });
     };
@@ -240,7 +240,7 @@ export default function DraftPage() {
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
       setRightWidth(prev => {
-        setPreference(PREF_RIGHT_WIDTH, prev).catch(() => {});
+        try { localStorage.setItem(LS_RIGHT_WIDTH, String(prev)); } catch {}
         return prev;
       });
     };
