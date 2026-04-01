@@ -458,7 +458,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             overflow: hidden;
           }
 
-          /* --- Formatting marks (¶ ↵) --- */
+          /* --- Formatting marks (¶) --- */
           .draft-editor-wrapper.show-marks .ProseMirror p::after,
           .draft-editor-wrapper.show-marks .ProseMirror h1::after,
           .draft-editor-wrapper.show-marks .ProseMirror h2::after,
@@ -468,8 +468,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
           .draft-editor-wrapper.show-marks .ProseMirror li > p::after {
             content: '¶';
             color: #93c5fd;
-            font-size: 0.75em;
-            margin-left: 2px;
+            font-size: 0.65em;
             font-family: sans-serif;
             pointer-events: none;
           }
@@ -485,24 +484,11 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             font-family: sans-serif;
             pointer-events: none;
           }
-          /* Empty paragraphs: cursor lands on the trailing <br>, ¶ shows after it */
-          .draft-editor-wrapper.show-marks .ProseMirror p:empty::after,
-          .draft-editor-wrapper.show-marks .ProseMirror p:has(> br:only-child)::after {
+          /* Empty paragraphs: hide the <br> so ¶ sits on same line as cursor */
+          .draft-editor-wrapper.show-marks .ProseMirror p > br.ProseMirror-trailingBreak {
             display: inline;
-            margin-left: 0.25em;
-          }
-          .draft-editor-wrapper.show-marks .ProseMirror p:has(> br:only-child) {
-            min-height: 1em;
-          }
-          /* Push ¶ slightly right so cursor sits to the left of it */
-          .draft-editor-wrapper.show-marks .ProseMirror p::after,
-          .draft-editor-wrapper.show-marks .ProseMirror h1::after,
-          .draft-editor-wrapper.show-marks .ProseMirror h2::after,
-          .draft-editor-wrapper.show-marks .ProseMirror h3::after,
-          .draft-editor-wrapper.show-marks .ProseMirror h4::after,
-          .draft-editor-wrapper.show-marks .ProseMirror h5::after {
-            letter-spacing: 0;
-            padding-left: 1px;
+            line-height: 0;
+            font-size: 0;
           }
           .draft-editor-wrapper.show-marks .ProseMirror {
             word-spacing: 0.15em;

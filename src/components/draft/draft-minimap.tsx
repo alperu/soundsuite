@@ -7,8 +7,15 @@ interface MinimapProps {
   scrollContainer: HTMLElement | null;
 }
 
-const SCALE = 0.08;
-const CONTENT_WIDTH = 816; // letter width in px
+/** Cap image sizes so they don't blow up the minimap layout */
+function sanitizeForMinimap(html: string): string {
+  return html.replace(
+    /<img\b/gi,
+    '<img style="max-width:100%!important;max-height:200px!important;height:auto!important;object-fit:contain!important;"'
+  );
+}
+
+const CONTENT_WIDTH = 816;
 
 const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) => {
   const minimapRef = useRef<HTMLDivElement>(null);
@@ -16,20 +23,39 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
   const isDraggingRef = useRef(false);
   const dragStartYRef = useRef(0);
   const dragStartScrollTopRef = useRef(0);
-  const [scaledHeight, setScaledHeight] = useState(0);
-  const [viewport, setViewport] = useState({ top: 0, height: 0 });
 
-  // Measure content and set wrapper height after render
+  const [viewport, setViewport] = useState({ top: 0, height: 0 });
+  const [dynamicZoom, setDynamicZoom] = useState(0.08);
+
+  // Calculate zoom so entire content fits in the minimap container height
   useEffect(() => {
-    if (!contentRef.current) return;
-    // Use RAF to let browser lay out the content first
-    const raf = requestAnimationFrame(() => {
-      if (contentRef.current) {
-        const fullHeight = contentRef.current.scrollHeight;
-        setScaledHeight(fullHeight * SCALE);
+    const calculate = () => {
+      if (!contentRef.current || !minimapRef.current) return;
+
+      // First render at a known zoom to measure natural content height
+      contentRef.current.style.zoom = '1';
+      const naturalHeight = contentRef.current.scrollHeight;
+      const containerHeight = minimapRef.current.clientHeight;
+      const containerWidth = minimapRef.current.clientWidth;
+
+      if (naturalHeight <= 0 || containerHeight <= 0) {
+        contentRef.current.style.zoom = String(dynamicZoom);
+        return;
       }
-    });
-    return () => cancelAnimationFrame(raf);
+
+      // Zoom to fit: content must fit both width and height of container
+      const zoomByHeight = containerHeight / naturalHeight;
+      const zoomByWidth = containerWidth / CONTENT_WIDTH;
+      const newZoom = Math.min(zoomByHeight, zoomByWidth, 0.15); // cap at 15% max
+
+      setDynamicZoom(newZoom);
+      contentRef.current.style.zoom = String(newZoom);
+    };
+
+    // Defer to let content render first
+    const raf = requestAnimationFrame(calculate);
+    const timer = setTimeout(calculate, 500);
+    return () => { cancelAnimationFrame(raf); clearTimeout(timer); };
   }, [editorHtml]);
 
   const updateViewport = useCallback(() => {
@@ -43,7 +69,7 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
     const top = (scrollTop / scrollHeight) * minimapHeight;
     const height = (clientHeight / scrollHeight) * minimapHeight;
 
-    setViewport({ top, height: Math.max(height, 8) });
+    setViewport({ top, height: Math.max(height, 4) });
   }, [scrollContainer]);
 
   useEffect(() => {
@@ -59,7 +85,7 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
 
   useEffect(() => {
     updateViewport();
-  }, [editorHtml, updateViewport, scaledHeight]);
+  }, [editorHtml, updateViewport, dynamicZoom]);
 
   const scrollToPosition = useCallback(
     (clickY: number) => {
@@ -113,53 +139,27 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
     [scrollContainer]
   );
 
-  const scaledWidth = CONTENT_WIDTH * SCALE;
-
   return (
     <div
       ref={minimapRef}
-      className="relative bg-gray-50 cursor-pointer overflow-hidden"
-      style={{ width: scaledWidth, height: '100%' }}
+      className="relative w-full h-full bg-gray-50 cursor-pointer overflow-hidden"
       onClick={handleClick}
     >
-      {/* Content wrapper — clips overflow and sets correct scaled dimensions */}
+      {/* Content scaled to fit entire document in visible minimap area */}
       <div
+        ref={contentRef}
+        className="pointer-events-none select-none origin-top-left prose prose-sm max-w-none"
         style={{
-          width: scaledWidth,
-          height: scaledHeight || '100%',
-          overflow: 'hidden',
-          position: 'relative',
+          zoom: dynamicZoom,
+          width: `${CONTENT_WIDTH}px`,
+          padding: '96px',
+          fontFamily: 'Times New Roman, serif',
+          fontSize: '12px',
+          lineHeight: '1.5',
+          background: 'white',
         }}
-      >
-        <div
-          ref={contentRef}
-          className="pointer-events-none select-none prose prose-sm max-w-none"
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            transform: `scale(${SCALE})`,
-            transformOrigin: 'top left',
-            width: `${CONTENT_WIDTH}px`,
-            padding: '96px',
-            fontFamily: 'Times New Roman, serif',
-            fontSize: '12px',
-            lineHeight: '1.5',
-            background: 'white',
-          }}
-          dangerouslySetInnerHTML={{ __html: editorHtml }}
-        />
-      </div>
-
-      {/* Force images to fit within content width */}
-      <style>{`
-        .draft-minimap-content img,
-        .draft-minimap-content iframe,
-        .draft-minimap-content video {
-          max-width: 100% !important;
-          height: auto !important;
-        }
-      `}</style>
+        dangerouslySetInnerHTML={{ __html: sanitizeForMinimap(editorHtml) }}
+      />
 
       {/* Viewport indicator */}
       <div
