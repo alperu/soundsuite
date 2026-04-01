@@ -43,31 +43,97 @@ interface DraftToolbarProps {
   onWordImport?: (html: string) => void;
 }
 
+// ---------------------------------------------------------------------------
+// Tooltip
+// ---------------------------------------------------------------------------
+
+const isMac = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.userAgent);
+
+/** Format shortcut for display: Ctrl → ⌘ on Mac */
+function fmtShortcut(shortcut: string): string {
+  if (isMac) {
+    return shortcut
+      .replace(/Ctrl\+/gi, '⌘')
+      .replace(/Shift\+/gi, '⇧')
+      .replace(/Alt\+/gi, '⌥');
+  }
+  return shortcut;
+}
+
+function Tooltip({
+  label,
+  shortcut,
+  children,
+}: {
+  label: string;
+  shortcut?: string;
+  children: React.ReactNode;
+}) {
+  const [show, setShow] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleEnter = () => {
+    timerRef.current = setTimeout(() => setShow(true), 200);
+  };
+  const handleLeave = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = null;
+    setShow(false);
+  };
+
+  return (
+    <div className="relative" onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
+      {children}
+      {show && (
+        <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1.5 z-50 pointer-events-none whitespace-nowrap">
+          <div className="bg-gray-800 text-white text-[11px] leading-tight rounded px-2 py-1 shadow-lg flex items-center gap-1.5">
+            <span>{label}</span>
+            {shortcut && (
+              <kbd className="bg-gray-700 text-gray-300 text-[10px] px-1 py-0.5 rounded font-mono">
+                {fmtShortcut(shortcut)}
+              </kbd>
+            )}
+          </div>
+          {/* Arrow */}
+          <div className="absolute left-1/2 -translate-x-1/2 -top-1 w-2 h-2 bg-gray-800 rotate-45" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ToolbarButton
+// ---------------------------------------------------------------------------
+
 function ToolbarButton({
   onClick,
   active,
   disabled,
   title,
+  shortcut,
   children,
 }: {
   onClick: () => void;
   active?: boolean;
   disabled?: boolean;
   title: string;
+  shortcut?: string;
   children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      className={`w-8 h-8 flex items-center justify-center rounded text-sm font-medium transition-colors
-        ${active ? 'bg-blue-500 text-white' : 'text-gray-700 hover:bg-gray-200'}
-        ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
-    >
-      {children}
-    </button>
+    <Tooltip label={title} shortcut={shortcut}>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        className={`w-8 h-8 flex items-center justify-center rounded text-sm font-medium transition-colors
+          ${active ? 'bg-blue-500 text-white' : 'text-gray-700 hover:bg-gray-200'}
+          ${disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -88,7 +154,6 @@ function FontFamilyDropdown({ editor, value, onChange }: { editor: Editor; value
           editor.chain().focus().unsetFontFamily().run();
         }
       }}
-      title="Font family"
       className="h-8 px-2 text-sm border border-gray-300 rounded bg-white text-gray-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-blue-400 max-w-[130px]"
     >
       {FONT_FAMILIES.map(f => (
@@ -149,7 +214,6 @@ function HeadingDropdown({ editor }: { editor: Editor }) {
           editor.chain().focus().toggleHeading({ level }).run();
         }
       }}
-      title="Text style"
       className="h-8 px-2 text-sm border border-gray-300 rounded bg-white text-gray-700 cursor-pointer focus:outline-none focus:ring-1 focus:ring-blue-400"
     >
       <option value="p">Paragraph</option>
@@ -651,29 +715,34 @@ export default function DraftToolbar({
   return (
     <div className="flex items-center gap-1 px-2 py-1 bg-gray-50 border border-b-0 rounded-t-lg flex-wrap">
       {/* Font family dropdown */}
-      <FontFamilyDropdown editor={editor} value={fontFamily} onChange={onFontFamilyChange} />
+      <Tooltip label="Font Family">
+        <FontFamilyDropdown editor={editor} value={fontFamily} onChange={onFontFamilyChange} />
+      </Tooltip>
 
       {/* Font size dropdown */}
-      <select
-        value={editor.getAttributes('textStyle').fontSize || ''}
-        onChange={(e) => {
-          const size = e.target.value;
-          if (size) {
-            (editor.chain().focus() as any).setFontSize(size).run();
-          } else {
-            (editor.chain().focus() as any).unsetFontSize().run();
-          }
-        }}
-        className="h-8 px-1 text-xs border border-gray-200 rounded bg-white text-gray-700 cursor-pointer"
-        title="Font Size"
-      >
-        {FONT_SIZES.map(s => (
-          <option key={s.value} value={s.value}>{s.label}</option>
-        ))}
-      </select>
+      <Tooltip label="Font Size">
+        <select
+          value={editor.getAttributes('textStyle').fontSize || ''}
+          onChange={(e) => {
+            const size = e.target.value;
+            if (size) {
+              (editor.chain().focus() as any).setFontSize(size).run();
+            } else {
+              (editor.chain().focus() as any).unsetFontSize().run();
+            }
+          }}
+          className="h-8 px-1 text-xs border border-gray-200 rounded bg-white text-gray-700 cursor-pointer"
+        >
+          {FONT_SIZES.map(s => (
+            <option key={s.value} value={s.value}>{s.label}</option>
+          ))}
+        </select>
+      </Tooltip>
 
       {/* Heading dropdown */}
-      <HeadingDropdown editor={editor} />
+      <Tooltip label="Heading Level">
+        <HeadingDropdown editor={editor} />
+      </Tooltip>
 
       <Separator />
 
@@ -681,7 +750,8 @@ export default function DraftToolbar({
       <ToolbarButton
         onClick={() => editor.chain().focus().toggleBold().run()}
         active={editor.isActive('bold')}
-        title="Bold (Ctrl+B)"
+        title="Bold"
+        shortcut="Ctrl+B"
       >
         <BoldIcon />
       </ToolbarButton>
@@ -689,7 +759,8 @@ export default function DraftToolbar({
       <ToolbarButton
         onClick={() => editor.chain().focus().toggleItalic().run()}
         active={editor.isActive('italic')}
-        title="Italic (Ctrl+I)"
+        title="Italic"
+        shortcut="Ctrl+I"
       >
         <ItalicIcon />
       </ToolbarButton>
@@ -698,6 +769,7 @@ export default function DraftToolbar({
         onClick={() => editor.chain().focus().toggleUnderline().run()}
         active={editor.isActive('underline')}
         title="Underline"
+        shortcut="Ctrl+U"
       >
         <UnderlineIcon />
       </ToolbarButton>
@@ -706,6 +778,7 @@ export default function DraftToolbar({
         onClick={() => editor.chain().focus().toggleStrike().run()}
         active={editor.isActive('strike')}
         title="Strikethrough"
+        shortcut="Ctrl+Shift+S"
       >
         <StrikethroughIcon />
       </ToolbarButton>
@@ -771,6 +844,7 @@ export default function DraftToolbar({
         onClick={() => editor.chain().focus().toggleHighlight().run()}
         active={editor.isActive('highlight')}
         title="Highlight"
+        shortcut="Ctrl+Shift+H"
       >
         <HighlightIcon />
       </ToolbarButton>
@@ -779,16 +853,17 @@ export default function DraftToolbar({
 
       {/* Hyperlink */}
       <div className="relative">
-        <button
-          ref={linkBtnRef}
-          type="button"
-          onClick={() => setLinkDialogOpen(!linkDialogOpen)}
-          title={editor.isActive('link') ? 'Edit Link (Ctrl+K)' : 'Insert Link (Ctrl+K)'}
-          className={`w-8 h-8 flex items-center justify-center rounded text-sm font-medium transition-colors cursor-pointer
-            ${editor.isActive('link') ? 'bg-blue-500 text-white' : 'text-gray-700 hover:bg-gray-200'}`}
-        >
-          <LinkIcon />
-        </button>
+        <Tooltip label={editor.isActive('link') ? 'Edit Link' : 'Insert Link'} shortcut="Ctrl+K">
+          <button
+            ref={linkBtnRef}
+            type="button"
+            onClick={() => setLinkDialogOpen(!linkDialogOpen)}
+            className={`w-8 h-8 flex items-center justify-center rounded text-sm font-medium transition-colors cursor-pointer
+              ${editor.isActive('link') ? 'bg-blue-500 text-white' : 'text-gray-700 hover:bg-gray-200'}`}
+          >
+            <LinkIcon />
+          </button>
+        </Tooltip>
         {linkDialogOpen && (
           <LinkDialog editor={editor} onClose={() => setLinkDialogOpen(false)} anchorRef={linkBtnRef} />
         )}
@@ -856,12 +931,12 @@ export default function DraftToolbar({
       <Separator />
 
       {/* Import from Word */}
-      <button
-        onClick={() => wordInputRef.current?.click()}
-        disabled={wordImporting}
-        className="h-8 px-2 flex items-center gap-1 text-xs font-medium text-gray-700 rounded hover:bg-gray-200 transition-colors disabled:opacity-50"
-        title="Import from Word (.docx)"
-      >
+      <Tooltip label="Import from Word (.docx)">
+        <button
+          onClick={() => wordInputRef.current?.click()}
+          disabled={wordImporting}
+          className="h-8 px-2 flex items-center gap-1 text-xs font-medium text-gray-700 rounded hover:bg-gray-200 transition-colors disabled:opacity-50"
+        >
         {wordImporting ? (
           <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -876,7 +951,8 @@ export default function DraftToolbar({
           </svg>
         )}
         Word
-      </button>
+        </button>
+      </Tooltip>
       <input
         ref={wordInputRef}
         type="file"
