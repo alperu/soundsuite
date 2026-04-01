@@ -58,6 +58,7 @@ import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table
 import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
 import { Extension } from '@tiptap/core';
+// No custom HardBreak — use StarterKit default. Markers are CSS-only.
 
 // Cmd+Enter / Ctrl+Enter → insert page break (horizontal rule)
 const PageBreakShortcut = Extension.create({
@@ -462,36 +463,33 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
           .draft-editor-wrapper.show-marks .ProseMirror h1::after,
           .draft-editor-wrapper.show-marks .ProseMirror h2::after,
           .draft-editor-wrapper.show-marks .ProseMirror h3::after,
+          .draft-editor-wrapper.show-marks .ProseMirror h4::after,
+          .draft-editor-wrapper.show-marks .ProseMirror h5::after,
           .draft-editor-wrapper.show-marks .ProseMirror li > p::after {
             content: '¶';
             color: #93c5fd;
             font-size: 0.75em;
             margin-left: 2px;
             font-family: sans-serif;
-            user-select: none;
             pointer-events: none;
           }
-          /* Hard break (Shift+Enter) marker — uses ::after on br (works in Chromium) */
-          .draft-editor-wrapper.show-marks .ProseMirror br:not(.ProseMirror-trailingBreak)::after {
+          /* Hard break (Shift+Enter) marker — show ↵ before line breaks in Chromium */
+          .draft-editor-wrapper.show-marks .ProseMirror br:not(.ProseMirror-trailingBreak) {
+            position: relative;
+            display: inline;
+          }
+          .draft-editor-wrapper.show-marks .ProseMirror br:not(.ProseMirror-trailingBreak)::before {
             content: '↵';
             color: #93c5fd;
             font-size: 0.75em;
             font-family: sans-serif;
-            user-select: none;
             pointer-events: none;
-            position: relative;
-            top: -0.5em;
           }
-          /* Empty paragraphs: show ¶ on same line as cursor (like Word) */
+          /* Empty paragraphs: ensure ¶ is visible and paragraph is selectable */
           .draft-editor-wrapper.show-marks .ProseMirror p:empty::after,
           .draft-editor-wrapper.show-marks .ProseMirror p:has(> br:only-child)::after {
             display: inline;
           }
-          /* Hide the <br> in empty paragraphs when marks are shown so ¶ stays on cursor line */
-          .draft-editor-wrapper.show-marks .ProseMirror p > br:only-child {
-            display: none;
-          }
-          /* Ensure empty paragraphs still have height for the cursor */
           .draft-editor-wrapper.show-marks .ProseMirror p:has(> br:only-child) {
             min-height: 1em;
           }

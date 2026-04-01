@@ -113,21 +113,33 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
       className="relative w-full h-full bg-gray-50 cursor-pointer overflow-hidden"
       onClick={handleClick}
     >
-      {/* Scaled content */}
-      <div
-        ref={contentRef}
-        className="pointer-events-none overflow-hidden select-none origin-top-left prose prose-sm max-w-none"
-        style={{
-          zoom: 0.06,
-          width: '816px',
-          padding: '96px',
-          fontFamily: 'Times New Roman, serif',
-          fontSize: '12px',
-          lineHeight: '1.5',
-          background: 'white',
-        }}
-        dangerouslySetInnerHTML={{ __html: editorHtml }}
-      />
+      {/* Scaled content — use transform:scale for reliable cross-browser minimap */}
+      <div className="pointer-events-none overflow-hidden select-none" style={{ width: '100%' }}>
+        <div
+          ref={contentRef}
+          className="draft-minimap-content prose prose-sm max-w-none origin-top-left"
+          style={{
+            transform: 'scale(0.08)',
+            transformOrigin: 'top left',
+            width: '816px',
+            padding: '96px',
+            fontFamily: 'Times New Roman, serif',
+            fontSize: '12px',
+            lineHeight: '1.5',
+            background: 'white',
+          }}
+          dangerouslySetInnerHTML={{ __html: editorHtml }}
+        />
+      </div>
+      {/* CSS to force images/iframes to scale within minimap */}
+      <style>{`
+        .draft-minimap-content img,
+        .draft-minimap-content iframe,
+        .draft-minimap-content video {
+          max-width: 100% !important;
+          height: auto !important;
+        }
+      `}</style>
 
       {/* Viewport indicator */}
       <div
