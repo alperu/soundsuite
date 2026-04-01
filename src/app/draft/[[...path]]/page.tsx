@@ -39,6 +39,7 @@ const PREF_CASE_ID = 'draft.selectedCaseId';
 interface LastState {
   caseId: string;
   draftId: string | null;
+  draftSlug: string | null;
   rightTab: 'chat' | 'workflows';
 }
 
@@ -157,6 +158,14 @@ export default function DraftPage() {
         setSelectedCaseId(state.caseId);
         if (state.draftId) {
           loadDraft(state.draftId);
+          // Restore URL so refresh works again
+          if (state.draftSlug) {
+            router.replace(`/draft/${state.caseId}/${state.draftSlug}`, { scroll: false });
+          } else {
+            router.replace(`/draft/${state.caseId}`, { scroll: false });
+          }
+        } else {
+          router.replace(`/draft/${state.caseId}`, { scroll: false });
         }
       }
     }).catch(() => {});
@@ -169,6 +178,7 @@ export default function DraftPage() {
       const state: LastState = {
         caseId: selectedCaseId,
         draftId: activeDraft?.id || null,
+        draftSlug: activeDraft?.slug || null,
         rightTab: 'chat',
       };
       setPreference(PREF_LAST_STATE, state).catch(() => {});

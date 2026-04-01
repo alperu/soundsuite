@@ -1136,8 +1136,7 @@ export default function DraftToolbar({
             try {
               const { exportToDocx } = await import('@/lib/draft/docx-exporter');
               const json = editor.getJSON();
-              const buffer = await exportToDocx(json);
-              const blob = new Blob([buffer as unknown as BlobPart], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+              const blob = await exportToDocx(json);
               const a = document.createElement('a');
               a.href = URL.createObjectURL(blob);
               a.download = `document-${new Date().toISOString().slice(0, 10)}.docx`;
