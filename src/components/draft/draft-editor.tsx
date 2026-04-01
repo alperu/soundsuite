@@ -91,6 +91,19 @@ const HardBreakMarkerPlugin = Extension.create({
   },
 });
 
+// Cmd+Enter / Ctrl+Enter → insert page break (horizontal rule)
+const PageBreakShortcut = Extension.create({
+  name: 'pageBreakShortcut',
+  addKeyboardShortcuts() {
+    return {
+      'Mod-Enter': ({ editor }) => {
+        editor.chain().focus().setHorizontalRule().run();
+        return true;
+      },
+    };
+  },
+});
+
 export interface SelectionInfo {
   selectedText: string;
   from: number;
@@ -145,6 +158,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
           heading: { levels: [1, 2, 3, 4, 5] },
         }),
         HardBreakMarkerPlugin,
+        PageBreakShortcut,
         Underline,
         TextStyle,
         FontFamily,
