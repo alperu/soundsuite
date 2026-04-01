@@ -389,13 +389,26 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             box-shadow: 0 2px 8px rgba(0,0,0,0.1), 0 0 1px rgba(0,0,0,0.08);
             border: 1px solid #d1d5db;
             margin: 0 auto;
-            /* Estimated page boundary — blue line repeating at content page height */
-            background-color: white;
+            background: white;
+            position: relative;
+          }
+          /* Estimated page boundary — blue line below content, full page width */
+          .draft-editor-wrapper.page-view .ProseMirror::after {
+            content: '';
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            pointer-events: none;
+            z-index: 0;
             background-image:
-              linear-gradient(to bottom, transparent calc(100% - 2px), #60a5fa calc(100% - 2px), #60a5fa 100%);
-            background-size: 100% ${dims.h - ps.marginTop - ps.marginBottom}px;
+              linear-gradient(to bottom, transparent calc(100% - 2px), #93c5fd calc(100% - 2px), #93c5fd 100%);
+            background-size: 100% ${dims.h}px;
           }
           .draft-editor-wrapper.page-view .ProseMirror > * {
+            position: relative;
+            z-index: 1;
             max-width: 100%;
             overflow-wrap: break-word;
           }
