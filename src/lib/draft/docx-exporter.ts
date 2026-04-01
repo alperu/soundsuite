@@ -184,6 +184,18 @@ function convertInlineContent(nodes: TipTapNode[]): (TextRun | ExternalHyperlink
 // Block node conversion
 // ---------------------------------------------------------------------------
 
+// Heading sizes in half-points (Word units)
+const HEADING_SIZES: Record<number, number> = {
+  1: 48,  // 24pt
+  2: 40,  // 20pt
+  3: 32,  // 16pt
+  4: 28,  // 14pt
+  5: 24,  // 12pt
+};
+
+// Paragraph spacing in twips (240 twips = ~12pt after)
+const PARA_SPACING = { after: 240 };
+
 function convertBlockNode(node: TipTapNode): (Paragraph | Table)[] {
   const results: (Paragraph | Table)[] = [];
 
@@ -191,19 +203,53 @@ function convertBlockNode(node: TipTapNode): (Paragraph | Table)[] {
     case 'paragraph': {
       const children = node.content ? convertInlineContent(node.content) : [];
       const alignment = ALIGNMENT_MAP[node.attrs?.textAlign] || undefined;
-      results.push(new Paragraph({ children, alignment }));
+      results.push(new Paragraph({
+        children,
+        alignment,
+        spacing: PARA_SPACING,
+      }));
       break;
     }
 
     case 'heading': {
       const level = node.attrs?.level || 1;
-      const children = node.content ? convertInlineContent(node.content) : [];
       const alignment = ALIGNMENT_MAP[node.attrs?.textAlign] || undefined;
+      const headingSize = HEADING_SIZES[level] || 24;
+
+      // Build heading TextRuns with forced bold + black + size
+      const children: (TextRun | ExternalHyperlink)[] = [];
+      for (const child of (node.content || [])) {
+        if (child.type === 'text') {
+          const marks = child.marks || [];
+          const options: Record<string, any> = {
+            text: child.text || '',
+            bold: true,
+            size: headingSize,
+            color: '000000',
+          };
+          // Preserve italic/underline from marks
+          for (const mark of marks) {
+            if (mark.type === 'italic') options.italics = true;
+            if (mark.type === 'underline') options.underline = {};
+            if (mark.type === 'textStyle' && mark.attrs?.fontFamily) {
+              options.font = mark.attrs.fontFamily;
+            }
+          }
+          children.push(new TextRun(options));
+        } else if (child.type === 'hardBreak') {
+          children.push(new TextRun({ break: 1 }));
+        }
+      }
+
+      if (children.length === 0) {
+        children.push(new TextRun({ text: '', bold: true, size: headingSize, color: '000000' }));
+      }
+
       results.push(
         new Paragraph({
           children,
-          heading: HEADING_MAP[level] || HeadingLevel.HEADING_1,
           alignment,
+          spacing: { before: 240, after: 120 },
         })
       );
       break;
@@ -219,6 +265,7 @@ function convertBlockNode(node: TipTapNode): (Paragraph | Table)[] {
                 new Paragraph({
                   children,
                   bullet: { level: 0 },
+                  spacing: { after: 120 },
                 })
               );
             }
@@ -238,6 +285,7 @@ function convertBlockNode(node: TipTapNode): (Paragraph | Table)[] {
                 new Paragraph({
                   children,
                   numbering: { reference: 'default-numbering', level: 0 },
+                  spacing: { after: 120 },
                 })
               );
             }

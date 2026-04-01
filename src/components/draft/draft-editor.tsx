@@ -1,15 +1,34 @@
 'use client';
 
-import React, { forwardRef, useImperativeHandle, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { forwardRef, useImperativeHandle, useEffect, useCallback, useRef, useMemo, useState, lazy, Suspense } from 'react';
 import { useEditor, EditorContent, type Editor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
+
+const ImageToolbar = lazy(() => import('./image-toolbar'));
 import Underline from '@tiptap/extension-underline';
 import TextAlign from '@tiptap/extension-text-align';
 import Highlight from '@tiptap/extension-highlight';
 import { TextStyle } from '@tiptap/extension-text-style';
 import FontFamily from '@tiptap/extension-font-family';
 import Link from '@tiptap/extension-link';
-import Image from '@tiptap/extension-image';
+import BaseImage from '@tiptap/extension-image';
+
+// Extend Image to support width attribute for resizing
+const Image = BaseImage.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      width: {
+        default: null,
+        parseHTML: (el) => el.getAttribute('width') || el.style.width?.replace('px', '') || null,
+        renderHTML: (attrs) => {
+          if (!attrs.width) return {};
+          return { width: attrs.width, style: `width: ${attrs.width}px` };
+        },
+      },
+    };
+  },
+});
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
@@ -129,6 +148,25 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         },
       },
     });
+
+    // Image click → floating toolbar
+    const [selectedImage, setSelectedImage] = useState<HTMLImageElement | null>(null);
+
+    useEffect(() => {
+      if (!editor) return;
+      const el = editor.view.dom;
+      const handleImageClick = (e: MouseEvent) => {
+        const target = e.target as HTMLElement;
+        if (target.tagName === 'IMG' && target.closest('.ProseMirror')) {
+          e.stopPropagation();
+          setSelectedImage(target as HTMLImageElement);
+        } else if (!target.closest('[data-image-toolbar]')) {
+          setSelectedImage(null);
+        }
+      };
+      el.addEventListener('click', handleImageClick);
+      return () => el.removeEventListener('click', handleImageClick);
+    }, [editor]);
 
     // Sync content only on external changes (draft switch, version preview).
     // Track whether the editor itself triggered the update to avoid fighting user input.
@@ -332,6 +370,20 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
     return (
       <div ref={wrapperRef} className={wrapperClasses} data-page-size={ps.pageSize}>
         <style>{`
+          /* --- Image styling --- */
+          .draft-editor-wrapper .ProseMirror img {
+            cursor: pointer;
+            transition: outline 0.1s;
+          }
+          .draft-editor-wrapper .ProseMirror img:hover {
+            outline: 2px solid #93c5fd;
+            outline-offset: 2px;
+          }
+          .draft-editor-wrapper .ProseMirror img.ProseMirror-selectednode {
+            outline: 2px solid #3b82f6;
+            outline-offset: 2px;
+          }
+
           /* --- Style defaults from admin config --- */
           .draft-editor-wrapper .ProseMirror {
             font-family: ${styleDefaults?.defaultFont || 'Times New Roman'}, serif;
@@ -446,6 +498,17 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         >
           <EditorContent editor={editor} />
         </div>
+
+        {/* Image floating toolbar */}
+        {selectedImage && editor && (
+          <Suspense fallback={null}>
+            <ImageToolbar
+              editor={editor}
+              imageEl={selectedImage}
+              onClose={() => setSelectedImage(null)}
+            />
+          </Suspense>
+        )}
       </div>
     );
   }
