@@ -191,6 +191,15 @@ const TAB_DOCS: Record<TabKey, { title: string; description: string; details: st
       'Export filtered results as CSV for external analysis',
     ],
   },
+  drafts: {
+    title: 'Draft Settings',
+    description: 'Configure page size, margins, and defaults for the document drafting editor.',
+    details: [
+      'Page size: Letter, A4, or Legal',
+      'Custom margins (top, bottom, left, right) in inches',
+      'Margins apply to Page View mode in the draft editor',
+    ],
+  },
 };
 
 export default function AdminDashboard({ initialConfig, initialModelDownloads, initialTab = 'general' }: Props) {
@@ -2190,6 +2199,94 @@ function Stat({ label, value }: { label: string; value: string | number }) {
     <div>
       <div className="text-2xl font-bold text-gray-900">{value}</div>
       <div className="text-xs text-gray-500">{label}</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Draft Admin Panel
+// ---------------------------------------------------------------------------
+
+function DraftAdminPanel({ initialConfig }: { initialConfig: any }) {
+  const [pageSize, setPageSize] = useState(initialConfig?.draftPageSize || 'letter');
+  const [marginTop, setMarginTop] = useState(String(((initialConfig?.draftMarginTop || 96) / 96).toFixed(2)));
+  const [marginBottom, setMarginBottom] = useState(String(((initialConfig?.draftMarginBottom || 96) / 96).toFixed(2)));
+  const [marginLeft, setMarginLeft] = useState(String(((initialConfig?.draftMarginLeft || 96) / 96).toFixed(2)));
+  const [marginRight, setMarginRight] = useState(String(((initialConfig?.draftMarginRight || 96) / 96).toFixed(2)));
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaved(false);
+    try {
+      const configRes = await fetch('/api/config');
+      const currentConfig = await configRes.json();
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...currentConfig,
+          draftPageSize: pageSize,
+          draftMarginTop: Math.round(parseFloat(marginTop) * 96),
+          draftMarginBottom: Math.round(parseFloat(marginBottom) * 96),
+          draftMarginLeft: Math.round(parseFloat(marginLeft) * 96),
+          draftMarginRight: Math.round(parseFloat(marginRight) * 96),
+        }),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {}
+    setSaving(false);
+  };
+
+  const inputClass = 'w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md bg-white';
+
+  return (
+    <div className="max-w-lg space-y-6">
+      <div>
+        <h3 className="text-sm font-semibold text-gray-800 mb-3">Page Settings</h3>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">Page Size</label>
+            <select value={pageSize} onChange={e => setPageSize(e.target.value)} className={inputClass}>
+              <option value="letter">US Letter (8.5 x 11 in)</option>
+              <option value="a4">A4 (210 x 297 mm)</option>
+              <option value="legal">US Legal (8.5 x 14 in)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-gray-800 mb-3">Margins (inches)</h3>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">Top</label>
+            <input type="number" step="0.1" min="0" max="3" value={marginTop} onChange={e => setMarginTop(e.target.value)} className={inputClass} />
+          </div>
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">Bottom</label>
+            <input type="number" step="0.1" min="0" max="3" value={marginBottom} onChange={e => setMarginBottom(e.target.value)} className={inputClass} />
+          </div>
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">Left</label>
+            <input type="number" step="0.1" min="0" max="3" value={marginLeft} onChange={e => setMarginLeft(e.target.value)} className={inputClass} />
+          </div>
+          <div>
+            <label className="text-xs text-gray-600 font-medium block mb-1">Right</label>
+            <input type="number" step="0.1" min="0" max="3" value={marginRight} onChange={e => setMarginRight(e.target.value)} className={inputClass} />
+          </div>
+        </div>
+      </div>
+
+      <button
+        onClick={handleSave}
+        disabled={saving}
+        className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
+      >
+        {saving ? 'Saving...' : saved ? 'Saved!' : 'Save Draft Settings'}
+      </button>
     </div>
   );
 }

@@ -409,6 +409,48 @@ export default function ImageInsertModal({
                   </div>
                 </div>
               </div>
+
+              {/* Paste from Clipboard */}
+              <button
+                onClick={async () => {
+                  try {
+                    const items = await navigator.clipboard.read();
+                    for (const item of items) {
+                      const imageType = item.types.find(t => t.startsWith('image/'));
+                      if (imageType) {
+                        const blob = await item.getType(imageType);
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                          setImageDataUrl(reader.result as string);
+                          setImageSource('upload');
+                          setStep('describe');
+                        };
+                        reader.readAsDataURL(blob);
+                        return;
+                      }
+                    }
+                    setAiError('No image found in clipboard. Copy an image first, then try again.');
+                  } catch {
+                    setAiError('Could not access clipboard. Please allow clipboard access or use Upload instead.');
+                  }
+                }}
+                className="w-full flex items-center gap-4 p-4 border border-gray-200 rounded-lg hover:border-amber-400 hover:bg-amber-50/50 transition-colors text-left"
+              >
+                <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center shrink-0">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" />
+                    <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+                  </svg>
+                </div>
+                <div>
+                  <div className="text-sm font-medium text-gray-800">Paste from Clipboard</div>
+                  <div className="text-xs text-gray-500">Insert an image you've copied to clipboard</div>
+                </div>
+              </button>
+
+              {aiError && step === 'source' && (
+                <div className="text-xs text-red-500 bg-red-50 px-3 py-1.5 rounded">{aiError}</div>
+              )}
             </div>
           )}
 
