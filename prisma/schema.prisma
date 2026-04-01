@@ -23,6 +23,7 @@ model Case {
   updatedAt    DateTime    @updatedAt
   documents    Document[]
   filings      Filing[]
+  drafts       Draft[]
 
   @@index([path])
   @@index([caseNumber])
@@ -202,6 +203,37 @@ model Workflow {
 
   @@unique([caseId, slug])
   @@index([caseId])
+}
+
+model Draft {
+  id            String          @id @default(uuid())
+  caseId        String
+  case          Case            @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  title         String
+  slug          String
+  documentType  String
+  content       String          @default("")
+  status        String          @default("draft")
+  version       Int             @default(1)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  versions      DraftVersion[]
+
+  @@unique([caseId, slug])
+  @@index([caseId])
+  @@index([documentType])
+}
+
+model DraftVersion {
+  id            String    @id @default(uuid())
+  draftId       String
+  draft         Draft     @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  version       Int
+  content       String
+  changeSummary String?
+  createdAt     DateTime  @default(now())
+
+  @@index([draftId])
 }
 
 model SidecarCommand {
