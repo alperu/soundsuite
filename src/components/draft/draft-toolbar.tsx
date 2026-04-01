@@ -97,7 +97,7 @@ function Tooltip({
     <div className="relative" onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
       {children}
       {show && (
-        <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1.5 z-50 pointer-events-none whitespace-nowrap">
+        <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-[100] pointer-events-none whitespace-nowrap">
           <div className="bg-gray-800 text-white text-[11px] leading-tight rounded px-2 py-1 shadow-lg flex items-center gap-1.5">
             <span>{label}</span>
             {shortcut && (
@@ -106,8 +106,8 @@ function Tooltip({
               </kbd>
             )}
           </div>
-          {/* Arrow */}
-          <div className="absolute left-1/2 -translate-x-1/2 -top-1 w-2 h-2 bg-gray-800 rotate-45" />
+          {/* Arrow pointing down */}
+          <div className="absolute left-1/2 -translate-x-1/2 -bottom-1 w-2 h-2 bg-gray-800 rotate-45" />
         </div>
       )}
     </div>
