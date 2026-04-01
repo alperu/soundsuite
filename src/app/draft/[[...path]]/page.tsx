@@ -292,7 +292,12 @@ export default function DraftPage() {
 
   // ---- Parse initial content ----
 
-  const editorContent = previewContent ?? activeDraft?.content ?? '';
+  const rawContent = previewContent ?? activeDraft?.content ?? '';
+  // Parse JSON string back to object for TipTap (content is stored as JSON.stringify'd TipTap JSON)
+  let editorContent: string | object = rawContent;
+  if (rawContent && typeof rawContent === 'string' && rawContent.startsWith('{')) {
+    try { editorContent = JSON.parse(rawContent); } catch {}
+  }
 
   return (
     <div className="flex h-full overflow-hidden bg-white">

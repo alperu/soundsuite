@@ -1,6 +1,6 @@
 'use client';
 
-import React, { forwardRef, useImperativeHandle, useEffect, useCallback } from 'react';
+import React, { forwardRef, useImperativeHandle, useEffect, useCallback, useRef } from 'react';
 import { useEditor, EditorContent, type Editor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
@@ -28,7 +28,7 @@ export interface DraftEditorHandle {
 }
 
 interface DraftEditorProps {
-  content: string;
+  content: string | object;
   onUpdate: (json: string) => void;
   onSelectionChange?: (sel: { selectedText: string; hasSelection: boolean }) => void;
   onContextMenu?: (e: MouseEvent) => void;
@@ -79,6 +79,24 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         },
       },
     });
+
+    // Sync content when prop changes (e.g. switching drafts, version preview)
+    const contentRef = useRef(content);
+    useEffect(() => {
+      if (!editor || editor.isDestroyed) return;
+      // Only update if content actually changed (avoid loops from our own onUpdate)
+      const newContent = content;
+      if (newContent === contentRef.current) return;
+      contentRef.current = newContent;
+
+      // Parse if it's a JSON string that got double-encoded
+      let parsed = newContent;
+      if (typeof parsed === 'string' && parsed.startsWith('{')) {
+        try { parsed = JSON.parse(parsed); } catch {}
+      }
+
+      editor.commands.setContent(parsed, false);
+    }, [editor, content]);
 
     // Context menu listener
     useEffect(() => {
