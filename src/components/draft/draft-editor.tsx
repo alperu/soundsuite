@@ -88,7 +88,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         }),
         Image.configure({
           inline: false,
-          allowBase64: false,
+          allowBase64: true,
           HTMLAttributes: {
             class: 'max-w-full rounded border border-gray-200 my-2',
           },
@@ -379,7 +379,11 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
 
           /* --- Page view --- */
           .draft-editor-wrapper.page-view {
-            background: #e5e7eb;
+            background-color: #e5e7eb;
+            background-image:
+              linear-gradient(to bottom, transparent calc(100% - 1px), #bfdbfe calc(100% - 1px), #bfdbfe 100%);
+            background-size: 100% ${dims.h}px;
+            background-position: 0 32px;
             padding: 32px 0;
           }
           .draft-editor-wrapper.page-view .ProseMirror {
@@ -390,25 +394,8 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             border: 1px solid #d1d5db;
             margin: 0 auto;
             background: white;
-            position: relative;
-          }
-          /* Estimated page boundary — blue line below content, full page width */
-          .draft-editor-wrapper.page-view .ProseMirror::after {
-            content: '';
-            position: absolute;
-            left: 0;
-            right: 0;
-            top: 0;
-            bottom: 0;
-            pointer-events: none;
-            z-index: 0;
-            background-image:
-              linear-gradient(to bottom, transparent calc(100% - 2px), #93c5fd calc(100% - 2px), #93c5fd 100%);
-            background-size: 100% ${dims.h}px;
           }
           .draft-editor-wrapper.page-view .ProseMirror > * {
-            position: relative;
-            z-index: 1;
             max-width: 100%;
             overflow-wrap: break-word;
           }

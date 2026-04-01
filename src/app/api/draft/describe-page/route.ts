@@ -1,16 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
+import * as lancedb from '@lancedb/lancedb';
 import { streamAI, type AIMessage } from '@/lib/ai/ai-provider';
 import { AI_PROVIDER_KEYS, type AIProviderKey } from '@/lib/ai/models';
+
+const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
 
 /**
  * POST /api/draft/describe-page
  * AI-powered page/image description for exhibit generation.
  * Streams NDJSON with { type: 'token'|'result'|'error' }.
  *
- * Accepts either:
- *   { documentId, pageNum, provider, model, caseId } — describes a PDF page
- *   { imageBase64, provider, model }                 — describes an uploaded image
+ * Fetches actual page text from LanceDB chunks and PageCache,
+ * then sends it to the AI for description.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -41,10 +43,52 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Document not found' }, { status: 404 });
       }
 
+      // 1. Try PageCache first (has full extracted text per page)
+      let pageText = '';
+      try {
+        const cacheEntry = await (prisma as any).pageCache.findFirst({
+          where: { documentId, pageNumber: pageNum },
+          select: { text: true, source: true },
+        });
+        if (cacheEntry?.text?.trim()) {
+          pageText = cacheEntry.text;
+        }
+      } catch {
+        // PageCache may not exist
+      }
+
+      // 2. If no PageCache, get text chunks from LanceDB
+      if (!pageText) {
+        try {
+          const db = await lancedb.connect(LANCEDB_PATH);
+          const tableNames = await db.tableNames();
+          if (tableNames.includes('chunks')) {
+            const table = await db.openTable('chunks');
+            const escapedDocId = documentId.replace(/'/g, "''");
+            const rows = await table.query()
+              .select(['text', 'page_number'])
+              .where(`document_id = '${escapedDocId}' AND page_number = ${pageNum}`)
+              .toArray();
+
+            if (rows.length > 0) {
+              pageText = rows.map((r: any) => r.text as string).join('\n\n');
+            }
+          }
+        } catch {
+          // LanceDB not available
+        }
+      }
+
+      // Build context with actual page content
       pageContext = `Document: "${doc.fileName}", Page ${pageNum}`;
       if (doc.documentType) pageContext += `\nDocument type: ${doc.documentType}`;
-      if (doc.documentSummary) pageContext += `\nDocument summary: ${doc.documentSummary}`;
-      pageContext += `\n\nPlease describe what would typically appear on page ${pageNum} of this document based on the summary and document type. Focus on what makes this page relevant as a potential exhibit.`;
+
+      if (pageText) {
+        pageContext += `\n\n--- PAGE ${pageNum} CONTENT ---\n${pageText.slice(0, 8000)}\n--- END PAGE CONTENT ---`;
+      } else {
+        pageContext += `\n\n[No extracted text available for this page. It may be a scanned image or blank page.]`;
+        if (doc.documentSummary) pageContext += `\nDocument summary: ${doc.documentSummary}`;
+      }
     } else if (imageBase64) {
       pageContext = '[An image was provided for analysis. Describe what you can infer from the context.]';
     } else {

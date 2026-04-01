@@ -723,6 +723,7 @@ export default function DraftToolbar({
   const wordInputRef = useRef<HTMLInputElement>(null);
   const linkBtnRef = useRef<HTMLButtonElement | null>(null);
   const [wordImporting, setWordImporting] = useState(false);
+  const [wordExporting, setWordExporting] = useState(false);
   const [paintFormat, setPaintFormat] = useState<Record<string, any> | null>(null);
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -1125,6 +1126,46 @@ export default function DraftToolbar({
         }}
         className="hidden"
       />
+
+      {/* Export to Word */}
+      <Tooltip label="Export as Word (.docx)">
+        <button
+          onClick={async () => {
+            if (!editor) return;
+            setWordExporting(true);
+            try {
+              const { exportToDocx } = await import('@/lib/draft/docx-exporter');
+              const json = editor.getJSON();
+              const buffer = await exportToDocx(json);
+              const blob = new Blob([buffer as unknown as BlobPart], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+              const a = document.createElement('a');
+              a.href = URL.createObjectURL(blob);
+              a.download = `document-${new Date().toISOString().slice(0, 10)}.docx`;
+              a.click();
+              URL.revokeObjectURL(a.href);
+            } catch (err) {
+              alert('Export failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
+            }
+            setWordExporting(false);
+          }}
+          disabled={wordExporting}
+          className="h-8 px-2 flex items-center gap-1 text-xs font-medium text-gray-700 rounded hover:bg-gray-200 transition-colors disabled:opacity-50"
+        >
+          {wordExporting ? (
+            <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+          ) : (
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <path d="M12 18v-6m-3 3l3 3 3-3" />
+            </svg>
+          )}
+          DOCX
+        </button>
+      </Tooltip>
 
       {/* Spacer */}
       <div className="flex-1" />

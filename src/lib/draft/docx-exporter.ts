@@ -1,0 +1,389 @@
+/**
+ * TipTap JSON → DOCX converter using the 'docx' package.
+ * Converts TipTap editor JSON output to a Word document.
+ */
+
+import {
+  Document,
+  Paragraph,
+  TextRun,
+  HeadingLevel,
+  AlignmentType,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
+  Packer,
+  ImageRun,
+  ExternalHyperlink,
+  LevelFormat,
+  convertInchesToTwip,
+} from 'docx';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface TipTapNode {
+  type: string;
+  attrs?: Record<string, any>;
+  content?: TipTapNode[];
+  marks?: Array<{ type: string; attrs?: Record<string, any> }>;
+  text?: string;
+}
+
+interface ExportOptions {
+  title?: string;
+  pageSize?: 'letter' | 'a4' | 'legal';
+  marginTop?: number;   // pixels (96 = 1 inch)
+  marginBottom?: number;
+  marginLeft?: number;
+  marginRight?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const HEADING_MAP: Record<number, (typeof HeadingLevel)[keyof typeof HeadingLevel]> = {
+  1: HeadingLevel.HEADING_1,
+  2: HeadingLevel.HEADING_2,
+  3: HeadingLevel.HEADING_3,
+  4: HeadingLevel.HEADING_4,
+  5: HeadingLevel.HEADING_5,
+};
+
+const ALIGNMENT_MAP: Record<string, (typeof AlignmentType)[keyof typeof AlignmentType]> = {
+  left: AlignmentType.LEFT,
+  center: AlignmentType.CENTER,
+  right: AlignmentType.RIGHT,
+  justify: AlignmentType.JUSTIFIED,
+};
+
+function pxToTwip(px: number): number {
+  // 1 inch = 96px = 1440 twips
+  return Math.round((px / 96) * 1440);
+}
+
+function pxToHalfPt(px: number): number {
+  // 1pt = 1.333px, half-points = pt * 2
+  return Math.round((px / 1.333) * 2);
+}
+
+function parseFontSize(size: string | undefined): number | undefined {
+  if (!size) return undefined;
+  const num = parseFloat(size);
+  if (isNaN(num)) return undefined;
+  // size is in px, convert to half-points
+  return pxToHalfPt(num);
+}
+
+// Convert base64 data URL to buffer
+function base64ToBuffer(dataUrl: string): { buffer: Buffer; width: number; height: number } | null {
+  try {
+    const match = dataUrl.match(/^data:image\/(png|jpe?g|gif|webp);base64,(.+)$/);
+    if (!match) return null;
+    const buffer = Buffer.from(match[2], 'base64');
+    // Default dimensions — can't easily extract from base64 without sharp
+    return { buffer, width: 400, height: 300 };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Text run conversion
+// ---------------------------------------------------------------------------
+
+function convertTextNode(node: TipTapNode): TextRun {
+  const text = node.text || '';
+  const marks = node.marks || [];
+
+  const options: Record<string, any> = { text };
+
+  for (const mark of marks) {
+    switch (mark.type) {
+      case 'bold':
+        options.bold = true;
+        break;
+      case 'italic':
+        options.italics = true;
+        break;
+      case 'underline':
+        options.underline = {};
+        break;
+      case 'strike':
+        options.strike = true;
+        break;
+      case 'highlight':
+        options.highlight = 'yellow';
+        break;
+      case 'textStyle':
+        if (mark.attrs?.fontFamily) {
+          options.font = mark.attrs.fontFamily;
+        }
+        if (mark.attrs?.fontSize) {
+          const size = parseFontSize(mark.attrs.fontSize);
+          if (size) options.size = size;
+        }
+        break;
+      case 'link':
+        // Handled at paragraph level
+        break;
+    }
+  }
+
+  return new TextRun(options);
+}
+
+// ---------------------------------------------------------------------------
+// Inline content conversion (paragraph children → TextRun[])
+// ---------------------------------------------------------------------------
+
+function convertInlineContent(nodes: TipTapNode[]): (TextRun | ExternalHyperlink)[] {
+  const runs: (TextRun | ExternalHyperlink)[] = [];
+
+  for (const node of nodes) {
+    if (node.type === 'text') {
+      const linkMark = node.marks?.find(m => m.type === 'link');
+      if (linkMark?.attrs?.href) {
+        runs.push(
+          new ExternalHyperlink({
+            children: [
+              new TextRun({
+                text: node.text || '',
+                style: 'Hyperlink',
+              }),
+            ],
+            link: linkMark.attrs.href,
+          })
+        );
+      } else {
+        runs.push(convertTextNode(node));
+      }
+    } else if (node.type === 'hardBreak') {
+      runs.push(new TextRun({ break: 1 }));
+    } else if (node.type === 'image') {
+      const imgData = base64ToBuffer(node.attrs?.src || '');
+      if (imgData) {
+        runs.push(
+          new ImageRun({
+            data: imgData.buffer,
+            transformation: { width: imgData.width, height: imgData.height },
+            type: 'png',
+          })
+        );
+      }
+    }
+  }
+
+  return runs;
+}
+
+// ---------------------------------------------------------------------------
+// Block node conversion
+// ---------------------------------------------------------------------------
+
+function convertBlockNode(node: TipTapNode): (Paragraph | Table)[] {
+  const results: (Paragraph | Table)[] = [];
+
+  switch (node.type) {
+    case 'paragraph': {
+      const children = node.content ? convertInlineContent(node.content) : [];
+      const alignment = ALIGNMENT_MAP[node.attrs?.textAlign] || undefined;
+      results.push(new Paragraph({ children, alignment }));
+      break;
+    }
+
+    case 'heading': {
+      const level = node.attrs?.level || 1;
+      const children = node.content ? convertInlineContent(node.content) : [];
+      const alignment = ALIGNMENT_MAP[node.attrs?.textAlign] || undefined;
+      results.push(
+        new Paragraph({
+          children,
+          heading: HEADING_MAP[level] || HeadingLevel.HEADING_1,
+          alignment,
+        })
+      );
+      break;
+    }
+
+    case 'bulletList': {
+      if (node.content) {
+        for (const item of node.content) {
+          if (item.type === 'listItem' && item.content) {
+            for (const child of item.content) {
+              const children = child.content ? convertInlineContent(child.content) : [];
+              results.push(
+                new Paragraph({
+                  children,
+                  bullet: { level: 0 },
+                })
+              );
+            }
+          }
+        }
+      }
+      break;
+    }
+
+    case 'orderedList': {
+      if (node.content) {
+        for (const item of node.content) {
+          if (item.type === 'listItem' && item.content) {
+            for (const child of item.content) {
+              const children = child.content ? convertInlineContent(child.content) : [];
+              results.push(
+                new Paragraph({
+                  children,
+                  numbering: { reference: 'default-numbering', level: 0 },
+                })
+              );
+            }
+          }
+        }
+      }
+      break;
+    }
+
+    case 'table': {
+      if (node.content) {
+        const rows = node.content
+          .filter(r => r.type === 'tableRow')
+          .map(row => {
+            const cells = (row.content || [])
+              .filter(c => c.type === 'tableCell' || c.type === 'tableHeader')
+              .map(cell => {
+                const paragraphs = (cell.content || []).flatMap(convertBlockNode);
+                return new TableCell({
+                  children: paragraphs.length > 0 ? paragraphs : [new Paragraph({})],
+                });
+              });
+            return new TableRow({ children: cells });
+          });
+
+        if (rows.length > 0) {
+          results.push(
+            new Table({
+              rows,
+              width: { size: 100, type: WidthType.PERCENTAGE },
+            })
+          );
+        }
+      }
+      break;
+    }
+
+    case 'horizontalRule': {
+      // Page break
+      results.push(
+        new Paragraph({
+          children: [],
+          pageBreakBefore: true,
+        })
+      );
+      break;
+    }
+
+    case 'image': {
+      const imgData = base64ToBuffer(node.attrs?.src || '');
+      if (imgData) {
+        results.push(
+          new Paragraph({
+            children: [
+              new ImageRun({
+                data: imgData.buffer,
+                transformation: { width: imgData.width, height: imgData.height },
+                type: 'png',
+              }),
+            ],
+          })
+        );
+      }
+      break;
+    }
+
+    case 'tableOfContents': {
+      // Skip TOC node in export — Word has its own TOC
+      results.push(
+        new Paragraph({
+          children: [new TextRun({ text: '[Table of Contents]', italics: true, color: '888888' })],
+        })
+      );
+      break;
+    }
+
+    default: {
+      // Try to convert content recursively for unknown nodes
+      if (node.content) {
+        for (const child of node.content) {
+          results.push(...convertBlockNode(child));
+        }
+      }
+      break;
+    }
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Main export function
+// ---------------------------------------------------------------------------
+
+export async function exportToDocx(
+  tiptapJson: Record<string, any>,
+  options: ExportOptions = {}
+): Promise<Blob> {
+  const content = (tiptapJson.content || []) as TipTapNode[];
+  const paragraphs = content.flatMap(convertBlockNode);
+
+  // Page size
+  const PAGE_SIZES = {
+    letter: { width: convertInchesToTwip(8.5), height: convertInchesToTwip(11) },
+    a4: { width: convertInchesToTwip(8.27), height: convertInchesToTwip(11.69) },
+    legal: { width: convertInchesToTwip(8.5), height: convertInchesToTwip(14) },
+  };
+  const pageSize = PAGE_SIZES[options.pageSize || 'letter'] || PAGE_SIZES.letter;
+
+  // Margins (convert px to twips)
+  const margins = {
+    top: pxToTwip(options.marginTop || 96),
+    bottom: pxToTwip(options.marginBottom || 96),
+    left: pxToTwip(options.marginLeft || 96),
+    right: pxToTwip(options.marginRight || 96),
+  };
+
+  const doc = new Document({
+    title: options.title || 'Document',
+    numbering: {
+      config: [
+        {
+          reference: 'default-numbering',
+          levels: [
+            {
+              level: 0,
+              format: LevelFormat.DECIMAL,
+              text: '%1.',
+              alignment: AlignmentType.LEFT,
+            },
+          ],
+        },
+      ],
+    },
+    sections: [
+      {
+        properties: {
+          page: {
+            size: pageSize,
+            margin: margins,
+          },
+        },
+        children: paragraphs,
+      },
+    ],
+  });
+
+  return Packer.toBlob(doc);
+}
