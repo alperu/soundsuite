@@ -402,8 +402,6 @@ export default function DraftPage() {
           documentContent={editorRef.current?.getMarkdown?.() || ''}
           selectedText={editorSelection.selectedText}
           hasSelection={editorSelection.hasSelection}
-          provider={provider}
-          model={model}
           onInsertText={handleInsertText}
           onReplaceSelection={handleReplaceSelection}
         />

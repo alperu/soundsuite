@@ -76,6 +76,7 @@ export async function updateDraft(id: string, input: UpdateDraftInput) {
       ...(input.title !== undefined && { title: input.title }),
       ...(input.content !== undefined && { content: input.content }),
       ...(input.status !== undefined && { status: input.status }),
+      ...(input.documentType !== undefined && { documentType: input.documentType }),
       ...(shouldVersion && { version: { increment: 1 } }),
     },
   });

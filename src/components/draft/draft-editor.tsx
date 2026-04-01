@@ -1,7 +1,7 @@
 'use client';
 
 import React, { forwardRef, useImperativeHandle, useEffect, useCallback } from 'react';
-import { useEditor, EditorContent } from '@tiptap/react';
+import { useEditor, EditorContent, type Editor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
 import TextAlign from '@tiptap/extension-text-align';
@@ -16,6 +16,7 @@ export interface SelectionInfo {
 }
 
 export interface DraftEditorHandle {
+  editor: Editor | null;
   getSelection: () => SelectionInfo;
   replaceSelection: (text: string) => void;
   insertAtCursor: (text: string) => void;
@@ -35,6 +36,7 @@ interface DraftEditorProps {
 const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
   ({ content, onUpdate, onSelectionChange, onContextMenu, className }, ref) => {
     const editor = useEditor({
+      immediatelyRender: false,
       extensions: [
         StarterKit.configure({
           heading: { levels: [1, 2, 3] },
@@ -93,6 +95,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
     }, [editor]);
 
     useImperativeHandle(ref, () => ({
+      editor,
       getSelection,
       replaceSelection: (text: string) => {
         if (!editor) return;

@@ -19,15 +19,16 @@ export async function PUT(
 ) {
   const { id } = await params;
   const body = await request.json();
-  const { title, content, status, changeSummary } = body as {
+  const { title, content, status, documentType, changeSummary } = body as {
     title?: string;
     content?: string;
     status?: string;
+    documentType?: string;
     changeSummary?: string;
   };
 
   try {
-    const updated = await updateDraft(id, { title, content, status, changeSummary });
+    const updated = await updateDraft(id, { title, content, status, documentType, changeSummary });
     return NextResponse.json(updated);
   } catch (e: any) {
     if (e.message === 'Draft not found') {

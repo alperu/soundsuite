@@ -48,5 +48,6 @@ export interface UpdateDraftInput {
   title?: string;
   content?: string;
   status?: string;
+  documentType?: string;
   changeSummary?: string;
 }
