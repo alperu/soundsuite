@@ -149,6 +149,23 @@ export default function DraftPage() {
     } catch {}
   }, []);
 
+  // URL-based restore: when URL has /draft/{caseId}/{slug}, load that draft
+  useEffect(() => {
+    if (!urlCaseId || !urlSlug) return;
+    // Fetch drafts for this case and find the one matching the slug
+    fetch(`/api/drafts?caseId=${urlCaseId}`)
+      .then(r => r.json())
+      .then(data => {
+        const drafts = data.drafts || data || [];
+        const match = drafts.find((d: any) => d.slug === urlSlug);
+        if (match) {
+          loadDraft(match.id);
+        }
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlCaseId, urlSlug]);
+
   // Session restore (only when URL is bare /draft)
   useEffect(() => {
     if (urlCaseId) return;
