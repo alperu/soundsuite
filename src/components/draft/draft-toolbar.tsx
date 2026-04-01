@@ -1109,26 +1109,25 @@ export default function DraftToolbar({
             title="Zoom Out (Ctrl+Scroll)"
           >−</button>
           <select
-            value=""
+            value={String(zoom)}
             onChange={(e) => {
               const val = e.target.value;
               if (val === 'fit') {
-                // Calculate fit-to-width: page width vs viewport width
                 const wrapper = editor?.view?.dom?.closest?.('.draft-editor-wrapper');
                 if (wrapper) {
-                  const viewportW = wrapper.clientWidth - 64; // subtract padding
-                  const pageW = 816; // default Letter width
+                  const viewportW = wrapper.clientWidth - 64;
+                  const pageW = 816;
                   const fitZoom = Math.min(2, Math.max(0.5, viewportW / pageW));
                   onZoomChange(Math.round(fitZoom * 100) / 100);
                 }
-              } else if (val) {
+              } else {
                 onZoomChange(parseFloat(val));
               }
             }}
             className="h-6 px-0.5 text-[11px] border border-gray-200 rounded bg-white text-gray-600 cursor-pointer min-w-[52px] text-center"
             title="Zoom Level"
           >
-            <option value="" disabled>{Math.round(zoom * 100)}%</option>
+            <option value={String(zoom)}>{Math.round(zoom * 100)}%</option>
             <option value="fit">Fit Width</option>
             <option value="0.5">50%</option>
             <option value="0.75">75%</option>

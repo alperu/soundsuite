@@ -18,7 +18,7 @@ const DraftEditor = dynamic(() => import('@/components/draft/draft-editor'), {
   loading: () => <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">Loading editor...</div>,
 });
 
-const DraftToolbar = dynamic(() => import('@/components/draft/draft-toolbar'), { ssr: false });
+import DraftToolbar from '@/components/draft/draft-toolbar';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -74,6 +74,7 @@ export default function DraftPage() {
 
   // Editor
   const editorRef = useRef<any>(null);
+  const [editorReady, setEditorReady] = useState(0); // increment to trigger re-render when editor mounts
   const [trackChanges, setTrackChanges] = usePersistedState<boolean>('draft.editor.trackChanges', false);
   const [editorSelection, setEditorSelection] = useState({ selectedText: '', hasSelection: false });
 
@@ -192,6 +193,18 @@ export default function DraftPage() {
   }, []);
 
   // ---- Auto-save ----
+
+  // Signal editor ready for toolbar after ref populates
+  useEffect(() => {
+    if (!activeDraft) return;
+    const interval = setInterval(() => {
+      if (editorRef.current?.editor) {
+        setEditorReady(v => v + 1);
+        clearInterval(interval);
+      }
+    }, 100);
+    return () => clearInterval(interval);
+  }, [activeDraft?.id]);
 
   const handleEditorUpdate = useCallback((json: string) => {
     if (!activeDraft) return;
@@ -414,7 +427,7 @@ export default function DraftPage() {
         {/* Toolbar */}
         {activeDraft && (
           <DraftToolbar
-            editor={editorRef.current?.editor || null}
+            editor={editorReady ? editorRef.current?.editor || null : null}
             saveStatus={saveStatus}
             trackChanges={trackChanges}
             onToggleTrackChanges={() => setTrackChanges(t => !t)}
