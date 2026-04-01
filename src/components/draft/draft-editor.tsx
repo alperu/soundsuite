@@ -275,6 +275,12 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             white-space: nowrap;
           }
 
+          /* --- TOC overflow fix (all modes) --- */
+          .draft-editor-wrapper [data-type="table-of-contents"] {
+            max-width: 100%;
+            overflow: hidden;
+          }
+
           /* --- Formatting marks (¶ ↵ ·) --- */
           .draft-editor-wrapper.show-marks .ProseMirror p::after,
           .draft-editor-wrapper.show-marks .ProseMirror h1::after,
@@ -314,39 +320,46 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             width: ${dims.w}px;
             min-height: ${dims.h}px;
             padding: ${ps.marginTop}px ${ps.marginRight}px ${ps.marginBottom}px ${ps.marginLeft}px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1), 0 0 1px rgba(0,0,0,0.08);
             border: 1px solid #d1d5db;
             margin: 0 auto;
-            /* Repeating page boundary lines every page-height */
-            background-image:
-              linear-gradient(to bottom,
-                transparent 0px,
-                transparent ${dims.h - 2}px,
-                #d1d5db ${dims.h - 2}px,
-                #d1d5db ${dims.h - 1}px,
-                #e5e7eb ${dims.h - 1}px,
-                #e5e7eb ${dims.h + 31}px,
-                #d1d5db ${dims.h + 31}px,
-                #d1d5db ${dims.h + 32}px,
-                transparent ${dims.h + 32}px
-              );
-            background-size: 100% ${dims.h + 32}px;
-            background-repeat: repeat-y;
-            background-color: white;
           }
-          /* Page number labels at each break */
-          .draft-editor-wrapper.page-view .ProseMirror::before {
-            content: '';
-            display: block;
-            height: 0;
+          /* Constrain all block content to page width */
+          .draft-editor-wrapper.page-view .ProseMirror > * {
+            max-width: 100%;
+            overflow-wrap: break-word;
+            word-wrap: break-word;
           }
+          .draft-editor-wrapper.page-view .ProseMirror table {
+            max-width: 100%;
+            table-layout: fixed;
+          }
+          /* TOC node must stay within page bounds */
+          .draft-editor-wrapper.page-view [data-type="table-of-contents"] {
+            max-width: 100%;
+            overflow: hidden;
+          }
+          /* Page breaks in page view — full visual gap */
           .draft-editor-wrapper.page-view hr {
-            margin: 0 -${ps.marginRight}px;
+            border: none;
+            margin: 0 -${ps.marginRight}px 0 -${ps.marginLeft}px;
             padding: 0;
-            border-top: none;
-            height: ${ps.marginBottom + 32 + ps.marginTop}px;
-            background: #e5e7eb;
+            height: ${ps.marginBottom + 40 + ps.marginTop}px;
+            background:
+              linear-gradient(to bottom,
+                white 0px,
+                white ${ps.marginBottom}px,
+                #d1d5db ${ps.marginBottom}px,
+                #d1d5db ${ps.marginBottom + 1}px,
+                #e5e7eb ${ps.marginBottom + 1}px,
+                #e5e7eb ${ps.marginBottom + 39}px,
+                #d1d5db ${ps.marginBottom + 39}px,
+                #d1d5db ${ps.marginBottom + 40}px,
+                white ${ps.marginBottom + 40}px
+              );
             position: relative;
+            box-shadow: inset 0 ${ps.marginBottom + 5}px 8px -8px rgba(0,0,0,0.06),
+                        inset 0 -${ps.marginTop + 5}px 8px -8px rgba(0,0,0,0.06);
           }
           .draft-editor-wrapper.page-view hr::after {
             content: 'Page Break';

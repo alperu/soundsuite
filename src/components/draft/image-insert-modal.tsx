@@ -25,6 +25,252 @@ interface ImageInsertModalProps {
 type Step = 'source' | 'doclist' | 'page' | 'describe';
 
 // ---------------------------------------------------------------------------
+// PageNavigator — renders PDF pages like the case explorer does
+// Uses server-side page-image API with loading/error states.
+// Renders via fetch + blob URL to properly handle error responses.
+// ---------------------------------------------------------------------------
+
+function PageNavigator({
+  docId,
+  numPages,
+  currentPage,
+  onPageChange,
+}: {
+  docId: string;
+  numPages: number;
+  currentPage: number;
+  onPageChange: (page: number) => void;
+}) {
+  const [mainImgUrl, setMainImgUrl] = useState<string | null>(null);
+  const [mainLoading, setMainLoading] = useState(false);
+  const [mainError, setMainError] = useState<string | null>(null);
+  const [thumbUrls, setThumbUrls] = useState<Map<number, string>>(new Map());
+  const [thumbErrors, setThumbErrors] = useState<Set<number>>(new Set());
+  const thumbStripRef = useRef<HTMLDivElement>(null);
+
+  // Fetch main page image via fetch → blob URL (handles JSON error responses properly)
+  useEffect(() => {
+    let cancelled = false;
+    setMainLoading(true);
+    setMainError(null);
+    setMainImgUrl(null);
+
+    fetch(`/api/documents/${docId}/page-image/${currentPage}?scale=2`)
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) {
+          const ct = res.headers.get('content-type') || '';
+          if (ct.includes('json')) {
+            const data = await res.json();
+            throw new Error(data.error || `Failed (${res.status})`);
+          }
+          throw new Error(`Server error ${res.status}`);
+        }
+        const blob = await res.blob();
+        if (cancelled) return;
+        const url = URL.createObjectURL(blob);
+        setMainImgUrl(url);
+      })
+      .catch((err) => {
+        if (!cancelled) setMainError(err.message || 'Failed to render page');
+      })
+      .finally(() => {
+        if (!cancelled) setMainLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      // Revoke old blob URL
+      setMainImgUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null; });
+    };
+  }, [docId, currentPage]);
+
+  // Load thumbnails lazily — batch load visible range
+  useEffect(() => {
+    const totalThumbs = Math.min(numPages, 50);
+    const toLoad: number[] = [];
+    for (let i = 1; i <= totalThumbs; i++) {
+      if (!thumbUrls.has(i) && !thumbErrors.has(i)) toLoad.push(i);
+    }
+
+    // Load 6 at a time to avoid overwhelming the server
+    let idx = 0;
+    const loadBatch = () => {
+      const batch = toLoad.slice(idx, idx + 6);
+      if (batch.length === 0) return;
+      idx += 6;
+
+      batch.forEach(page => {
+        fetch(`/api/documents/${docId}/page-image/${page}?scale=0.4`)
+          .then(async (res) => {
+            if (!res.ok) throw new Error('fail');
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            setThumbUrls(prev => new Map(prev).set(page, url));
+          })
+          .catch(() => {
+            setThumbErrors(prev => new Set(prev).add(page));
+          });
+      });
+
+      // Stagger next batch
+      setTimeout(loadBatch, 200);
+    };
+    loadBatch();
+
+    // Cleanup blob URLs on unmount
+    return () => {
+      thumbUrls.forEach(url => URL.revokeObjectURL(url));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docId, numPages]);
+
+  // Scroll active thumbnail into view
+  useEffect(() => {
+    if (!thumbStripRef.current) return;
+    const btn = thumbStripRef.current.querySelector(`[data-thumb="${currentPage}"]`);
+    if (btn) btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+  }, [currentPage]);
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        onPageChange(Math.max(1, currentPage - 1));
+      } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        onPageChange(Math.min(numPages, currentPage + 1));
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [currentPage, numPages, onPageChange]);
+
+  const totalThumbs = Math.min(numPages, 50);
+
+  return (
+    <div className="flex flex-col">
+      {/* Page controls */}
+      <div className="flex items-center justify-center gap-3 px-4 py-2 border-b border-gray-100 bg-white">
+        <button
+          onClick={() => onPageChange(Math.max(1, currentPage - 1))}
+          disabled={currentPage <= 1}
+          className="px-2.5 py-1 text-sm rounded hover:bg-gray-100 disabled:opacity-30 transition-colors"
+        >
+          &#8592; Prev
+        </button>
+        <div className="flex items-center gap-1.5">
+          <span className="text-sm text-gray-500">Page</span>
+          <input
+            type="number"
+            value={currentPage}
+            onChange={e => {
+              const v = parseInt(e.target.value, 10);
+              if (v >= 1 && v <= numPages) onPageChange(v);
+            }}
+            min={1}
+            max={numPages}
+            className="w-16 px-1.5 py-0.5 text-sm text-center border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+          />
+          <span className="text-sm text-gray-500">of {numPages}</span>
+        </div>
+        <button
+          onClick={() => onPageChange(Math.min(numPages, currentPage + 1))}
+          disabled={currentPage >= numPages}
+          className="px-2.5 py-1 text-sm rounded hover:bg-gray-100 disabled:opacity-30 transition-colors"
+        >
+          Next &#8594;
+        </button>
+      </div>
+
+      {/* Main page preview */}
+      <div className="flex items-center justify-center p-4 bg-gray-100 min-h-[420px]">
+        {mainLoading && (
+          <div className="flex flex-col items-center gap-2 text-gray-400">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-400" />
+            <span className="text-xs">Rendering page {currentPage}...</span>
+          </div>
+        )}
+        {mainError && !mainLoading && (
+          <div className="flex flex-col items-center gap-2 text-gray-400">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <span className="text-xs text-center max-w-[200px]">{mainError}</span>
+            <button
+              onClick={() => onPageChange(currentPage)}
+              className="text-xs text-blue-600 hover:underline"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {mainImgUrl && !mainLoading && (
+          /* eslint-disable-next-line @next/next/no-img-element */
+          <img
+            src={mainImgUrl}
+            alt={`Page ${currentPage}`}
+            className="max-h-[400px] max-w-full shadow-lg border border-gray-200 rounded bg-white"
+          />
+        )}
+      </div>
+
+      {/* Thumbnail strip */}
+      <div
+        ref={thumbStripRef}
+        className="flex gap-1.5 px-4 py-2 overflow-x-auto border-t border-gray-200 bg-gray-50"
+      >
+        {Array.from({ length: totalThumbs }, (_, i) => i + 1).map(page => {
+          const thumbUrl = thumbUrls.get(page);
+          const hasFailed = thumbErrors.has(page);
+          return (
+            <button
+              key={page}
+              data-thumb={page}
+              onClick={() => onPageChange(page)}
+              className={`shrink-0 rounded border-2 transition-all overflow-hidden relative ${
+                page === currentPage
+                  ? 'border-blue-500 shadow-md ring-1 ring-blue-300'
+                  : 'border-gray-200 hover:border-gray-400'
+              }`}
+              style={{ minWidth: 44, minHeight: 56 }}
+            >
+              {thumbUrl ? (
+                /* eslint-disable-next-line @next/next/no-img-element */
+                <img
+                  src={thumbUrl}
+                  alt={`Page ${page}`}
+                  className="h-14 w-auto block"
+                />
+              ) : hasFailed ? (
+                <div className="h-14 w-11 flex items-center justify-center bg-gray-100 text-gray-400 text-[9px]">
+                  {page}
+                </div>
+              ) : (
+                <div className="h-14 w-11 flex items-center justify-center bg-gray-50">
+                  <div className="animate-pulse rounded bg-gray-200 h-10 w-8" />
+                </div>
+              )}
+              <div className="absolute bottom-0 inset-x-0 text-center text-[8px] text-gray-500 bg-white/80 leading-tight py-px">
+                {page}
+              </div>
+            </button>
+          );
+        })}
+        {numPages > 50 && (
+          <div className="shrink-0 flex items-center px-2 text-xs text-gray-400">
+            +{numPages - 50} more
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
