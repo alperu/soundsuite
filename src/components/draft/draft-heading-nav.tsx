@@ -109,12 +109,14 @@ const DraftHeadingNav: React.FC<HeadingNavProps> = ({ editor, scrollContainer })
   const handleHeadingClick = useCallback(
     (pos: number) => {
       if (!editor) return;
-      editor.chain().focus().setTextSelection(pos).run();
+      // pos is the position before the heading node; pos+1 is inside it
+      const targetPos = pos + 1;
+      editor.chain().focus().setTextSelection(targetPos).run();
 
       // Find the scroll container dynamically (the overflow-y-auto parent of the editor)
       const sc = scrollContainer || editor.view.dom.closest('.overflow-y-auto');
       try {
-        const domAtPos = editor.view.domAtPos(pos);
+        const domAtPos = editor.view.domAtPos(targetPos);
         const domNode = domAtPos.node instanceof HTMLElement
           ? domAtPos.node
           : domAtPos.node.parentElement;
