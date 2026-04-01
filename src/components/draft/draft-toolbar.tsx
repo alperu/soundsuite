@@ -1113,11 +1113,17 @@ export default function DraftToolbar({
             onChange={(e) => {
               const val = e.target.value;
               if (val === 'fit') {
+                // Measure the middle panel (flex-1 column that contains toolbar + editor)
+                // Go up from the editor to find the middle panel container
                 const wrapper = editor?.view?.dom?.closest?.('.draft-editor-wrapper');
-                if (wrapper) {
-                  const viewportW = wrapper.clientWidth - 64;
-                  const pageW = 816;
-                  const fitZoom = Math.min(2, Math.max(0.5, viewportW / pageW));
+                const middlePanel = wrapper?.parentElement; // the flex-1 flex-col div
+                if (middlePanel) {
+                  const availableW = middlePanel.clientWidth - 32; // small padding buffer
+                  // Get actual page width from pagination config or use defaults
+                  const PAGE_WIDTHS: Record<string, number> = { letter: 818, a4: 794, legal: 818 };
+                  const pageSize = document.querySelector('[data-page-size]')?.getAttribute('data-page-size') || 'letter';
+                  const pageW = PAGE_WIDTHS[pageSize] || 818;
+                  const fitZoom = Math.min(2, Math.max(0.5, availableW / pageW));
                   onZoomChange(Math.round(fitZoom * 100) / 100);
                 }
               } else {

@@ -308,7 +308,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
     ].filter(Boolean).join(' ');
 
     return (
-      <div ref={wrapperRef} className={wrapperClasses}>
+      <div ref={wrapperRef} className={wrapperClasses} data-page-size={ps.pageSize}>
         <style>{`
           /* --- Page breaks (continuous mode) --- */
           .draft-editor-wrapper hr {
