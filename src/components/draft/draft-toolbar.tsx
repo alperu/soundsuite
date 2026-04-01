@@ -82,6 +82,34 @@ function FontFamilyDropdown({ editor, value, onChange }: { editor: Editor; value
   );
 }
 
+// ---------------------------------------------------------------------------
+// Shared heading helpers
+// ---------------------------------------------------------------------------
+
+interface TOCEntry {
+  level: 1 | 2 | 3;
+  text: string;
+  pos: number;
+}
+
+function extractHeadings(editor: Editor): TOCEntry[] {
+  const found: TOCEntry[] = [];
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name === 'heading') {
+      found.push({
+        level: node.attrs.level as 1 | 2 | 3,
+        text: node.textContent || '(empty)',
+        pos,
+      });
+    }
+  });
+  return found;
+}
+
+function slugify(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80);
+}
+
 function HeadingDropdown({ editor }: { editor: Editor }) {
   const current = editor.isActive('heading', { level: 1 })
     ? 'h1'
@@ -248,16 +276,50 @@ function LinkDialog({
   anchorRef: React.RefObject<HTMLButtonElement | null>;
 }) {
   const currentHref = editor.getAttributes('link').href || '';
-  const [url, setUrl] = useState(currentHref);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const isAnchor = currentHref.startsWith('#');
+  const [tab, setTab] = useState<'headings' | 'url'>(isAnchor || !currentHref ? 'headings' : 'url');
+  const [url, setUrl] = useState(isAnchor ? '' : currentHref);
+  const [search, setSearch] = useState('');
+  const [headings, setHeadings] = useState<TOCEntry[]>([]);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const urlRef = useRef<HTMLInputElement>(null);
 
+  // Extract headings
   React.useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, []);
+    setHeadings(extractHeadings(editor));
+    const handler = () => setHeadings(extractHeadings(editor));
+    editor.on('update', handler);
+    return () => { editor.off('update', handler); };
+  }, [editor]);
 
-  // Close on click outside
+  // Auto-focus
+  React.useEffect(() => {
+    if (tab === 'headings') searchRef.current?.focus();
+    else urlRef.current?.focus();
+  }, [tab]);
+
+  // Viewport-aware positioning
+  React.useEffect(() => {
+    if (!dialogRef.current || !anchorRef.current) return;
+    const btnRect = anchorRef.current.getBoundingClientRect();
+    const dlgRect = dialogRef.current.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    // Flip up if overflows bottom
+    if (btnRect.bottom + 4 + dlgRect.height > vh) {
+      dialogRef.current.style.top = 'auto';
+      dialogRef.current.style.bottom = 'calc(100% + 4px)';
+    }
+    // Flip left if overflows right
+    if (btnRect.left + dlgRect.width > vw - 8) {
+      dialogRef.current.style.left = 'auto';
+      dialogRef.current.style.right = '0';
+    }
+  }, [anchorRef, tab]);
+
+  // Close on click outside / escape
   React.useEffect(() => {
     const handleClick = (e: MouseEvent) => {
       if (dialogRef.current && !dialogRef.current.contains(e.target as Node) &&
@@ -274,7 +336,15 @@ function LinkDialog({
     };
   }, [onClose, anchorRef]);
 
-  const apply = () => {
+  const applyHeadingLink = (entry: TOCEntry) => {
+    const slug = slugify(entry.text);
+    if (slug) {
+      editor.chain().focus().extendMarkRange('link').setLink({ href: `#${slug}` }).run();
+    }
+    onClose();
+  };
+
+  const applyUrl = () => {
     const trimmed = url.trim();
     if (trimmed) {
       editor.chain().focus().extendMarkRange('link').setLink({ href: trimmed }).run();
@@ -284,39 +354,141 @@ function LinkDialog({
     onClose();
   };
 
-  const remove = () => {
+  const removeLink = () => {
     editor.chain().focus().extendMarkRange('link').unsetLink().run();
     onClose();
   };
 
+  const filtered = headings.filter(h =>
+    h.text.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const currentSlug = isAnchor ? currentHref.slice(1) : '';
+
   return (
     <div
       ref={dialogRef}
-      className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg p-2 flex items-center gap-1.5"
-      style={{ minWidth: 320 }}
+      className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-xl"
+      style={{ width: 360 }}
     >
-      <input
-        ref={inputRef}
-        type="url"
-        value={url}
-        onChange={e => setUrl(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') apply(); }}
-        placeholder="https://..."
-        className="flex-1 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
-      />
-      <button
-        onClick={apply}
-        className="px-2 py-1 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700"
-      >
-        Apply
-      </button>
-      {currentHref && (
+      {/* Tabs */}
+      <div className="flex border-b border-gray-200">
         <button
-          onClick={remove}
-          className="px-2 py-1 text-xs font-medium text-red-600 border border-red-300 rounded hover:bg-red-50"
+          onClick={() => setTab('headings')}
+          className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+            tab === 'headings'
+              ? 'text-blue-700 border-b-2 border-blue-600 bg-blue-50/50'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
         >
-          Remove
+          Headings
         </button>
+        <button
+          onClick={() => setTab('url')}
+          className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+            tab === 'url'
+              ? 'text-blue-700 border-b-2 border-blue-600 bg-blue-50/50'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          URL
+        </button>
+      </div>
+
+      {tab === 'headings' ? (
+        <div>
+          {/* Search */}
+          <div className="p-2 border-b border-gray-100">
+            <input
+              ref={searchRef}
+              type="text"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search headings..."
+              className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+            />
+          </div>
+
+          {/* Heading list */}
+          <div className="max-h-64 overflow-y-auto py-1">
+            {filtered.length === 0 ? (
+              <div className="px-3 py-4 text-xs text-gray-400 text-center">
+                {headings.length === 0
+                  ? 'No headings in document. Add H1, H2, or H3 headings first.'
+                  : 'No headings match your search.'}
+              </div>
+            ) : (
+              filtered.map((entry, i) => {
+                const entrySlug = slugify(entry.text);
+                const isLinked = currentSlug === entrySlug;
+                return (
+                  <button
+                    key={i}
+                    onClick={() => applyHeadingLink(entry)}
+                    className={`w-full text-left px-3 py-1.5 text-sm transition-colors truncate flex items-center gap-2 ${
+                      isLinked
+                        ? 'bg-blue-100 text-blue-800 font-medium'
+                        : 'hover:bg-blue-50 text-gray-700'
+                    } ${
+                      entry.level === 1 ? 'font-semibold' :
+                      entry.level === 2 ? 'pl-6' :
+                      'pl-9 text-gray-600'
+                    }`}
+                    title={entry.text}
+                  >
+                    <span className="truncate">{entry.text}</span>
+                    {isLinked && (
+                      <svg className="w-3.5 h-3.5 shrink-0 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    )}
+                  </button>
+                );
+              })
+            )}
+          </div>
+
+          {/* Remove link (if editing existing) */}
+          {currentHref && (
+            <div className="p-2 border-t border-gray-100">
+              <button
+                onClick={removeLink}
+                className="w-full px-2 py-1 text-xs font-medium text-red-600 border border-red-300 rounded hover:bg-red-50"
+              >
+                Remove Link
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* URL tab */
+        <div className="p-2.5 space-y-2">
+          <input
+            ref={urlRef}
+            type="url"
+            value={url}
+            onChange={e => setUrl(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') applyUrl(); }}
+            placeholder="https://..."
+            className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+          />
+          <div className="flex gap-1.5">
+            <button
+              onClick={applyUrl}
+              className="flex-1 px-2 py-1 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700"
+            >
+              Apply
+            </button>
+            {currentHref && (
+              <button
+                onClick={removeLink}
+                className="px-2 py-1 text-xs font-medium text-red-600 border border-red-300 rounded hover:bg-red-50"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -326,34 +498,16 @@ function LinkDialog({
 // TOC Modal
 // ---------------------------------------------------------------------------
 
-interface TOCEntry {
-  level: 1 | 2 | 3;
-  text: string;
-  pos: number;
-}
-
 function TOCModal({ editor, onClose }: { editor: Editor; onClose: () => void }) {
   const [entries, setEntries] = useState<TOCEntry[]>([]);
   const modalRef = useRef<HTMLDivElement>(null);
 
-  // Extract headings
+  // Extract headings (reuse shared helper)
   React.useEffect(() => {
-    const extract = () => {
-      const found: TOCEntry[] = [];
-      editor.state.doc.descendants((node, pos) => {
-        if (node.type.name === 'heading') {
-          found.push({
-            level: node.attrs.level as 1 | 2 | 3,
-            text: node.textContent || '(empty)',
-            pos,
-          });
-        }
-      });
-      setEntries(found);
-    };
-    extract();
-    editor.on('update', extract);
-    return () => { editor.off('update', extract); };
+    const refresh = () => setEntries(extractHeadings(editor));
+    refresh();
+    editor.on('update', refresh);
+    return () => { editor.off('update', refresh); };
   }, [editor]);
 
   // Close on click outside / escape

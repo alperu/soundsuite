@@ -51,10 +51,13 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
           openOnClick: false,
           autolink: true,
           linkOnPaste: true,
+          isAllowedUri: (url: string, ctx: { defaultValidate: (url: string) => boolean }) => {
+            if (url.startsWith('#')) return true;
+            return ctx.defaultValidate(url);
+          },
           HTMLAttributes: {
             class: 'text-blue-600 underline cursor-pointer',
             rel: 'noopener noreferrer nofollow',
-            target: '_blank',
           },
         }),
         TextAlign.configure({
