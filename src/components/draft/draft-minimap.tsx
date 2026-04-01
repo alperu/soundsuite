@@ -7,14 +7,30 @@ interface MinimapProps {
   scrollContainer: HTMLElement | null;
 }
 
+const SCALE = 0.08;
+const CONTENT_WIDTH = 816; // letter width in px
+
 const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) => {
   const minimapRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
   const dragStartYRef = useRef(0);
   const dragStartScrollTopRef = useRef(0);
-
+  const [scaledHeight, setScaledHeight] = useState(0);
   const [viewport, setViewport] = useState({ top: 0, height: 0 });
+
+  // Measure content and set wrapper height after render
+  useEffect(() => {
+    if (!contentRef.current) return;
+    // Use RAF to let browser lay out the content first
+    const raf = requestAnimationFrame(() => {
+      if (contentRef.current) {
+        const fullHeight = contentRef.current.scrollHeight;
+        setScaledHeight(fullHeight * SCALE);
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [editorHtml]);
 
   const updateViewport = useCallback(() => {
     if (!scrollContainer || !minimapRef.current) return;
@@ -22,7 +38,7 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
     const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
     const minimapHeight = minimapRef.current.clientHeight;
 
-    if (scrollHeight <= 0) return;
+    if (scrollHeight <= 0 || minimapHeight <= 0) return;
 
     const top = (scrollTop / scrollHeight) * minimapHeight;
     const height = (clientHeight / scrollHeight) * minimapHeight;
@@ -30,35 +46,28 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
     setViewport({ top, height: Math.max(height, 8) });
   }, [scrollContainer]);
 
-  // Listen to scroll events on the scroll container
   useEffect(() => {
     if (!scrollContainer) return;
-
     updateViewport();
     scrollContainer.addEventListener('scroll', updateViewport, { passive: true });
     window.addEventListener('resize', updateViewport);
-
     return () => {
       scrollContainer.removeEventListener('scroll', updateViewport);
       window.removeEventListener('resize', updateViewport);
     };
   }, [scrollContainer, updateViewport]);
 
-  // Update viewport when content changes
   useEffect(() => {
     updateViewport();
-  }, [editorHtml, updateViewport]);
+  }, [editorHtml, updateViewport, scaledHeight]);
 
   const scrollToPosition = useCallback(
     (clickY: number) => {
       if (!scrollContainer || !minimapRef.current) return;
-
       const minimapRect = minimapRef.current.getBoundingClientRect();
       const relativeY = clickY - minimapRect.top;
       const minimapHeight = minimapRef.current.clientHeight;
-
       if (minimapHeight <= 0) return;
-
       const ratio = relativeY / minimapHeight;
       const { scrollHeight, clientHeight } = scrollContainer;
       scrollContainer.scrollTop = ratio * scrollHeight - clientHeight / 2;
@@ -84,13 +93,10 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
 
       const handleMouseMove = (moveEvent: MouseEvent) => {
         if (!isDraggingRef.current || !scrollContainer || !minimapRef.current) return;
-
         const deltaY = moveEvent.clientY - dragStartYRef.current;
         const minimapHeight = minimapRef.current.clientHeight;
         const { scrollHeight } = scrollContainer;
-
         if (minimapHeight <= 0) return;
-
         const scrollDelta = (deltaY / minimapHeight) * scrollHeight;
         scrollContainer.scrollTop = dragStartScrollTopRef.current + scrollDelta;
       };
@@ -107,21 +113,34 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
     [scrollContainer]
   );
 
+  const scaledWidth = CONTENT_WIDTH * SCALE;
+
   return (
     <div
       ref={minimapRef}
-      className="relative w-full h-full bg-gray-50 cursor-pointer overflow-hidden"
+      className="relative bg-gray-50 cursor-pointer overflow-hidden"
+      style={{ width: scaledWidth, height: '100%' }}
       onClick={handleClick}
     >
-      {/* Scaled content — use transform:scale for reliable cross-browser minimap */}
-      <div className="pointer-events-none overflow-hidden select-none" style={{ width: '100%' }}>
+      {/* Content wrapper — clips overflow and sets correct scaled dimensions */}
+      <div
+        style={{
+          width: scaledWidth,
+          height: scaledHeight || '100%',
+          overflow: 'hidden',
+          position: 'relative',
+        }}
+      >
         <div
           ref={contentRef}
-          className="draft-minimap-content prose prose-sm max-w-none origin-top-left"
+          className="pointer-events-none select-none prose prose-sm max-w-none"
           style={{
-            transform: 'scale(0.08)',
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            transform: `scale(${SCALE})`,
             transformOrigin: 'top left',
-            width: '816px',
+            width: `${CONTENT_WIDTH}px`,
             padding: '96px',
             fontFamily: 'Times New Roman, serif',
             fontSize: '12px',
@@ -131,7 +150,8 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
           dangerouslySetInnerHTML={{ __html: editorHtml }}
         />
       </div>
-      {/* CSS to force images/iframes to scale within minimap */}
+
+      {/* Force images to fit within content width */}
       <style>{`
         .draft-minimap-content img,
         .draft-minimap-content iframe,

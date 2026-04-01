@@ -485,13 +485,24 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             font-family: sans-serif;
             pointer-events: none;
           }
-          /* Empty paragraphs: ensure ¶ is visible and paragraph is selectable */
+          /* Empty paragraphs: cursor lands on the trailing <br>, ¶ shows after it */
           .draft-editor-wrapper.show-marks .ProseMirror p:empty::after,
           .draft-editor-wrapper.show-marks .ProseMirror p:has(> br:only-child)::after {
             display: inline;
+            margin-left: 0.25em;
           }
           .draft-editor-wrapper.show-marks .ProseMirror p:has(> br:only-child) {
             min-height: 1em;
+          }
+          /* Push ¶ slightly right so cursor sits to the left of it */
+          .draft-editor-wrapper.show-marks .ProseMirror p::after,
+          .draft-editor-wrapper.show-marks .ProseMirror h1::after,
+          .draft-editor-wrapper.show-marks .ProseMirror h2::after,
+          .draft-editor-wrapper.show-marks .ProseMirror h3::after,
+          .draft-editor-wrapper.show-marks .ProseMirror h4::after,
+          .draft-editor-wrapper.show-marks .ProseMirror h5::after {
+            letter-spacing: 0;
+            padding-left: 1px;
           }
           .draft-editor-wrapper.show-marks .ProseMirror {
             word-spacing: 0.15em;
