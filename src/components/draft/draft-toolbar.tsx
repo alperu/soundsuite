@@ -630,51 +630,6 @@ export default function DraftToolbar({
         <span className="text-xs font-bold">TC</span>
       </ToolbarButton>
 
-      <Separator />
-
-      {/* Export */}
-      <ToolbarButton
-        onClick={handleExport}
-        active={false}
-        title={exporting ? 'Exporting...' : 'Export All Drafts'}
-      >
-        {exporting ? (
-          <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
-        ) : (
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M8 1v8m0 0l-3-3m3 3l3-3M3 12v1.5A1.5 1.5 0 004.5 15h7a1.5 1.5 0 001.5-1.5V12" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        )}
-      </ToolbarButton>
-
-      {/* Import */}
-      <ToolbarButton
-        onClick={() => fileInputRef.current?.click()}
-        active={false}
-        title={importing ? 'Importing...' : 'Import Drafts'}
-      >
-        {importing ? (
-          <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
-        ) : (
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M8 11V3m0 0l-3 3m3-3l3 3M3 12v1.5A1.5 1.5 0 004.5 15h7a1.5 1.5 0 001.5-1.5V12" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        )}
-      </ToolbarButton>
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".zip"
-        onChange={handleImport}
-        className="hidden"
-      />
-
       {/* Spacer + Save status */}
       <div className="flex-1" />
       <SaveIndicator status={saveStatus} />

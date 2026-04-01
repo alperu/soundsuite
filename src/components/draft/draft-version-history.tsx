@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 interface VersionEntry {
   id: string;
@@ -15,6 +15,8 @@ interface DraftVersionHistoryProps {
   currentVersion: number;
   onRestore: () => void;
   onPreview?: (content: string | null) => void;
+  caseId?: string;
+  onImportComplete?: () => void;
 }
 
 function relativeTime(dateStr: string): string {
@@ -49,12 +51,56 @@ export default function DraftVersionHistory({
   currentVersion,
   onRestore,
   onPreview,
+  caseId,
+  onImportComplete,
 }: DraftVersionHistoryProps) {
   const [versions, setVersions] = useState<VersionEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [previewingId, setPreviewingId] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const url = caseId ? `/api/drafts/export?caseId=${caseId}` : '/api/drafts/export';
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Export failed');
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `drafts-export-${new Date().toISOString().slice(0, 10)}.zip`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      alert('Export failed: ' + (e instanceof Error ? e.message : 'Unknown error'));
+    }
+    setExporting(false);
+  };
+
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch('/api/drafts/import', { method: 'POST', body: form });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || 'Import failed');
+      const msg = `Imported: ${result.imported}, Skipped: ${result.skipped}` +
+        (result.errors?.length ? `\n\nWarnings:\n${result.errors.join('\n')}` : '');
+      alert(msg);
+      onImportComplete?.();
+    } catch (e) {
+      alert('Import failed: ' + (e instanceof Error ? e.message : 'Unknown error'));
+    }
+    setImporting(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
 
   const fetchVersions = useCallback(() => {
     if (!draftId) return;
@@ -178,6 +224,51 @@ export default function DraftVersionHistory({
           </div>
         </div>
       )}
+
+      {/* Export / Import toolbar */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100 shrink-0">
+        <button
+          onClick={handleExport}
+          disabled={exporting}
+          className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+        >
+          {exporting ? (
+            <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+          ) : (
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 5v14m0 0l-4-4m4 4l4-4M5 19h14" />
+            </svg>
+          )}
+          Export All
+        </button>
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={importing}
+          className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+        >
+          {importing ? (
+            <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+          ) : (
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 19V5m0 0l-4 4m4-4l4 4M5 5h14" />
+            </svg>
+          )}
+          Import
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".zip"
+          onChange={handleImport}
+          className="hidden"
+        />
+      </div>
 
       {/* Version list */}
       <div className="flex-1 overflow-y-auto px-3 py-2">

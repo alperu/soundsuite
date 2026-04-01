@@ -844,6 +844,8 @@ export default function DraftChatPanel({
             currentVersion={currentVersion ?? 1}
             onRestore={() => onDraftRestore?.()}
             onPreview={onPreviewVersion}
+            caseId={caseId}
+            onImportComplete={onDraftRestore}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center text-xs text-gray-400 px-4">
