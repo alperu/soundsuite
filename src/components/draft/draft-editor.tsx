@@ -13,7 +13,7 @@ import FontFamily from '@tiptap/extension-font-family';
 import Link from '@tiptap/extension-link';
 import BaseImage from '@tiptap/extension-image';
 
-// Extend Image to support width attribute for resizing
+// Extend Image to support width and wrapping attributes
 const Image = BaseImage.extend({
   addAttributes() {
     return {
@@ -24,6 +24,22 @@ const Image = BaseImage.extend({
         renderHTML: (attrs) => {
           if (!attrs.width) return {};
           return { width: attrs.width, style: `width: ${attrs.width}px` };
+        },
+      },
+      wrapping: {
+        default: 'inline',  // 'inline' | 'float-left' | 'float-right' | 'block'
+        parseHTML: (el) => {
+          const float = el.style.float;
+          if (float === 'left') return 'float-left';
+          if (float === 'right') return 'float-right';
+          if (el.style.display === 'block') return 'block';
+          return 'inline';
+        },
+        renderHTML: (attrs) => {
+          if (attrs.wrapping === 'float-left') return { style: 'float: left; margin-right: 12px; margin-bottom: 8px;' };
+          if (attrs.wrapping === 'float-right') return { style: 'float: right; margin-left: 12px; margin-bottom: 8px;' };
+          if (attrs.wrapping === 'block') return { style: 'display: block; margin: 8px auto;' };
+          return {};
         },
       },
     };

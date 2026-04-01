@@ -35,13 +35,17 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
     });
   }, [imageEl, width]);
 
-  // Close on click outside
+  // Close on click outside — but NOT when editor modal is open
   useEffect(() => {
+    if (editorOpen) return; // Don't register close handlers while modal is open
+
     const handler = (e: MouseEvent) => {
-      if (toolbarRef.current && !toolbarRef.current.contains(e.target as Node) &&
-          e.target !== imageEl) {
-        onClose();
-      }
+      const target = e.target as HTMLElement;
+      // Don't close if clicking inside toolbar, the image itself, or any modal overlay
+      if (toolbarRef.current?.contains(target)) return;
+      if (target === imageEl) return;
+      if (target.closest('[data-image-editor-modal]')) return;
+      onClose();
     };
     const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     // Delay to avoid the initial click that opened this
@@ -54,7 +58,7 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
       document.removeEventListener('mousedown', handler);
       document.removeEventListener('keydown', handleEsc);
     };
-  }, [onClose, imageEl]);
+  }, [onClose, imageEl, editorOpen]);
 
   // Add visual selection to image
   useEffect(() => {

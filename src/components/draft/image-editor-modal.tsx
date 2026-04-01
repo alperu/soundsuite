@@ -224,7 +224,7 @@ export default function ImageEditorModal({ imageSrc, onSave, onClose }: ImageEdi
   };
 
   return (
-    <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/50">
+    <div data-image-editor-modal className="fixed inset-0 z-[150] flex items-center justify-center bg-black/50">
       <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-[700px] max-h-[85vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 shrink-0">

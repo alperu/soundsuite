@@ -18,6 +18,10 @@ import {
   ExternalHyperlink,
   LevelFormat,
   convertInchesToTwip,
+  HorizontalPositionAlign,
+  VerticalPositionAlign,
+  HorizontalPositionRelativeFrom,
+  VerticalPositionRelativeFrom,
 } from 'docx';
 
 // ---------------------------------------------------------------------------
@@ -78,17 +82,105 @@ function parseFontSize(size: string | undefined): number | undefined {
   return pxToHalfPt(num);
 }
 
-// Convert base64 data URL to buffer
-function base64ToBuffer(dataUrl: string): { buffer: Buffer; width: number; height: number } | null {
+// Parse image dimensions from binary data (PNG and JPEG headers)
+function getImageDimensions(buffer: Buffer, format: string): { width: number; height: number } {
+  try {
+    if (format === 'png' && buffer.length > 24) {
+      // PNG: width at offset 16 (4 bytes BE), height at offset 20 (4 bytes BE)
+      const width = buffer.readUInt32BE(16);
+      const height = buffer.readUInt32BE(20);
+      if (width > 0 && height > 0) return { width, height };
+    }
+    if ((format === 'jpeg' || format === 'jpg') && buffer.length > 4) {
+      // JPEG: scan for SOF0 marker (0xFF 0xC0) or SOF2 (0xFF 0xC2)
+      let i = 2;
+      while (i < buffer.length - 8) {
+        if (buffer[i] === 0xFF) {
+          const marker = buffer[i + 1];
+          if (marker === 0xC0 || marker === 0xC2) {
+            const height = buffer.readUInt16BE(i + 5);
+            const width = buffer.readUInt16BE(i + 7);
+            if (width > 0 && height > 0) return { width, height };
+          }
+          if (marker === 0xD9) break; // EOI
+          const segLen = buffer.readUInt16BE(i + 2);
+          i += 2 + segLen;
+        } else {
+          i++;
+        }
+      }
+    }
+  } catch {}
+  return { width: 400, height: 300 }; // fallback
+}
+
+// Convert base64 data URL to buffer with real dimensions
+function base64ToBuffer(dataUrl: string): { buffer: Buffer; width: number; height: number; format: string } | null {
   try {
     const match = dataUrl.match(/^data:image\/(png|jpe?g|gif|webp);base64,(.+)$/);
     if (!match) return null;
+    const format = match[1];
     const buffer = Buffer.from(match[2], 'base64');
-    // Default dimensions — can't easily extract from base64 without sharp
-    return { buffer, width: 400, height: 300 };
+    const dims = getImageDimensions(buffer, format);
+    return { buffer, ...dims, format };
   } catch {
     return null;
   }
+}
+
+// Build an ImageRun with correct scaling from TipTap node attrs
+function createImageRun(node: TipTapNode): ImageRun | null {
+  const imgData = base64ToBuffer(node.attrs?.src || '');
+  if (!imgData) return null;
+
+  const nodeWidth = node.attrs?.width ? Number(node.attrs.width) : null;
+  let exportW = imgData.width;
+  let exportH = imgData.height;
+
+  // If the editor has a display width, scale proportionally
+  if (nodeWidth && nodeWidth > 0 && imgData.width > 0) {
+    const ratio = imgData.height / imgData.width;
+    exportW = nodeWidth;
+    exportH = Math.round(nodeWidth * ratio);
+  }
+
+  // Cap max width to ~6 inches (576px) for Word
+  if (exportW > 576) {
+    const ratio = exportH / exportW;
+    exportW = 576;
+    exportH = Math.round(576 * ratio);
+  }
+
+  const imgType = imgData.format === 'jpg' || imgData.format === 'jpeg' ? 'jpg' : 'png';
+  const wrapping = node.attrs?.wrapping || 'inline';
+
+  const baseOpts: any = {
+    data: imgData.buffer,
+    transformation: { width: exportW, height: exportH },
+    type: imgType,
+  };
+
+  // Add floating for wrapped images
+  if (wrapping === 'float-left' || wrapping === 'float-right') {
+    baseOpts.floating = {
+      horizontalPosition: {
+        relative: HorizontalPositionRelativeFrom.MARGIN,
+        align: wrapping === 'float-left'
+          ? HorizontalPositionAlign.LEFT
+          : HorizontalPositionAlign.RIGHT,
+      },
+      verticalPosition: {
+        relative: VerticalPositionRelativeFrom.PARAGRAPH,
+        align: VerticalPositionAlign.TOP,
+      },
+      wrap: {
+        type: 1, // square wrapping (TextWrappingType.SQUARE = 1 in docx)
+        side: 3, // both sides (TextWrappingSide.BOTH_SIDES = 3)
+      },
+    };
+  }
+
+  return new ImageRun(baseOpts);
 }
 
 // ---------------------------------------------------------------------------
@@ -164,16 +256,8 @@ function convertInlineContent(nodes: TipTapNode[]): (TextRun | ExternalHyperlink
     } else if (node.type === 'hardBreak') {
       runs.push(new TextRun({ break: 1 }));
     } else if (node.type === 'image') {
-      const imgData = base64ToBuffer(node.attrs?.src || '');
-      if (imgData) {
-        runs.push(
-          new ImageRun({
-            data: imgData.buffer,
-            transformation: { width: imgData.width, height: imgData.height },
-            type: 'png',
-          })
-        );
-      }
+      const imgRun = createImageRun(node);
+      if (imgRun) runs.push(imgRun);
     }
   }
 
@@ -335,17 +419,11 @@ function convertBlockNode(node: TipTapNode): (Paragraph | Table)[] {
     }
 
     case 'image': {
-      const imgData = base64ToBuffer(node.attrs?.src || '');
-      if (imgData) {
+      const imgRun = createImageRun(node);
+      if (imgRun) {
         results.push(
           new Paragraph({
-            children: [
-              new ImageRun({
-                data: imgData.buffer,
-                transformation: { width: imgData.width, height: imgData.height },
-                type: 'png',
-              }),
-            ],
+            children: [imgRun],
           })
         );
       }
