@@ -13,6 +13,7 @@ import Image from '@tiptap/extension-image';
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
+import { PaginationPlus, PAGE_SIZES } from 'tiptap-pagination-plus';
 
 export interface SelectionInfo {
   selectedText: string;
@@ -48,10 +49,21 @@ interface DraftEditorProps {
   showMarks?: boolean;
   pageView?: boolean;
   pageSettings?: PageSettings;
+  zoom?: number;
+  onZoomChange?: (zoom: number) => void;
 }
 
 const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
-  ({ content, onUpdate, onSelectionChange, onContextMenu, className, showMarks, pageView, pageSettings }, ref) => {
+  ({ content, onUpdate, onSelectionChange, onContextMenu, className, showMarks, pageView, pageSettings, zoom = 1, onZoomChange }, ref) => {
+    // Compute page size config for pagination
+    const ps = pageSettings || { pageSize: 'letter', marginTop: 96, marginBottom: 96, marginLeft: 96, marginRight: 96 };
+    const pageSizeMap: Record<string, any> = {
+      letter: PAGE_SIZES.LETTER,
+      a4: PAGE_SIZES.A4,
+      legal: PAGE_SIZES.LEGAL,
+    };
+    const paginationConfig = pageSizeMap[ps.pageSize] || PAGE_SIZES.LETTER;
+
     const editor = useEditor({
       immediatelyRender: false,
       extensions: [
@@ -95,6 +107,13 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         TableCell,
         TableHeader,
         TableOfContents,
+        PaginationPlus.configure({
+          ...paginationConfig,
+          pageGap: 40,
+          pageGapBorderColor: '#d1d5db',
+          pageBreakBackground: '#e5e7eb',
+          footerRight: 'Page {page}',
+        }),
       ],
       content,
       onUpdate: ({ editor: ed }) => {
@@ -156,6 +175,36 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
 
       editor.commands.setContent(parsed);
     }, [editor, content]);
+
+    // Toggle pagination on/off by changing page height
+    useEffect(() => {
+      if (!editor || editor.isDestroyed) return;
+      try {
+        if (pageView) {
+          (editor.commands as any).setPaginationOptions?.({
+            ...paginationConfig,
+            pageGap: 40,
+            pageGapBorderColor: '#d1d5db',
+            pageBreakBackground: '#e5e7eb',
+            footerRight: 'Page {page}',
+          });
+        } else {
+          (editor.commands as any).setPaginationOptions?.({
+            pageHeight: 99999,
+            pageWidth: 99999,
+            pageGap: 0,
+            marginTop: 0,
+            marginBottom: 0,
+            marginLeft: 0,
+            marginRight: 0,
+            footerRight: '',
+            footerLeft: '',
+            headerRight: '',
+            headerLeft: '',
+          });
+        }
+      } catch {}
+    }, [editor, pageView, paginationConfig]);
 
     // Context menu listener
     useEffect(() => {
@@ -234,16 +283,6 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       );
     }
 
-    // Page dimensions at 96 DPI
-    const PAGE_DIMS: Record<string, { w: number; h: number }> = {
-      letter: { w: 816, h: 1056 },  // 8.5 x 11 in
-      a4: { w: 794, h: 1123 },      // 210 x 297 mm
-      legal: { w: 816, h: 1344 },   // 8.5 x 14 in
-    };
-
-    const ps = pageSettings || { pageSize: 'letter', marginTop: 96, marginBottom: 96, marginLeft: 96, marginRight: 96 };
-    const dims = PAGE_DIMS[ps.pageSize] || PAGE_DIMS.letter;
-
     const wrapperClasses = [
       'draft-editor-wrapper',
       'overflow-auto flex-1',
@@ -252,10 +291,26 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       className ?? '',
     ].filter(Boolean).join(' ');
 
+    // Ctrl+scroll zoom handler
+    const wrapperRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+      const el = wrapperRef.current;
+      if (!el || !onZoomChange) return;
+      const handler = (e: WheelEvent) => {
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          const delta = e.deltaY > 0 ? -0.05 : 0.05;
+          onZoomChange(Math.min(2, Math.max(0.5, zoom + delta)));
+        }
+      };
+      el.addEventListener('wheel', handler, { passive: false });
+      return () => el.removeEventListener('wheel', handler);
+    }, [zoom, onZoomChange]);
+
     return (
-      <div className={wrapperClasses}>
+      <div ref={wrapperRef} className={wrapperClasses}>
         <style>{`
-          /* --- Page breaks --- */
+          /* --- Page breaks (continuous mode) --- */
           .draft-editor-wrapper hr {
             border: none;
             border-top: 2px dashed #d1d5db;
@@ -275,13 +330,13 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             white-space: nowrap;
           }
 
-          /* --- TOC overflow fix (all modes) --- */
+          /* --- TOC overflow fix --- */
           .draft-editor-wrapper [data-type="table-of-contents"] {
             max-width: 100%;
             overflow: hidden;
           }
 
-          /* --- Formatting marks (¶ ↵ ·) --- */
+          /* --- Formatting marks (¶ ↵) --- */
           .draft-editor-wrapper.show-marks .ProseMirror p::after,
           .draft-editor-wrapper.show-marks .ProseMirror h1::after,
           .draft-editor-wrapper.show-marks .ProseMirror h2::after,
@@ -307,73 +362,21 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             word-spacing: 0.15em;
           }
 
-          /* --- Page view --- */
+          /* --- Page view background --- */
           .draft-editor-wrapper.page-view {
             background: #e5e7eb;
-            padding: 32px 0;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-          }
-          .draft-editor-wrapper.page-view .ProseMirror {
-            background: white;
-            width: ${dims.w}px;
-            min-height: ${dims.h}px;
-            padding: ${ps.marginTop}px ${ps.marginRight}px ${ps.marginBottom}px ${ps.marginLeft}px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1), 0 0 1px rgba(0,0,0,0.08);
-            border: 1px solid #d1d5db;
-            margin: 0 auto;
-          }
-          /* Constrain all block content to page width */
-          .draft-editor-wrapper.page-view .ProseMirror > * {
-            max-width: 100%;
-            overflow-wrap: break-word;
-            word-wrap: break-word;
-          }
-          .draft-editor-wrapper.page-view .ProseMirror table {
-            max-width: 100%;
-            table-layout: fixed;
-          }
-          /* TOC node must stay within page bounds */
-          .draft-editor-wrapper.page-view [data-type="table-of-contents"] {
-            max-width: 100%;
-            overflow: hidden;
-          }
-          /* Page breaks in page view — full visual gap */
-          .draft-editor-wrapper.page-view hr {
-            border: none;
-            margin: 0 -${ps.marginRight}px 0 -${ps.marginLeft}px;
-            padding: 0;
-            height: ${ps.marginBottom + 40 + ps.marginTop}px;
-            background:
-              linear-gradient(to bottom,
-                white 0px,
-                white ${ps.marginBottom}px,
-                #d1d5db ${ps.marginBottom}px,
-                #d1d5db ${ps.marginBottom + 1}px,
-                #e5e7eb ${ps.marginBottom + 1}px,
-                #e5e7eb ${ps.marginBottom + 39}px,
-                #d1d5db ${ps.marginBottom + 39}px,
-                #d1d5db ${ps.marginBottom + 40}px,
-                white ${ps.marginBottom + 40}px
-              );
-            position: relative;
-            box-shadow: inset 0 ${ps.marginBottom + 5}px 8px -8px rgba(0,0,0,0.06),
-                        inset 0 -${ps.marginTop + 5}px 8px -8px rgba(0,0,0,0.06);
-          }
-          .draft-editor-wrapper.page-view hr::after {
-            content: 'Page Break';
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: #e5e7eb;
-            padding: 0 0.75rem;
-            font-size: 11px;
-            color: #9ca3af;
           }
         `}</style>
-        <EditorContent editor={editor} />
+        <div
+          className="draft-zoom-inner"
+          style={zoom !== 1 ? {
+            transform: `scale(${zoom})`,
+            transformOrigin: 'top center',
+            width: `${100 / zoom}%`,
+          } : undefined}
+        >
+          <EditorContent editor={editor} />
+        </div>
       </div>
     );
   }

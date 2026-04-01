@@ -25,10 +25,18 @@ interface ImageInsertModalProps {
 type Step = 'source' | 'doclist' | 'page' | 'describe';
 
 // ---------------------------------------------------------------------------
-// PageNavigator — renders PDF pages like the case explorer does
-// Uses server-side page-image API with loading/error states.
-// Renders via fetch + blob URL to properly handle error responses.
+// PageNavigator — renders PDF pages client-side using pdfjs-dist
+// Mimics the case explorer's approach: loads raw PDF, renders to canvas,
+// with proper loading/error states and keyboard navigation.
 // ---------------------------------------------------------------------------
+
+let pdfjsLib: typeof import('pdfjs-dist') | null = null;
+if (typeof window !== 'undefined') {
+  import('pdfjs-dist').then(mod => {
+    pdfjsLib = mod;
+    mod.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+  });
+}
 
 function PageNavigator({
   docId,
@@ -41,89 +49,138 @@ function PageNavigator({
   currentPage: number;
   onPageChange: (page: number) => void;
 }) {
-  const [mainImgUrl, setMainImgUrl] = useState<string | null>(null);
-  const [mainLoading, setMainLoading] = useState(false);
-  const [mainError, setMainError] = useState<string | null>(null);
-  const [thumbUrls, setThumbUrls] = useState<Map<number, string>>(new Map());
-  const [thumbErrors, setThumbErrors] = useState<Set<number>>(new Set());
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const pdfDocRef = useRef<any>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const thumbStripRef = useRef<HTMLDivElement>(null);
+  const thumbCanvasRefs = useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const renderedThumbs = useRef<Set<number>>(new Set());
 
-  // Fetch main page image via fetch → blob URL (handles JSON error responses properly)
+  // Load the PDF document once
   useEffect(() => {
     let cancelled = false;
-    setMainLoading(true);
-    setMainError(null);
-    setMainImgUrl(null);
 
-    fetch(`/api/documents/${docId}/page-image/${currentPage}?scale=2`)
-      .then(async (res) => {
+    const loadPdf = async () => {
+      setLoading(true);
+      setError(null);
+
+      // Wait for pdfjs to be ready
+      let attempts = 0;
+      while (!pdfjsLib && attempts < 30) {
+        await new Promise(r => setTimeout(r, 100));
+        attempts++;
+      }
+      if (!pdfjsLib) {
+        setError('PDF viewer failed to load');
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const doc = await pdfjsLib.getDocument({
+          url: `/api/documents/${docId}/pdf`,
+          wasmUrl: '/',
+        }).promise;
         if (cancelled) return;
-        if (!res.ok) {
-          const ct = res.headers.get('content-type') || '';
-          if (ct.includes('json')) {
-            const data = await res.json();
-            throw new Error(data.error || `Failed (${res.status})`);
-          }
-          throw new Error(`Server error ${res.status}`);
+        pdfDocRef.current = doc;
+        setLoading(false);
+      } catch (err: any) {
+        if (!cancelled) {
+          setError(err.message || 'Failed to load PDF');
+          setLoading(false);
         }
-        const blob = await res.blob();
-        if (cancelled) return;
-        const url = URL.createObjectURL(blob);
-        setMainImgUrl(url);
-      })
-      .catch((err) => {
-        if (!cancelled) setMainError(err.message || 'Failed to render page');
-      })
-      .finally(() => {
-        if (!cancelled) setMainLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-      // Revoke old blob URL
-      setMainImgUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null; });
+      }
     };
-  }, [docId, currentPage]);
 
-  // Load thumbnails lazily — batch load visible range
+    loadPdf();
+    return () => { cancelled = true; };
+  }, [docId]);
+
+  // Render current page to main canvas
   useEffect(() => {
-    const totalThumbs = Math.min(numPages, 50);
-    const toLoad: number[] = [];
-    for (let i = 1; i <= totalThumbs; i++) {
-      if (!thumbUrls.has(i) && !thumbErrors.has(i)) toLoad.push(i);
+    const doc = pdfDocRef.current;
+    if (!doc || !canvasRef.current || loading) return;
+
+    let cancelled = false;
+
+    const renderMain = async () => {
+      try {
+        const page = await doc.getPage(currentPage);
+        if (cancelled) return;
+
+        // Fit to container width (~640px modal content area)
+        const baseViewport = page.getViewport({ scale: 1.0 });
+        const containerW = 620;
+        const scale = containerW / baseViewport.width;
+        const viewport = page.getViewport({ scale });
+
+        const canvas = canvasRef.current!;
+        const ctx = canvas.getContext('2d')!;
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        await page.render({ canvasContext: ctx, viewport } as any).promise;
+        page.cleanup();
+      } catch (err: any) {
+        if (!cancelled) setError(`Page ${currentPage}: ${err.message}`);
+      }
+    };
+
+    renderMain();
+    return () => { cancelled = true; };
+  }, [currentPage, loading]);
+
+  // Render thumbnail when its canvas ref is set
+  const renderThumb = useCallback(async (page: number, canvas: HTMLCanvasElement) => {
+    const doc = pdfDocRef.current;
+    if (!doc || renderedThumbs.current.has(page)) return;
+    renderedThumbs.current.add(page);
+
+    try {
+      const pdfPage = await doc.getPage(page);
+      const baseViewport = pdfPage.getViewport({ scale: 1.0 });
+      const scale = 56 / baseViewport.height; // ~56px tall thumbnails
+      const viewport = pdfPage.getViewport({ scale });
+
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      await pdfPage.render({ canvasContext: ctx, viewport } as any).promise;
+      pdfPage.cleanup();
+    } catch {
+      // Thumbnail render failed — leave blank
     }
+  }, []);
 
-    // Load 6 at a time to avoid overwhelming the server
-    let idx = 0;
-    const loadBatch = () => {
-      const batch = toLoad.slice(idx, idx + 6);
-      if (batch.length === 0) return;
-      idx += 6;
+  // Render visible thumbnails after PDF loads
+  useEffect(() => {
+    if (loading || !pdfDocRef.current) return;
 
-      batch.forEach(page => {
-        fetch(`/api/documents/${docId}/page-image/${page}?scale=0.4`)
-          .then(async (res) => {
-            if (!res.ok) throw new Error('fail');
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            setThumbUrls(prev => new Map(prev).set(page, url));
-          })
-          .catch(() => {
-            setThumbErrors(prev => new Set(prev).add(page));
-          });
-      });
-
-      // Stagger next batch
-      setTimeout(loadBatch, 200);
+    const totalThumbs = Math.min(numPages, 50);
+    // Render in batches around current page
+    const renderBatch = async (start: number, end: number) => {
+      for (let i = start; i <= end; i++) {
+        const canvas = thumbCanvasRefs.current.get(i);
+        if (canvas && !renderedThumbs.current.has(i)) {
+          await renderThumb(i, canvas);
+        }
+      }
     };
-    loadBatch();
 
-    // Cleanup blob URLs on unmount
-    return () => {
-      thumbUrls.forEach(url => URL.revokeObjectURL(url));
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docId, numPages]);
+    // Render current page's neighborhood first, then expand
+    const batchStart = Math.max(1, currentPage - 10);
+    const batchEnd = Math.min(totalThumbs, currentPage + 10);
+    renderBatch(batchStart, batchEnd).then(() => {
+      // Then render the rest
+      renderBatch(1, totalThumbs);
+    });
+  }, [loading, currentPage, numPages, renderThumb]);
 
   // Scroll active thumbnail into view
   useEffect(() => {
@@ -135,6 +192,7 @@ function PageNavigator({
   // Keyboard navigation
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement) return;
       if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
         e.preventDefault();
         onPageChange(Math.max(1, currentPage - 1));
@@ -186,47 +244,38 @@ function PageNavigator({
 
       {/* Main page preview */}
       <div className="flex items-center justify-center p-4 bg-gray-100 min-h-[420px]">
-        {mainLoading && (
+        {loading && (
           <div className="flex flex-col items-center gap-2 text-gray-400">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-400" />
-            <span className="text-xs">Rendering page {currentPage}...</span>
+            <span className="text-xs">Loading PDF...</span>
           </div>
         )}
-        {mainError && !mainLoading && (
+        {error && !loading && (
           <div className="flex flex-col items-center gap-2 text-gray-400">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10" />
               <line x1="12" y1="8" x2="12" y2="12" />
               <line x1="12" y1="16" x2="12.01" y2="16" />
             </svg>
-            <span className="text-xs text-center max-w-[200px]">{mainError}</span>
-            <button
-              onClick={() => onPageChange(currentPage)}
-              className="text-xs text-blue-600 hover:underline"
-            >
-              Retry
-            </button>
+            <span className="text-xs text-center max-w-[250px]">{error}</span>
           </div>
         )}
-        {mainImgUrl && !mainLoading && (
-          /* eslint-disable-next-line @next/next/no-img-element */
-          <img
-            src={mainImgUrl}
-            alt={`Page ${currentPage}`}
+        {!loading && !error && (
+          <canvas
+            ref={canvasRef}
             className="max-h-[400px] max-w-full shadow-lg border border-gray-200 rounded bg-white"
+            style={{ objectFit: 'contain' }}
           />
         )}
       </div>
 
       {/* Thumbnail strip */}
-      <div
-        ref={thumbStripRef}
-        className="flex gap-1.5 px-4 py-2 overflow-x-auto border-t border-gray-200 bg-gray-50"
-      >
-        {Array.from({ length: totalThumbs }, (_, i) => i + 1).map(page => {
-          const thumbUrl = thumbUrls.get(page);
-          const hasFailed = thumbErrors.has(page);
-          return (
+      {!loading && (
+        <div
+          ref={thumbStripRef}
+          className="flex gap-1.5 px-4 py-2 overflow-x-auto border-t border-gray-200 bg-gray-50"
+        >
+          {Array.from({ length: totalThumbs }, (_, i) => i + 1).map(page => (
             <button
               key={page}
               data-thumb={page}
@@ -236,36 +285,28 @@ function PageNavigator({
                   ? 'border-blue-500 shadow-md ring-1 ring-blue-300'
                   : 'border-gray-200 hover:border-gray-400'
               }`}
-              style={{ minWidth: 44, minHeight: 56 }}
+              style={{ minWidth: 44, minHeight: 60 }}
             >
-              {thumbUrl ? (
-                /* eslint-disable-next-line @next/next/no-img-element */
-                <img
-                  src={thumbUrl}
-                  alt={`Page ${page}`}
-                  className="h-14 w-auto block"
-                />
-              ) : hasFailed ? (
-                <div className="h-14 w-11 flex items-center justify-center bg-gray-100 text-gray-400 text-[9px]">
-                  {page}
-                </div>
-              ) : (
-                <div className="h-14 w-11 flex items-center justify-center bg-gray-50">
-                  <div className="animate-pulse rounded bg-gray-200 h-10 w-8" />
-                </div>
-              )}
+              <canvas
+                ref={(el) => {
+                  if (el) {
+                    thumbCanvasRefs.current.set(page, el);
+                  }
+                }}
+                className="h-14 w-auto block"
+              />
               <div className="absolute bottom-0 inset-x-0 text-center text-[8px] text-gray-500 bg-white/80 leading-tight py-px">
                 {page}
               </div>
             </button>
-          );
-        })}
-        {numPages > 50 && (
-          <div className="shrink-0 flex items-center px-2 text-xs text-gray-400">
-            +{numPages - 50} more
-          </div>
-        )}
-      </div>
+          ))}
+          {numPages > 50 && (
+            <div className="shrink-0 flex items-center px-2 text-xs text-gray-400">
+              +{numPages - 50} more
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -357,14 +398,46 @@ export default function ImageInsertModal({
 
   const capturePageImage = useCallback(async (docId: string, page: number) => {
     try {
-      const res = await fetch(`/api/documents/${docId}/page-image/${page}?scale=2`);
-      if (res.ok) {
-        const blob = await res.blob();
-        const reader = new FileReader();
-        reader.onloadend = () => setImageDataUrl(reader.result as string);
-        reader.readAsDataURL(blob);
+      // Wait for pdfjs
+      let attempts = 0;
+      while (!pdfjsLib && attempts < 30) {
+        await new Promise(r => setTimeout(r, 100));
+        attempts++;
       }
-    } catch {}
+      if (!pdfjsLib) return;
+
+      const doc = await pdfjsLib.getDocument({
+        url: `/api/documents/${docId}/pdf`,
+        wasmUrl: '/',
+      }).promise;
+
+      const pdfPage = await doc.getPage(page);
+      const viewport = pdfPage.getViewport({ scale: 2.0 });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      await pdfPage.render({ canvasContext: ctx, viewport } as any).promise;
+      pdfPage.cleanup();
+
+      const dataUrl = canvas.toDataURL('image/png');
+      setImageDataUrl(dataUrl);
+    } catch {
+      // Fallback: try server-side API
+      try {
+        const res = await fetch(`/api/documents/${docId}/page-image/${page}?scale=2`);
+        if (res.ok) {
+          const blob = await res.blob();
+          const reader = new FileReader();
+          reader.onloadend = () => setImageDataUrl(reader.result as string);
+          reader.readAsDataURL(blob);
+        }
+      } catch {}
+    }
   }, []);
 
   // ---------------------------------------------------------------------------

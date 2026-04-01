@@ -51,6 +51,8 @@ interface DraftToolbarProps {
   provider?: string;
   model?: string;
   onImageInsert?: (url: string, alt: string) => void;
+  zoom?: number;
+  onZoomChange?: (zoom: number) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -679,6 +681,8 @@ export default function DraftToolbar({
   provider,
   model,
   onImageInsert,
+  zoom = 1,
+  onZoomChange,
 }: DraftToolbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wordInputRef = useRef<HTMLInputElement>(null);
@@ -1049,8 +1053,30 @@ export default function DraftToolbar({
         className="hidden"
       />
 
-      {/* Spacer + Save status */}
+      {/* Spacer */}
       <div className="flex-1" />
+
+      {/* Zoom controls */}
+      {onZoomChange && (
+        <div className="flex items-center gap-0.5 mr-2">
+          <button
+            onClick={() => onZoomChange(Math.max(0.5, zoom - 0.1))}
+            className="w-6 h-6 flex items-center justify-center rounded text-xs text-gray-600 hover:bg-gray-200"
+            title="Zoom Out"
+          >−</button>
+          <button
+            onClick={() => onZoomChange(1)}
+            className="px-1 h-6 flex items-center justify-center rounded text-[11px] text-gray-600 hover:bg-gray-200 min-w-[36px]"
+            title="Reset Zoom (click)"
+          >{Math.round(zoom * 100)}%</button>
+          <button
+            onClick={() => onZoomChange(Math.min(2, zoom + 0.1))}
+            className="w-6 h-6 flex items-center justify-center rounded text-xs text-gray-600 hover:bg-gray-200"
+            title="Zoom In"
+          >+</button>
+        </div>
+      )}
+
       <SaveIndicator status={saveStatus} />
     </div>
   );
