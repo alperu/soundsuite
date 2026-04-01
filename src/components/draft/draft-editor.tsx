@@ -496,6 +496,19 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             user-select: none;
             pointer-events: none;
           }
+          /* Empty paragraphs: show ¶ on same line as cursor (like Word) */
+          .draft-editor-wrapper.show-marks .ProseMirror p:empty::after,
+          .draft-editor-wrapper.show-marks .ProseMirror p:has(> br:only-child)::after {
+            display: inline;
+          }
+          /* Hide the <br> in empty paragraphs when marks are shown so ¶ stays on cursor line */
+          .draft-editor-wrapper.show-marks .ProseMirror p > br:only-child {
+            display: none;
+          }
+          /* Ensure empty paragraphs still have height for the cursor */
+          .draft-editor-wrapper.show-marks .ProseMirror p:has(> br:only-child) {
+            min-height: 1em;
+          }
           .draft-editor-wrapper.show-marks .ProseMirror {
             word-spacing: 0.15em;
           }
