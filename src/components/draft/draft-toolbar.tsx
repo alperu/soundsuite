@@ -399,24 +399,38 @@ function LinkDialog({
     else urlRef.current?.focus();
   }, [tab]);
 
-  // Viewport-aware positioning
-  React.useEffect(() => {
-    if (!dialogRef.current || !anchorRef.current) return;
-    const btnRect = anchorRef.current.getBoundingClientRect();
-    const dlgRect = dialogRef.current.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
+  // Position dialog using fixed coordinates from the button
+  const [pos, setPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
 
-    // Flip up if overflows bottom
-    if (btnRect.bottom + 4 + dlgRect.height > vh) {
-      dialogRef.current.style.top = 'auto';
-      dialogRef.current.style.bottom = 'calc(100% + 4px)';
-    }
-    // Flip left if overflows right
-    if (btnRect.left + dlgRect.width > vw - 8) {
-      dialogRef.current.style.left = 'auto';
-      dialogRef.current.style.right = '0';
-    }
+  React.useEffect(() => {
+    if (!anchorRef.current) return;
+    const btnRect = anchorRef.current.getBoundingClientRect();
+    let top = btnRect.bottom + 4;
+    let left = btnRect.left;
+
+    // Defer measurement to next frame so dialogRef has dimensions
+    requestAnimationFrame(() => {
+      if (!dialogRef.current) return;
+      const dlgRect = dialogRef.current.getBoundingClientRect();
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+
+      // Flip up if overflows bottom
+      if (top + dlgRect.height > vh - 8) {
+        top = btnRect.top - dlgRect.height - 4;
+      }
+      // Flip left if overflows right
+      if (left + 360 > vw - 8) {
+        left = vw - 360 - 8;
+      }
+      // Clamp
+      if (left < 8) left = 8;
+      if (top < 8) top = 8;
+
+      setPos({ top, left });
+    });
+
+    setPos({ top: btnRect.bottom + 4, left: btnRect.left });
   }, [anchorRef, tab]);
 
   // Close on click outside / escape
@@ -468,8 +482,8 @@ function LinkDialog({
   return (
     <div
       ref={dialogRef}
-      className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-xl"
-      style={{ width: 360 }}
+      className="fixed z-[100] bg-white border border-gray-200 rounded-lg shadow-xl"
+      style={{ width: 360, top: pos.top, left: pos.left }}
     >
       {/* Tabs */}
       <div className="flex border-b border-gray-200">
