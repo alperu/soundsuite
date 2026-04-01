@@ -57,16 +57,36 @@ const Image = BaseImage.extend({
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
-import HardBreak from '@tiptap/extension-hard-break';
+import { Extension } from '@tiptap/core';
+import { Plugin, PluginKey } from '@tiptap/pm/state';
+import { Decoration, DecorationSet } from '@tiptap/pm/view';
 
-// Custom HardBreak that renders ↵ marker before the <br> for formatting marks view
-const HardBreakWithMarker = HardBreak.extend({
-  renderHTML() {
+// ProseMirror decoration plugin: adds ↵ widget before every hardBreak node
+const hardBreakMarkerKey = new PluginKey('hardBreakMarker');
+const HardBreakMarkerPlugin = Extension.create({
+  name: 'hardBreakMarker',
+  addProseMirrorPlugins() {
     return [
-      'span',
-      { style: 'white-space: normal;' },
-      ['span', { class: 'hard-break-mark' }, '↵'],
-      ['br'],
+      new Plugin({
+        key: hardBreakMarkerKey,
+        props: {
+          decorations(state) {
+            const decorations: Decoration[] = [];
+            state.doc.descendants((node, pos) => {
+              if (node.type.name === 'hardBreak') {
+                const widget = Decoration.widget(pos, () => {
+                  const span = document.createElement('span');
+                  span.className = 'hard-break-mark';
+                  span.textContent = '↵';
+                  return span;
+                }, { side: -1 });
+                decorations.push(widget);
+              }
+            });
+            return DecorationSet.create(state.doc, decorations);
+          },
+        },
+      }),
     ];
   },
 });
@@ -301,79 +321,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       return () => el.removeEventListener('contextmenu', handler);
     }, [editor, onContextMenu]);
 
-    // Internal anchor link click handler — scroll to matching heading
-    // Uses capturing phase to fire BEFORE ProseMirror/browser default navigation
-    useEffect(() => {
-      if (!editor) return;
-      const el = editor.view.dom;
-
-      const handleAnchorClick = (e: Event) => {
-        const me = e as MouseEvent;
-        const target = me.target as HTMLElement;
-        const link = target.closest('a');
-        if (!link) return;
-        const href = link.getAttribute('href');
-        if (!href || !href.startsWith('#')) return;
-
-        // Block all default behavior — prevent new tab / navigation
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-
-        const slug = href.slice(1);
-
-        // Find heading whose text slugifies to match
-        editor.state.doc.descendants((node, pos) => {
-          if (node.type.name === 'heading') {
-            const headingSlug = node.textContent
-              .toLowerCase()
-              .replace(/[^a-z0-9]+/g, '-')
-              .replace(/^-|-$/g, '')
-              .slice(0, 80);
-            if (headingSlug === slug) {
-              // Set cursor at heading
-              editor.chain().setTextSelection(pos).run();
-
-              // Scroll heading to TOP of editor (not just into view)
-              try {
-                const domAtPos = editor.view.domAtPos(pos);
-                const domNode = domAtPos.node instanceof HTMLElement
-                  ? domAtPos.node
-                  : domAtPos.node.parentElement;
-                if (domNode) {
-                  const scrollContainer = editor.view.dom.closest('.overflow-auto, .overflow-y-auto') || editor.view.dom.parentElement;
-                  if (scrollContainer) {
-                    const nodeRect = domNode.getBoundingClientRect();
-                    const containerRect = scrollContainer.getBoundingClientRect();
-                    const offset = nodeRect.top - containerRect.top - 20;
-                    scrollContainer.scrollBy({ top: offset, behavior: 'smooth' });
-                  }
-                }
-              } catch {
-                // Fallback to TipTap's scroll
-                editor.chain().setTextSelection(pos).scrollIntoView().run();
-              }
-              return false;
-            }
-          }
-        });
-      };
-
-      // Register on both capture and bubble phases, and on parent + editor DOM
-      // to ensure we catch the click regardless of ProseMirror event handling
-      el.addEventListener('click', handleAnchorClick, true);   // capture on editor
-      el.addEventListener('click', handleAnchorClick, false);  // bubble on editor
-
-      // Also listen on the scroll container (parent) to catch clicks that bubble past ProseMirror
-      const wrapper = el.closest('.draft-editor-wrapper');
-      wrapper?.addEventListener('click', handleAnchorClick, true);
-
-      return () => {
-        el.removeEventListener('click', handleAnchorClick, true);
-        el.removeEventListener('click', handleAnchorClick, false);
-        wrapper?.removeEventListener('click', handleAnchorClick, true);
-      };
-    }, [editor]);
+    // Anchor link handling is done in editorProps.handleClick above (ProseMirror level)
 
     const getSelection = useCallback((): SelectionInfo => {
       if (!editor) {
