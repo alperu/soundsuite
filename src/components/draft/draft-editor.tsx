@@ -145,6 +145,40 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       return () => el.removeEventListener('contextmenu', handler);
     }, [editor, onContextMenu]);
 
+    // Internal anchor link click handler — scroll to matching heading
+    useEffect(() => {
+      if (!editor) return;
+      const el = editor.view.dom;
+      const handler = (e: MouseEvent) => {
+        const target = e.target as HTMLElement;
+        const link = target.closest('a');
+        if (!link) return;
+        const href = link.getAttribute('href');
+        if (!href || !href.startsWith('#')) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        const slug = href.slice(1);
+
+        // Find heading whose text slugifies to match
+        editor.state.doc.descendants((node, pos) => {
+          if (node.type.name === 'heading') {
+            const headingSlug = node.textContent
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '-')
+              .replace(/^-|-$/g, '')
+              .slice(0, 80);
+            if (headingSlug === slug) {
+              editor.chain().setTextSelection(pos).scrollIntoView().run();
+              return false; // stop traversal
+            }
+          }
+        });
+      };
+      el.addEventListener('click', handler);
+      return () => el.removeEventListener('click', handler);
+    }, [editor]);
+
     const getSelection = useCallback((): SelectionInfo => {
       if (!editor) {
         return { selectedText: '', from: 0, to: 0, hasSelection: false };
@@ -180,7 +214,30 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
     }
 
     return (
-      <div className={`bg-white overflow-auto flex-1 ${className ?? ''}`}>
+      <div className={`draft-editor-wrapper bg-white overflow-auto flex-1 ${className ?? ''}`}>
+        <style>{`
+          .draft-editor-wrapper hr {
+            border: none;
+            border-top: 2px dashed #d1d5db;
+            margin: 1.5rem 0;
+            position: relative;
+          }
+          .draft-editor-wrapper hr::after {
+            content: 'Page Break';
+            position: absolute;
+            top: -0.7em;
+            left: 50%;
+            transform: translateX(-50%);
+            background: white;
+            padding: 0 0.5rem;
+            font-size: 10px;
+            color: #9ca3af;
+            white-space: nowrap;
+          }
+          .draft-editor-wrapper.hide-breaks hr {
+            display: none;
+          }
+        `}</style>
         <EditorContent editor={editor} />
       </div>
     );

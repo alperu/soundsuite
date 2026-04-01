@@ -815,6 +815,35 @@ export default function DraftToolbar({
 
       <Separator />
 
+      {/* Page Break (horizontal rule) */}
+      <ToolbarButton
+        onClick={() => editor.chain().focus().setHorizontalRule().run()}
+        title="Insert Page Break"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <rect x="2" y="2" width="12" height="1.5" rx="0.5" opacity="0.3" />
+          <rect x="2" y="7" width="12" height="2" rx="0.5" />
+          <rect x="2" y="12.5" width="12" height="1.5" rx="0.5" opacity="0.3" />
+        </svg>
+      </ToolbarButton>
+
+      {/* Show/Hide Page Breaks */}
+      <ToolbarButton
+        onClick={() => {
+          const el = editor.view.dom.closest('.draft-editor-wrapper');
+          if (el) el.classList.toggle('hide-breaks');
+        }}
+        title="Show/Hide Page Breaks"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          {/* eye icon */}
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      </ToolbarButton>
+
+      <Separator />
+
       {/* Track Changes */}
       <ToolbarButton
         onClick={onToggleTrackChanges}
