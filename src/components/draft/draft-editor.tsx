@@ -58,7 +58,7 @@ import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table
 import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
 import { Extension } from '@tiptap/core';
-// No custom HardBreak — use StarterKit default. Markers are CSS-only.
+import { InvisibleCharacters, HardBreakNode, ParagraphNode } from '@tiptap/extension-invisible-characters';
 
 // Cmd+Enter / Ctrl+Enter → insert page break (horizontal rule)
 const PageBreakShortcut = Extension.create({
@@ -127,6 +127,10 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
           heading: { levels: [1, 2, 3, 4, 5] },
         }),
         PageBreakShortcut,
+        InvisibleCharacters.configure({
+          visible: false, // controlled by showMarks prop
+          builders: [new HardBreakNode(), new ParagraphNode()],
+        }),
         Underline,
         TextStyle,
         FontFamily,
@@ -291,6 +295,16 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       editor.commands.setContent(parsed);
     }, [editor, content]);
 
+    // Toggle invisible characters (¶ ↵) visibility
+    useEffect(() => {
+      if (!editor || editor.isDestroyed) return;
+      if (showMarks) {
+        (editor.commands as any).showInvisibleCharacters?.();
+      } else {
+        (editor.commands as any).hideInvisibleCharacters?.();
+      }
+    }, [editor, showMarks]);
+
     // Page view is CSS-only (no pagination plugin) until Tiptap Pages Pro is available
 
     // Context menu listener
@@ -371,7 +385,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
     const wrapperClasses = [
       'draft-editor-wrapper',
       'overflow-auto flex-1',
-      showMarks ? 'show-marks' : '',
+      '',
       pageView ? 'page-view' : 'bg-white',
       className ?? '',
     ].filter(Boolean).join(' ');
@@ -458,40 +472,13 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             overflow: hidden;
           }
 
-          /* --- Formatting marks (¶) --- */
-          .draft-editor-wrapper.show-marks .ProseMirror p::after,
-          .draft-editor-wrapper.show-marks .ProseMirror h1::after,
-          .draft-editor-wrapper.show-marks .ProseMirror h2::after,
-          .draft-editor-wrapper.show-marks .ProseMirror h3::after,
-          .draft-editor-wrapper.show-marks .ProseMirror h4::after,
-          .draft-editor-wrapper.show-marks .ProseMirror h5::after,
-          .draft-editor-wrapper.show-marks .ProseMirror li > p::after {
-            content: '¶';
+          /* --- Invisible characters extension styling (¶ ↵) --- */
+          .Tiptap-invisible-character {
             color: #93c5fd;
-            font-size: 0.65em;
+            font-size: 0.7em;
             font-family: sans-serif;
             pointer-events: none;
-          }
-          /* Hard break (Shift+Enter) marker — show ↵ before line breaks in Chromium */
-          .draft-editor-wrapper.show-marks .ProseMirror br:not(.ProseMirror-trailingBreak) {
-            position: relative;
-            display: inline;
-          }
-          .draft-editor-wrapper.show-marks .ProseMirror br:not(.ProseMirror-trailingBreak)::before {
-            content: '↵';
-            color: #93c5fd;
-            font-size: 0.75em;
-            font-family: sans-serif;
-            pointer-events: none;
-          }
-          /* Empty paragraphs: hide the <br> so ¶ sits on same line as cursor */
-          .draft-editor-wrapper.show-marks .ProseMirror p > br.ProseMirror-trailingBreak {
-            display: inline;
-            line-height: 0;
-            font-size: 0;
-          }
-          .draft-editor-wrapper.show-marks .ProseMirror {
-            word-spacing: 0.15em;
+            user-select: none;
           }
 
           /* --- Page view --- */

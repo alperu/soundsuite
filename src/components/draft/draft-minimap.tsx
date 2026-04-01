@@ -15,8 +15,6 @@ function sanitizeForMinimap(html: string): string {
   );
 }
 
-const CONTENT_WIDTH = 816;
-
 const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) => {
   const minimapRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -25,78 +23,68 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
   const dragStartScrollTopRef = useRef(0);
 
   const [viewport, setViewport] = useState({ top: 0, height: 0 });
-  const [dynamicZoom, setDynamicZoom] = useState(0.08);
 
-  // Calculate zoom so entire content fits in the minimap container height
-  useEffect(() => {
-    const calculate = () => {
-      if (!contentRef.current || !minimapRef.current) return;
-
-      // First render at a known zoom to measure natural content height
-      contentRef.current.style.zoom = '1';
-      const naturalHeight = contentRef.current.scrollHeight;
-      const containerHeight = minimapRef.current.clientHeight;
-      const containerWidth = minimapRef.current.clientWidth;
-
-      if (naturalHeight <= 0 || containerHeight <= 0) {
-        contentRef.current.style.zoom = String(dynamicZoom);
-        return;
-      }
-
-      // Zoom to fit: content must fit both width and height of container
-      const zoomByHeight = containerHeight / naturalHeight;
-      const zoomByWidth = containerWidth / CONTENT_WIDTH;
-      const newZoom = Math.min(zoomByHeight, zoomByWidth, 0.15); // cap at 15% max
-
-      setDynamicZoom(newZoom);
-      contentRef.current.style.zoom = String(newZoom);
-    };
-
-    // Defer to let content render first
-    const raf = requestAnimationFrame(calculate);
-    const timer = setTimeout(calculate, 500);
-    return () => { cancelAnimationFrame(raf); clearTimeout(timer); };
-  }, [editorHtml]);
-
-  const updateViewport = useCallback(() => {
+  // Sync minimap scroll position with editor + update viewport indicator
+  const syncScroll = useCallback(() => {
     if (!scrollContainer || !minimapRef.current) return;
 
-    const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
-    const minimapHeight = minimapRef.current.clientHeight;
+    const editor = scrollContainer;
+    const minimap = minimapRef.current;
 
-    if (scrollHeight <= 0 || minimapHeight <= 0) return;
+    // Proportionally scroll the minimap to match the editor's position
+    const editorMaxScroll = editor.scrollHeight - editor.clientHeight;
+    const minimapMaxScroll = minimap.scrollHeight - minimap.clientHeight;
 
-    const top = (scrollTop / scrollHeight) * minimapHeight;
-    const height = (clientHeight / scrollHeight) * minimapHeight;
+    if (editorMaxScroll > 0 && minimapMaxScroll > 0) {
+      const ratio = editor.scrollTop / editorMaxScroll;
+      minimap.scrollTop = ratio * minimapMaxScroll;
+    }
 
-    setViewport({ top, height: Math.max(height, 4) });
+    // Viewport indicator: shows which part of the editor is visible
+    // Map editor coordinates to minimap coordinates
+    const contentScale = minimap.scrollHeight / editor.scrollHeight;
+    const vpTopInContent = editor.scrollTop * contentScale;
+    const vpHeightInContent = editor.clientHeight * contentScale;
+
+    // Position relative to minimap's visible area
+    const vpTop = vpTopInContent - minimap.scrollTop;
+
+    setViewport({ top: vpTop, height: Math.max(vpHeightInContent, 4) });
   }, [scrollContainer]);
 
   useEffect(() => {
     if (!scrollContainer) return;
-    updateViewport();
-    scrollContainer.addEventListener('scroll', updateViewport, { passive: true });
-    window.addEventListener('resize', updateViewport);
+    syncScroll();
+    scrollContainer.addEventListener('scroll', syncScroll, { passive: true });
+    window.addEventListener('resize', syncScroll);
     return () => {
-      scrollContainer.removeEventListener('scroll', updateViewport);
-      window.removeEventListener('resize', updateViewport);
+      scrollContainer.removeEventListener('scroll', syncScroll);
+      window.removeEventListener('resize', syncScroll);
     };
-  }, [scrollContainer, updateViewport]);
+  }, [scrollContainer, syncScroll]);
 
+  // Re-sync when content changes
   useEffect(() => {
-    updateViewport();
-  }, [editorHtml, updateViewport, dynamicZoom]);
+    const timer = setTimeout(syncScroll, 100);
+    return () => clearTimeout(timer);
+  }, [editorHtml, syncScroll]);
 
+  // Click on minimap → jump editor to that position
   const scrollToPosition = useCallback(
     (clickY: number) => {
       if (!scrollContainer || !minimapRef.current) return;
-      const minimapRect = minimapRef.current.getBoundingClientRect();
-      const relativeY = clickY - minimapRect.top;
-      const minimapHeight = minimapRef.current.clientHeight;
-      if (minimapHeight <= 0) return;
-      const ratio = relativeY / minimapHeight;
-      const { scrollHeight, clientHeight } = scrollContainer;
-      scrollContainer.scrollTop = ratio * scrollHeight - clientHeight / 2;
+      const minimap = minimapRef.current;
+      const rect = minimap.getBoundingClientRect();
+
+      // Click position in minimap content coordinates
+      const clickInContent = (clickY - rect.top) + minimap.scrollTop;
+      const contentScale = minimap.scrollHeight / scrollContainer.scrollHeight;
+
+      if (contentScale <= 0) return;
+
+      // Map back to editor coordinates
+      const editorPos = clickInContent / contentScale;
+      scrollContainer.scrollTop = editorPos - scrollContainer.clientHeight / 2;
     },
     [scrollContainer]
   );
@@ -109,6 +97,7 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
     [scrollToPosition]
   );
 
+  // Drag viewport indicator
   const handleViewportMouseDown = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
@@ -120,11 +109,13 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
       const handleMouseMove = (moveEvent: MouseEvent) => {
         if (!isDraggingRef.current || !scrollContainer || !minimapRef.current) return;
         const deltaY = moveEvent.clientY - dragStartYRef.current;
-        const minimapHeight = minimapRef.current.clientHeight;
-        const { scrollHeight } = scrollContainer;
-        if (minimapHeight <= 0) return;
-        const scrollDelta = (deltaY / minimapHeight) * scrollHeight;
-        scrollContainer.scrollTop = dragStartScrollTopRef.current + scrollDelta;
+        const minimap = minimapRef.current;
+        const contentScale = minimap.scrollHeight / scrollContainer.scrollHeight;
+        if (contentScale <= 0) return;
+
+        // Convert minimap pixel delta to editor scroll delta
+        const editorDelta = deltaY / contentScale;
+        scrollContainer.scrollTop = dragStartScrollTopRef.current + editorDelta;
       };
 
       const handleMouseUp = () => {
@@ -142,16 +133,28 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
   return (
     <div
       ref={minimapRef}
-      className="relative w-full h-full bg-gray-50 cursor-pointer overflow-hidden"
+      className="relative w-full h-full bg-gray-50 cursor-pointer minimap-scroll"
       onClick={handleClick}
     >
-      {/* Content scaled to fit entire document in visible minimap area */}
+      {/* Hide scrollbar but allow programmatic scroll */}
+      <style>{`
+        .minimap-scroll {
+          overflow-y: scroll;
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+        }
+        .minimap-scroll::-webkit-scrollbar {
+          display: none;
+        }
+      `}</style>
+
+      {/* Content at fixed 8% zoom */}
       <div
         ref={contentRef}
         className="pointer-events-none select-none origin-top-left prose prose-sm max-w-none"
         style={{
-          zoom: dynamicZoom,
-          width: `${CONTENT_WIDTH}px`,
+          zoom: 0.08,
+          width: '816px',
           padding: '96px',
           fontFamily: 'Times New Roman, serif',
           fontSize: '12px',
@@ -161,12 +164,13 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
         dangerouslySetInnerHTML={{ __html: sanitizeForMinimap(editorHtml) }}
       />
 
-      {/* Viewport indicator */}
+      {/* Viewport indicator — positioned relative to visible minimap area */}
       <div
-        className="absolute left-0 right-0 bg-blue-400/20 border-y border-blue-400/40 cursor-grab active:cursor-grabbing"
+        className="sticky left-0 right-0 bg-blue-400/20 border-y border-blue-400/40 cursor-grab active:cursor-grabbing pointer-events-auto"
         style={{
           top: `${viewport.top}px`,
           height: `${viewport.height}px`,
+          position: 'absolute',
         }}
         onMouseDown={handleViewportMouseDown}
       />
