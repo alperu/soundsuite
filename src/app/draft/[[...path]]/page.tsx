@@ -85,6 +85,12 @@ export default function DraftPage() {
   // Context menu
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
+  // TOC context menu
+  const [tocContextMenu, setTocContextMenu] = useState<{
+    x: number; y: number;
+    attrs: { tocStyle: string; showNumbers: boolean; maxDepth: number };
+  } | null>(null);
+
   // AI transform stream
   const transform = useDraftStream();
 

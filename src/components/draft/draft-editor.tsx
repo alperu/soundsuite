@@ -11,6 +11,7 @@ import FontFamily from '@tiptap/extension-font-family';
 import Link from '@tiptap/extension-link';
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 import { FontSize } from '@/lib/draft/font-size-extension';
+import { TableOfContents } from '@/lib/draft/toc-extension';
 
 export interface SelectionInfo {
   selectedText: string;
@@ -74,6 +75,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         TableRow,
         TableCell,
         TableHeader,
+        TableOfContents,
       ],
       content,
       onUpdate: ({ editor: ed }) => {
