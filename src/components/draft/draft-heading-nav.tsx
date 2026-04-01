@@ -111,7 +111,8 @@ const DraftHeadingNav: React.FC<HeadingNavProps> = ({ editor, scrollContainer })
       if (!editor) return;
       // pos is the position before the heading node; pos+1 is inside it
       const targetPos = pos + 1;
-      editor.chain().focus().setTextSelection(targetPos).run();
+      // Set selection without focus first — focus after scroll to avoid stealing click
+      editor.commands.setTextSelection(targetPos);
 
       // Find the scroll container dynamically (the overflow-y-auto parent of the editor)
       const sc = scrollContainer || editor.view.dom.closest('.overflow-y-auto');
@@ -126,11 +127,12 @@ const DraftHeadingNav: React.FC<HeadingNavProps> = ({ editor, scrollContainer })
           const offset = nodeRect.top - containerRect.top - 20;
           sc.scrollBy({ top: offset, behavior: 'smooth' });
         } else {
-          // Last resort fallback
-          editor.chain().focus().setTextSelection(pos).scrollIntoView().run();
+          editor.commands.setTextSelection(targetPos);
+          editor.commands.scrollIntoView();
         }
       } catch {
-        editor.chain().focus().setTextSelection(pos).scrollIntoView().run();
+        editor.commands.setTextSelection(targetPos);
+        editor.commands.scrollIntoView();
       }
     },
     [editor, scrollContainer]
