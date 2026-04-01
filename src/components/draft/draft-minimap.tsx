@@ -32,7 +32,7 @@ const DraftMinimap: React.FC<MinimapProps> = ({ editorHtml, scrollContainer }) =
   const syncScroll = useCallback(() => {
     cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
-      if (!scrollContainer || !minimapRef.current || !contentRef.current || isDraggingRef.current) return;
+      if (!scrollContainer || !minimapRef.current || !contentRef.current) return;
 
       const editor = scrollContainer;
       const minimap = minimapRef.current;
