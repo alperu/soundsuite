@@ -275,6 +275,22 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       getMarkdown: () => editor?.getText() ?? '',
     }), [editor, getSelection]);
 
+    // Zoom wrapper ref + Ctrl+scroll handler (must be before early returns)
+    const wrapperRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+      const el = wrapperRef.current;
+      if (!el || !onZoomChange) return;
+      const handler = (e: WheelEvent) => {
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          const delta = e.deltaY > 0 ? -0.05 : 0.05;
+          onZoomChange(Math.min(2, Math.max(0.5, zoom + delta)));
+        }
+      };
+      el.addEventListener('wheel', handler, { passive: false });
+      return () => el.removeEventListener('wheel', handler);
+    }, [zoom, onZoomChange]);
+
     if (!editor) {
       return (
         <div className={`bg-white flex-1 flex items-center justify-center text-gray-400 ${className ?? ''}`}>
@@ -290,22 +306,6 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       pageView ? 'page-view' : 'bg-white',
       className ?? '',
     ].filter(Boolean).join(' ');
-
-    // Ctrl+scroll zoom handler
-    const wrapperRef = useRef<HTMLDivElement>(null);
-    useEffect(() => {
-      const el = wrapperRef.current;
-      if (!el || !onZoomChange) return;
-      const handler = (e: WheelEvent) => {
-        if (e.ctrlKey || e.metaKey) {
-          e.preventDefault();
-          const delta = e.deltaY > 0 ? -0.05 : 0.05;
-          onZoomChange(Math.min(2, Math.max(0.5, zoom + delta)));
-        }
-      };
-      el.addEventListener('wheel', handler, { passive: false });
-      return () => el.removeEventListener('wheel', handler);
-    }, [zoom, onZoomChange]);
 
     return (
       <div ref={wrapperRef} className={wrapperClasses}>

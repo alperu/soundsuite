@@ -85,6 +85,20 @@ export default function DraftPage() {
   const [pageView, setPageView] = usePersistedState<boolean>('draft.editor.pageView', false);
   const [pageSettings, setPageSettings] = useState<{ pageSize: 'letter' | 'a4' | 'legal'; marginTop: number; marginBottom: number; marginLeft: number; marginRight: number }>({ pageSize: 'letter', marginTop: 96, marginBottom: 96, marginLeft: 96, marginRight: 96 });
 
+  // Zoom (persisted to localStorage)
+  const [zoom, setZoom] = useState(1);
+  useEffect(() => {
+    try {
+      const z = Number(localStorage.getItem('draft-zoom-level'));
+      if (z >= 0.5 && z <= 2) setZoom(z);
+    } catch {}
+  }, []);
+  const handleZoomChange = useCallback((z: number) => {
+    const clamped = Math.round(Math.min(2, Math.max(0.5, z)) * 100) / 100;
+    setZoom(clamped);
+    try { localStorage.setItem('draft-zoom-level', String(clamped)); } catch {}
+  }, []);
+
   // Load page settings from config
   useEffect(() => {
     fetch('/api/config')
@@ -416,6 +430,8 @@ export default function DraftPage() {
             onToggleShowMarks={() => setShowMarks(v => !v)}
             pageView={pageView}
             onTogglePageView={() => setPageView(v => !v)}
+            zoom={zoom}
+            onZoomChange={handleZoomChange}
             draftId={activeDraft?.id}
             provider={provider}
             model={model}
@@ -451,6 +467,8 @@ export default function DraftPage() {
               showMarks={showMarks}
               pageView={pageView}
               pageSettings={pageSettings}
+              zoom={zoom}
+              onZoomChange={handleZoomChange}
               onContextMenu={(e: MouseEvent) => {
                 e.preventDefault();
                 setContextMenu({ x: e.clientX, y: e.clientY });
