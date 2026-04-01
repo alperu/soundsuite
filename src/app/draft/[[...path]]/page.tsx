@@ -9,6 +9,8 @@ import DraftSettingsPanel from '@/components/draft/draft-settings-panel';
 import DraftChatPanel from '@/components/draft/draft-chat-panel';
 import { DraftContextMenu } from '@/components/draft/draft-context-menu';
 import { TOCContextMenu } from '@/components/draft/toc-context-menu';
+import DraftMinimap from '@/components/draft/draft-minimap';
+import DraftHeadingNav from '@/components/draft/draft-heading-nav';
 import type { DraftSummary, DraftFull } from '@/lib/draft/draft-types';
 import { useDraftStream } from '@/hooks/use-draft-stream';
 import { AI_PROVIDERS, type AIProviderKey } from '@/lib/ai/models';
@@ -64,6 +66,21 @@ export default function DraftPage() {
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT);
   const isResizingLeft = useRef(false);
   const isResizingRight = useRef(false);
+
+  // Sidebar collapsed state (synced with navigation.tsx)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const editorScrollRef = useRef<HTMLDivElement>(null);
+  const [minimapHtml, setMinimapHtml] = useState('');
+
+  useEffect(() => {
+    try { setSidebarCollapsed(localStorage.getItem('nav-collapsed') === 'true'); } catch {}
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      setSidebarCollapsed(detail?.collapsed ?? localStorage.getItem('nav-collapsed') === 'true');
+    };
+    window.addEventListener('nav-collapse-toggle', handler);
+    return () => window.removeEventListener('nav-collapse-toggle', handler);
+  }, []);
 
   // Case & draft
   const [selectedCaseId, setSelectedCaseId] = useState(urlCaseId);

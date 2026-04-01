@@ -14,6 +14,60 @@ interface ImageToolbarProps {
 const MIN_WIDTH = 50;
 const MAX_WIDTH = 1200;
 
+type WrapMode = 'inline' | 'float-left' | 'float-right' | 'block';
+
+const WRAP_OPTIONS: { value: WrapMode; label: string; icon: React.ReactNode }[] = [
+  {
+    value: 'inline',
+    label: 'Inline',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" opacity="0.7">
+        <rect x="1" y="2" width="4" height="4" rx="0.5" />
+        <rect x="6" y="3" width="9" height="1.5" rx="0.5" />
+        <rect x="1" y="8" width="14" height="1.5" rx="0.5" />
+        <rect x="1" y="12" width="10" height="1.5" rx="0.5" />
+      </svg>
+    ),
+  },
+  {
+    value: 'float-left',
+    label: 'Wrap right',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" opacity="0.7">
+        <rect x="1" y="1" width="5" height="5" rx="0.5" />
+        <rect x="7" y="2" width="8" height="1.5" rx="0.5" />
+        <rect x="7" y="5" width="8" height="1.5" rx="0.5" />
+        <rect x="1" y="8" width="14" height="1.5" rx="0.5" />
+        <rect x="1" y="12" width="10" height="1.5" rx="0.5" />
+      </svg>
+    ),
+  },
+  {
+    value: 'float-right',
+    label: 'Wrap left',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" opacity="0.7">
+        <rect x="10" y="1" width="5" height="5" rx="0.5" />
+        <rect x="1" y="2" width="8" height="1.5" rx="0.5" />
+        <rect x="1" y="5" width="8" height="1.5" rx="0.5" />
+        <rect x="1" y="8" width="14" height="1.5" rx="0.5" />
+        <rect x="1" y="12" width="10" height="1.5" rx="0.5" />
+      </svg>
+    ),
+  },
+  {
+    value: 'block',
+    label: 'Block (centered)',
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" opacity="0.7">
+        <rect x="4" y="1" width="8" height="5" rx="0.5" />
+        <rect x="1" y="8" width="14" height="1.5" rx="0.5" />
+        <rect x="1" y="12" width="10" height="1.5" rx="0.5" />
+      </svg>
+    ),
+  },
+];
+
 /**
  * Floating toolbar that appears when an image is clicked in the editor.
  * Provides: slider resize, edit (crop/annotate/redact), and delete.
@@ -25,6 +79,17 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
     return w ? parseInt(w, 10) : (imageEl.naturalWidth || imageEl.offsetWidth || 400);
   });
   const [inputValue, setInputValue] = useState(String(sliderValue));
+  const [wrapMode, setWrapMode] = useState<WrapMode>(() => {
+    // Read current wrapping from the image's TipTap node attrs
+    let current: WrapMode = 'inline';
+    editor.state.doc.descendants((node) => {
+      if (node.type.name === 'image' && node.attrs.src === imageEl.getAttribute('src')) {
+        current = node.attrs.wrapping || 'inline';
+        return false;
+      }
+    });
+    return current;
+  });
   const toolbarRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ top: 0, left: 0 });
   const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -41,6 +106,62 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
         return false;
       }
     });
+  }, [editor, imageEl]);
+
+  // Update wrapping mode in TipTap
+  const handleWrapChange = useCallback((mode: WrapMode) => {
+    setWrapMode(mode);
+    const { state } = editor;
+    state.doc.descendants((node, nodePos) => {
+      if (node.type.name === 'image' && node.attrs.src === imageEl.getAttribute('src')) {
+        editor.view.dispatch(
+          state.tr.setNodeMarkup(nodePos, undefined, { ...node.attrs, wrapping: mode })
+        );
+        return false;
+      }
+    });
+  }, [editor, imageEl]);
+
+  // Move image: cut from current position and insert at target
+  const handleMoveImage = useCallback((direction: 'up' | 'down') => {
+    const { state } = editor;
+    let imgPos = -1;
+    let imgNode: any = null;
+    state.doc.descendants((node, nodePos) => {
+      if (node.type.name === 'image' && node.attrs.src === imageEl.getAttribute('src')) {
+        imgPos = nodePos;
+        imgNode = node;
+        return false;
+      }
+    });
+    if (imgPos < 0 || !imgNode) return;
+
+    // Find the parent block and swap with sibling
+    const resolved = state.doc.resolve(imgPos);
+    const parentDepth = resolved.depth;
+    const parentPos = resolved.before(parentDepth);
+    const parentEnd = resolved.after(parentDepth);
+
+    if (direction === 'up' && parentPos > 0) {
+      const targetPos = state.doc.resolve(parentPos).before(parentDepth);
+      const tr = state.tr;
+      const slice = tr.doc.slice(parentPos, parentEnd);
+      tr.delete(parentPos, parentEnd);
+      tr.insert(targetPos, slice.content);
+      editor.view.dispatch(tr);
+    } else if (direction === 'down') {
+      const afterNode = state.doc.resolve(parentEnd);
+      if (afterNode.pos < state.doc.content.size) {
+        const nextEnd = afterNode.pos + (state.doc.nodeAt(afterNode.pos)?.nodeSize || 0);
+        const tr = state.tr;
+        const slice = tr.doc.slice(parentPos, parentEnd);
+        tr.delete(parentPos, parentEnd);
+        // After deletion, position shifts
+        const insertAt = nextEnd - (parentEnd - parentPos);
+        tr.insert(Math.min(insertAt, tr.doc.content.size), slice.content);
+        editor.view.dispatch(tr);
+      }
+    }
   }, [editor, imageEl]);
 
   // Position toolbar above the image
@@ -83,13 +204,35 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
     };
   }, [onClose, imageEl, editorOpen]);
 
-  // Visual selection outline
+  // Visual selection outline + move handle overlay
   useEffect(() => {
     imageEl.style.outline = '2px solid #3b82f6';
     imageEl.style.outlineOffset = '2px';
+    imageEl.style.cursor = 'grab';
+
+    // Add a move handle icon in the top-left corner
+    const parent = imageEl.parentElement;
+    if (parent) {
+      parent.style.position = 'relative';
+      const handle = document.createElement('div');
+      handle.className = 'image-move-handle';
+      handle.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>`;
+      handle.style.cssText = 'position:absolute;top:4px;left:4px;width:24px;height:24px;background:rgba(59,130,246,0.8);border-radius:4px;display:flex;align-items:center;justify-content:center;cursor:grab;z-index:5;';
+      handle.title = 'Move image (use ↑↓ buttons in toolbar)';
+      parent.appendChild(handle);
+
+      return () => {
+        imageEl.style.outline = '';
+        imageEl.style.outlineOffset = '';
+        imageEl.style.cursor = '';
+        handle.remove();
+      };
+    }
+
     return () => {
       imageEl.style.outline = '';
       imageEl.style.outlineOffset = '';
+      imageEl.style.cursor = '';
     };
   }, [imageEl]);
 
@@ -206,6 +349,48 @@ export default function ImageToolbar({ editor, imageEl, onClose }: ImageToolbarP
         >
           px
         </span>
+
+        <div className="w-px h-5 bg-gray-300 mx-0.5" />
+
+        {/* Wrap mode */}
+        <div className="flex items-center gap-0.5">
+          {WRAP_OPTIONS.map(opt => (
+            <button
+              key={opt.value}
+              onClick={() => handleWrapChange(opt.value)}
+              className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
+                wrapMode === opt.value
+                  ? 'bg-blue-100 text-blue-700'
+                  : 'text-gray-500 hover:bg-gray-100'
+              }`}
+              title={opt.label}
+            >
+              {opt.icon}
+            </button>
+          ))}
+        </div>
+
+        <div className="w-px h-5 bg-gray-300 mx-0.5" />
+
+        {/* Move up/down */}
+        <button
+          onClick={() => handleMoveImage('up')}
+          className="w-7 h-7 flex items-center justify-center rounded text-gray-500 hover:bg-gray-100"
+          title="Move up"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="18 15 12 9 6 15" />
+          </svg>
+        </button>
+        <button
+          onClick={() => handleMoveImage('down')}
+          className="w-7 h-7 flex items-center justify-center rounded text-gray-500 hover:bg-gray-100"
+          title="Move down"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
 
         <div className="w-px h-5 bg-gray-300 mx-0.5" />
 

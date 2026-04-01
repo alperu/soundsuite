@@ -1,7 +1,10 @@
 'use client';
 
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+
+const LS_KEY = 'nav-collapsed';
 
 const links = [
   { href: '/', label: 'Cases', icon: 'M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z' },
@@ -17,18 +20,44 @@ const links = [
 
 export default function Navigation() {
   const pathname = usePathname();
+  const [collapsed, setCollapsed] = useState(false);
+
+  // Load persisted state
+  useEffect(() => {
+    try {
+      setCollapsed(localStorage.getItem(LS_KEY) === 'true');
+    } catch {}
+  }, []);
+
+  const toggle = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    try { localStorage.setItem(LS_KEY, String(next)); } catch {}
+    // Dispatch custom event so other components (Draft page) can react
+    window.dispatchEvent(new CustomEvent('nav-collapse-toggle', { detail: { collapsed: next } }));
+  };
 
   return (
-    <aside className="w-56 bg-white border-r border-gray-200 flex flex-col shrink-0">
+    <aside
+      className={`bg-white border-r border-gray-200 flex flex-col shrink-0 transition-all duration-200 ${
+        collapsed ? 'w-12' : 'w-56'
+      }`}
+    >
       {/* Logo */}
-      <div className="h-14 flex items-center px-4 border-b border-gray-200">
-        <Link href="/" className="text-lg font-bold text-gray-900">
-          Sound Suite
-        </Link>
+      <div className="h-14 flex items-center border-b border-gray-200 overflow-hidden">
+        {collapsed ? (
+          <Link href="/" className="w-full flex items-center justify-center text-sm font-bold text-gray-900" title="Sound Suite">
+            SS
+          </Link>
+        ) : (
+          <Link href="/" className="text-lg font-bold text-gray-900 px-4 whitespace-nowrap">
+            Sound Suite
+          </Link>
+        )}
       </div>
 
       {/* Nav links */}
-      <nav className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto">
+      <nav className="flex-1 py-3 px-1 space-y-0.5 overflow-y-auto overflow-x-hidden">
         {links.map((link) => {
           const active = link.href === '/'
             ? pathname === '/'
@@ -38,8 +67,10 @@ export default function Navigation() {
             <Link
               key={link.href}
               href={link.href}
+              title={collapsed ? link.label : undefined}
               className={`
-                flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors
+                flex items-center rounded-md text-sm font-medium transition-colors overflow-hidden
+                ${collapsed ? 'justify-center px-0 py-2' : 'gap-3 px-3 py-2'}
                 ${active
                   ? 'bg-blue-50 text-blue-700'
                   : 'text-gray-700 hover:bg-gray-100'
@@ -55,11 +86,28 @@ export default function Navigation() {
               >
                 <path strokeLinecap="round" strokeLinejoin="round" d={link.icon} />
               </svg>
-              {link.label}
+              {!collapsed && <span className="whitespace-nowrap">{link.label}</span>}
             </Link>
           );
         })}
       </nav>
+
+      {/* Collapse toggle */}
+      <button
+        onClick={toggle}
+        className="h-10 flex items-center justify-center border-t border-gray-200 text-gray-400 hover:text-gray-600 hover:bg-gray-50 transition-colors"
+        title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      >
+        <svg
+          className={`w-4 h-4 transition-transform duration-200 ${collapsed ? 'rotate-180' : ''}`}
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+        </svg>
+      </button>
     </aside>
   );
 }
