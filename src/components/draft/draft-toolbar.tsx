@@ -82,22 +82,37 @@ function Tooltip({
   children: React.ReactNode;
 }) {
   const [show, setShow] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
 
   const handleEnter = () => {
-    timerRef.current = setTimeout(() => setShow(true), 200);
+    timerRef.current = setTimeout(() => {
+      if (wrapperRef.current) {
+        const rect = wrapperRef.current.getBoundingClientRect();
+        setPos({
+          top: rect.top - 6,
+          left: rect.left + rect.width / 2,
+        });
+      }
+      setShow(true);
+    }, 200);
   };
   const handleLeave = () => {
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = null;
     setShow(false);
+    setPos(null);
   };
 
   return (
-    <div className="relative" onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
+    <div ref={wrapperRef} onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
       {children}
-      {show && (
-        <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 z-[100] pointer-events-none whitespace-nowrap">
+      {show && pos && (
+        <div
+          className="fixed z-[200] pointer-events-none whitespace-nowrap -translate-x-1/2 -translate-y-full"
+          style={{ top: pos.top, left: pos.left }}
+        >
           <div className="bg-gray-800 text-white text-[11px] leading-tight rounded px-2 py-1 shadow-lg flex items-center gap-1.5">
             <span>{label}</span>
             {shortcut && (
