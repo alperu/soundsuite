@@ -14,6 +14,23 @@ const FONT_FAMILIES = [
   { value: 'Verdana', label: 'Verdana' },
 ];
 
+const FONT_SIZES = [
+  { value: '', label: 'Size' },
+  { value: '10px', label: '10' },
+  { value: '11px', label: '11' },
+  { value: '12px', label: '12' },
+  { value: '13px', label: '13' },
+  { value: '14px', label: '14' },
+  { value: '16px', label: '16' },
+  { value: '18px', label: '18' },
+  { value: '20px', label: '20' },
+  { value: '24px', label: '24' },
+  { value: '28px', label: '28' },
+  { value: '32px', label: '32' },
+  { value: '36px', label: '36' },
+  { value: '48px', label: '48' },
+];
+
 interface DraftToolbarProps {
   editor: Editor | null;
   saveStatus: 'saved' | 'unsaved' | 'saving';
@@ -23,6 +40,7 @@ interface DraftToolbarProps {
   onFontFamilyChange: (font: string) => void;
   caseId?: string;
   onImportComplete?: () => void;
+  onWordImport?: (html: string) => void;
 }
 
 function ToolbarButton({
@@ -578,9 +596,12 @@ export default function DraftToolbar({
   onFontFamilyChange,
   caseId,
   onImportComplete,
+  onWordImport,
 }: DraftToolbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const wordInputRef = useRef<HTMLInputElement>(null);
   const linkBtnRef = useRef<HTMLButtonElement | null>(null);
+  const [wordImporting, setWordImporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
@@ -631,6 +652,25 @@ export default function DraftToolbar({
     <div className="flex items-center gap-1 px-2 py-1 bg-gray-50 border border-b-0 rounded-t-lg flex-wrap">
       {/* Font family dropdown */}
       <FontFamilyDropdown editor={editor} value={fontFamily} onChange={onFontFamilyChange} />
+
+      {/* Font size dropdown */}
+      <select
+        value={editor.getAttributes('textStyle').fontSize || ''}
+        onChange={(e) => {
+          const size = e.target.value;
+          if (size) {
+            (editor.chain().focus() as any).setFontSize(size).run();
+          } else {
+            (editor.chain().focus() as any).unsetFontSize().run();
+          }
+        }}
+        className="h-8 px-1 text-xs border border-gray-200 rounded bg-white text-gray-700 cursor-pointer"
+        title="Font Size"
+      >
+        {FONT_SIZES.map(s => (
+          <option key={s.value} value={s.value}>{s.label}</option>
+        ))}
+      </select>
 
       {/* Heading dropdown */}
       <HeadingDropdown editor={editor} />
@@ -783,6 +823,69 @@ export default function DraftToolbar({
       >
         <span className="text-xs font-bold">TC</span>
       </ToolbarButton>
+
+      <Separator />
+
+      {/* Import from Word */}
+      <button
+        onClick={() => wordInputRef.current?.click()}
+        disabled={wordImporting}
+        className="h-8 px-2 flex items-center gap-1 text-xs font-medium text-gray-700 rounded hover:bg-gray-200 transition-colors disabled:opacity-50"
+        title="Import from Word (.docx)"
+      >
+        {wordImporting ? (
+          <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        ) : (
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="12" y1="18" x2="12" y2="12" />
+            <line x1="9" y1="15" x2="15" y2="15" />
+          </svg>
+        )}
+        Word
+      </button>
+      <input
+        ref={wordInputRef}
+        type="file"
+        accept=".docx"
+        onChange={async (e) => {
+          const file = e.target.files?.[0];
+          if (!file || !editor) return;
+          setWordImporting(true);
+          try {
+            const mammoth = (await import('mammoth')).default;
+            const arrayBuffer = await file.arrayBuffer();
+            const result = await mammoth.convertToHtml(
+              { arrayBuffer },
+              {
+                convertImage: mammoth.images.imgElement((image: any) =>
+                  image.read('base64').then((imageBuffer: string) => ({
+                    src: `data:${image.contentType};base64,${imageBuffer}`,
+                  }))
+                ),
+              }
+            );
+            if (result.value) {
+              // Strip font-family from imported HTML so editor font applies
+              const cleanHtml = result.value.replace(/font-family\s*:\s*[^;"]+;?/gi, '');
+              editor.commands.setContent(cleanHtml);
+              onWordImport?.(cleanHtml);
+            }
+            if (result.messages?.length) {
+              console.warn('[Word Import] Warnings:', result.messages);
+            }
+          } catch (err) {
+            alert('Word import failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
+          }
+          setWordImporting(false);
+          if (wordInputRef.current) wordInputRef.current.value = '';
+        }}
+        className="hidden"
+      />
 
       {/* Spacer + Save status */}
       <div className="flex-1" />

@@ -10,6 +10,7 @@ import { TextStyle } from '@tiptap/extension-text-style';
 import FontFamily from '@tiptap/extension-font-family';
 import Link from '@tiptap/extension-link';
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
+import { FontSize } from '@/lib/draft/font-size-extension';
 
 export interface SelectionInfo {
   selectedText: string;
@@ -47,6 +48,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         Underline,
         TextStyle,
         FontFamily,
+        FontSize,
         Link.configure({
           openOnClick: false,
           autolink: true,
@@ -90,6 +92,10 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       editorProps: {
         attributes: {
           class: 'prose prose-sm max-w-none focus:outline-none min-h-full px-4 py-3',
+        },
+        // Strip font-family from pasted HTML so the editor's set font is used
+        transformPastedHTML(html: string) {
+          return html.replace(/font-family\s*:\s*[^;"]+;?/gi, '');
         },
       },
     });
