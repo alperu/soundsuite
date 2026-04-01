@@ -174,8 +174,24 @@ function createImageRun(node: TipTapNode): ImageRun | null {
         align: VerticalPositionAlign.TOP,
       },
       wrap: {
-        type: 1, // square wrapping (TextWrappingType.SQUARE = 1 in docx)
-        side: 3, // both sides (TextWrappingSide.BOTH_SIDES = 3)
+        type: 1, // square wrapping
+        side: 3, // both sides
+      },
+    };
+  } else if (wrapping === 'block') {
+    // Center: use floating with center alignment
+    baseOpts.floating = {
+      horizontalPosition: {
+        relative: HorizontalPositionRelativeFrom.MARGIN,
+        align: HorizontalPositionAlign.CENTER,
+      },
+      verticalPosition: {
+        relative: VerticalPositionRelativeFrom.PARAGRAPH,
+        align: VerticalPositionAlign.TOP,
+      },
+      wrap: {
+        type: 3, // top and bottom wrapping (no text beside image)
+        side: 3,
       },
     };
   }
@@ -421,9 +437,12 @@ function convertBlockNode(node: TipTapNode): (Paragraph | Table)[] {
     case 'image': {
       const imgRun = createImageRun(node);
       if (imgRun) {
+        const wrap = node.attrs?.wrapping || 'inline';
         results.push(
           new Paragraph({
             children: [imgRun],
+            alignment: wrap === 'block' ? AlignmentType.CENTER : undefined,
+            spacing: { after: 120 },
           })
         );
       }
