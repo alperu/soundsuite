@@ -112,6 +112,9 @@ export default function DraftPage() {
   const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving'>('saved');
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSavedContent = useRef('');
+  const [wordImporting, setWordImporting] = useState(false);
+  const [wordExporting, setWordExporting] = useState(false);
+  const wordInputRef = useRef<HTMLInputElement>(null);
 
   // Editor
   const editorRef = useRef<any>(null);
@@ -669,10 +672,102 @@ export default function DraftPage() {
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
           </select>
+          {/* Word Import / DOCX Export */}
           {activeDraft && (
-            <span className="ml-auto text-gray-500">
-              {activeDraft.documentType} — {activeDraft.title}
-            </span>
+            <>
+              <button
+                onClick={() => wordInputRef.current?.click()}
+                disabled={wordImporting}
+                className="ml-auto h-6 px-2 flex items-center gap-1 text-[11px] font-medium text-gray-600 border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+                title="Import from Word (.docx)"
+              >
+                {wordImporting ? (
+                  <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                ) : (
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="12" y1="18" x2="12" y2="12" /><line x1="9" y1="15" x2="15" y2="15" /></svg>
+                )}
+                Word
+              </button>
+              <input
+                ref={wordInputRef}
+                type="file"
+                accept=".docx"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  const editor = editorRef.current?.editor;
+                  if (!file || !editor) return;
+                  setWordImporting(true);
+                  try {
+                    const mammoth = (await import('mammoth')).default;
+                    const arrayBuffer = await file.arrayBuffer();
+                    const result = await mammoth.convertToHtml({ arrayBuffer }, {
+                      convertImage: mammoth.images.imgElement((image: any) =>
+                        image.read('base64').then((imageBuffer: string) => ({
+                          src: `data:${image.contentType};base64,${imageBuffer}`,
+                        }))
+                      ),
+                    });
+                    if (result.value) {
+                      const cleanHtml = result.value.replace(/font-family\s*:\s*[^;"]+;?/gi, '');
+                      editor.commands.setContent(cleanHtml);
+                    }
+                  } catch (err) {
+                    alert('Word import failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
+                  }
+                  setWordImporting(false);
+                  if (wordInputRef.current) wordInputRef.current.value = '';
+                }}
+                className="hidden"
+              />
+              <button
+                onClick={async () => {
+                  const editor = editorRef.current?.editor;
+                  if (!editor) return;
+                  setWordExporting(true);
+                  try {
+                    const { exportToDocx } = await import('@/lib/draft/docx-exporter');
+                    const json = editor.getJSON();
+                    const blob = await exportToDocx(json, {
+                      pageSize: (pageSettings?.pageSize as 'letter' | 'a4' | 'legal') || 'letter',
+                      marginTop: pageSettings?.marginTop,
+                      marginBottom: pageSettings?.marginBottom,
+                      marginLeft: pageSettings?.marginLeft,
+                      marginRight: pageSettings?.marginRight,
+                      defaultFont: styleDefaults?.defaultFont,
+                      defaultFontSize: styleDefaults?.defaultFontSize,
+                      h1Size: styleDefaults?.h1Size,
+                      h2Size: styleDefaults?.h2Size,
+                      h3Size: styleDefaults?.h3Size,
+                      h4Size: styleDefaults?.h4Size,
+                      h5Size: styleDefaults?.h5Size,
+                      lineSpacing: styleDefaults?.lineSpacing,
+                      paragraphSpacing: styleDefaults?.paragraphSpacing,
+                    });
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = `document-${new Date().toISOString().slice(0, 10)}.docx`;
+                    a.click();
+                    URL.revokeObjectURL(a.href);
+                  } catch (err) {
+                    alert('Export failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
+                  }
+                  setWordExporting(false);
+                }}
+                disabled={wordExporting}
+                className="h-6 px-2 flex items-center gap-1 text-[11px] font-medium text-gray-600 border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+                title="Export as Word (.docx)"
+              >
+                {wordExporting ? (
+                  <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                ) : (
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><path d="M12 18v-6m-3 3l3 3 3-3" /></svg>
+                )}
+                DOCX
+              </button>
+              <span className="text-gray-500">
+                {activeDraft.documentType} — {activeDraft.title}
+              </span>
+            </>
           )}
         </div>
 

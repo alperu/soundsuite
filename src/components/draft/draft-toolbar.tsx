@@ -811,10 +811,24 @@ export default function DraftToolbar({
         </select>
       </Tooltip>
 
-      {/* Heading dropdown */}
-      <Tooltip label="Heading Level">
-        <HeadingDropdown editor={editor} />
-      </Tooltip>
+      {/* Heading buttons H1-H5 + Paragraph */}
+      <ToolbarButton
+        onClick={() => editor.chain().focus().setParagraph().run()}
+        active={!editor.isActive('heading')}
+        title="Paragraph"
+      >
+        <span className="text-[11px] font-bold leading-none">P</span>
+      </ToolbarButton>
+      {([1, 2, 3, 4, 5] as const).map(level => (
+        <ToolbarButton
+          key={level}
+          onClick={() => editor.chain().focus().toggleHeading({ level }).run()}
+          active={editor.isActive('heading', { level })}
+          title={`Heading ${level}`}
+        >
+          <span className="text-[11px] font-bold leading-none">H{level}</span>
+        </ToolbarButton>
+      ))}
 
       <Separator />
 
@@ -1116,121 +1130,7 @@ export default function DraftToolbar({
 
       <Separator />
 
-      {/* Import from Word */}
-      <Tooltip label="Import from Word (.docx)">
-        <button
-          onClick={() => wordInputRef.current?.click()}
-          disabled={wordImporting}
-          className="h-8 px-2 flex items-center gap-1 text-xs font-medium text-gray-700 rounded hover:bg-gray-200 transition-colors disabled:opacity-50"
-        >
-        {wordImporting ? (
-          <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
-        ) : (
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-            <polyline points="14 2 14 8 20 8" />
-            <line x1="12" y1="18" x2="12" y2="12" />
-            <line x1="9" y1="15" x2="15" y2="15" />
-          </svg>
-        )}
-        Word
-        </button>
-      </Tooltip>
-      <input
-        ref={wordInputRef}
-        type="file"
-        accept=".docx"
-        onChange={async (e) => {
-          const file = e.target.files?.[0];
-          if (!file || !editor) return;
-          setWordImporting(true);
-          try {
-            const mammoth = (await import('mammoth')).default;
-            const arrayBuffer = await file.arrayBuffer();
-            const result = await mammoth.convertToHtml(
-              { arrayBuffer },
-              {
-                convertImage: mammoth.images.imgElement((image: any) =>
-                  image.read('base64').then((imageBuffer: string) => ({
-                    src: `data:${image.contentType};base64,${imageBuffer}`,
-                  }))
-                ),
-              }
-            );
-            if (result.value) {
-              // Strip font-family from imported HTML so editor font applies
-              const cleanHtml = result.value.replace(/font-family\s*:\s*[^;"]+;?/gi, '');
-              editor.commands.setContent(cleanHtml);
-              onWordImport?.(cleanHtml);
-            }
-            if (result.messages?.length) {
-              console.warn('[Word Import] Warnings:', result.messages);
-            }
-          } catch (err) {
-            alert('Word import failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
-          }
-          setWordImporting(false);
-          if (wordInputRef.current) wordInputRef.current.value = '';
-        }}
-        className="hidden"
-      />
-
-      {/* Export to Word */}
-      <Tooltip label="Export as Word (.docx)">
-        <button
-          onClick={async () => {
-            if (!editor) return;
-            setWordExporting(true);
-            try {
-              const { exportToDocx } = await import('@/lib/draft/docx-exporter');
-              const json = editor.getJSON();
-              const blob = await exportToDocx(json, {
-                pageSize: (pageSettings?.pageSize as 'letter' | 'a4' | 'legal') || 'letter',
-                marginTop: pageSettings?.marginTop,
-                marginBottom: pageSettings?.marginBottom,
-                marginLeft: pageSettings?.marginLeft,
-                marginRight: pageSettings?.marginRight,
-                defaultFont: styleDefaults?.defaultFont,
-                defaultFontSize: styleDefaults?.defaultFontSize,
-                h1Size: styleDefaults?.h1Size,
-                h2Size: styleDefaults?.h2Size,
-                h3Size: styleDefaults?.h3Size,
-                h4Size: styleDefaults?.h4Size,
-                h5Size: styleDefaults?.h5Size,
-                lineSpacing: styleDefaults?.lineSpacing,
-                paragraphSpacing: styleDefaults?.paragraphSpacing,
-              });
-              const a = document.createElement('a');
-              a.href = URL.createObjectURL(blob);
-              a.download = `document-${new Date().toISOString().slice(0, 10)}.docx`;
-              a.click();
-              URL.revokeObjectURL(a.href);
-            } catch (err) {
-              alert('Export failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
-            }
-            setWordExporting(false);
-          }}
-          disabled={wordExporting}
-          className="h-8 px-2 flex items-center gap-1 text-xs font-medium text-gray-700 rounded hover:bg-gray-200 transition-colors disabled:opacity-50"
-        >
-          {wordExporting ? (
-            <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-            </svg>
-          ) : (
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <path d="M12 18v-6m-3 3l3 3 3-3" />
-            </svg>
-          )}
-          DOCX
-        </button>
-      </Tooltip>
+      {/* Word/DOCX buttons moved to top bar in page.tsx */}
 
       {/* Spacer */}
       <div className="flex-1" />
