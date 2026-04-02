@@ -317,7 +317,7 @@ export default function DraftVersionHistory({
 
           <div className="space-y-0.5">
             {versions.map((entry, i) => {
-              const isCurrent = entry.version === currentVersion;
+              const isCurrent = i === 0; // first entry is always the latest (sorted desc)
               const isPreviewing = entry.id === previewingId;
 
               return (
