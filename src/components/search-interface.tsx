@@ -672,7 +672,7 @@ export default function SearchInterface({
     sessionId: string,
   ) => {
     const mode = deepSearchMode ? 'deep' : compareMode ? 'compare' : 'ai';
-    const turns: Array<{ role: 'user' | 'assistant'; content: string; mode?: string; searchTime?: number | null }> = [];
+    const turns: Array<{ role: 'user' | 'assistant'; content: string; mode?: string; searchTime?: number | null; sources?: any[]; searchStats?: any; subQueries?: string[] }> = [];
 
     if (mode === 'deep') {
       for (const t of sessionDeepTurns) {
