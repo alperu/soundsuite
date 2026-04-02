@@ -114,7 +114,22 @@ export async function updateDraft(id: string, input: UpdateDraftInput) {
   const existing = await prisma.draft.findUnique({ where: { id } });
   if (!existing) throw new Error('Draft not found');
 
-  const shouldVersion = input.content !== undefined && input.content !== existing.content;
+  const contentChanged = input.content !== undefined && input.content !== existing.content;
+
+  // Only create a version if content changed AND enough time since last version
+  // This prevents a new version on every 1.5s autosave — only meaningful checkpoints
+  let shouldVersion = false;
+  if (contentChanged) {
+    const lastVersion = await prisma.draftVersion.findFirst({
+      where: { draftId: id },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    const MIN_VERSION_INTERVAL = 2 * 60 * 1000; // 2 minutes between versions
+    shouldVersion = !lastVersion
+      || (Date.now() - lastVersion.createdAt.getTime() > MIN_VERSION_INTERVAL)
+      || !!input.changeSummary; // explicit changeSummary always creates a version
+  }
 
   const updated = await prisma.draft.update({
     where: { id },
