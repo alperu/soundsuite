@@ -44,6 +44,16 @@ interface ExportOptions {
   marginBottom?: number;
   marginLeft?: number;
   marginRight?: number;
+  // Font/style settings from editor config
+  defaultFont?: string;        // e.g. 'Times New Roman'
+  defaultFontSize?: string;    // e.g. '12px'
+  h1Size?: string;
+  h2Size?: string;
+  h3Size?: string;
+  h4Size?: string;
+  h5Size?: string;
+  lineSpacing?: string;        // e.g. '1.5' (multiplier)
+  paragraphSpacing?: string;   // e.g. '12px'
 }
 
 // ---------------------------------------------------------------------------
@@ -303,17 +313,23 @@ function convertInlineContent(nodes: TipTapNode[]): (TextRun | ExternalHyperlink
 // Block node conversion
 // ---------------------------------------------------------------------------
 
-// Heading sizes in half-points (Word units)
-const HEADING_SIZES: Record<number, number> = {
-  1: 48,  // 24pt
+// Heading sizes in half-points — set dynamically by exportToDocx() from options
+let _headingSizes: Record<number, number> = {
+  1: 48,  // 24pt default
   2: 40,  // 20pt
   3: 32,  // 16pt
   4: 28,  // 14pt
   5: 24,  // 12pt
 };
 
-// Paragraph spacing in twips (240 twips = ~12pt after)
-const PARA_SPACING = { after: 240 };
+// Default body font size in half-points — set dynamically
+let _defaultBodySize: number | undefined;
+
+// Default font family — set dynamically
+let _defaultFont: string | undefined;
+
+// Paragraph spacing in twips — set dynamically
+let _paraSpacing = { after: 240, line: 360 };
 
 function convertBlockNode(node: TipTapNode, allContent?: TipTapNode[]): (Paragraph | Table)[] {
   const results: (Paragraph | Table)[] = [];
@@ -325,7 +341,7 @@ function convertBlockNode(node: TipTapNode, allContent?: TipTapNode[]): (Paragra
       results.push(new Paragraph({
         children,
         alignment,
-        spacing: PARA_SPACING,
+        spacing: _paraSpacing,
       }));
       break;
     }
@@ -333,7 +349,7 @@ function convertBlockNode(node: TipTapNode, allContent?: TipTapNode[]): (Paragra
     case 'heading': {
       const level = node.attrs?.level || 1;
       const alignment = ALIGNMENT_MAP[node.attrs?.textAlign] || undefined;
-      const headingSize = HEADING_SIZES[level] || 24;
+      const headingSize = _headingSizes[level] || 24;
 
       // Build heading TextRuns with forced bold + black + size
       const children: (TextRun | ExternalHyperlink)[] = [];
@@ -588,6 +604,21 @@ export async function exportToDocx(
 ): Promise<Blob> {
   const content = (tiptapJson.content || []) as TipTapNode[];
 
+  // --- Apply style options to module-level config ---
+  _headingSizes = {
+    1: parseFontSize(options.h1Size) || 48,
+    2: parseFontSize(options.h2Size) || 40,
+    3: parseFontSize(options.h3Size) || 32,
+    4: parseFontSize(options.h4Size) || 28,
+    5: parseFontSize(options.h5Size) || 24,
+  };
+  _defaultBodySize = parseFontSize(options.defaultFontSize) || pxToHalfPt(12);
+  _defaultFont = options.defaultFont || 'Times New Roman';
+
+  const lineMultiplier = parseFloat(options.lineSpacing || '1.5') || 1.5;
+  const paraAfter = options.paragraphSpacing ? pxToTwip(parseFloat(options.paragraphSpacing)) : 240;
+  _paraSpacing = { after: paraAfter, line: Math.round(lineMultiplier * 240) };
+
   // Extract footnotes first so inline references can use FootnoteReferenceRun
   const { footnoteMap, footnotesConfig } = extractFootnotes(content);
   // Store in module scope so convertInlineContent can access it
@@ -614,6 +645,19 @@ export async function exportToDocx(
   const doc = new Document({
     title: options.title || 'Document',
     footnotes: Object.keys(footnotesConfig).length > 0 ? footnotesConfig : undefined,
+    styles: {
+      default: {
+        document: {
+          run: {
+            font: _defaultFont,
+            size: _defaultBodySize,
+          },
+          paragraph: {
+            spacing: _paraSpacing,
+          },
+        },
+      },
+    },
     numbering: {
       config: [
         {

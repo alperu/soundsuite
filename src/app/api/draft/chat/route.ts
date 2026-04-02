@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { streamAI } from '@/lib/ai/ai-provider';
-import { AIProviderKey, AI_PROVIDER_KEYS } from '@/lib/ai/models';
+import { AIProviderKey, AI_PROVIDER_KEYS, AI_PROVIDERS } from '@/lib/ai/models';
 import { getDraftChatSystemPrompt } from '@/lib/ai/draft-prompts';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 
@@ -21,6 +21,8 @@ export async function POST(request: NextRequest) {
       history,
       provider,
       model,
+      thinking,
+      maxTokens: reqMaxTokens,
     } = body as {
       query: string;
       caseId?: string;
@@ -30,6 +32,8 @@ export async function POST(request: NextRequest) {
       history?: Array<{ role: 'user' | 'assistant'; content: string }>;
       provider: string;
       model: string;
+      thinking?: boolean;
+      maxTokens?: number;
     };
 
     // Support both single caseId and array of caseIds
@@ -46,6 +50,17 @@ export async function POST(request: NextRequest) {
     if (!provider || !AI_PROVIDER_KEYS.includes(provider as AIProviderKey)) {
       return NextResponse.json({ error: 'Invalid provider' }, { status: 400 });
     }
+
+    // Relax model validation for Ollama (arbitrary models) — match search/ai behavior
+    const providerDef = AI_PROVIDERS[provider as AIProviderKey];
+    if (provider !== 'ollama' && model && !providerDef.models.some(m => m.id === model)) {
+      // Auto-fallback to first model instead of erroring
+      const fallbackModel = providerDef.models[0]?.id;
+      if (fallbackModel) {
+        (body as any).model = fallbackModel;
+      }
+    }
+    const effectiveModel = (body as any).model || model || providerDef.models[0]?.id || '';
 
     if (!documentContent) {
       return NextResponse.json({ error: 'documentContent is required' }, { status: 400 });
@@ -135,10 +150,11 @@ export async function POST(request: NextRequest) {
 
           for await (const event of streamAI({
             provider: provider as AIProviderKey,
-            model,
+            model: effectiveModel,
             messages,
-            maxTokens: 4096,
-            temperature: 0.3,
+            maxTokens: reqMaxTokens || 4096,
+            temperature: 0.7,
+            thinking,
           })) {
             if (event.type === 'token') {
               fullContent += event.text;

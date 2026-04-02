@@ -659,6 +659,8 @@ export default function DraftPage() {
             draftId={activeDraft?.id}
             provider={provider}
             model={model}
+            styleDefaults={styleDefaults}
+            pageSettings={pageSettings}
           />
         )}
 

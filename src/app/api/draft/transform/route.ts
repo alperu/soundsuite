@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { streamAI } from '@/lib/ai/ai-provider';
-import { AIProviderKey, AI_PROVIDER_KEYS } from '@/lib/ai/models';
+import { AIProviderKey, AI_PROVIDER_KEYS, AI_PROVIDERS } from '@/lib/ai/models';
 import { getTransformPrompt, TransformAction, ToneOption } from '@/lib/ai/draft-prompts';
 
 const VALID_ACTIONS: TransformAction[] = ['adjust_tone', 'fix_grammar', 'extend', 'simplify', 'legalize'];
@@ -37,6 +37,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid provider' }, { status: 400 });
     }
 
+    // Relax model validation — auto-fallback to first model for the provider
+    const providerDef = AI_PROVIDERS[provider as AIProviderKey];
+    const effectiveModel = (provider !== 'ollama' && model && !providerDef.models.some(m => m.id === model))
+      ? (providerDef.models[0]?.id || model)
+      : (model || providerDef.models[0]?.id || '');
+
     if (action === 'adjust_tone' && tone && !VALID_TONES.includes(tone as ToneOption)) {
       return NextResponse.json(
         { error: `Invalid tone. Must be one of: ${VALID_TONES.join(', ')}` },
@@ -68,7 +74,7 @@ export async function POST(request: NextRequest) {
 
           for await (const event of streamAI({
             provider: provider as AIProviderKey,
-            model,
+            model: effectiveModel,
             messages: [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userMessage },

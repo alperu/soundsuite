@@ -53,6 +53,14 @@ interface DraftToolbarProps {
   onImageInsert?: (url: string, alt: string) => void;
   zoom?: number;
   onZoomChange?: (zoom: number) => void;
+  styleDefaults?: {
+    defaultFont: string;
+    defaultFontSize: string;
+    h1Size: string; h2Size: string; h3Size: string; h4Size: string; h5Size: string;
+    lineSpacing: string;
+    paragraphSpacing: string;
+  };
+  pageSettings?: { pageSize: string; marginTop: number; marginBottom: number; marginLeft: number; marginRight: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +726,8 @@ export default function DraftToolbar({
   onImageInsert,
   zoom = 1,
   onZoomChange,
+  styleDefaults,
+  pageSettings,
 }: DraftToolbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wordInputRef = useRef<HTMLInputElement>(null);
@@ -1175,7 +1185,22 @@ export default function DraftToolbar({
             try {
               const { exportToDocx } = await import('@/lib/draft/docx-exporter');
               const json = editor.getJSON();
-              const blob = await exportToDocx(json);
+              const blob = await exportToDocx(json, {
+                pageSize: (pageSettings?.pageSize as 'letter' | 'a4' | 'legal') || 'letter',
+                marginTop: pageSettings?.marginTop,
+                marginBottom: pageSettings?.marginBottom,
+                marginLeft: pageSettings?.marginLeft,
+                marginRight: pageSettings?.marginRight,
+                defaultFont: styleDefaults?.defaultFont,
+                defaultFontSize: styleDefaults?.defaultFontSize,
+                h1Size: styleDefaults?.h1Size,
+                h2Size: styleDefaults?.h2Size,
+                h3Size: styleDefaults?.h3Size,
+                h4Size: styleDefaults?.h4Size,
+                h5Size: styleDefaults?.h5Size,
+                lineSpacing: styleDefaults?.lineSpacing,
+                paragraphSpacing: styleDefaults?.paragraphSpacing,
+              });
               const a = document.createElement('a');
               a.href = URL.createObjectURL(blob);
               a.download = `document-${new Date().toISOString().slice(0, 10)}.docx`;
