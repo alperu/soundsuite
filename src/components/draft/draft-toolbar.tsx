@@ -843,6 +843,24 @@ export default function DraftToolbar({
         <StrikethroughIcon />
       </ToolbarButton>
 
+      {/* Subscript */}
+      <ToolbarButton
+        onClick={() => editor.chain().focus().toggleSubscript().run()}
+        active={editor.isActive('subscript')}
+        title="Subscript"
+      >
+        <span className="text-[11px] font-bold leading-none">X<sub style={{fontSize:'7px'}}>2</sub></span>
+      </ToolbarButton>
+
+      {/* Superscript */}
+      <ToolbarButton
+        onClick={() => editor.chain().focus().toggleSuperscript().run()}
+        active={editor.isActive('superscript')}
+        title="Superscript"
+      >
+        <span className="text-[11px] font-bold leading-none">X<sup style={{fontSize:'7px'}}>2</sup></span>
+      </ToolbarButton>
+
       {/* Paint Format */}
       <ToolbarButton
         onClick={() => {
@@ -1229,6 +1247,12 @@ export default function DraftToolbar({
         </div>
       )}
 
+      {/* Word count */}
+      {editor.storage?.characterCount && (
+        <span className="text-[10px] text-gray-400 mr-2 whitespace-nowrap">
+          {editor.storage.characterCount.words()} words
+        </span>
+      )}
       <SaveIndicator status={saveStatus} />
     </div>
   );

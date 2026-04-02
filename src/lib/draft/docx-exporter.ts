@@ -226,6 +226,12 @@ function convertTextNode(node: TipTapNode): TextRun {
       case 'highlight':
         options.highlight = 'yellow';
         break;
+      case 'subscript':
+        options.subScript = true;
+        break;
+      case 'superscript':
+        options.superScript = true;
+        break;
       case 'textStyle':
         if (mark.attrs?.fontFamily) {
           options.font = mark.attrs.fontFamily;
@@ -296,7 +302,7 @@ const HEADING_SIZES: Record<number, number> = {
 // Paragraph spacing in twips (240 twips = ~12pt after)
 const PARA_SPACING = { after: 240 };
 
-function convertBlockNode(node: TipTapNode): (Paragraph | Table)[] {
+function convertBlockNode(node: TipTapNode, allContent?: TipTapNode[]): (Paragraph | Table)[] {
   const results: (Paragraph | Table)[] = [];
 
   switch (node.type) {
@@ -403,7 +409,7 @@ function convertBlockNode(node: TipTapNode): (Paragraph | Table)[] {
             const cells = (row.content || [])
               .filter(c => c.type === 'tableCell' || c.type === 'tableHeader')
               .map(cell => {
-                const paragraphs = (cell.content || []).flatMap(convertBlockNode);
+                const paragraphs = (cell.content || []).flatMap(c => convertBlockNode(c));
                 return new TableCell({
                   children: paragraphs.length > 0 ? paragraphs : [new Paragraph({})],
                 });
@@ -450,12 +456,40 @@ function convertBlockNode(node: TipTapNode): (Paragraph | Table)[] {
     }
 
     case 'tableOfContents': {
-      // Skip TOC node in export — Word has its own TOC
-      results.push(
-        new Paragraph({
-          children: [new TextRun({ text: '[Table of Contents]', italics: true, color: '888888' })],
-        })
-      );
+      // Generate a static TOC from document headings
+      results.push(new Paragraph({
+        children: [new TextRun({ text: 'TABLE OF CONTENTS', bold: true, size: 28, color: '000000' })],
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 240 },
+      }));
+
+      // Extract headings from document
+      const maxDepth = node.attrs?.maxDepth || 3;
+      const headings: Array<{ level: number; text: string }> = [];
+      if (allContent) {
+        for (const block of allContent) {
+          if (block.type === 'heading') {
+            const level = block.attrs?.level || 1;
+            if (level <= maxDepth) {
+              const text = block.content?.map(c => c.text || '').join('') || '';
+              if (text.trim()) headings.push({ level, text: text.trim() });
+            }
+          }
+        }
+      }
+
+      for (const h of headings) {
+        const indent = convertInchesToTwip((h.level - 1) * 0.5);
+        results.push(new Paragraph({
+          children: [new TextRun({ text: h.text, size: 22, color: '000000' })],
+          indent: { left: indent },
+          spacing: { after: 60 },
+        }));
+      }
+
+      if (headings.length > 0) {
+        results.push(new Paragraph({ children: [], spacing: { after: 240 } }));
+      }
       break;
     }
 
@@ -463,7 +497,7 @@ function convertBlockNode(node: TipTapNode): (Paragraph | Table)[] {
       // Try to convert content recursively for unknown nodes
       if (node.content) {
         for (const child of node.content) {
-          results.push(...convertBlockNode(child));
+          results.push(...convertBlockNode(child, allContent));
         }
       }
       break;
@@ -482,7 +516,7 @@ export async function exportToDocx(
   options: ExportOptions = {}
 ): Promise<Blob> {
   const content = (tiptapJson.content || []) as TipTapNode[];
-  const paragraphs = content.flatMap(convertBlockNode);
+  const paragraphs = content.flatMap(node => convertBlockNode(node, content));
 
   // Page size
   const PAGE_SIZES = {

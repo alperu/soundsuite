@@ -59,6 +59,9 @@ import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
 import { Extension } from '@tiptap/core';
 import { InvisibleCharacters, HardBreakNode, ParagraphNode } from '@tiptap/extension-invisible-characters';
+import Subscript from '@tiptap/extension-subscript';
+import Superscript from '@tiptap/extension-superscript';
+import CharacterCount from '@tiptap/extension-character-count';
 
 // Cmd+Enter / Ctrl+Enter → insert page break (horizontal rule)
 const PageBreakShortcut = Extension.create({
@@ -168,6 +171,9 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         TableCell,
         TableHeader,
         TableOfContents,
+        Subscript,
+        Superscript,
+        CharacterCount,
       ],
       content,
       onUpdate: ({ editor: ed }) => {
