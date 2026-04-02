@@ -168,8 +168,9 @@ export default function DraftPage() {
             marginRight: Number(cfg.draftMarginRight) || 96,
           });
         }
+        const adminFont = cfg.draftDefaultFont || 'Times New Roman';
         setStyleDefaults({
-          defaultFont: cfg.draftDefaultFont || 'Times New Roman',
+          defaultFont: adminFont,
           defaultFontSize: cfg.draftDefaultFontSize || '12px',
           h1Size: cfg.draftH1Size || '24px',
           h2Size: cfg.draftH2Size || '20px',
@@ -179,6 +180,10 @@ export default function DraftPage() {
           lineSpacing: cfg.draftLineSpacing || '1.5',
           paragraphSpacing: cfg.draftParagraphSpacing || '12px',
         });
+        // Initialize toolbar font from admin config if no user preference saved
+        if (!fontFamily) {
+          setFontFamily(adminFont);
+        }
       })
       .catch(() => {});
   }, []);

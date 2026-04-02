@@ -652,13 +652,24 @@ export default function DraftChatPanel({
             </div>
           )}
 
-          {/* Selection indicator */}
-          {hasSelection && (
-            <div className="px-3 py-1.5 bg-blue-50 border-b border-blue-100 text-xs text-blue-600 flex items-center gap-1.5 shrink-0">
-              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-              </svg>
-              Editing selected text
+          {/* Selection indicator with preview */}
+          {hasSelection && selectedText && (
+            <div className="px-3 py-1.5 bg-blue-50 border-b border-blue-100 text-xs text-blue-600 shrink-0">
+              <div className="flex items-center gap-1.5">
+                <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                </svg>
+                Editing selected text
+              </div>
+              <div className="mt-1 text-[10px] text-blue-500/80 leading-snug italic truncate">
+                {(() => {
+                  const words = selectedText.split(/\s+/);
+                  if (words.length <= 30) return `"${selectedText.slice(0, 200)}"`;
+                  const head = words.slice(0, 20).join(' ');
+                  const tail = words.slice(-10).join(' ');
+                  return `"${head} ... ${tail}"`;
+                })()}
+              </div>
             </div>
           )}
 

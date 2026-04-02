@@ -261,6 +261,14 @@ function convertTextNode(node: TipTapNode): TextRun {
     }
   }
 
+  // Apply admin default font/size when no explicit mark is set
+  if (!options.font && _defaultFont) {
+    options.font = _defaultFont;
+  }
+  if (!options.size && _defaultBodySize) {
+    options.size = _defaultBodySize;
+  }
+
   return new TextRun(options);
 }
 
@@ -281,6 +289,8 @@ function convertInlineContent(nodes: TipTapNode[]): (TextRun | ExternalHyperlink
               new TextRun({
                 text: node.text || '',
                 style: 'Hyperlink',
+                font: _defaultFont || undefined,
+                size: _defaultBodySize || undefined,
               }),
             ],
             link: linkMark.attrs.href,
