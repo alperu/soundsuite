@@ -3,6 +3,7 @@ import { streamAI } from '@/lib/ai/ai-provider';
 import { AIProviderKey, AI_PROVIDER_KEYS, AI_PROVIDERS } from '@/lib/ai/models';
 import { getDraftChatSystemPrompt, getAppealBriefPrompt } from '@/lib/ai/draft-prompts';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
+import { prisma } from '@/lib/db/prisma';
 
 /**
  * POST /api/draft/chat
@@ -25,6 +26,8 @@ export async function POST(request: NextRequest) {
       maxTokens: reqMaxTokens,
       briefMode,
       sectionType,
+      vectorSearch,
+      draftId,
     } = body as {
       query: string;
       caseId?: string;
@@ -38,6 +41,8 @@ export async function POST(request: NextRequest) {
       maxTokens?: number;
       briefMode?: boolean;
       sectionType?: 'issues' | 'facts' | 'summary' | 'argument' | 'conclusion' | 'general';
+      vectorSearch?: boolean;
+      draftId?: string;
     };
 
     // Support both single caseId and array of caseIds
@@ -123,6 +128,75 @@ export async function POST(request: NextRequest) {
             } catch (err) {
               console.warn('[Draft Chat] RAG search failed:', err);
               send({ type: 'progress', message: 'Case document search unavailable, proceeding without context' });
+            }
+          }
+
+          // Search sibling drafts if vector search enabled
+          if (vectorSearch && draftId) {
+            try {
+              send({ type: 'progress', message: 'Searching draft content...' });
+
+              // Find all indexed drafts linked to the same cases
+              const draftCaseLinks = await prisma.draftCase.findMany({
+                where: { draftId },
+                select: { caseId: true },
+              });
+              const linkedCaseIds = draftCaseLinks.map(dc => dc.caseId);
+
+              const siblingDrafts = await prisma.draft.findMany({
+                where: {
+                  indexingStatus: 'INDEXED',
+                  draftCases: { some: { caseId: { in: linkedCaseIds } } },
+                },
+                select: { id: true, title: true },
+              });
+
+              if (siblingDrafts.length > 0) {
+                const registry = await getToolRegistry();
+                const draftResults: any[] = [];
+                for (const sibling of siblingDrafts) {
+                  // Note: query_case_knowledge filters by caseId, not documentId.
+                  // Search each linked case to find relevant content from sibling drafts.
+                  for (const caseLink of draftCaseLinks) {
+                    const searchResult = await registry.execute('query_case_knowledge', {
+                      query: query.trim(),
+                      caseId: caseLink.caseId,
+                      limit: 5,
+                    });
+                    if (searchResult.success && searchResult.data?.results?.length > 0) {
+                      for (const r of searchResult.data.results) {
+                        draftResults.push({ ...r, draftTitle: sibling.title });
+                      }
+                    }
+                  }
+                }
+
+                if (draftResults.length > 0) {
+                  // Deduplicate by text content
+                  const seen = new Set<string>();
+                  const uniqueResults = draftResults.filter(r => {
+                    const key = r.text?.slice(0, 100);
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                  });
+
+                  const draftContext = uniqueResults
+                    .map(r => `[From draft: ${r.draftTitle}]\n${r.text}`)
+                    .join('\n\n---\n\n');
+
+                  knowledgeContext = knowledgeContext
+                    ? `${knowledgeContext}\n\n## Draft Content\n\n${draftContext}`
+                    : draftContext;
+
+                  send({
+                    type: 'progress',
+                    message: `Found ${uniqueResults.length} excerpts from ${siblingDrafts.length} draft(s)`,
+                  });
+                }
+              }
+            } catch (err) {
+              console.warn('[Draft Chat] Draft vector search failed:', err);
             }
           }
 

@@ -55,6 +55,9 @@ interface DraftChatPanelProps {
   currentVersion?: number;
   onDraftRestore?: () => void;
   onPreviewVersion?: (content: string | null) => void;
+  draftVersion?: number;
+  draftIndexedVersion?: number | null;
+  draftIndexingStatus?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +106,9 @@ export default function DraftChatPanel({
   currentVersion,
   onDraftRestore,
   onPreviewVersion,
+  draftVersion,
+  draftIndexedVersion,
+  draftIndexingStatus,
 }: DraftChatPanelProps) {
   // Tabs (persisted)
   const [activeTab, setActiveTab] = usePersistedState<'chat' | 'workflows' | 'history'>('draft.chat.activeTab', 'chat');
@@ -132,6 +138,8 @@ export default function DraftChatPanel({
   const [thinkingMode, setThinkingMode] = usePersistedState<boolean>('draft.chat.thinking', true);
   const [maxTokens, setMaxTokens] = usePersistedState<number>('draft.chat.maxTokens', 2048);
   const [briefMode, setBriefMode] = usePersistedState<boolean>('draft.chat.briefMode', false);
+  const [vectorSearch, setVectorSearch] = usePersistedState<boolean>('draft.chat.vectorSearch', true);
+  const [draftIndexing, setDraftIndexing] = useState(false);
 
   // Chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -401,6 +409,8 @@ export default function DraftChatPanel({
         thinking: thinkingMode,
         maxTokens,
         briefMode,
+        vectorSearch,
+        draftId: draftId || undefined,
       });
     }
 
@@ -494,6 +504,8 @@ export default function DraftChatPanel({
   const streamingText = deepSearch ? deepStreamingAnswer : tokens;
   const currentError = deepSearch ? deepError : error;
   const hasThinkingEntries = progressLog.length > 0;
+  const isIndexStale = (draftVersion || 0) > (draftIndexedVersion || 0);
+  const isIndexed = draftIndexingStatus === 'INDEXED';
 
   return (
     <div className="flex flex-col h-full">
@@ -637,6 +649,38 @@ export default function DraftChatPanel({
                   className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${briefMode ? 'bg-amber-600' : 'bg-gray-200'}`}
                 >
                   <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${briefMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                </button>
+              </div>
+
+              {/* Vector Search toggle */}
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!draftId) return;
+                    setDraftIndexing(true);
+                    try {
+                      await fetch(`/api/drafts/${draftId}/index`, { method: 'POST' });
+                      onDraftRestore?.(); // reload draft to get updated indexing status
+                    } catch {}
+                    setDraftIndexing(false);
+                  }}
+                  disabled={draftIndexing}
+                  className={`text-[10px] font-semibold cursor-pointer transition-colors ${
+                    draftIndexing ? 'text-gray-400 animate-pulse' :
+                    !isIndexed && !isIndexStale ? 'text-gray-400' :
+                    isIndexStale ? 'text-amber-600' : 'text-emerald-600'
+                  }`}
+                  title={draftIndexing ? 'Indexing...' : isIndexStale ? 'Index stale — click to reindex' : isIndexed ? 'Index fresh — click to reindex' : 'Not indexed — click to index'}
+                >
+                  {draftIndexing ? 'Indexing...' : 'Vector'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVectorSearch(!vectorSearch)}
+                  className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${vectorSearch ? 'bg-emerald-600' : 'bg-gray-200'}`}
+                >
+                  <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${vectorSearch ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
                 </button>
               </div>
             </div>

@@ -216,6 +216,12 @@ model Draft {
   content       String          @default("")
   status        String          @default("draft")
   version       Int             @default(1)
+  // Vector indexing tracking
+  indexingStatus  String?
+  lastIndexedAt   DateTime?
+  indexedVersion  Int?
+  embeddingModel  String?
+  indexingError   String?
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
   versions      DraftVersion[]

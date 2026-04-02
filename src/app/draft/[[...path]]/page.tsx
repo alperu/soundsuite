@@ -936,6 +936,9 @@ export default function DraftPage() {
           currentVersion={activeDraft?.version}
           onDraftRestore={() => { if (activeDraft) loadDraft(activeDraft.id); }}
           onPreviewVersion={setPreviewContent}
+          draftVersion={activeDraft?.version}
+          draftIndexedVersion={activeDraft?.indexedVersion}
+          draftIndexingStatus={activeDraft?.indexingStatus}
         />
       </div>
 

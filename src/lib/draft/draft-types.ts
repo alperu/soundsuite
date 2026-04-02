@@ -36,6 +36,8 @@ export interface DraftFull extends DraftSummary {
   content: string;
   case?: { id: string; name: string; caseNumber?: string };
   linkedCases?: LinkedCase[];
+  indexingStatus?: string | null;
+  indexedVersion?: number | null;
 }
 
 export interface DraftVersionSummary {

@@ -157,6 +157,18 @@ export async function updateDraft(id: string, input: UpdateDraftInput) {
 }
 
 export async function deleteDraft(id: string) {
+  // Clean up vectors from LanceDB before deleting
+  try {
+    const { VectorStore } = await import('@/lib/vector/vector-store');
+    const vs = new VectorStore({
+      dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+      tableName: process.env.LANCEDB_TABLE || 'chunks',
+    });
+    await vs.initialize();
+    await vs.deleteByDocument(id);
+  } catch {
+    // Don't block deletion if vector cleanup fails
+  }
   return prisma.draft.delete({ where: { id } });
 }
 
