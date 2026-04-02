@@ -1001,6 +1001,17 @@ export default function DraftToolbar({
         <TOCIcon />
       </ToolbarButton>
 
+      {/* Insert Footnote */}
+      <ToolbarButton
+        onClick={() => (editor.chain().focus() as any).addFootnote().run()}
+        title="Insert Footnote"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <text x="2" y="9" fontSize="8" fontWeight="bold" fontFamily="serif">F</text>
+          <text x="8" y="12" fontSize="6" fontFamily="serif">n</text>
+        </svg>
+      </ToolbarButton>
+
       <Separator />
 
       {/* Page Break (horizontal rule) */}

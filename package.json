@@ -25,6 +25,7 @@
     "@d0paminedriven/pdfdown": "^0.9.7",
     "@eslint/eslintrc": "^3.3.3",
     "@gutenye/ocr-node": "^1.4.8",
+    "@intevation/tiptap-extension-office-paste": "^0.1.2",
     "@lancedb/lancedb": "^0.26.2",
     "@langchain/textsplitters": "^1.0.1",
     "@milkdown/crepe": "^7.18.0",
@@ -70,6 +71,7 @@
     "remark-gfm": "^4.0.1",
     "sharp": "^0.34.5",
     "tiktoken": "^1.0.22",
+    "tiptap-footnotes": "^3.0.1",
     "tiptap-pagination-plus": "^3.0.5",
     "tokenizers": "^0.13.3",
     "ws": "^8.19.0"

@@ -62,6 +62,8 @@ import { InvisibleCharacters, HardBreakNode, ParagraphNode } from '@tiptap/exten
 import Subscript from '@tiptap/extension-subscript';
 import Superscript from '@tiptap/extension-superscript';
 import CharacterCount from '@tiptap/extension-character-count';
+import { Footnote, FootnoteReference, Footnotes } from 'tiptap-footnotes';
+import OfficePaste from '@intevation/tiptap-extension-office-paste';
 
 // Cmd+Enter / Ctrl+Enter → insert page break (horizontal rule)
 const PageBreakShortcut = Extension.create({
@@ -174,6 +176,10 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         Subscript,
         Superscript,
         CharacterCount,
+        Footnotes,
+        Footnote,
+        FootnoteReference,
+        OfficePaste,
       ],
       content,
       onUpdate: ({ editor: ed }) => {
@@ -476,6 +482,25 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
           .draft-editor-wrapper [data-type="table-of-contents"] {
             max-width: 100%;
             overflow: hidden;
+          }
+
+          /* --- Footnotes styling --- */
+          .draft-editor-wrapper .ProseMirror [data-footnote-reference] {
+            color: #2563eb;
+            cursor: pointer;
+            font-size: 0.75em;
+            vertical-align: super;
+            font-weight: 600;
+          }
+          .draft-editor-wrapper .ProseMirror [data-footnote-reference]:hover {
+            text-decoration: underline;
+          }
+          .draft-editor-wrapper .ProseMirror ol[data-footnotes] {
+            border-top: 1px solid #d1d5db;
+            margin-top: 2rem;
+            padding-top: 1rem;
+            font-size: 0.85em;
+            color: #4b5563;
           }
 
           /* --- Invisible characters extension styling (¶ ↵) --- */

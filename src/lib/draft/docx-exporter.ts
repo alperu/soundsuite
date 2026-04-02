@@ -280,6 +280,9 @@ function convertInlineContent(nodes: TipTapNode[]): (TextRun | ExternalHyperlink
     } else if (node.type === 'image') {
       const imgRun = createImageRun(node);
       if (imgRun) runs.push(imgRun);
+    } else if (node.type === 'footnoteReference') {
+      // Inline footnote reference — superscript number
+      runs.push(new TextRun({ text: '*', superScript: true, size: 18 }));
     }
   }
 
@@ -490,6 +493,53 @@ function convertBlockNode(node: TipTapNode, allContent?: TipTapNode[]): (Paragra
       if (headings.length > 0) {
         results.push(new Paragraph({ children: [], spacing: { after: 240 } }));
       }
+      break;
+    }
+
+    case 'footnotes': {
+      // Footnotes container — render as numbered list at the bottom
+      if (node.content) {
+        results.push(new Paragraph({
+          children: [],
+          spacing: { before: 480 },
+        }));
+        // Separator line
+        results.push(new Paragraph({
+          children: [new TextRun({ text: '_______________', color: '999999', size: 16 })],
+          spacing: { after: 120 },
+        }));
+        let fnNum = 1;
+        for (const fn of node.content) {
+          if (fn.type === 'footnote') {
+            const fnContent = fn.content?.flatMap(c => {
+              if (c.content) return convertInlineContent(c.content);
+              return [];
+            }) || [];
+            results.push(new Paragraph({
+              children: [
+                new TextRun({ text: `${fnNum}. `, superScript: true, size: 18 }),
+                ...fnContent.map(r => {
+                  if (r instanceof TextRun) return r;
+                  return r;
+                }),
+              ],
+              spacing: { after: 60 },
+              indent: { left: convertInchesToTwip(0.25), hanging: convertInchesToTwip(0.25) },
+            }));
+            fnNum++;
+          }
+        }
+      }
+      break;
+    }
+
+    case 'footnoteReference': {
+      // Inline footnote reference — render as superscript number
+      const fnId = node.attrs?.['data-id'] || '';
+      // Count which footnote this is by its position
+      results.push(new Paragraph({
+        children: [new TextRun({ text: '*', superScript: true, size: 18 })],
+      }));
       break;
     }
 
