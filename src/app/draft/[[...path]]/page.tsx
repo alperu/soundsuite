@@ -114,6 +114,7 @@ export default function DraftPage() {
   const lastSavedContent = useRef('');
   const [wordImporting, setWordImporting] = useState(false);
   const [wordExporting, setWordExporting] = useState(false);
+  const [pdfExporting, setPdfExporting] = useState(false);
   const wordInputRef = useRef<HTMLInputElement>(null);
 
   // Editor
@@ -763,6 +764,51 @@ export default function DraftPage() {
                   <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><path d="M12 18v-6m-3 3l3 3 3-3" /></svg>
                 )}
                 DOCX
+              </button>
+              <button
+                onClick={async () => {
+                  const editor = editorRef.current?.editor;
+                  if (!editor) return;
+                  setPdfExporting(true);
+                  try {
+                    const { exportToPdf } = await import('@/lib/draft/pdf-exporter');
+                    const json = editor.getJSON();
+                    const blob = await exportToPdf(json, {
+                      pageSize: (pageSettings?.pageSize as 'letter' | 'a4' | 'legal') || 'letter',
+                      marginTop: pageSettings?.marginTop,
+                      marginBottom: pageSettings?.marginBottom,
+                      marginLeft: pageSettings?.marginLeft,
+                      marginRight: pageSettings?.marginRight,
+                      defaultFont: styleDefaults?.defaultFont,
+                      defaultFontSize: styleDefaults?.defaultFontSize,
+                      h1Size: styleDefaults?.h1Size,
+                      h2Size: styleDefaults?.h2Size,
+                      h3Size: styleDefaults?.h3Size,
+                      h4Size: styleDefaults?.h4Size,
+                      h5Size: styleDefaults?.h5Size,
+                      lineSpacing: styleDefaults?.lineSpacing,
+                      paragraphSpacing: styleDefaults?.paragraphSpacing,
+                    });
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = `document-${new Date().toISOString().slice(0, 10)}.pdf`;
+                    a.click();
+                    URL.revokeObjectURL(a.href);
+                  } catch (err) {
+                    alert('PDF export failed: ' + (err instanceof Error ? err.message : 'Unknown error'));
+                  }
+                  setPdfExporting(false);
+                }}
+                disabled={pdfExporting}
+                className="h-6 px-2 flex items-center gap-1 text-[11px] font-medium text-gray-600 border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+                title="Export as PDF"
+              >
+                {pdfExporting ? (
+                  <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
+                ) : (
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><path d="M12 18v-6m-3 3l3 3 3-3" /></svg>
+                )}
+                PDF
               </button>
               <span className="text-gray-500">
                 {activeDraft.documentType} — {activeDraft.title}
