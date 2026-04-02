@@ -6,6 +6,7 @@ import { useDraftStream } from '@/hooks/use-draft-stream';
 import { AI_PROVIDERS, AI_PROVIDER_KEYS, type AIProviderKey, type AIModelDef } from '@/lib/ai/models';
 import { AIThinkingLog, type AIProgressEntry } from '@/components/search/ai-thinking-log';
 import DraftVersionHistory from '@/components/draft/draft-version-history';
+import { parseFootnoteMarkers, insertBriefWithFootnotes } from '@/lib/draft/footnote-parser';
 import { usePersistedState } from '@/hooks/use-persisted-state';
 
 // ---------------------------------------------------------------------------
@@ -33,6 +34,7 @@ interface DraftChatPanelProps {
   hasSelection: boolean;
   onInsertText?: (text: string) => void;
   onReplaceSelection?: (text: string) => void;
+  onInsertWithFootnotes?: (text: string) => void;
   draftId?: string;
   currentVersion?: number;
   onDraftRestore?: () => void;
@@ -80,6 +82,7 @@ export default function DraftChatPanel({
   hasSelection,
   onInsertText,
   onReplaceSelection,
+  onInsertWithFootnotes,
   draftId,
   currentVersion,
   onDraftRestore,
@@ -112,6 +115,7 @@ export default function DraftChatPanel({
   const [deepSearch, setDeepSearch] = usePersistedState<boolean>('draft.chat.deepSearch', false);
   const [thinkingMode, setThinkingMode] = usePersistedState<boolean>('draft.chat.thinking', true);
   const [maxTokens, setMaxTokens] = usePersistedState<number>('draft.chat.maxTokens', 2048);
+  const [briefMode, setBriefMode] = usePersistedState<boolean>('draft.chat.briefMode', false);
 
   // Chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -380,6 +384,7 @@ export default function DraftChatPanel({
         model,
         thinking: thinkingMode,
         maxTokens,
+        briefMode,
       });
     }
 
@@ -604,8 +609,30 @@ export default function DraftChatPanel({
                   <option value={4096}>4k</option>
                 </select>
               </div>
+
+              {/* Brief Mode toggle */}
+              <div className="flex items-center gap-1.5">
+                <label className="text-[10px] font-medium text-gray-500">Brief</label>
+                <button
+                  type="button"
+                  onClick={() => setBriefMode(!briefMode)}
+                  className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${briefMode ? 'bg-amber-600' : 'bg-gray-200'}`}
+                >
+                  <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${briefMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                </button>
+              </div>
             </div>
           </div>
+
+          {/* Brief mode indicator */}
+          {briefMode && (
+            <div className="px-3 py-1.5 bg-amber-50 border-b border-amber-100 text-xs text-amber-700 flex items-center gap-1.5 shrink-0">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Appeal Brief mode — AI will generate with footnotes [^N]
+            </div>
+          )}
 
           {/* Selection indicator */}
           {hasSelection && (
@@ -652,6 +679,14 @@ export default function DraftChatPanel({
                             className="text-[11px] px-2 py-0.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700"
                           >
                             Insert
+                          </button>
+                        )}
+                        {onInsertWithFootnotes && m.content.includes('[^') && (
+                          <button
+                            onClick={() => onInsertWithFootnotes(m.content)}
+                            className="text-[11px] px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-800"
+                          >
+                            Insert with Footnotes
                           </button>
                         )}
                         {onReplaceSelection && hasSelection && (

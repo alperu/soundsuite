@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { streamAI } from '@/lib/ai/ai-provider';
 import { AIProviderKey, AI_PROVIDER_KEYS, AI_PROVIDERS } from '@/lib/ai/models';
-import { getDraftChatSystemPrompt } from '@/lib/ai/draft-prompts';
+import { getDraftChatSystemPrompt, getAppealBriefPrompt } from '@/lib/ai/draft-prompts';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 
 /**
@@ -23,6 +23,8 @@ export async function POST(request: NextRequest) {
       model,
       thinking,
       maxTokens: reqMaxTokens,
+      briefMode,
+      sectionType,
     } = body as {
       query: string;
       caseId?: string;
@@ -34,6 +36,8 @@ export async function POST(request: NextRequest) {
       model: string;
       thinking?: boolean;
       maxTokens?: number;
+      briefMode?: boolean;
+      sectionType?: 'issues' | 'facts' | 'summary' | 'argument' | 'conclusion' | 'general';
     };
 
     // Support both single caseId and array of caseIds
@@ -122,14 +126,20 @@ export async function POST(request: NextRequest) {
             }
           }
 
-          // Build system prompt
+          // Build system prompt — use brief prompt when in brief mode
           const hasSelection = !!selectedText?.trim();
-          const systemPrompt = getDraftChatSystemPrompt({
-            hasSelection,
-            documentContent,
-            selectedText: hasSelection ? selectedText : undefined,
-            knowledgeContext,
-          });
+          const systemPrompt = briefMode
+            ? getAppealBriefPrompt({
+                documentContent,
+                knowledgeContext,
+                sectionType: sectionType || 'general',
+              })
+            : getDraftChatSystemPrompt({
+                hasSelection,
+                documentContent,
+                selectedText: hasSelection ? selectedText : undefined,
+                knowledgeContext,
+              });
 
           // Build messages array
           const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [

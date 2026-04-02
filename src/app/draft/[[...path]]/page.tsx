@@ -527,6 +527,14 @@ export default function DraftPage() {
     editorRef.current?.insertAtCursor(text);
   }, []);
 
+  const handleInsertWithFootnotes = useCallback((text: string) => {
+    const editor = editorRef.current?.editor;
+    if (!editor) return;
+    const { parseFootnoteMarkers, insertBriefWithFootnotes } = require('@/lib/draft/footnote-parser');
+    const parsed = parseFootnoteMarkers(text);
+    insertBriefWithFootnotes(editor, parsed);
+  }, []);
+
   const handleReplaceSelection = useCallback((text: string) => {
     editorRef.current?.replaceSelection(text);
   }, []);
@@ -743,6 +751,7 @@ export default function DraftPage() {
           hasSelection={editorSelection.hasSelection}
           onInsertText={handleInsertText}
           onReplaceSelection={handleReplaceSelection}
+          onInsertWithFootnotes={handleInsertWithFootnotes}
           draftId={activeDraft?.id}
           currentVersion={activeDraft?.version}
           onDraftRestore={() => { if (activeDraft) loadDraft(activeDraft.id); }}
