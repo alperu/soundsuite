@@ -9,6 +9,22 @@ import DraftVersionHistory from '@/components/draft/draft-version-history';
 import { parseFootnoteMarkers, insertBriefWithFootnotes } from '@/lib/draft/footnote-parser';
 import { usePersistedState } from '@/hooks/use-persisted-state';
 
+/**
+ * Build a smart context window from the document content.
+ * For short docs (≤maxLen): sends the whole thing.
+ * For long docs: sends the head (title/structure) + tail (where writing stopped).
+ */
+function buildSmartContext(content: string, maxLen = 20000): string {
+  if (!content || content.length <= maxLen) return content;
+
+  const headLen = 3000;
+  const tailLen = maxLen - headLen - 100;
+  const head = content.slice(0, headLen);
+  const tail = content.slice(-tailLen);
+
+  return `${head}\n\n[... middle of document (${Math.round((content.length - headLen - tailLen) / 1000)}K chars) omitted ...]\n\n${tail}`;
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -266,7 +282,7 @@ export default function DraftChatPanel({
       if (hasSelection && selectedText) {
         contextualQuery = `[Selected text from document]: ${selectedText.slice(0, 4000)}\n\n${query}`;
       } else if (documentContent) {
-        contextualQuery = `[Document context]: ${documentContent.slice(0, 8000)}\n\n${query}`;
+        contextualQuery = `[Document context]: ${buildSmartContext(documentContent, 12000)}\n\n${query}`;
       }
 
       const res = await fetch('/api/search/deep', {
@@ -377,7 +393,7 @@ export default function DraftChatPanel({
       await send('/api/draft/chat', {
         query,
         caseIds: caseIds?.length ? caseIds : caseId ? [caseId] : undefined,
-        documentContent: documentContent.slice(0, 12000),
+        documentContent: buildSmartContext(documentContent),
         selectedText: hasSelection ? selectedText : undefined,
         history: history.slice(-10),
         provider,
