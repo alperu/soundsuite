@@ -58,13 +58,19 @@ export function HistoryPanel({ currentSessionId, onLoadSession }: HistoryPanelPr
     };
   }, [contextMenu]);
 
-  const handleOpenFolder = async (session: SessionMeta) => {
+  const handleCopyPath = async (session: SessionMeta) => {
     setContextMenu(null);
-    await fetch(`/api/chat/history/${session.id}/open-folder`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ caseNumber: session.caseNumber }),
-    }).catch(() => {});
+    try {
+      const res = await fetch(`/api/chat/history/${session.id}/open-folder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ caseNumber: session.caseNumber }),
+      });
+      const data = await res.json();
+      if (data.path) {
+        await navigator.clipboard.writeText(data.path);
+      }
+    } catch {}
   };
 
   const toggleSelect = (id: string) => {
@@ -264,13 +270,14 @@ export function HistoryPanel({ currentSessionId, onLoadSession }: HistoryPanelPr
           onMouseDown={e => e.stopPropagation()}
         >
           <button
-            onClick={() => handleOpenFolder(contextMenu.session)}
+            onClick={() => handleCopyPath(contextMenu.session)}
             className="w-full text-left px-3 py-1.5 text-sm text-gray-700 hover:bg-blue-50 flex items-center gap-2"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-              <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
             </svg>
-            Open Folder
+            Copy Path
           </button>
           <button
             onClick={() => { onLoadSession(contextMenu.session.id); setContextMenu(null); }}
