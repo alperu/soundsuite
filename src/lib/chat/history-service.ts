@@ -17,6 +17,13 @@ export interface ChatTurn {
     citation?: string;
     citationShort?: string;
   }>;
+  searchStats?: {
+    totalRetrieved?: number;
+    uniqueAfterDedup?: number;
+    finalAfterRerank?: number;
+    subQueryCount?: number;
+  };
+  subQueries?: string[];
 }
 
 export interface ChatSessionMeta {
@@ -80,6 +87,19 @@ function toMarkdown(session: ChatSession): string {
 
     let content = `${heading}\n\n${turn.content}`;
     if (meta.length > 0) content += `\n\n<!-- ${meta.join(' | ')} -->`;
+
+    if (turn.searchStats) {
+      const st = turn.searchStats;
+      content += `\n\n<!-- stats: ${st.subQueryCount || 0} sub-queries, ${st.totalRetrieved || 0} retrieved, ${st.uniqueAfterDedup || 0} unique, ${st.finalAfterRerank || 0} after rerank -->`;
+    }
+
+    if (turn.subQueries && turn.subQueries.length > 0) {
+      content += '\n\n<details><summary>Sub-queries</summary>\n\n';
+      for (const sq of turn.subQueries) {
+        content += `- ${sq}\n`;
+      }
+      content += '\n</details>';
+    }
 
     if (turn.sources && turn.sources.length > 0) {
       content += '\n\n<details><summary>Sources</summary>\n\n';

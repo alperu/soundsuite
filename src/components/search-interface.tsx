@@ -677,12 +677,38 @@ export default function SearchInterface({
     if (mode === 'deep') {
       for (const t of sessionDeepTurns) {
         turns.push({ role: 'user', content: t.query, mode: 'deep' });
-        turns.push({ role: 'assistant', content: t.result.report, mode: 'deep', searchTime: t.searchTime });
+        turns.push({
+          role: 'assistant',
+          content: t.result.report,
+          mode: 'deep',
+          searchTime: t.searchTime,
+          sources: t.result.sources?.map(s => ({
+            text: s.text,
+            document: s.document,
+            page: s.page,
+            citation: s.citation,
+            citationShort: s.citationShort,
+          })),
+          searchStats: t.result.searchStats,
+          subQueries: t.result.subQueries,
+        } as any);
       }
     } else {
       for (const t of sessionAiTurns) {
         turns.push({ role: 'user', content: t.query, mode });
-        turns.push({ role: 'assistant', content: t.result.answer, mode, searchTime: t.searchTime });
+        turns.push({
+          role: 'assistant',
+          content: t.result.answer,
+          mode,
+          searchTime: t.searchTime,
+          sources: t.result.sources?.map((s: any) => ({
+            text: s.text || s.content || '',
+            document: s.document || s.fileName || '',
+            page: s.page || s.pageNumber || 0,
+            citation: s.citation,
+            citationShort: s.citationShort,
+          })),
+        });
       }
     }
 
@@ -787,17 +813,17 @@ export default function SearchInterface({
       }
       setAiSearchTime(Math.round(performance.now() - t0));
 
-      // Auto-persist session after successful turn
-      // Use a microtask to read the latest state after the setState calls
+      // Persist session immediately using the complete data we already have
+      // (Don't rely on React state which may not be flushed yet)
       setTimeout(() => {
-        setAiTurns(currentAiTurns => {
-          setDeepTurns(currentDeepTurns => {
-            persistSession(currentAiTurns, currentDeepTurns, currentSessionId);
-            return currentDeepTurns;
+        setAiTurns(latestAi => {
+          setDeepTurns(latestDeep => {
+            persistSession(latestAi, latestDeep, currentSessionId);
+            return latestDeep;
           });
-          return currentAiTurns;
+          return latestAi;
         });
-      }, 100);
+      }, 500);
     } catch (err) {
       setAiError(err instanceof Error ? err.message : 'An error occurred');
       // Restore query on error so user can retry

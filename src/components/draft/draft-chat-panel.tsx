@@ -275,7 +275,7 @@ export default function DraftChatPanel({
         body: JSON.stringify({
           query: contextualQuery,
           provider,
-          model,
+          model: effectiveModel,
           caseId: caseId || undefined,
           thinking: thinkingMode,
           maxTokens,
@@ -381,7 +381,7 @@ export default function DraftChatPanel({
         selectedText: hasSelection ? selectedText : undefined,
         history: history.slice(-10),
         provider,
-        model,
+        model: effectiveModel,
         thinking: thinkingMode,
         maxTokens,
         briefMode,
@@ -473,6 +473,8 @@ export default function DraftChatPanel({
 
   // Computed
   const models = getModels(provider, ollamaModels);
+  // Ensure model is valid for the current provider — fallback to first available
+  const effectiveModel = (model && models.some(m => m.id === model)) ? model : (models[0]?.id || model || '');
   const streamingText = deepSearch ? deepStreamingAnswer : tokens;
   const currentError = deepSearch ? deepError : error;
   const hasThinkingEntries = progressLog.length > 0;
