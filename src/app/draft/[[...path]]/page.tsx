@@ -341,6 +341,39 @@ export default function DraftPage() {
     }, 1500);
   }, []); // stable — uses ref for draft ID
 
+  // Manual save — immediately saves + creates a version checkpoint
+  const handleManualSave = useCallback(async () => {
+    if (!activeDraftIdRef.current || !editorRef.current) return;
+    const json = JSON.stringify(editorRef.current.getJSON());
+    if (json === lastSavedContent.current) return; // nothing changed
+
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    setSaveStatus('saving');
+    try {
+      await fetch(`/api/drafts/${activeDraftIdRef.current}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: json, changeSummary: 'Manual save' }),
+      });
+      lastSavedContent.current = json;
+      setSaveStatus('saved');
+    } catch {
+      setSaveStatus('unsaved');
+    }
+  }, []);
+
+  // Keyboard shortcut: Cmd+S / Ctrl+S → manual save
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        handleManualSave();
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [handleManualSave]);
+
   // ---- Selection change ----
 
   const handleSelectionChange = useCallback((sel: { selectedText: string; hasSelection: boolean }) => {
@@ -669,6 +702,7 @@ export default function DraftPage() {
             model={model}
             styleDefaults={styleDefaults}
             pageSettings={pageSettings}
+            onManualSave={handleManualSave}
           />
         )}
 

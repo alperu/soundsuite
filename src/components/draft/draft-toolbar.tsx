@@ -61,6 +61,7 @@ interface DraftToolbarProps {
     paragraphSpacing: string;
   };
   pageSettings?: { pageSize: string; marginTop: number; marginBottom: number; marginLeft: number; marginRight: number };
+  onManualSave?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +729,7 @@ export default function DraftToolbar({
   onZoomChange,
   styleDefaults,
   pageSettings,
+  onManualSave,
 }: DraftToolbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wordInputRef = useRef<HTMLInputElement>(null);
@@ -1288,6 +1290,25 @@ export default function DraftToolbar({
         <span className="text-[10px] text-gray-400 mr-2 whitespace-nowrap">
           {editor.storage.characterCount.words()} words
         </span>
+      )}
+      {onManualSave && (
+        <Tooltip label="Save" shortcut="Ctrl+S">
+          <button
+            onClick={onManualSave}
+            disabled={saveStatus === 'saved' || saveStatus === 'saving'}
+            className={`w-8 h-8 flex items-center justify-center rounded text-sm transition-colors ${
+              saveStatus === 'unsaved'
+                ? 'text-blue-600 hover:bg-blue-100'
+                : 'text-gray-400 cursor-default'
+            }`}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" />
+              <polyline points="17 21 17 13 7 13 7 21" />
+              <polyline points="7 3 7 8 15 8" />
+            </svg>
+          </button>
+        </Tooltip>
       )}
       <SaveIndicator status={saveStatus} />
     </div>
