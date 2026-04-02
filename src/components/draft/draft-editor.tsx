@@ -64,6 +64,12 @@ import Superscript from '@tiptap/extension-superscript';
 import CharacterCount from '@tiptap/extension-character-count';
 import { Footnote, FootnoteReference, Footnotes } from 'tiptap-footnotes';
 import OfficePaste from '@intevation/tiptap-extension-office-paste';
+import Document from '@tiptap/extension-document';
+
+// Override Document to allow footnotes node at the end
+const CustomDocument = Document.extend({
+  content: 'block+ footnotes?',
+});
 
 // Cmd+Enter / Ctrl+Enter → insert page break (horizontal rule)
 const PageBreakShortcut = Extension.create({
@@ -130,7 +136,9 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       extensions: [
         StarterKit.configure({
           heading: { levels: [1, 2, 3, 4, 5] },
+          document: false, // replaced by CustomDocument for footnotes support
         }),
+        CustomDocument,
         PageBreakShortcut,
         InvisibleCharacters.configure({
           visible: false, // controlled by showMarks prop

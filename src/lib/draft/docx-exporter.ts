@@ -22,6 +22,7 @@ import {
   VerticalPositionAlign,
   HorizontalPositionRelativeFrom,
   VerticalPositionRelativeFrom,
+  FootnoteReferenceRun,
 } from 'docx';
 
 // ---------------------------------------------------------------------------
@@ -127,6 +128,9 @@ function base64ToBuffer(dataUrl: string): { buffer: Buffer; width: number; heigh
     return null;
   }
 }
+
+// Module-scope footnote map (set during export, used by convertInlineContent)
+let _footnoteMap: Map<string, number> = new Map();
 
 // Build an ImageRun with correct scaling from TipTap node attrs
 function createImageRun(node: TipTapNode): ImageRun | null {
@@ -281,8 +285,14 @@ function convertInlineContent(nodes: TipTapNode[]): (TextRun | ExternalHyperlink
       const imgRun = createImageRun(node);
       if (imgRun) runs.push(imgRun);
     } else if (node.type === 'footnoteReference') {
-      // Inline footnote reference — superscript number
-      runs.push(new TextRun({ text: '*', superScript: true, size: 18 }));
+      // Inline footnote reference — proper Word footnote
+      const dataId = node.attrs?.['data-id'] || '';
+      const fnId = _footnoteMap.get(dataId);
+      if (fnId) {
+        runs.push(new FootnoteReferenceRun(fnId));
+      } else {
+        runs.push(new TextRun({ text: '*', superScript: true, size: 18 }));
+      }
     }
   }
 
@@ -497,49 +507,18 @@ function convertBlockNode(node: TipTapNode, allContent?: TipTapNode[]): (Paragra
     }
 
     case 'footnotes': {
-      // Footnotes container — render as numbered list at the bottom
-      if (node.content) {
-        results.push(new Paragraph({
-          children: [],
-          spacing: { before: 480 },
-        }));
-        // Separator line
-        results.push(new Paragraph({
-          children: [new TextRun({ text: '_______________', color: '999999', size: 16 })],
-          spacing: { after: 120 },
-        }));
-        let fnNum = 1;
-        for (const fn of node.content) {
-          if (fn.type === 'footnote') {
-            const fnContent = fn.content?.flatMap(c => {
-              if (c.content) return convertInlineContent(c.content);
-              return [];
-            }) || [];
-            results.push(new Paragraph({
-              children: [
-                new TextRun({ text: `${fnNum}. `, superScript: true, size: 18 }),
-                ...fnContent.map(r => {
-                  if (r instanceof TextRun) return r;
-                  return r;
-                }),
-              ],
-              spacing: { after: 60 },
-              indent: { left: convertInchesToTwip(0.25), hanging: convertInchesToTwip(0.25) },
-            }));
-            fnNum++;
-          }
-        }
-      }
+      // Skip — footnotes are handled via Word's native footnote system
+      // (extracted in extractFootnotes and passed to Document constructor)
+      break;
+    }
+
+    case 'footnote': {
+      // Skip — handled by extractFootnotes
       break;
     }
 
     case 'footnoteReference': {
-      // Inline footnote reference — render as superscript number
-      const fnId = node.attrs?.['data-id'] || '';
-      // Count which footnote this is by its position
-      results.push(new Paragraph({
-        children: [new TextRun({ text: '*', superScript: true, size: 18 })],
-      }));
+      // Skip as block — handled inline in convertInlineContent
       break;
     }
 
@@ -561,11 +540,59 @@ function convertBlockNode(node: TipTapNode, allContent?: TipTapNode[]): (Paragra
 // Main export function
 // ---------------------------------------------------------------------------
 
+// Extract footnotes from document, returning a map of data-id → footnote ID (1-based)
+// and the footnotes config for the Document constructor
+function extractFootnotes(content: TipTapNode[]): {
+  footnoteMap: Map<string, number>;
+  footnotesConfig: Record<number, { children: Paragraph[] }>;
+} {
+  const footnoteMap = new Map<string, number>();
+  const footnotesConfig: Record<number, { children: Paragraph[] }> = {};
+  let fnId = 1;
+
+  // Find the footnotes container
+  for (const node of content) {
+    if (node.type === 'footnotes' && node.content) {
+      for (const fn of node.content) {
+        if (fn.type === 'footnote') {
+          const dataId = fn.attrs?.['data-id'] || '';
+          if (dataId) {
+            footnoteMap.set(dataId, fnId);
+            // Convert footnote content to paragraphs
+            const children: Paragraph[] = [];
+            for (const child of fn.content || []) {
+              if (child.content) {
+                children.push(new Paragraph({
+                  children: convertInlineContent(child.content),
+                  spacing: { after: 60 },
+                }));
+              }
+            }
+            if (children.length === 0) {
+              children.push(new Paragraph({ children: [] }));
+            }
+            footnotesConfig[fnId] = { children };
+            fnId++;
+          }
+        }
+      }
+    }
+  }
+
+  return { footnoteMap, footnotesConfig };
+}
+
 export async function exportToDocx(
   tiptapJson: Record<string, any>,
   options: ExportOptions = {}
 ): Promise<Blob> {
   const content = (tiptapJson.content || []) as TipTapNode[];
+
+  // Extract footnotes first so inline references can use FootnoteReferenceRun
+  const { footnoteMap, footnotesConfig } = extractFootnotes(content);
+  // Store in module scope so convertInlineContent can access it
+  _footnoteMap = footnoteMap;
+
   const paragraphs = content.flatMap(node => convertBlockNode(node, content));
 
   // Page size
@@ -586,6 +613,7 @@ export async function exportToDocx(
 
   const doc = new Document({
     title: options.title || 'Document',
+    footnotes: Object.keys(footnotesConfig).length > 0 ? footnotesConfig : undefined,
     numbering: {
       config: [
         {

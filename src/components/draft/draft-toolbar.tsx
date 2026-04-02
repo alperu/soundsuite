@@ -1003,7 +1003,7 @@ export default function DraftToolbar({
 
       {/* Insert Footnote */}
       <ToolbarButton
-        onClick={() => (editor.chain().focus() as any).addFootnote().run()}
+        onClick={() => { editor.chain().focus().run(); (editor.commands as any).addFootnote(); }}
         title="Insert Footnote"
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
