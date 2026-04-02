@@ -54,9 +54,19 @@ function pxToPoints(px: number): number {
   return Math.round((px / 96) * 72);
 }
 
-// Slugify for internal anchor IDs
+// Slugify for internal anchor IDs — deduplicates by appending suffix
+const _usedPdfIds = new Set<string>();
 function slugify(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80);
+  let base = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80);
+  if (!base) return '';
+  let id = base;
+  let suffix = 2;
+  while (_usedPdfIds.has(id)) {
+    id = `${base}-${suffix}`;
+    suffix++;
+  }
+  _usedPdfIds.add(id);
+  return id;
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +295,9 @@ export async function exportToPdf(
   tiptapJson: Record<string, any>,
   options: ExportOptions = {}
 ): Promise<Blob> {
+  // Reset deduplication for each export
+  _usedPdfIds.clear();
+
   // Dynamic import pdfmake (client-side only)
   const pdfMakeModule = await import('pdfmake/build/pdfmake');
   const pdfFontsModule = await import('pdfmake/build/vfs_fonts');
