@@ -32,6 +32,7 @@ export function HistoryPanel({ currentSessionId, onLoadSession }: HistoryPanelPr
   const [archiveMode, setArchiveMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [archiving, setArchiving] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; session: SessionMeta } | null>(null);
 
   const fetchSessions = useCallback(() => {
     setLoading(true);
@@ -43,6 +44,28 @@ export function HistoryPanel({ currentSessionId, onLoadSession }: HistoryPanelPr
   }, []);
 
   useEffect(() => { fetchSessions(); }, [fetchSessions]);
+
+  // Close context menu on click outside / escape
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleClick = () => setContextMenu(null);
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') setContextMenu(null); };
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleEsc);
+    };
+  }, [contextMenu]);
+
+  const handleOpenFolder = async (session: SessionMeta) => {
+    setContextMenu(null);
+    await fetch(`/api/chat/history/${session.id}/open-folder`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ caseNumber: session.caseNumber }),
+    }).catch(() => {});
+  };
 
   const toggleSelect = (id: string) => {
     setSelectedIds(prev => {
@@ -187,6 +210,10 @@ export function HistoryPanel({ currentSessionId, onLoadSession }: HistoryPanelPr
                     isActive ? 'bg-purple-50 border-l-2 border-l-purple-500' : 'hover:bg-gray-50'
                   }`}
                   onClick={() => archiveMode ? toggleSelect(s.id) : onLoadSession(s.id)}
+                  onContextMenu={e => {
+                    e.preventDefault();
+                    setContextMenu({ x: e.clientX, y: e.clientY, session: s });
+                  }}
                 >
                   <div className="flex items-start gap-2">
                     {archiveMode && (
@@ -228,6 +255,46 @@ export function HistoryPanel({ currentSessionId, onLoadSession }: HistoryPanelPr
           </div>
         ))}
       </div>
+
+      {/* Right-click context menu */}
+      {contextMenu && (
+        <div
+          className="fixed z-50 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[180px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onMouseDown={e => e.stopPropagation()}
+        >
+          <button
+            onClick={() => handleOpenFolder(contextMenu.session)}
+            className="w-full text-left px-3 py-1.5 text-sm text-gray-700 hover:bg-blue-50 flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+            </svg>
+            Open Folder
+          </button>
+          <button
+            onClick={() => { onLoadSession(contextMenu.session.id); setContextMenu(null); }}
+            className="w-full text-left px-3 py-1.5 text-sm text-gray-700 hover:bg-blue-50 flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            </svg>
+            Load Session
+          </button>
+          <div className="border-t border-gray-100 my-1" />
+          <button
+            onClick={() => { handleDelete(contextMenu.session.id); setContextMenu(null); }}
+            className="w-full text-left px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+            </svg>
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   );
 }
