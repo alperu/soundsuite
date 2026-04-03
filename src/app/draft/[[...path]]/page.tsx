@@ -337,13 +337,20 @@ export default function DraftPage() {
     saveTimer.current = setTimeout(async () => {
       setSaveStatus('saving');
       try {
-        await fetch(`/api/drafts/${activeDraftIdRef.current}`, {
+        const saveRes = await fetch(`/api/drafts/${activeDraftIdRef.current}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: json }),
         });
         lastSavedContent.current = json;
         setSaveStatus('saved');
+        // Update activeDraft version so Vector staleness detection works
+        if (saveRes.ok) {
+          const saved = await saveRes.json();
+          if (saved.version) {
+            setActiveDraft(prev => prev ? { ...prev, version: saved.version } : prev);
+          }
+        }
       } catch {
         setSaveStatus('unsaved');
       }
