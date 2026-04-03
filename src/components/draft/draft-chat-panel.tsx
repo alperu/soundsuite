@@ -6,6 +6,7 @@ import { useDraftStream } from '@/hooks/use-draft-stream';
 import { AI_PROVIDERS, AI_PROVIDER_KEYS, type AIProviderKey, type AIModelDef } from '@/lib/ai/models';
 import { AIThinkingLog, type AIProgressEntry } from '@/components/search/ai-thinking-log';
 import DraftVersionHistory from '@/components/draft/draft-version-history';
+import { DraftChatHistory } from '@/components/draft/draft-chat-history';
 import { parseFootnoteMarkers, insertBriefWithFootnotes } from '@/lib/draft/footnote-parser';
 import { usePersistedState } from '@/hooks/use-persisted-state';
 
@@ -111,7 +112,7 @@ export default function DraftChatPanel({
   draftIndexingStatus,
 }: DraftChatPanelProps) {
   // Tabs (persisted)
-  const [activeTab, setActiveTab] = usePersistedState<'chat' | 'workflows' | 'history'>('draft.chat.activeTab', 'chat');
+  const [activeTab, setActiveTab] = usePersistedState<'chat' | 'history' | 'workflows' | 'version'>('draft.chat.activeTab', 'chat');
 
   // Chat input height (localStorage)
   const [chatInputHeight, setChatInputHeight] = useState(CHAT_INPUT_DEFAULT);
@@ -439,6 +440,27 @@ export default function DraftChatPanel({
     setSearchStartTime(0);
   }, []);
 
+  // Restore a chat session from history
+  const handleLoadSession = useCallback((session: any) => {
+    const restoredMessages: ChatMessage[] = (session.turns || []).map((t: any) => ({
+      role: t.role,
+      content: t.content,
+      mode: t.mode || undefined,
+    }));
+    setMessages(restoredMessages);
+    setSessionId(session.id);
+    setProgressLog([]);
+    setDeepStreamingAnswer(null);
+    setDeepError(null);
+    // Restore provider/model if available
+    if (session.provider && AI_PROVIDER_KEYS.includes(session.provider)) {
+      setProvider(session.provider);
+    }
+    if (session.model) setModel(session.model);
+    // Switch to chat tab
+    setActiveTab('chat');
+  }, [setProvider, setModel, setActiveTab]);
+
   // ---------------------------------------------------------------------------
   // Abort
   // ---------------------------------------------------------------------------
@@ -522,6 +544,16 @@ export default function DraftChatPanel({
           Chat
         </button>
         <button
+          onClick={() => setActiveTab('history')}
+          className={`flex-1 px-3 py-2 text-sm font-medium ${
+            activeTab === 'history'
+              ? 'text-blue-700 border-b-2 border-blue-600'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          History
+        </button>
+        <button
           onClick={() => setActiveTab('workflows')}
           className={`flex-1 px-3 py-2 text-sm font-medium ${
             activeTab === 'workflows'
@@ -532,14 +564,14 @@ export default function DraftChatPanel({
           Workflows
         </button>
         <button
-          onClick={() => setActiveTab('history')}
+          onClick={() => setActiveTab('version')}
           className={`flex-1 px-3 py-2 text-sm font-medium ${
-            activeTab === 'history'
+            activeTab === 'version'
               ? 'text-blue-700 border-b-2 border-blue-600'
               : 'text-gray-500 hover:text-gray-700'
           }`}
         >
-          History
+          Version
         </button>
         {activeTab === 'chat' && messages.length > 0 && (
           <button
@@ -899,6 +931,13 @@ export default function DraftChatPanel({
             </div>
           </div>
         </>
+      ) : activeTab === 'history' ? (
+        /* Chat History tab */
+        <DraftChatHistory
+          caseId={caseId}
+          currentSessionId={sessionId}
+          onLoadSession={handleLoadSession}
+        />
       ) : activeTab === 'workflows' ? (
         /* Workflows tab */
         <div className="flex-1 overflow-y-auto px-3 py-2">
@@ -945,7 +984,7 @@ export default function DraftChatPanel({
           )}
         </div>
       ) : (
-        /* History tab */
+        /* Version tab (document version history) */
         draftId ? (
           <DraftVersionHistory
             draftId={draftId}
