@@ -37,7 +37,7 @@ async function ensureCudaContainer(): Promise<boolean> {
 
   if (cs.exists && cs.status !== 'running') {
     // Exists but stopped — try to start it
-    const { status, body: startBody } = await dockerRequestWithBody('POST', `/containers/${GPU_CONTAINER}/start`, undefined);
+    const { status, body: startBody } = await dockerRequest('POST', `/containers/${GPU_CONTAINER}/start`);
     if (status === 204 || status === 304) {
       log.info('ss-cuda container restarted');
       return true;
@@ -94,7 +94,7 @@ async function ensureCudaContainer(): Promise<boolean> {
   }
 
   const containerId = JSON.parse(body).Id;
-  const { status: startStatus, body: startErrBody } = await dockerRequestWithBody('POST', `/containers/${containerId}/start`, undefined);
+  const { status: startStatus, body: startErrBody } = await dockerRequest('POST', `/containers/${containerId}/start`);
   if (startStatus !== 204 && startStatus !== 304) {
     log.error(`ss-cuda start failed after create: ${startStatus} ${startErrBody?.slice(0, 300) || ''}`);
     return false;
