@@ -181,27 +181,44 @@ export async function performUpdate(serverUrl: string): Promise<boolean> {
 
     log.info(`Update to v${newVersion} extracted successfully. Restarting...`);
 
-    // 8. Save current agentUrl so the new process uses the same URL
+    // 8. Save current agentUrl and serverUrl so the new process uses the same URLs
     state.savedAgentUrl = getAgentUrl();
     saveConfig();
     const resolvedConfigPath = getConfigPath();
-    log.info(`Pre-restart state: serverUrl=${state.serverUrl}, agentUrl=${state.savedAgentUrl}, configPath=${resolvedConfigPath}`);
 
-    // Verify config was actually written
-    if (fs.existsSync(resolvedConfigPath)) {
-      const saved = JSON.parse(fs.readFileSync(resolvedConfigPath, 'utf8'));
-      log.info(`Config file verified: serverUrl=${saved.serverUrl}, agentUrl=${saved.agentUrl}`);
-    } else {
-      log.error(`Config file NOT found at ${resolvedConfigPath} after saveConfig()!`);
+    // Also force-write sidecar.config.json to ensure serverUrl survives
+    const { saveSidecarConfig, getSidecarConfigPath } = await import('./sidecar-config');
+    if (state.serverUrl) {
+      saveSidecarConfig({ serverUrl: state.serverUrl });
+      log.info(`Force-saved sidecar.config.json with serverUrl=${state.serverUrl}`);
+    }
+    const resolvedSidecarConfigPath = getSidecarConfigPath();
+
+    log.info(`Pre-restart state: serverUrl=${state.serverUrl}, agentUrl=${state.savedAgentUrl}`);
+    log.info(`Config paths: config=${resolvedConfigPath}, sidecar=${resolvedSidecarConfigPath}`);
+
+    // Verify both config files were actually written
+    for (const p of [resolvedConfigPath, resolvedSidecarConfigPath]) {
+      if (fs.existsSync(p)) {
+        const saved = JSON.parse(fs.readFileSync(p, 'utf8'));
+        log.info(`Config verified [${path.basename(p)}]: serverUrl=${saved.serverUrl}`);
+      } else {
+        log.error(`Config NOT found at ${p} after save!`);
+      }
     }
 
     // 9. Graceful shutdown: disconnect WS + heartbeats to free the port
     disconnectWebSocket();
 
     // 10. Restart: spawn with shell sleep so parent exits first and frees port
-    // Explicitly pass CONFIG_PATH so the new process reads config from the same location
+    // Pass ALL config paths + SERVER_URL as env vars — belt and suspenders
     const serverJs = path.join(installDir, 'server.js');
-    const childEnv = { ...process.env, CONFIG_PATH: resolvedConfigPath };
+    const childEnv = {
+      ...process.env,
+      CONFIG_PATH: resolvedConfigPath,
+      SIDECAR_CONFIG_PATH: resolvedSidecarConfigPath,
+      SERVER_URL: state.serverUrl || process.env.SERVER_URL || '',
+    };
     const child = spawn('sh', ['-c', `sleep 3 && exec node "${serverJs}"`], {
       detached: true,
       stdio: 'ignore',

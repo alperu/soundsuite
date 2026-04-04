@@ -35,10 +35,13 @@ export async function register() {
       log.info(`Resuming with saved agentUrl: ${state.savedAgentUrl}`);
     }
 
-    // CLI / env override: SERVER_URL=http://172.16.16.9:3000 ./start.sh
-    if (process.env.SERVER_URL && !state.serverUrl) {
+    // CLI / env override: SERVER_URL always wins (critical for surviving upgrades)
+    if (process.env.SERVER_URL) {
+      if (state.serverUrl && state.serverUrl !== process.env.SERVER_URL) {
+        log.info(`Server URL override: ${state.serverUrl} → ${process.env.SERVER_URL} (from env)`);
+      }
       state.serverUrl = process.env.SERVER_URL;
-      log.info(`Server URL set from environment: ${state.serverUrl}`);
+      log.info(`Server URL from environment: ${state.serverUrl}`);
     }
 
     if (state.serverUrl) {
