@@ -150,13 +150,32 @@ async function ensureOllamaModel(role: string): Promise<void> {
   }
 }
 
-/** Fire-and-forget load a model into VRAM with duplicate-prevention guard. */
-function fireAndForgetLoad(role: string, port: number, model: string): void {
+/** Fire-and-forget load a model into VRAM with duplicate-prevention guard and VRAM check. */
+function fireAndForgetLoad(role: string, port: number, model: string, attempt = 1): void {
   if (state.modelLoading.has(role)) {
     log.info(`fireAndForgetLoad: ${role} already loading, skipping`);
     return;
   }
-  log.info(`fireAndForgetLoad: starting load of ${model} into VRAM for ${role} on port ${port}`);
+
+  const MAX_ATTEMPTS = 3;
+  const RETRY_DELAY = 30_000; // 30s between retries
+
+  // Check available VRAM before attempting load
+  const def = state.registry[role];
+  if (def && def.vram > 0 && state.gpuCache) {
+    const freeVram = state.gpuCache.reduce((sum: number, g: any) => sum + (g.memoryFree || 0), 0);
+    if (freeVram < def.vram * 0.5) {
+      log.warn(`fireAndForgetLoad: ${role} needs ~${def.vram}MB VRAM but only ${freeVram}MB free — deferring load (attempt ${attempt}/${MAX_ATTEMPTS})`);
+      if (attempt < MAX_ATTEMPTS) {
+        setTimeout(() => fireAndForgetLoad(role, port, model, attempt + 1), RETRY_DELAY);
+      } else {
+        log.error(`fireAndForgetLoad: ${role} — gave up after ${MAX_ATTEMPTS} attempts, insufficient VRAM`);
+      }
+      return;
+    }
+  }
+
+  log.info(`fireAndForgetLoad: loading ${model} for ${role} on port ${port} (attempt ${attempt}/${MAX_ATTEMPTS})`);
   state.modelLoading.add(role);
   const loadTaskId = tasks.start('model-load', `Load ${model} into VRAM`, role);
   ollamaLoad(port, model, {
@@ -167,10 +186,25 @@ function fireAndForgetLoad(role: string, port: number, model: string): void {
       }
     },
   }).then((ok) => {
-    if (ok) tasks.complete(loadTaskId);
-    else tasks.fail(loadTaskId, 'Load returned false');
+    if (ok) {
+      tasks.complete(loadTaskId);
+      log.info(`fireAndForgetLoad: ${role} loaded successfully`);
+    } else {
+      tasks.fail(loadTaskId, 'Load returned false');
+      log.warn(`fireAndForgetLoad: ${role} load failed (attempt ${attempt}/${MAX_ATTEMPTS})`);
+      // Retry after delay
+      if (attempt < MAX_ATTEMPTS) {
+        log.info(`fireAndForgetLoad: will retry ${role} in ${RETRY_DELAY / 1000}s`);
+        setTimeout(() => fireAndForgetLoad(role, port, model, attempt + 1), RETRY_DELAY);
+      } else {
+        log.error(`fireAndForgetLoad: ${role} — all ${MAX_ATTEMPTS} load attempts failed`);
+      }
+    }
   }).catch((err) => {
     tasks.fail(loadTaskId, (err as Error).message);
+    if (attempt < MAX_ATTEMPTS) {
+      setTimeout(() => fireAndForgetLoad(role, port, model, attempt + 1), RETRY_DELAY);
+    }
   }).finally(() => {
     state.modelLoading.delete(role);
   });

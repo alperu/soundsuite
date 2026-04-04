@@ -122,6 +122,10 @@ async function buildFullStatus(): Promise<Record<string, unknown>> {
     gpus = await discoverGpus();
   } catch { /* gpu discovery optional */ }
 
+  // Calculate total free VRAM for fleet routing decisions
+  const freeVram = (gpus as any[]).reduce((sum, g) => sum + (g.memoryFree || 0), 0);
+  const totalVram = (gpus as any[]).reduce((sum, g) => sum + (g.memoryTotal || 0), 0);
+
   return {
     agentUrl: getAgentUrl(),
     hostname: getDisplayHostname(),
@@ -134,6 +138,8 @@ async function buildFullStatus(): Promise<Record<string, unknown>> {
     roles: status.roles,
     peakDemand: status.peakDemand,
     gpus,
+    freeVram,    // total free GPU memory in MB — for fleet routing
+    totalVram,   // total GPU memory in MB
     wsConnected: connectionMode === 'websocket',
     containerNames: getRegisteredContainers(),
     tasks: tasks.getAll(),

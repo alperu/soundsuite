@@ -46,6 +46,8 @@ export interface CachedSidecarStatus {
     temperature: number;
   }>;
   wsConnected: boolean;
+  freeVram?: number;   // total free GPU memory in MB
+  totalVram?: number;  // total GPU memory in MB
   tasks?: Array<{
     id: string;
     type: string;
@@ -106,6 +108,8 @@ export function updateSidecarStatus(agentUrl: string, status: Partial<CachedSide
     roles: status.roles || existing?.roles || {},
     peakDemand: status.peakDemand || existing?.peakDemand || {},
     gpus: status.gpus || existing?.gpus || [],
+    freeVram: status.freeVram ?? existing?.freeVram,
+    totalVram: status.totalVram ?? existing?.totalVram,
     wsConnected: status.wsConnected ?? existing?.wsConnected ?? false,
     tasks: status.tasks || existing?.tasks || [],
     lastSeen: Date.now(),

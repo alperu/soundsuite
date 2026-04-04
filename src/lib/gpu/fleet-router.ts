@@ -730,6 +730,14 @@ async function enforceMinOnline(): Promise<void> {
     let runningCount = 0;
     const idleSidecars: string[] = [];
 
+    // VRAM requirements for roles that need GPU
+    const ROLE_VRAM_NEEDS: Record<string, number> = {
+      completion: 10000,
+      reranker: 7000,
+      embedding: 1200,
+      ocr: 8000,
+    };
+
     for (const sidecar of reachable) {
       const cached = statusCache.getSidecarStatus(sidecar.url);
       if (!cached) continue;
@@ -737,7 +745,14 @@ async function enforceMinOnline(): Promise<void> {
       if (containerStatus === 'running') {
         runningCount++;
       } else if (containerStatus === 'exited' || cached.containers?.[role]?.exists) {
-        idleSidecars.push(sidecar.url);
+        // Only consider this sidecar if it has enough free VRAM for the role
+        const vramNeeded = ROLE_VRAM_NEEDS[role] || 0;
+        const freeVram = cached.freeVram ?? Infinity; // no data = assume ok
+        if (freeVram >= vramNeeded * 0.5) {
+          idleSidecars.push(sidecar.url);
+        } else {
+          logger.info(`min-online: skipping ${sidecar.url} for ${role} — need ${vramNeeded}MB but only ${freeVram}MB free VRAM`);
+        }
       }
     }
 
@@ -747,7 +762,7 @@ async function enforceMinOnline(): Promise<void> {
     const toAcquire = idleSidecars.slice(0, deficit);
 
     if (toAcquire.length < deficit) {
-      logger.warn(`min-online: need ${deficit} more ${role} container(s) but only ${toAcquire.length} idle sidecar(s) available`);
+      logger.warn(`min-online: need ${deficit} more ${role} container(s) but only ${toAcquire.length} sidecar(s) with sufficient VRAM`);
     }
 
     for (const url of toAcquire) {

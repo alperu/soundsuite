@@ -33,7 +33,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     image: 'ollama/ollama',
     model: 'qwen3.5:9b',
     port: 11435,
-    vram: 12000,
+    vram: 10000, // 9B with 30% CPU offload needs ~10GB GPU
     type: 'ollama',
     modes: ['searching'],
     containerName: `${CONTAINER_PREFIX}completion`,
