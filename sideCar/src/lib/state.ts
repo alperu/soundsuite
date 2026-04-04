@@ -143,6 +143,8 @@ export const state = {
   gpuCache: null as GpuInfo[] | null,
   gpuCacheTime: 0,
   GPU_CACHE_TTL: 30_000,
+  cudaUnavailable: false,  // set true if NVIDIA runtime not found — stops retry loop
+  cudaRetried: false,      // tracks single retry attempt for ss-cuda
 
   // WebSocket state
   wsConnection: null as WebSocket | null,

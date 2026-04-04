@@ -36,16 +36,38 @@ async function ensureCudaContainer(): Promise<boolean> {
   if (cs.status === 'running') return true;
 
   if (cs.exists && cs.status !== 'running') {
-    // Exists but stopped — start it
-    const { status } = await dockerRequest('POST', `/containers/${GPU_CONTAINER}/start`);
+    // Exists but stopped — try to start it
+    const { status, body: startBody } = await dockerRequestWithBody('POST', `/containers/${GPU_CONTAINER}/start`, undefined);
     if (status === 204 || status === 304) {
       log.info('ss-cuda container restarted');
       return true;
     }
-    // Couldn't start — remove and recreate
-    log.warn(`ss-cuda start returned ${status}, recreating...`);
-    await dockerRequest('DELETE', `/containers/${GPU_CONTAINER}?force=true`);
+    // Log the actual Docker error so we can diagnose
+    log.warn(`ss-cuda start failed (${status}): ${startBody?.slice(0, 300) || 'no body'}`);
+
+    // If start failed, DON'T immediately delete+recreate — that causes a create/delete loop.
+    // Only recreate if the container is in a truly broken state (not just a GPU access issue).
+    if (status === 500 && startBody?.includes('could not select device driver')) {
+      // NVIDIA runtime not available — don't loop, just report
+      log.error('ss-cuda: NVIDIA runtime not available on this host. Skipping GPU container.');
+      state.cudaUnavailable = true;
+      return false;
+    }
+
+    // For other errors, try recreate once
+    if (!state.cudaRetried) {
+      state.cudaRetried = true;
+      log.info('ss-cuda: removing and recreating (one attempt)...');
+      await dockerRequest('DELETE', `/containers/${GPU_CONTAINER}?force=true`);
+    } else {
+      // Already retried — don't loop
+      log.warn('ss-cuda: already retried recreate, backing off');
+      return false;
+    }
   }
+
+  // Skip if we know CUDA isn't available on this host
+  if (state.cudaUnavailable) return false;
 
   // Create fresh
   if (!await ensureImage()) return false;
@@ -67,17 +89,19 @@ async function ensureCudaContainer(): Promise<boolean> {
   }
 
   if (status !== 201) {
-    log.error(`ss-cuda create failed: ${status} ${body.slice(0, 200)}`);
+    log.error(`ss-cuda create failed: ${status} ${body?.slice(0, 300) || 'no body'}`);
     return false;
   }
 
-  const { status: startStatus } = await dockerRequest('POST', `/containers/${JSON.parse(body).Id}/start`);
+  const containerId = JSON.parse(body).Id;
+  const { status: startStatus, body: startErrBody } = await dockerRequestWithBody('POST', `/containers/${containerId}/start`, undefined);
   if (startStatus !== 204 && startStatus !== 304) {
-    log.error(`ss-cuda start failed: ${startStatus}`);
+    log.error(`ss-cuda start failed after create: ${startStatus} ${startErrBody?.slice(0, 300) || ''}`);
     return false;
   }
 
   log.info('ss-cuda container created and started');
+  state.cudaRetried = false; // reset retry flag on success
   return true;
 }
 

@@ -20,7 +20,25 @@ async function getData() {
     orderBy: { fileName: 'asc' },
   });
 
-  return { cases, filings, documents };
+  // Include indexed drafts as pseudo-documents so they appear in the vector viewer
+  const indexedDrafts = await prisma.draft.findMany({
+    where: { indexingStatus: 'INDEXED' },
+    select: { id: true, title: true, caseId: true, documentType: true, indexedVersion: true, lastIndexedAt: true },
+    orderBy: { title: 'asc' },
+  });
+
+  // Convert drafts to document-like objects for the viewer
+  const draftDocs = indexedDrafts.map(d => ({
+    id: d.id,
+    fileName: `📝 Draft: ${d.title} (${d.documentType})`,
+    caseId: d.caseId,
+    filingId: null as string | null,
+    isDraft: true,
+  }));
+
+  const allDocuments = [...documents, ...draftDocs];
+
+  return { cases, filings, documents: allDocuments };
 }
 
 interface VectorsPageProps {
