@@ -352,7 +352,7 @@ chmod +x "$STAGE_DIR/sidecar/install.sh"
 
 # Build the tarball
 cd "$STAGE_DIR"
-tar czf "$TARBALL" sidecar/
+tar czf "$TARBALL" --exclude='sidecar/config' sidecar/
 
 # Compute checksum
 if command -v shasum &>/dev/null; then

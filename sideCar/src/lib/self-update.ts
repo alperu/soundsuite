@@ -148,22 +148,24 @@ export async function performUpdate(serverUrl: string): Promise<boolean> {
       return false;
     }
 
-    // Back up config before overwriting (tarball might include config/ in the future)
-    const configPath = path.join(installDir, 'config', 'config.json');
-    let configBackup: Buffer | null = null;
-    if (fs.existsSync(configPath)) {
-      configBackup = fs.readFileSync(configPath);
-      log.info('Backed up config.json before update');
+    // Back up ENTIRE config/ directory before overwriting
+    // (includes config.json AND sidecar.config.json — the authoritative serverUrl source)
+    const configDir = path.join(installDir, 'config');
+    const configBackupDir = path.join(installDir, '_config-backup');
+    if (fs.existsSync(configDir)) {
+      if (fs.existsSync(configBackupDir)) fs.rmSync(configBackupDir, { recursive: true });
+      fs.cpSync(configDir, configBackupDir, { recursive: true });
+      log.info('Backed up entire config/ directory before update');
     }
 
     copyDirSync(extractedSidecar, installDir);
 
-    // Restore config if it was backed up
-    if (configBackup) {
-      const configDir = path.dirname(configPath);
+    // Restore entire config/ directory after extraction
+    if (fs.existsSync(configBackupDir)) {
       if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
-      fs.writeFileSync(configPath, configBackup);
-      log.info('Restored config.json after update');
+      fs.cpSync(configBackupDir, configDir, { recursive: true });
+      fs.rmSync(configBackupDir, { recursive: true });
+      log.info('Restored config/ directory after update (config.json + sidecar.config.json)');
     }
 
     // 7. Cleanup
@@ -223,8 +225,8 @@ function copyDirSync(src: string, dest: string) {
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
 
-    // Skip backup/temp dirs in destination
-    if (entry.name.startsWith('_backup-') || entry.name.startsWith('_update-')) continue;
+    // Skip backup/temp dirs AND config directory (never overwrite user config from tarball)
+    if (entry.name.startsWith('_backup-') || entry.name.startsWith('_update-') || entry.name.startsWith('_config-') || entry.name === 'config') continue;
 
     if (entry.isDirectory()) {
       fs.mkdirSync(destPath, { recursive: true });

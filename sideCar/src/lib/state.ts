@@ -57,7 +57,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     containerName: `${CONTAINER_PREFIX}reranker`,
   },
   cuda: {
-    image: 'nvidia/cuda:12.6.3-base-ubuntu24.04',
+    image: 'nvidia/cuda:12.4.1-base-ubuntu22.04',
     model: null,
     port: 0,
     vram: 0,

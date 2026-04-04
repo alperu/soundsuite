@@ -4,7 +4,9 @@ import { createLogger } from './logger';
 
 const log = createLogger('gpu');
 
-const GPU_IMAGE = 'nvidia/cuda:12.6.3-base-ubuntu24.04';
+// Use CUDA 12.4 base — matches driver 550+ (most current fleet machines)
+// Only used for nvidia-smi queries, not for running CUDA workloads
+const GPU_IMAGE = 'nvidia/cuda:12.4.1-base-ubuntu22.04';
 const GPU_CONTAINER = 'ss-cuda';
 const NVIDIA_SMI_CMD = ['nvidia-smi', '--query-gpu=index,name,memory.total,memory.used,memory.free,temperature.gpu', '--format=csv,noheader,nounits'];
 
