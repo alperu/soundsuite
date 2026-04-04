@@ -287,6 +287,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
 
         // Build citation input
         const totalVolumes = filingType ? (volumeCountMap.get(filingType) ?? 1) : 1;
+        const filing = (document as any)?.filing;
         const citationInput: CitationInput = {
           filingType,
           volumeNumber,
@@ -294,6 +295,8 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
           caseNumber: caseNumber || undefined,
           pageNumber: result.metadata.pageNumber,
           fileName: document?.fileName,
+          isSupplemental: filing?.isSupplemental || false,
+          supplementalOrder: filing?.supplementalOrder || undefined,
         };
 
         // Line numbers for Reporter's Record filings: prefer stored metadata, fall back to detection

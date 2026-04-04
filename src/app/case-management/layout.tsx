@@ -25,6 +25,8 @@ interface FilingRecord {
   title: string;
   slug: string;
   volumeNumber: number | null;
+  isSupplemental: boolean;
+  supplementalOrder: number | null;
   documents: DocumentRecord[];
 }
 
@@ -210,6 +212,8 @@ export default function CaseManagementLayout({ children }: { children: React.Rea
   const [editFilingType, setEditFilingType] = useState('');
   const [editFilingTitle, setEditFilingTitle] = useState('');
   const [editFilingVolume, setEditFilingVolume] = useState('');
+  const [editFilingSupplemental, setEditFilingSupplemental] = useState(false);
+  const [editFilingSupplementalOrder, setEditFilingSupplementalOrder] = useState('');
   const [editFilingLoading, setEditFilingLoading] = useState(false);
 
   // Case edit dialog state
@@ -475,6 +479,8 @@ export default function CaseManagementLayout({ children }: { children: React.Rea
           title: editFilingTitle.trim(),
           filingType: editFilingType,
           volumeNumber: editFilingVolume.trim() ? parseInt(editFilingVolume, 10) : null,
+          isSupplemental: editFilingSupplemental,
+          supplementalOrder: editFilingSupplementalOrder.trim() ? parseInt(editFilingSupplementalOrder, 10) : null,
         }),
       });
       if (res.ok) {
@@ -575,6 +581,8 @@ export default function CaseManagementLayout({ children }: { children: React.Rea
             setEditFilingType(f.filingType);
             setEditFilingTitle(f.title);
             setEditFilingVolume(f.volumeNumber != null ? String(f.volumeNumber) : '');
+            setEditFilingSupplemental(f.isSupplemental || false);
+            setEditFilingSupplementalOrder(f.supplementalOrder != null ? String(f.supplementalOrder) : '');
             setShowEditFilingDialog(true);
           },
         },
@@ -822,6 +830,11 @@ export default function CaseManagementLayout({ children }: { children: React.Rea
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-1">
+                              {filing.isSupplemental && (
+                                <span className="text-[9px] font-medium text-amber-700 bg-amber-100 px-1 py-0.5 rounded shrink-0">
+                                  Supp.{filing.supplementalOrder && filing.supplementalOrder > 1 ? ` ${filing.supplementalOrder}` : ''}
+                                </span>
+                              )}
                               <span
                                 className="text-sm text-gray-800 truncate flex-1 hover:text-blue-600"
                                 title={filing.title}
@@ -1057,7 +1070,31 @@ export default function CaseManagementLayout({ children }: { children: React.Rea
                 <label className="block text-sm font-medium text-gray-700 mb-1">Volume Number</label>
                 <input type="number" min="1" value={editFilingVolume} onChange={e => setEditFilingVolume(e.target.value)}
                   placeholder="e.g. 2"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4" />
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-3" />
+                <div className="flex items-center gap-3 mb-3">
+                  <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editFilingSupplemental}
+                      onChange={e => setEditFilingSupplemental(e.target.checked)}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    Supplemental Record
+                  </label>
+                  {editFilingSupplemental && (
+                    <div className="flex items-center gap-1.5">
+                      <label className="text-xs text-gray-500">Order:</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={editFilingSupplementalOrder}
+                        onChange={e => setEditFilingSupplementalOrder(e.target.value)}
+                        placeholder="1"
+                        className="w-16 px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                  )}
+                </div>
               </>
             )}
             <div className="flex justify-end gap-2">

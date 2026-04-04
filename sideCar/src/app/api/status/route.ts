@@ -2,8 +2,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import { handleStatus } from '@/lib/handlers';
 import { state } from '@/lib/state';
 import { saveConfig } from '@/lib/config';
-import { saveSidecarConfig } from '@/lib/sidecar-config';
 import { connectWebSocket, disconnectWebSocket } from '@/lib/ws-client';
+import fs from 'fs';
+import path from 'path';
+
+function writeSidecarConfig(serverUrl: string | null) {
+  try {
+    const configPath = process.env.SIDECAR_CONFIG_PATH ||
+      path.join(path.dirname(process.argv[1] || __filename), 'config', 'sidecar.config.json');
+    const dir = path.dirname(configPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    let existing: any = { serverUrl: null };
+    try { if (fs.existsSync(configPath)) existing = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+    fs.writeFileSync(configPath, JSON.stringify({ ...existing, serverUrl }, null, 2));
+  } catch {}
+}
 import { switchMode } from '@/lib/containers';
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
@@ -30,7 +43,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'serverUrl is required' }, { status: 400, headers: cors });
       }
       state.serverUrl = serverUrl;
-      saveSidecarConfig({ serverUrl });
+      writeSidecarConfig(serverUrl);
       saveConfig();
       disconnectWebSocket();
       connectWebSocket();
@@ -40,7 +53,7 @@ export async function POST(request: NextRequest) {
     if (action === 'disconnect') {
       disconnectWebSocket();
       state.serverUrl = null;
-      saveSidecarConfig({ serverUrl: null });
+      writeSidecarConfig(null);
       saveConfig();
       return NextResponse.json({ message: 'Disconnected' }, { headers: cors });
     }

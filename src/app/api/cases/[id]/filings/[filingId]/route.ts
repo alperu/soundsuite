@@ -108,6 +108,8 @@ export async function PATCH(
     if (body.filingDate !== undefined) updateData.filingDate = body.filingDate ? new Date(body.filingDate) : null;
     if (body.description !== undefined) updateData.description = body.description || null;
     if (body.volumeNumber !== undefined) updateData.volumeNumber = typeof body.volumeNumber === 'number' ? body.volumeNumber : null;
+    if (body.isSupplemental !== undefined) updateData.isSupplemental = body.isSupplemental === true;
+    if (body.supplementalOrder !== undefined) updateData.supplementalOrder = typeof body.supplementalOrder === 'number' ? body.supplementalOrder : null;
 
     if (Object.keys(updateData).length === 0) {
       return NextResponse.json({ error: 'No valid fields to update' }, { status: 400 });

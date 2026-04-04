@@ -31,6 +31,10 @@ export interface CitationInput {
   lineEnd?: number;
   /** Document file name (fallback for generic citations) */
   fileName?: string;
+  /** Whether this filing is a supplemental record */
+  isSupplemental?: boolean;
+  /** Supplemental order (1 = 1st, 2 = 2nd, etc.) */
+  supplementalOrder?: number;
 }
 
 export interface FormattedCitation {
@@ -77,16 +81,29 @@ export class TexasAppellateCitationFormatter implements CitationFormatter {
     // Omit volume number when there's only 1 volume for this filing type
     const showVolume = (input.totalVolumes ?? 0) > 1;
 
+    // Build supplemental prefix: "Supp. " or "2nd Supp. " etc.
+    let suppPrefix = '';
+    if (input.isSupplemental) {
+      const order = input.supplementalOrder || 1;
+      if (order > 1) {
+        const ordinals = ['', '', '2nd', '3rd', '4th', '5th', '6th'];
+        suppPrefix = `${ordinals[order] || `${order}th`} Supp. `;
+      } else {
+        suppPrefix = 'Supp. ';
+      }
+    }
+
     switch (kind) {
       case 'CR': {
         const vol = input.volumeNumber ?? 1;
+        const typeLabel = `${suppPrefix}CR`;
         const shortCite = showVolume
-          ? `${vol} CR ${input.pageNumber}`
-          : `CR ${input.pageNumber}`;
+          ? `${vol} ${typeLabel} ${input.pageNumber}`
+          : `${typeLabel} ${input.pageNumber}`;
         const fullCite = input.caseNumber
           ? `${input.caseNumber} ${shortCite}`
           : shortCite;
-        return { full: fullCite, short: shortCite, type: 'CR' };
+        return { full: fullCite, short: shortCite, type: suppPrefix ? 'Supp. CR' : 'CR' };
       }
 
       case 'RR': {
@@ -98,13 +115,14 @@ export class TexasAppellateCitationFormatter implements CitationFormatter {
             pagePart += `-${input.lineEnd}`;
           }
         }
+        const typeLabel = `${suppPrefix}RR`;
         const shortCite = showVolume
-          ? `${vol} RR ${pagePart}`
-          : `RR ${pagePart}`;
+          ? `${vol} ${typeLabel} ${pagePart}`
+          : `${typeLabel} ${pagePart}`;
         const fullCite = input.caseNumber
           ? `${input.caseNumber} ${shortCite}`
           : shortCite;
-        return { full: fullCite, short: shortCite, type: 'RR' };
+        return { full: fullCite, short: shortCite, type: suppPrefix ? 'Supp. RR' : 'RR' };
       }
 
       default: {

@@ -39,7 +39,9 @@ model Filing {
   slug        String
   filingDate  DateTime?
   description  String?
-  volumeNumber Int?
+  volumeNumber      Int?
+  isSupplemental    Boolean   @default(false)
+  supplementalOrder Int?      // 1 = 1st supplemental, 2 = 2nd, etc.
   createdAt    DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
   documents   Document[]

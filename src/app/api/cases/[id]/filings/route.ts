@@ -74,7 +74,7 @@ export async function POST(
   try {
     const { id } = await params;
     const body = await request.json();
-    const { filingType, title, filingDate, description, volumeNumber } = body;
+    const { filingType, title, filingDate, description, volumeNumber, isSupplemental, supplementalOrder } = body;
 
     if (!filingType || !title) {
       return NextResponse.json(
@@ -113,6 +113,8 @@ export async function POST(
         filingDate: filingDate ? new Date(filingDate) : null,
         description: description || null,
         volumeNumber: typeof volumeNumber === 'number' ? volumeNumber : null,
+        isSupplemental: isSupplemental === true,
+        supplementalOrder: typeof supplementalOrder === 'number' ? supplementalOrder : null,
       },
     });
 
