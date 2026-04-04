@@ -66,7 +66,8 @@ export function DraftChatHistory({ caseId, currentSessionId, onLoadSession }: Dr
     try {
       const res = await fetch(`/api/chat/history/${session.id}`);
       if (res.ok) {
-        const fullSession = await res.json();
+        const data = await res.json();
+        const fullSession = data.session || data;
         onLoadSession(fullSession);
       }
     } catch { /* ignore */ }
