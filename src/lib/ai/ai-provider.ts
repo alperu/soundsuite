@@ -93,13 +93,45 @@ async function completeWithAnthropic(
   const systemMsg = messages.find(m => m.role === 'system');
   const nonSystem = messages.filter(m => m.role !== 'system');
 
-  // jsonMode: prefill the assistant turn with `{` to force JSON continuation.
   const outgoingMessages: Array<{ role: 'user' | 'assistant'; content: string }> = nonSystem.map(m => ({
     role: m.role as 'user' | 'assistant',
     content: m.content,
   }));
+
+  // jsonMode: forced tool use (canonical approach for Claude 4+).
   if (jsonMode) {
-    outgoingMessages.push({ role: 'assistant', content: '{' });
+    const response = await client.messages.create({
+      model,
+      max_tokens: maxTokens,
+      temperature,
+      ...(systemMsg ? { system: systemMsg.content } : {}),
+      messages: outgoingMessages,
+      tools: [
+        {
+          name: 'emit_json_result',
+          description:
+            'Emit the structured JSON result that matches the schema described in the system prompt. Call this tool exactly once with your output as the tool input.',
+          input_schema: { type: 'object' as const },
+        },
+      ],
+      tool_choice: { type: 'tool' as const, name: 'emit_json_result' },
+    });
+
+    // Extract the tool_use block and serialize its input to JSON.
+    const toolBlock = response.content.find(
+      (b: { type: string }) => b.type === 'tool_use'
+    ) as { type: 'tool_use'; input: unknown } | undefined;
+    const content = toolBlock ? JSON.stringify(toolBlock.input) : '';
+
+    return {
+      content,
+      model: response.model,
+      provider: 'anthropic',
+      usage: {
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+      },
+    };
   }
 
   const response = await client.messages.create({
@@ -111,11 +143,8 @@ async function completeWithAnthropic(
   });
 
   const textBlock = response.content.find(b => b.type === 'text');
-  // Re-inject the prefilled `{` so callers see a complete JSON object.
-  const rawText = textBlock?.text ?? '';
-  const content = jsonMode ? '{' + rawText : rawText;
   return {
-    content,
+    content: textBlock?.text ?? '',
     model: response.model,
     provider: 'anthropic',
     usage: {
@@ -552,20 +581,87 @@ async function* streamWithAnthropic(
   const systemMsg = messages.find(m => m.role === 'system');
   const nonSystem = messages.filter(m => m.role !== 'system');
 
-  // Anthropic has no native `response_format: json_object`. The canonical
-  // approach is to PREFILL the assistant turn with `{` so the model is forced
-  // into JSON-continuation mode from its very first token.
-  // https://docs.anthropic.com/en/docs/test-and-evaluate/strengthen-guardrails/increase-consistency#prefill-claudes-response
   const outgoingMessages: Array<{ role: 'user' | 'assistant'; content: string }> = nonSystem.map(m => ({
     role: m.role as 'user' | 'assistant',
     content: m.content,
   }));
+
+  // Anthropic has no native `response_format: json_object`. For JSON mode we
+  // use FORCED TOOL USE — the canonical approach for Claude 4+. We define a
+  // permissive single-object tool and set `tool_choice` to require calling it,
+  // so the model's output arrives as structured JSON input to the tool rather
+  // than free-form text.
+  //
+  // (Assistant-message prefill, the older approach, is rejected by Claude 4/4.5:
+  //  "This model does not support assistant message prefill.")
   if (jsonMode) {
-    outgoingMessages.push({ role: 'assistant', content: '{' });
-    console.log(`[streamWithAnthropic] jsonMode=true, prefilling assistant turn with "{" for ${model}`);
+    console.log(`[streamWithAnthropic] jsonMode=true, using forced tool use for ${model}`);
+    const response = await client.messages.create({
+      model,
+      max_tokens: maxTokens,
+      temperature,
+      ...(systemMsg ? { system: systemMsg.content } : {}),
+      messages: outgoingMessages,
+      tools: [
+        {
+          name: 'emit_json_result',
+          description:
+            'Emit the structured JSON result that matches the schema described in the system prompt. Call this tool exactly once with your output as the tool input.',
+          // Permissive schema — the actual shape is enforced by downstream
+          // zod validation. This tool exists purely to force JSON mode.
+          input_schema: {
+            type: 'object' as const,
+          },
+        },
+      ],
+      tool_choice: { type: 'tool' as const, name: 'emit_json_result' },
+      stream: true,
+    });
+
+    let fullContent = '';
+    let batchBuffer = '';
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    for await (const event of response) {
+      if (
+        event.type === 'content_block_delta' &&
+        (event.delta as { type?: string }).type === 'input_json_delta'
+      ) {
+        const chunk = (event.delta as { partial_json?: string }).partial_json ?? '';
+        if (chunk) {
+          fullContent += chunk;
+          batchBuffer += chunk;
+          if (batchBuffer.length >= 20) {
+            yield { type: 'token', text: batchBuffer };
+            batchBuffer = '';
+          }
+        }
+      } else if (event.type === 'message_delta') {
+        outputTokens = (event as any).usage?.output_tokens ?? outputTokens;
+      } else if (event.type === 'message_start') {
+        inputTokens = (event as any).message?.usage?.input_tokens ?? 0;
+      }
+    }
+
+    if (batchBuffer) yield { type: 'token', text: batchBuffer };
+
+    console.log(`[streamWithAnthropic] tool-use complete`, {
+      contentLength: fullContent.length,
+      contentPreview: fullContent.slice(0, 200),
+    });
+
+    yield {
+      type: 'done',
+      content: fullContent,
+      model,
+      provider: 'anthropic',
+      usage: { inputTokens, outputTokens },
+    };
+    return;
   }
 
-  // Use the async iterable stream API
+  // Non-jsonMode path: standard text streaming.
   const response = await client.messages.create({
     model,
     max_tokens: maxTokens,
@@ -575,11 +671,8 @@ async function* streamWithAnthropic(
     stream: true,
   });
 
-  // When we prefilled with `{`, the model's completion will NOT include the
-  // leading brace. We re-inject it into the content stream so downstream
-  // parsers see a complete JSON object.
-  let fullContent = jsonMode ? '{' : '';
-  let batchBuffer = jsonMode ? '{' : '';
+  let fullContent = '';
+  let batchBuffer = '';
   let inputTokens = 0;
   let outputTokens = 0;
 
