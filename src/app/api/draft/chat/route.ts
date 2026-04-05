@@ -99,7 +99,8 @@ export async function POST(request: NextRequest) {
                 const searchResult = await registry.execute('query_case_knowledge', {
                   query: query.trim(),
                   caseId: cid,
-                  limit: Math.max(5, Math.floor(15 / effectiveCaseIds.length)),
+                  limit: 20,
+                  searchMode: 'hybrid',
                 });
 
                 if (searchResult.success && searchResult.data?.results?.length > 0) {
@@ -111,7 +112,7 @@ export async function POST(request: NextRequest) {
                 // Sort by score if available, take top 15
                 const sorted = allResults
                   .sort((a: any, b: any) => (b.score ?? 0) - (a.score ?? 0))
-                  .slice(0, 15);
+                  .slice(0, 25);
 
                 knowledgeContext = sorted
                   .map((r) => {
