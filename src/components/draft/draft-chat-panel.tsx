@@ -198,12 +198,18 @@ export default function DraftChatPanel({
   const suggestionsState = useDraftSuggestions({
     draftId,
     onSuggestionArrived: (suggestion) => {
-      // Install the anchor in the editor so its position stays live across edits.
-      draftEditorRef?.current?.addSuggestionAnchor({
-        id: suggestion.id,
-        from: suggestion.anchorFrom,
-        to: suggestion.anchorTo,
-      });
+      const editorHandle = draftEditorRef?.current;
+      if (!editorHandle) return;
+      // Re-anchor using the verbatim originalText so we get correct PM
+      // positions. Server-side anchorFrom/anchorTo are plain-text offsets
+      // which don't equal PM positions in multi-paragraph documents (PM
+      // counts block-boundary tokens that plain text doesn't).
+      const range =
+        editorHandle.findTextInDoc(suggestion.originalText) ?? {
+          from: suggestion.anchorFrom,
+          to: suggestion.anchorTo,
+        };
+      editorHandle.addSuggestionAnchor({ id: suggestion.id, ...range });
     },
     onStreamComplete: (count) => {
       // After a fresh run, auto-switch to the Suggestions tab so the user sees results.
@@ -282,8 +288,13 @@ export default function DraftChatPanel({
     const fingerprint = pending.map((s) => `${s.id}:${s.anchorFrom}:${s.anchorTo}`).join('|');
     if (fingerprint === lastRehydrateRef.current) return;
     lastRehydrateRef.current = fingerprint;
+    const editorHandle = draftEditorRef.current;
     draftEditorRef.current.replaceSuggestionAnchors(
-      pending.map((s) => ({ id: s.id, from: s.anchorFrom, to: s.anchorTo }))
+      pending.map((s) => {
+        // Re-anchor by text so PM positions are correct after document edits.
+        const range = editorHandle.findTextInDoc(s.originalText);
+        return { id: s.id, from: range?.from ?? s.anchorFrom, to: range?.to ?? s.anchorTo };
+      })
     );
   }, [suggestionsState.suggestions, draftEditorRef, draftId]);
 
@@ -663,11 +674,15 @@ export default function DraftChatPanel({
   const handleSuggestionReopen = useCallback(
     async (suggestion: DraftSuggestionDTO) => {
       // Re-install the anchor and mark pending again.
-      draftEditorRef?.current?.addSuggestionAnchor({
-        id: suggestion.id,
-        from: suggestion.anchorFrom,
-        to: suggestion.anchorTo,
-      });
+      const editorHandle = draftEditorRef?.current;
+      if (editorHandle) {
+        const range =
+          editorHandle.findTextInDoc(suggestion.originalText) ?? {
+            from: suggestion.anchorFrom,
+            to: suggestion.anchorTo,
+          };
+        editorHandle.addSuggestionAnchor({ id: suggestion.id, ...range });
+      }
       await suggestionsState.updateStatus(suggestion.id, 'pending');
     },
     [draftEditorRef, suggestionsState]
@@ -675,11 +690,14 @@ export default function DraftChatPanel({
 
   const handleSuggestionJump = useCallback(
     (suggestion: DraftSuggestionDTO) => {
-      // Pass the DTO's stored anchor positions as a fallback — if the
-      // tracking plugin doesn't have the anchor installed yet (race on first
-      // render after stream arrival), the editor can still scroll using
-      // these initial offsets.
-      draftEditorRef?.current?.flashSuggestion(suggestion.id, {
+      const editorHandle = draftEditorRef?.current;
+      if (!editorHandle) return;
+      // Prefer the live plugin-tracked range (survives edits). If the plugin
+      // doesn't have it yet, re-locate by verbatim text (correct PM coords).
+      // Last resort: stored plain-text offsets (may be off in multi-para docs).
+      const liveRange = editorHandle.resolveSuggestionRange?.(suggestion.id);
+      const textRange = !liveRange ? editorHandle.findTextInDoc(suggestion.originalText) : null;
+      editorHandle.flashSuggestion(suggestion.id, liveRange ?? textRange ?? {
         from: suggestion.anchorFrom,
         to: suggestion.anchorTo,
       });
@@ -1289,6 +1307,14 @@ export default function DraftChatPanel({
           onIgnore={handleSuggestionIgnore}
           onRegenerate={handleSuggestionRegenerate}
           onReopen={handleSuggestionReopen}
+          onDelete={(suggestion) => {
+            draftEditorRef?.current?.removeSuggestionAnchor(suggestion.id);
+            suggestionsState.deleteSuggestion(suggestion.id);
+          }}
+          onBulkDelete={(ids) => {
+            ids.forEach((id) => draftEditorRef?.current?.removeSuggestionAnchor(id));
+            suggestionsState.bulkDelete(ids);
+          }}
           onJump={handleSuggestionJump}
           onBulkAction={async (action, ids) => {
             for (const id of ids) {

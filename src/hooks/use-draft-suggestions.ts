@@ -63,6 +63,10 @@ export interface UseDraftSuggestionsReturn {
     payload?: { denyReasonTags?: DenyReasonTagSlug[]; denyReasonText?: string | null }
   ) => Promise<DraftSuggestionDTO | null>;
 
+  /** Permanently delete a suggestion (removes from DB and local state). */
+  deleteSuggestion: (id: string) => Promise<void>;
+  /** Permanently delete all suggestions with the given ids. */
+  bulkDelete: (ids: string[]) => Promise<void>;
   /** Refresh from the server (e.g. on focus). */
   refresh: () => Promise<void>;
   /** Manually set the list (used after external edits). */
@@ -370,6 +374,27 @@ export function useDraftSuggestions(options: UseDraftSuggestionsOptions): UseDra
   );
 
   // ---------------------------------------------------------------------
+  // Delete
+  // ---------------------------------------------------------------------
+  const deleteSuggestion = useCallback(async (id: string) => {
+    setSuggestions((prev) => prev.filter((s) => s.id !== id));
+    try {
+      await fetch(`/api/draft/suggestions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    } catch {
+      // If the delete failed, refresh to get back in sync.
+      await refresh();
+    }
+  }, [refresh]);
+
+  const bulkDelete = useCallback(async (ids: string[]) => {
+    const idSet = new Set(ids);
+    setSuggestions((prev) => prev.filter((s) => !idSet.has(s.id)));
+    await Promise.allSettled(
+      ids.map((id) => fetch(`/api/draft/suggestions/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+    );
+  }, []);
+
+  // ---------------------------------------------------------------------
   // Derived: ordered view + pending count
   // ---------------------------------------------------------------------
   const orderedSuggestions = (() => {
@@ -398,6 +423,8 @@ export function useDraftSuggestions(options: UseDraftSuggestionsOptions): UseDra
     regenerate,
     abort,
     updateStatus,
+    deleteSuggestion,
+    bulkDelete,
     refresh,
     setSuggestions,
   };

@@ -36,6 +36,8 @@ export interface SuggestionQueuePanelProps {
   onIgnore: (suggestion: DraftSuggestionDTO) => void;
   onRegenerate: (suggestion: DraftSuggestionDTO) => void;
   onReopen: (suggestion: DraftSuggestionDTO) => void;
+  onDelete: (suggestion: DraftSuggestionDTO) => void;
+  onBulkDelete?: (ids: string[]) => void;
   onJump: (suggestion: DraftSuggestionDTO) => void;
   onBulkAction?: (action: 'accept-safe' | 'deny-all' | 'ignore-all', ids: string[]) => void;
   /** Called when the user clicks "Clear learned preferences" in the footer. */
@@ -55,6 +57,8 @@ export function SuggestionQueuePanel({
   onIgnore,
   onRegenerate,
   onReopen,
+  onDelete,
+  onBulkDelete,
   onJump,
   onBulkAction,
   onClearPreferences,
@@ -74,10 +78,11 @@ export function SuggestionQueuePanel({
     if (!externalHighlightId) return;
     const highlighted = suggestions.find((s) => s.id === externalHighlightId);
     if (!highlighted) return;
-    // Switch to the filter tab that contains the highlighted row so it's
-    // actually visible in the list.
+    // Switch to the filter tab that contains the highlighted row.
+    // NOTE: 'filter' is intentionally NOT in the dependency array — if it were,
+    // every manual tab click would re-run this effect and override the user's choice.
     const targetFilter = highlighted.status as FilterKey;
-    if (targetFilter !== filter && (['pending', 'accepted', 'denied', 'ignored', 'stale'] as FilterKey[]).includes(targetFilter)) {
+    if ((['pending', 'accepted', 'denied', 'ignored', 'stale'] as FilterKey[]).includes(targetFilter)) {
       setFilter(targetFilter);
     }
     setFocusedId(externalHighlightId);
@@ -89,7 +94,8 @@ export function SuggestionQueuePanel({
       rowEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
     return () => cancelAnimationFrame(raf);
-  }, [externalHighlightId, suggestions, filter]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [externalHighlightId, suggestions]);
 
   const counts = useMemo(() => {
     const c: Record<FilterKey, number> = { pending: 0, accepted: 0, denied: 0, ignored: 0, stale: 0 };
@@ -219,6 +225,19 @@ export function SuggestionQueuePanel({
         })}
       </div>
 
+      {/* Clear-all bar — for resolved tabs with ≥1 item */}
+      {filter !== 'pending' && filtered.length > 0 && onBulkDelete && (
+        <div className="flex shrink-0 items-center justify-end gap-1.5 border-b border-gray-200 bg-gray-50 px-2 py-1 text-[11px]">
+          <button
+            type="button"
+            onClick={() => onBulkDelete(filtered.map((s) => s.id))}
+            className="rounded border border-red-200 bg-white px-2 py-0.5 font-medium text-red-600 hover:bg-red-50"
+          >
+            Clear all {filter} ({filtered.length})
+          </button>
+        </div>
+      )}
+
       {/* Bulk action bar — only for pending view with ≥3 items */}
       {filter === 'pending' && pendingIds.length >= 3 && onBulkAction && (
         <div className="flex shrink-0 items-center gap-1.5 border-b border-gray-200 bg-purple-50 px-2 py-1.5 text-[11px]">
@@ -289,6 +308,7 @@ export function SuggestionQueuePanel({
               onIgnore={() => onIgnore(suggestion)}
               onRegenerate={() => onRegenerate(suggestion)}
               onReopen={() => onReopen(suggestion)}
+              onDelete={() => onDelete(suggestion)}
               onJump={() => onJump(suggestion)}
               canRegenerate={suggestion.regenerationCount < 3}
               isRegenerating={regeneratingId === suggestion.id}

@@ -118,6 +118,13 @@ export interface DraftEditorHandle {
   resolveSuggestionRange: (id: string) => { from: number; to: number } | null;
   /** Replace all tracked anchors in one shot (used on rehydration). */
   replaceSuggestionAnchors: (anchors: Array<{ id: string; from: number; to: number }>) => void;
+  /**
+   * Search for `targetText` (verbatim substring) in the editor document and
+   * return its ProseMirror {from, to} positions, or null if not found.
+   * Use this to convert plain-text offsets from the server into the correct
+   * PM coordinate space (plain-text offset ≠ PM position in multi-paragraph docs).
+   */
+  findTextInDoc: (targetText: string) => { from: number; to: number } | null;
 }
 
 interface PageSettings {
@@ -146,6 +153,51 @@ interface DraftEditorProps {
     lineSpacing: string;
     paragraphSpacing: string;
   };
+}
+
+/**
+ * Walk the ProseMirror document and find the {from, to} PM positions for a
+ * verbatim target string. Returns null if the text is not found.
+ *
+ * Plain-text offset ≠ PM position in multi-paragraph documents because
+ * ProseMirror counts one token for each block open/close boundary. This
+ * function builds a plain-text string alongside a position map so we can
+ * convert accurately.
+ */
+function findTextRangeInDoc(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  doc: { descendants: (fn: (node: any, pos: number) => boolean | void) => void },
+  targetText: string,
+): { from: number; to: number } | null {
+  if (!targetText) return null;
+
+  let plain = '';
+  const posMap: number[] = []; // posMap[i] = PM position of plain-text char at index i
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  doc.descendants((node: any, pos: number) => {
+    if (node.isText) {
+      const text: string = node.text ?? '';
+      for (let i = 0; i < text.length; i++) {
+        plain += text[i];
+        posMap.push(pos + i);
+      }
+    } else if (node.isBlock && plain.length > 0 && !plain.endsWith('\n')) {
+      // Insert a newline separator between blocks (mirrors editor.getText() behaviour).
+      plain += '\n';
+      posMap.push(pos);
+    }
+    return true;
+  });
+
+  const idx = plain.indexOf(targetText);
+  if (idx === -1 || idx >= posMap.length) return null;
+
+  const from = posMap[idx];
+  const lastCharIdx = idx + targetText.length - 1;
+  const to = (lastCharIdx < posMap.length ? posMap[lastCharIdx] : posMap[posMap.length - 1]) + 1;
+
+  return { from, to };
 }
 
 const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
@@ -489,6 +541,11 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             anchors: Array<{ id: string; from: number; to: number }>
           ) => boolean;
         }).replaceAllSuggestionAnchors(anchors);
+      },
+      findTextInDoc: (targetText: string) => {
+        if (!editor) return null;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return findTextRangeInDoc(editor.state.doc as any, targetText);
       },
     }), [editor, getSelection]);
 

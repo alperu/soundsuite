@@ -33,6 +33,7 @@ export interface SuggestionRowProps {
   onRegenerate: () => void;
   onJump: () => void;
   onReopen: () => void;
+  onDelete: () => void;
   canRegenerate: boolean;
   isRegenerating?: boolean;
 }
@@ -49,6 +50,7 @@ export function SuggestionRow({
   onRegenerate,
   onJump,
   onReopen,
+  onDelete,
   canRegenerate,
   isRegenerating,
 }: SuggestionRowProps) {
@@ -188,28 +190,56 @@ export function SuggestionRow({
             {suggestion.status === 'ignored' && '⊘ ignored'}
           </span>
         )}
+        {isResolved && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            title="Delete suggestion"
+            aria-label="Delete suggestion"
+            className="shrink-0 flex h-5 w-5 items-center justify-center rounded text-[11px] text-gray-400 opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 transition-all"
+          >
+            ✕
+          </button>
+        )}
       </div>
 
       {/* Expanded body */}
       {expanded && (
         <div className="border-t border-gray-100 bg-gray-50/50 px-3 py-2">
-          <div className="mb-2 space-y-1">
-            <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Proposed change</div>
-            <div className="rounded border border-gray-200 bg-white p-2 text-[12px] leading-relaxed">
-              {diff.map((span, i) => {
-                if (span.kind === 'equal') return <span key={i}>{span.text}</span>;
-                if (span.kind === 'delete')
+          <div className="mb-2 space-y-1.5">
+            {/* From sentence */}
+            <div>
+              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-500">From</div>
+              <div className="rounded border border-red-200 bg-red-50 p-2 text-[12px] leading-relaxed text-red-900">
+                {suggestion.originalText}
+              </div>
+            </div>
+            {/* To sentence */}
+            <div>
+              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-600">To</div>
+              <div className="rounded border border-emerald-200 bg-emerald-50 p-2 text-[12px] leading-relaxed text-emerald-900">
+                {suggestion.proposedText}
+              </div>
+            </div>
+            {/* Word-level diff */}
+            <div>
+              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Changes</div>
+              <div className="rounded border border-gray-200 bg-white p-2 text-[12px] leading-relaxed">
+                {diff.map((span, i) => {
+                  if (span.kind === 'equal') return <span key={i}>{span.text}</span>;
+                  if (span.kind === 'delete')
+                    return (
+                      <span key={i} className="bg-red-100 text-red-800 line-through decoration-red-400">
+                        {span.text}
+                      </span>
+                    );
                   return (
-                    <span key={i} className="bg-red-100 text-red-800 line-through decoration-red-400">
+                    <span key={i} className="bg-green-100 text-green-800">
                       {span.text}
                     </span>
                   );
-                return (
-                  <span key={i} className="bg-green-100 text-green-800">
-                    {span.text}
-                  </span>
-                );
-              })}
+                })}
+              </div>
             </div>
           </div>
 
@@ -271,13 +301,22 @@ export function SuggestionRow({
           )}
 
           {isResolved && (
-            <button
-              type="button"
-              onClick={onReopen}
-              className="text-[11px] font-medium text-purple-600 hover:text-purple-800 hover:underline"
-            >
-              ↩ Reopen
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={onReopen}
+                className="text-[11px] font-medium text-purple-600 hover:text-purple-800 hover:underline"
+              >
+                ↩ Reopen
+              </button>
+              <button
+                type="button"
+                onClick={onDelete}
+                className="text-[11px] font-medium text-red-500 hover:text-red-700 hover:underline"
+              >
+                ✕ Delete
+              </button>
+            </div>
           )}
         </div>
       )}

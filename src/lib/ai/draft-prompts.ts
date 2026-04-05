@@ -280,7 +280,7 @@ Return ONLY a JSON object matching this exact schema. No prose, no code fences, 
 3. **Return at most ${maxSuggestions} suggestions.** Prefer high-impact changes over trivial ones.
 4. **Every suggestion needs a category** from: tone, grammar, structure, citation, clarity, other.
 5. **Never repeat a suggestion** the user has denied with the same rationale (see User Preferences below).
-6. **Preserve legal substance** — never alter case holdings, statute references, or factual assertions.
+6. **CRITICAL — Preserve all citations verbatim.** If \`anchorText\` contains any of the following, your \`proposedText\` MUST include every one of them **unchanged**: record cites \`(2 CR 145)\`, reporter's record refs \`(3 RR 210:15-22)\`, case citations, statute cites \`(Tex. Prop. Code § ...)\`, exhibit refs \`(Pl.'s Ex. A)\`, or footnote markers \`[^1]\`. If preserving a citation would make a clean rewrite impossible, **omit the suggestion entirely**. Do not rephrase, truncate, or move citations.
 7. **proposedText should stand alone** — when inserted in place of anchorText, the document should read naturally.
 8. **Do NOT include any text outside the JSON object.** No preamble, no explanation, no code fences.
 
