@@ -10,7 +10,7 @@
  * and full-width action buttons.
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CATEGORY_COLORS,
   type DenyReasonTagSlug,
@@ -24,6 +24,8 @@ export interface SuggestionRowProps {
   suggestion: DraftSuggestionDTO;
   index: number;
   focused: boolean;
+  /** When this flips true, the row auto-expands. Used by the editor-hover integration. */
+  forceExpanded?: boolean;
   onFocus: () => void;
   onAccept: () => void;
   onDeny: (tags: DenyReasonTagSlug[], freeText: string) => void;
@@ -39,6 +41,7 @@ export function SuggestionRow({
   suggestion,
   index,
   focused,
+  forceExpanded,
   onFocus,
   onAccept,
   onDeny,
@@ -52,6 +55,12 @@ export function SuggestionRow({
   const [expanded, setExpanded] = useState(false);
   const [denyOpen, setDenyOpen] = useState(false);
   const denyButtonRef = useRef<HTMLButtonElement>(null);
+
+  // When the parent asserts forceExpanded (e.g. from editor hover), sync to
+  // expanded=true. Never auto-collapse — that's left to explicit user action.
+  useEffect(() => {
+    if (forceExpanded) setExpanded(true);
+  }, [forceExpanded]);
 
   const colors = CATEGORY_COLORS[suggestion.category] ?? CATEGORY_COLORS.other;
   const isResolved = suggestion.status !== 'pending';
@@ -69,10 +78,11 @@ export function SuggestionRow({
 
   const handleRowClick = () => {
     onFocus();
-    if (!isResolved) {
-      setExpanded((e) => !e);
-      onJump();
-    }
+    // Always scroll the editor to the anchor — useful for both pending and
+    // resolved rows so the user can review where a past edit landed.
+    onJump();
+    // Expand/collapse on row click for every status.
+    setExpanded((e) => !e);
   };
 
   return (
@@ -125,6 +135,24 @@ export function SuggestionRow({
             ↻{suggestion.regenerationCount}
           </span>
         )}
+        {/* Persistent Go-To button — always visible, scrolls the editor to
+            this suggestion's anchor without toggling the row expansion. */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onFocus();
+            onJump();
+          }}
+          title="Go to location in document"
+          aria-label="Go to location in document"
+          className="shrink-0 flex items-center gap-0.5 rounded border border-purple-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-purple-700 hover:border-purple-400 hover:bg-purple-50 hover:text-purple-900 transition-colors"
+        >
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+          </svg>
+          <span>Go to</span>
+        </button>
         {!isResolved && (
           <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
             <IconButton title="Accept (a)" onClick={(e) => { e.stopPropagation(); onAccept(); }}>

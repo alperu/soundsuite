@@ -155,6 +155,11 @@ export default function DraftChatPanel({
   const [draftIndexing, setDraftIndexing] = useState(false);
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
 
+  // When the user hovers a .suggestion-anchor decoration in the editor for
+  // ≥250ms, this id is set, which cascades: switch to Suggestions tab, focus
+  // and expand the matching card, and scroll it into view in the queue list.
+  const [editorHighlightedId, setEditorHighlightedId] = useState<string | null>(null);
+
   // Chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -203,6 +208,63 @@ export default function DraftChatPanel({
     },
     onError: () => setRegeneratingId(null),
   });
+
+  // Dwell-hover integration: when the cursor lingers on a .suggestion-anchor
+  // decoration in the editor for ≥250ms, open the matching card in the
+  // Suggestions tab. Uses a dwell timer so casual mouse-through doesn't
+  // thrash the UI.
+  useEffect(() => {
+    const editor = draftEditorRef?.current?.editor;
+    if (!editor) return;
+    const dom = editor.view.dom as HTMLElement;
+    let dwellTimer: ReturnType<typeof setTimeout> | null = null;
+    let currentId: string | null = null;
+    const DWELL_MS = 250;
+
+    const clearDwell = () => {
+      if (dwellTimer) {
+        clearTimeout(dwellTimer);
+        dwellTimer = null;
+      }
+    };
+
+    const handleMouseOver = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      const anchor = target.closest('[data-suggestion-id]') as HTMLElement | null;
+      if (!anchor) {
+        // Moving off the anchor — cancel any pending dwell and clear the last-seen.
+        clearDwell();
+        currentId = null;
+        return;
+      }
+      const id = anchor.getAttribute('data-suggestion-id');
+      if (!id || id === currentId) return; // still hovering the same anchor, no-op
+      currentId = id;
+      clearDwell();
+      dwellTimer = setTimeout(() => {
+        setEditorHighlightedId(id);
+        setActiveTab('suggestions');
+      }, DWELL_MS);
+    };
+
+    const handleMouseOut = (e: MouseEvent) => {
+      // When leaving an anchor WITHOUT entering another, cancel the dwell.
+      const related = e.relatedTarget as HTMLElement | null;
+      if (!related || !related.closest?.('[data-suggestion-id]')) {
+        clearDwell();
+        currentId = null;
+      }
+    };
+
+    dom.addEventListener('mouseover', handleMouseOver);
+    dom.addEventListener('mouseout', handleMouseOut);
+    return () => {
+      clearDwell();
+      dom.removeEventListener('mouseover', handleMouseOver);
+      dom.removeEventListener('mouseout', handleMouseOut);
+    };
+  }, [draftEditorRef, setActiveTab, suggestionsState.suggestions.length]);
 
   // When the hook rehydrates pending suggestions on mount, install their anchors too.
   const lastRehydrateRef = useRef<string>('');
@@ -605,7 +667,14 @@ export default function DraftChatPanel({
 
   const handleSuggestionJump = useCallback(
     (suggestion: DraftSuggestionDTO) => {
-      draftEditorRef?.current?.flashSuggestion(suggestion.id);
+      // Pass the DTO's stored anchor positions as a fallback — if the
+      // tracking plugin doesn't have the anchor installed yet (race on first
+      // render after stream arrival), the editor can still scroll using
+      // these initial offsets.
+      draftEditorRef?.current?.flashSuggestion(suggestion.id, {
+        from: suggestion.anchorFrom,
+        to: suggestion.anchorTo,
+      });
     },
     [draftEditorRef]
   );
@@ -1206,6 +1275,7 @@ export default function DraftChatPanel({
           lastError={suggestionsState.lastError}
           progressLog={suggestionsState.progressLog}
           runStartTime={suggestionsState.runStartTime}
+          externalHighlightId={editorHighlightedId}
           onAccept={handleSuggestionAccept}
           onDeny={handleSuggestionDeny}
           onIgnore={handleSuggestionIgnore}

@@ -109,8 +109,11 @@ export interface DraftEditorHandle {
   removeSuggestionAnchor: (id: string) => void;
   /** Accept a pending suggestion by replacing the live anchor range with proposedText. Returns ok/stale/not-found. */
   acceptSuggestion: (id: string, proposedText: string) => { ok: boolean; reason?: 'stale' | 'not-found' };
-  /** Briefly highlight and scroll to a suggestion's anchor range. */
-  flashSuggestion: (id: string) => void;
+  /**
+   * Smoothly scroll the editor to a suggestion's anchor range and pulse-highlight it.
+   * Falls back to the provided positions if the plugin doesn't have the anchor installed yet.
+   */
+  flashSuggestion: (id: string, fallback?: { from: number; to: number }) => void;
   /** Resolve the current live range of a suggestion, or null if stale. */
   resolveSuggestionRange: (id: string) => { from: number; to: number } | null;
   /** Replace all tracked anchors in one shot (used on rehydration). */
@@ -417,36 +420,59 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         }).removeSuggestionAnchor({ id });
         return { ok: true };
       },
-      flashSuggestion: (id: string) => {
+      flashSuggestion: (id: string, fallback?: { from: number; to: number }) => {
         if (!editor) return;
         const storage = (editor.storage as unknown as {
           suggestionTracking?: { resolveAnchor: (id: string) => { from: number; to: number } | null };
         }).suggestionTracking;
-        const range = storage?.resolveAnchor(id);
+        // Prefer the live plugin-tracked range (survives edits). Fall back to
+        // the DTO's stored anchorFrom/anchorTo if the plugin doesn't have this
+        // anchor installed yet (e.g. when the user clicks a row before the
+        // onSuggestionArrived callback has dispatched the install transaction).
+        const range = storage?.resolveAnchor(id) ?? fallback ?? null;
+
+        // Fire the flash decoration regardless — if the anchor isn't in the
+        // plugin, the flash is a no-op, which is fine.
         (editor.commands as unknown as {
           flashSuggestionAnchor: (p: { id: string }) => boolean;
         }).flashSuggestionAnchor({ id });
-        if (range) {
-          // Scroll the anchor into view.
-          try {
-            const domAtPos = editor.view.domAtPos(range.from);
-            const domNode = domAtPos.node instanceof HTMLElement
+
+        if (!range) return;
+
+        // Clamp to valid document range to avoid RangeError on domAtPos.
+        const docSize = editor.state.doc.nodeSize - 2;
+        const safeFrom = Math.max(0, Math.min(docSize, range.from));
+
+        try {
+          // Resolve a DOM node for the target position.
+          const domAtPos = editor.view.domAtPos(safeFrom);
+          const target: HTMLElement | null =
+            domAtPos.node instanceof HTMLElement
               ? domAtPos.node
-              : (domAtPos.node as Node).parentElement;
-            if (domNode) {
-              const scrollContainer = editor.view.dom.closest('.overflow-auto, .overflow-y-auto') || editor.view.dom.parentElement;
-              if (scrollContainer) {
-                const nodeRect = (domNode as HTMLElement).getBoundingClientRect();
-                const containerRect = scrollContainer.getBoundingClientRect();
-                scrollContainer.scrollBy({
-                  top: nodeRect.top - containerRect.top - 120,
-                  behavior: 'smooth',
-                });
-              }
+              : ((domAtPos.node as Node).parentElement as HTMLElement | null);
+
+          if (target) {
+            // Use scrollIntoView directly on the target element — this
+            // delegates scroll-container detection to the browser and
+            // handles nested overflow contexts correctly. `block: 'center'`
+            // puts the anchor in the middle of the viewport, so the user
+            // can see surrounding context.
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          } else {
+            // Absolute fallback: use ProseMirror's coordsAtPos to get screen
+            // coordinates, then scroll the wrapper element manually.
+            const coords = editor.view.coordsAtPos(safeFrom);
+            const scrollContainer = (editor.view.dom.closest(
+              '.overflow-auto, .overflow-y-auto, .overflow-scroll, .overflow-y-scroll'
+            ) || editor.view.dom.parentElement) as HTMLElement | null;
+            if (scrollContainer) {
+              const containerRect = scrollContainer.getBoundingClientRect();
+              const delta = coords.top - containerRect.top - containerRect.height / 2;
+              scrollContainer.scrollBy({ top: delta, behavior: 'smooth' });
             }
-          } catch {
-            // ignore scroll failures
           }
+        } catch (err) {
+          console.warn('[flashSuggestion] scroll failed', err);
         }
       },
       resolveSuggestionRange: (id: string) => {

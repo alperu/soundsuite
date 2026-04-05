@@ -25,6 +25,12 @@ export interface SuggestionQueuePanelProps {
   progressLog?: AIProgressEntry[];
   /** Unix ms when the current run started; 0 when idle. */
   runStartTime?: number;
+  /**
+   * Drives the editor-hover → open-card integration. When this changes to a
+   * non-null id, the matching row is focused, expanded, and scrolled into
+   * view in the queue list.
+   */
+  externalHighlightId?: string | null;
   onAccept: (suggestion: DraftSuggestionDTO) => void;
   onDeny: (suggestion: DraftSuggestionDTO, tags: DenyReasonTagSlug[], freeText: string) => void;
   onIgnore: (suggestion: DraftSuggestionDTO) => void;
@@ -55,11 +61,35 @@ export function SuggestionQueuePanel({
   regeneratingId,
   progressLog,
   runStartTime,
+  externalHighlightId,
 }: SuggestionQueuePanelProps) {
   const [filter, setFilter] = useState<FilterKey>('pending');
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [thinkingExpanded, setThinkingExpanded] = useState(true);
   const listRef = useRef<HTMLUListElement>(null);
+
+  // When the editor hover highlights a suggestion, focus + scroll the row
+  // into view. The row's own `forceExpanded` prop drives expansion.
+  useEffect(() => {
+    if (!externalHighlightId) return;
+    const highlighted = suggestions.find((s) => s.id === externalHighlightId);
+    if (!highlighted) return;
+    // Switch to the filter tab that contains the highlighted row so it's
+    // actually visible in the list.
+    const targetFilter = highlighted.status as FilterKey;
+    if (targetFilter !== filter && (['pending', 'accepted', 'denied', 'ignored', 'stale'] as FilterKey[]).includes(targetFilter)) {
+      setFilter(targetFilter);
+    }
+    setFocusedId(externalHighlightId);
+    // Wait a tick for any filter change to render, then scroll.
+    const raf = requestAnimationFrame(() => {
+      const rowEl = listRef.current?.querySelector(
+        `li[data-suggestion-id="${CSS.escape(externalHighlightId)}"]`
+      ) as HTMLElement | null;
+      rowEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [externalHighlightId, suggestions, filter]);
 
   const counts = useMemo(() => {
     const c: Record<FilterKey, number> = { pending: 0, accepted: 0, denied: 0, ignored: 0, stale: 0 };
@@ -252,6 +282,7 @@ export function SuggestionQueuePanel({
               suggestion={suggestion}
               index={i}
               focused={focusedId === suggestion.id}
+              forceExpanded={externalHighlightId === suggestion.id}
               onFocus={() => setFocusedId(suggestion.id)}
               onAccept={() => onAccept(suggestion)}
               onDeny={(tags, freeText) => onDeny(suggestion, tags, freeText)}
