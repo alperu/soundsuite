@@ -120,6 +120,36 @@ export default function DraftPage() {
   // Editor
   const editorRef = useRef<any>(null);
   const [editorInstance, setEditorInstance] = useState<any>(null);
+
+  // Document search
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchResults, setSearchResults] = useState<Array<{ text: string; pos: number }>>([]);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const doDocSearch = useCallback((term: string) => {
+    setSearchTerm(term);
+    if (editorInstance) (editorInstance.commands as any).setSearchTerm?.(term);
+    if (!term.trim() || !editorInstance) { setSearchResults([]); return; }
+    const results: Array<{ text: string; pos: number }> = [];
+    const lowerTerm = term.toLowerCase();
+    editorInstance.state.doc.descendants((node: any, pos: number) => {
+      if (node.isText) {
+        const text = node.text || '';
+        let idx = 0;
+        while ((idx = text.toLowerCase().indexOf(lowerTerm, idx)) !== -1) {
+          const start = Math.max(0, idx - 40);
+          const end = Math.min(text.length, idx + term.length + 60);
+          results.push({
+            text: (start > 0 ? '...' : '') + text.slice(start, end) + (end < text.length ? '...' : ''),
+            pos: pos + idx,
+          });
+          idx += term.length;
+        }
+      }
+    });
+    setSearchResults(results.slice(0, 50));
+  }, [editorInstance]);
   const [trackChanges, setTrackChanges] = usePersistedState<boolean>('draft.editor.trackChanges', false);
   const [editorSelection, setEditorSelection] = useState({ selectedText: '', hasSelection: false });
 
@@ -685,58 +715,96 @@ export default function DraftPage() {
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
           </select>
-          {/* Search in document */}
+          {/* Spacer to center search */}
+          <div className="flex-1" />
+
+          {/* Search in document — centered */}
           {editorInstance && (
-            <div className="flex items-center gap-1 ml-2">
-              <div className="relative flex items-center">
-                <svg className="absolute left-1.5 w-3 h-3 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
-                </svg>
-                <input
-                  type="text"
-                  placeholder="Find..."
-                  className="w-32 pl-6 pr-14 py-0.5 text-xs border border-gray-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
-                  onChange={e => {
-                    const term = e.target.value;
-                    if (editorInstance) {
-                      (editorInstance.commands as any).setSearchTerm?.(term);
-                    }
-                  }}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      if (e.shiftKey) {
-                        (editorInstance.commands as any).previousSearchResult?.();
-                      } else {
-                        (editorInstance.commands as any).nextSearchResult?.();
+            <div className="relative">
+              <div className="flex items-center gap-1">
+                <div className="relative flex items-center">
+                  <svg className="absolute left-1.5 w-3 h-3 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                    <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
+                  </svg>
+                  <input
+                    ref={searchInputRef}
+                    type="text"
+                    placeholder="Find in document..."
+                    value={searchTerm}
+                    className="w-48 pl-6 pr-2 py-0.5 text-xs border border-gray-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+                    onFocus={() => setSearchOpen(true)}
+                    onChange={e => doDocSearch(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (e.shiftKey) {
+                          (editorInstance.commands as any).previousSearchResult?.();
+                        } else {
+                          (editorInstance.commands as any).nextSearchResult?.();
+                        }
                       }
-                    }
-                    if (e.key === 'Escape') {
-                      (editorInstance.commands as any).setSearchTerm?.('');
-                      (e.target as HTMLInputElement).value = '';
-                      (e.target as HTMLInputElement).blur();
-                    }
-                  }}
-                />
-                <div className="absolute right-1 flex items-center gap-0.5">
-                  <button
-                    onClick={() => (editorInstance.commands as any).previousSearchResult?.()}
-                    className="w-4 h-4 flex items-center justify-center text-gray-400 hover:text-gray-600"
-                    title="Previous (Shift+Enter)"
-                  >
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path d="M18 15l-6-6-6 6" /></svg>
-                  </button>
-                  <button
-                    onClick={() => (editorInstance.commands as any).nextSearchResult?.()}
-                    className="w-4 h-4 flex items-center justify-center text-gray-400 hover:text-gray-600"
-                    title="Next (Enter)"
-                  >
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path d="M6 9l6 6 6-6" /></svg>
-                  </button>
+                      if (e.key === 'Escape') {
+                        doDocSearch('');
+                        setSearchOpen(false);
+                        searchInputRef.current?.blur();
+                      }
+                    }}
+                  />
                 </div>
+                {searchTerm && (
+                  <span className="text-[10px] text-gray-400 whitespace-nowrap">{searchResults.length} match{searchResults.length !== 1 ? 'es' : ''}</span>
+                )}
               </div>
+
+              {/* Search results popup */}
+              {searchOpen && searchResults.length > 0 && (
+                <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-[500px] max-h-[400px] overflow-y-auto bg-white border border-gray-200 rounded-lg shadow-xl z-50">
+                  <div className="sticky top-0 bg-gray-50 px-3 py-1.5 border-b border-gray-200 flex items-center justify-between">
+                    <span className="text-xs font-medium text-gray-600">{searchResults.length} result{searchResults.length !== 1 ? 's' : ''} for &ldquo;{searchTerm}&rdquo;</span>
+                    <button onClick={() => { doDocSearch(''); setSearchOpen(false); }} className="text-gray-400 hover:text-gray-600">
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path d="M18 6L6 18M6 6l12 12" /></svg>
+                    </button>
+                  </div>
+                  {searchResults.map((r, i) => (
+                    <button
+                      key={`${r.pos}-${i}`}
+                      onClick={() => {
+                        editorInstance.commands.setTextSelection(r.pos);
+                        const sc = editorScrollRef.current;
+                        if (sc) {
+                          try {
+                            const coords = editorInstance.view.coordsAtPos(r.pos);
+                            const containerRect = sc.getBoundingClientRect();
+                            sc.scrollBy({ top: coords.top - containerRect.top - 100, behavior: 'smooth' });
+                          } catch {}
+                        }
+                        setSearchOpen(false);
+                      }}
+                      className="w-full text-left px-3 py-2 hover:bg-blue-50 border-b border-gray-100 last:border-0"
+                    >
+                      <div className="flex items-start gap-2">
+                        <span className="text-[10px] text-gray-400 mt-0.5 shrink-0 w-8 text-right">#{i + 1}</span>
+                        <span className="text-xs text-gray-700 break-words" dangerouslySetInnerHTML={{
+                          __html: r.text.replace(
+                            new RegExp(`(${searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'),
+                            '<mark class="bg-yellow-200 rounded px-0.5">$1</mark>'
+                          ),
+                        }} />
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Click outside to close */}
+              {searchOpen && searchResults.length > 0 && (
+                <div className="fixed inset-0 z-40" onClick={() => setSearchOpen(false)} />
+              )}
             </div>
           )}
+
+          {/* Spacer to push Word buttons right */}
+          <div className="flex-1" />
 
           {/* Word Import / DOCX Export */}
           {activeDraft && (
