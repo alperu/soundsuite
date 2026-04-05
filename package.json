@@ -34,6 +34,7 @@
     "@milkdown/theme-nord": "^7.18.0",
     "@prisma/client": "^5.22.0",
     "@prosemirror-adapter/react": "^0.4.1",
+    "@sereneinserenade/tiptap-search-and-replace": "^0.1.1",
     "@tailwindcss/typography": "^0.5.19",
     "@tiptap/extension-character-count": "^3.22.0",
     "@tiptap/extension-font-family": "^3.22.0",

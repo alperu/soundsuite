@@ -685,6 +685,59 @@ export default function DraftPage() {
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
           </select>
+          {/* Search in document */}
+          {editorInstance && (
+            <div className="flex items-center gap-1 ml-2">
+              <div className="relative flex items-center">
+                <svg className="absolute left-1.5 w-3 h-3 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Find..."
+                  className="w-32 pl-6 pr-14 py-0.5 text-xs border border-gray-300 rounded bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  onChange={e => {
+                    const term = e.target.value;
+                    if (editorInstance) {
+                      (editorInstance.commands as any).setSearchTerm?.(term);
+                    }
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      if (e.shiftKey) {
+                        (editorInstance.commands as any).previousSearchResult?.();
+                      } else {
+                        (editorInstance.commands as any).nextSearchResult?.();
+                      }
+                    }
+                    if (e.key === 'Escape') {
+                      (editorInstance.commands as any).setSearchTerm?.('');
+                      (e.target as HTMLInputElement).value = '';
+                      (e.target as HTMLInputElement).blur();
+                    }
+                  }}
+                />
+                <div className="absolute right-1 flex items-center gap-0.5">
+                  <button
+                    onClick={() => (editorInstance.commands as any).previousSearchResult?.()}
+                    className="w-4 h-4 flex items-center justify-center text-gray-400 hover:text-gray-600"
+                    title="Previous (Shift+Enter)"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path d="M18 15l-6-6-6 6" /></svg>
+                  </button>
+                  <button
+                    onClick={() => (editorInstance.commands as any).nextSearchResult?.()}
+                    className="w-4 h-4 flex items-center justify-center text-gray-400 hover:text-gray-600"
+                    title="Next (Enter)"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path d="M6 9l6 6 6-6" /></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Word Import / DOCX Export */}
           {activeDraft && (
             <>

@@ -59,6 +59,7 @@ import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
 import { Extension } from '@tiptap/core';
 import { InvisibleCharacters, HardBreakNode, ParagraphNode } from '@tiptap/extension-invisible-characters';
+import { SearchAndReplace } from '@sereneinserenade/tiptap-search-and-replace';
 import Subscript from '@tiptap/extension-subscript';
 import Superscript from '@tiptap/extension-superscript';
 import CharacterCount from '@tiptap/extension-character-count';
@@ -188,6 +189,10 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         Footnote,
         FootnoteReference,
         OfficePaste,
+        SearchAndReplace.configure({
+          searchResultClass: 'search-result-highlight',
+          disableRegex: true,
+        }),
       ],
       content,
       onUpdate: ({ editor: ed }) => {
@@ -509,6 +514,17 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             padding-top: 1rem;
             font-size: 0.85em;
             color: #4b5563;
+          }
+
+          /* --- Search highlight --- */
+          .draft-editor-wrapper .search-result-highlight {
+            background-color: #fef08a;
+            border-radius: 2px;
+          }
+          .draft-editor-wrapper .search-result-highlight.search-result-current {
+            background-color: #fb923c;
+            color: white;
+            border-radius: 2px;
           }
 
           /* --- Invisible characters extension styling (¶ ↵) --- */
