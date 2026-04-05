@@ -585,11 +585,23 @@ export async function POST(request: NextRequest) {
           // ------------------------------------------------------------
           // Default path — free-form chat (unchanged)
           // ------------------------------------------------------------
+          let briefLinkedCases: Array<{ name: string; caseNumber: string | null }> = [];
+          if (briefMode && effectiveCaseIds.length > 0) {
+            try {
+              briefLinkedCases = await prisma.case.findMany({
+                where: { id: { in: effectiveCaseIds } },
+                select: { name: true, caseNumber: true },
+              });
+            } catch (err) {
+              console.warn('[Draft Chat] Failed to load linked cases for brief prompt:', err);
+            }
+          }
           const systemPrompt = briefMode
             ? getAppealBriefPrompt({
                 documentContent,
                 knowledgeContext,
                 sectionType: sectionType || 'general',
+                linkedCases: briefLinkedCases,
               })
             : getDraftChatSystemPrompt({
                 hasSelection,

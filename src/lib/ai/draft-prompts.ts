@@ -97,31 +97,38 @@ export interface AppealBriefOptions {
   knowledgeContext?: string;
   sectionType?: 'issues' | 'facts' | 'summary' | 'argument' | 'conclusion' | 'general';
   jurisdiction?: string;
+  linkedCases?: Array<{ name: string; caseNumber: string | null }>;
 }
 
 /**
  * Specialized system prompt for generating appeal brief sections with footnotes.
  */
 export function getAppealBriefPrompt(options: AppealBriefOptions): string {
-  const { documentContent, knowledgeContext, sectionType = 'general', jurisdiction = 'Texas' } = options;
+  const { documentContent, knowledgeContext, sectionType = 'general', jurisdiction = 'Texas', linkedCases } = options;
 
   let prompt = `You are an expert appellate attorney drafting a formal appeal brief for a ${jurisdiction} appellate court. You write in a persuasive, authoritative legal style.
 
-## CRITICAL: Footnote Format
+## CRITICAL: Inline Citation Format
 
-You MUST use footnote markers in your output. Use this exact format:
-- Inline references: [^1], [^2], [^3] (superscript numbers in the text)
-- Footnote definitions at the end, each on its own line:
-  [^1]: Full citation text here.
-  [^2]: Record reference here.
+You MUST place citations INLINE, in parentheses, immediately after the sentence they support and BEFORE the sentence-ending period. Do NOT use footnote markers like [^1]. Do NOT include a footnote or references section at the end.
 
-Every legal assertion, case citation, record reference, and evidentiary claim MUST have a footnote.
+Format:
+- Every legal assertion, case citation, record reference, exhibit, or statute must end with a parenthetical citation before the period.
+- Example: "The trial court abused its discretion by excluding the evidence (Smith v. Jones, 801 S.W.2d 109, 112 (Tex. App.—Houston [14th Dist.] 2020, no pet.))."
+- Multiple sources in one parenthetical separated by "; ".
 
-### Types of footnotes:
-1. **Case law citations**: Full citation on first mention (e.g., "[^1]: Smith v. Jones, 801 S.W.2d 109, 112 (Tex. App.—Houston [14th Dist.] 2020, no pet.)."), short form after (e.g., "[^3]: Smith, 801 S.W.2d at 114.")
-2. **Record references**: Clerk's Record (CR) and Reporter's Record (RR) with volume and page (e.g., "[^2]: 2 CR 145." or "[^4]: 3 RR 210:15-22.")
-3. **Exhibit references**: (e.g., "[^5]: Plaintiff's Exhibit A at p. 3.")
-4. **Statute citations**: (e.g., "[^6]: Tex. Prop. Code § 12.0071(c).")
+### Citation types:
+1. **Case law — first mention**: (Smith v. Jones, 801 S.W.2d 109, 112 (Tex. App.—Houston [14th Dist.] 2020, no pet.))
+2. **Case law — short form**: (Smith, 801 S.W.2d at 114)
+3. **Record references**: (2 CR 145) or (3 RR 210:15–22)
+4. **Exhibits**: (Pl.'s Ex. A at 3)
+5. **Statutes**: (Tex. Prop. Code § 12.0071(c))
+
+## Grounding Rules (MANDATORY)
+
+- Cite ONLY from the CASE KNOWLEDGE and LINKED CASES provided below. Never cite from training data or memory.
+- If a claim cannot be supported from CASE KNOWLEDGE or LINKED CASES, write it without a citation — do NOT fabricate.
+- Any text placed inside quotation marks MUST appear verbatim in CASE KNOWLEDGE.
 
 ## Brief Structure
 
@@ -153,7 +160,7 @@ Generate the "Issues Presented" or "Points of Error" section. Each issue should 
     facts: `## Section: Statement of Facts
 Generate the "Statement of Facts" section. Requirements:
 - Present facts in chronological order
-- Cite the record (CR, RR) for every factual assertion using footnotes
+- Cite the record (CR, RR) for every factual assertion using inline parenthetical citations
 - Be thorough but focus on facts relevant to the issues on appeal
 - Present facts favorably to your client but accurately
 - Include procedural history\n\n`,
@@ -168,8 +175,8 @@ Generate a concise summary (1-2 paragraphs per issue) previewing each argument.
 Generate the argument section with full legal analysis.
 - Start each major argument with a bold point heading
 - State the standard of review
-- Cite controlling case law with full citations in footnotes
-- Apply the law to the facts with record citations in footnotes
+- Cite controlling case law with full inline parenthetical citations
+- Apply the law to the facts with inline parenthetical record citations
 - Address counterarguments
 - Conclude each section with why it supports your position\n\n`,
 
@@ -184,6 +191,15 @@ Generate the conclusion and prayer for relief.
 
   prompt += sectionInstructions[sectionType] || '';
 
+  if (linkedCases && linkedCases.length > 0) {
+    prompt += `## Linked Cases (attached to this brief)\n\n`;
+    for (const c of linkedCases) {
+      const num = c.caseNumber ? ` — Cause No. ${c.caseNumber}` : '';
+      prompt += `- ${c.name}${num}\n`;
+    }
+    prompt += `\nWhen citing the record, indicate which case by name or cause number where ambiguous. Only cite claims that can be supported from these cases and the Case Knowledge below.\n\n`;
+  }
+
   if (documentContent) {
     prompt += `## Current Document Draft\n\n${documentContent}\n\n`;
     prompt += `Build upon and be consistent with the existing document content.\n\n`;
@@ -191,7 +207,7 @@ Generate the conclusion and prayer for relief.
 
   if (knowledgeContext) {
     prompt += `## Case Knowledge (from indexed court documents)\n\nThe following excerpts are from the actual case record and related documents. Use these as the basis for your citations and arguments:\n\n${knowledgeContext}\n\n`;
-    prompt += `IMPORTANT: When referencing these excerpts, use the citation format provided (e.g., "2 CR 145" or "3 RR 210:15-22"). Create footnotes for each reference.\n\n`;
+    prompt += `IMPORTANT: When referencing these excerpts, place an inline parenthetical citation at the end of each sentence that draws on them (e.g., "(2 CR 145)" or "(3 RR 210:15–22)") before the sentence-ending period. Do NOT create footnotes.\n\n`;
   }
 
   return prompt;

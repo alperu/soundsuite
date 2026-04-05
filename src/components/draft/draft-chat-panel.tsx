@@ -10,7 +10,6 @@ import { AIThinkingLog, type AIProgressEntry } from '@/components/search/ai-thin
 import DraftVersionHistory from '@/components/draft/draft-version-history';
 import { DraftChatHistory } from '@/components/draft/draft-chat-history';
 import { SuggestionQueuePanel } from '@/components/draft/suggestion-queue-panel';
-import { parseFootnoteMarkers, insertBriefWithFootnotes } from '@/lib/draft/footnote-parser';
 import { usePersistedState } from '@/hooks/use-persisted-state';
 import type { DraftEditorHandle } from '@/components/draft/draft-editor';
 import type { DraftSuggestionDTO, DenyReasonTagSlug } from '@/lib/draft/suggestion-types';
@@ -67,6 +66,8 @@ interface DraftChatPanelProps {
   draftIndexingStatus?: string | null;
   /** Editor ref for Auto-Suggest anchor installation + apply. */
   draftEditorRef?: React.RefObject<DraftEditorHandle | null>;
+  /** Linked cases attached to the draft (used by Brief Mode prompt + UI chips). */
+  linkedCases?: Array<{ id: string; name: string; caseNumber?: string | null }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +120,7 @@ export default function DraftChatPanel({
   draftIndexedVersion,
   draftIndexingStatus,
   draftEditorRef,
+  linkedCases,
 }: DraftChatPanelProps) {
   // Tabs (persisted)
   const [activeTab, setActiveTab] = usePersistedState<'chat' | 'history' | 'workflows' | 'version' | 'suggestions'>('draft.chat.activeTab', 'chat');
@@ -448,12 +450,29 @@ export default function DraftChatPanel({
         ]);
         return;
       }
+      // Switch to the Suggestions tab IMMEDIATELY so the user can watch the
+      // thinking log stream live. Previously this only happened on
+      // `suggestions_done`, which meant the user got stuck on the Chat tab
+      // whenever the stream errored or returned zero suggestions.
+      setActiveTab('suggestions');
       setProgressLog([]);
       setSearchStartTime(Date.now());
+      console.log('[AutoSuggest][client] start', {
+        draftId,
+        provider,
+        model: effectiveModel,
+        deepSearch,
+        documentChars: documentContent.length,
+        hasSelection,
+        sessionId: sid,
+      });
       try {
         await suggestionsState.startAutoSuggest({
           query,
-          documentContent: buildSmartContext(documentContent),
+          // Send the FULL document — NOT smart-windowed. The server needs the
+          // full text so locateAnchor() can find every verbatim anchor the
+          // model proposes, regardless of which section it targeted.
+          documentContent,
           selectedText: hasSelection ? selectedText : undefined,
           provider,
           model: effectiveModel,
@@ -888,18 +907,6 @@ export default function DraftChatPanel({
                 </select>
               </div>
 
-              {/* Brief Mode toggle */}
-              <div className="flex items-center gap-1.5">
-                <label className="text-[10px] font-medium text-gray-500">Brief</label>
-                <button
-                  type="button"
-                  onClick={() => setBriefMode(!briefMode)}
-                  className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${briefMode ? 'bg-amber-600' : 'bg-gray-200'}`}
-                >
-                  <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${briefMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
-                </button>
-              </div>
-
               {/* Vector Search toggle */}
               <div className="flex items-center gap-1.5">
                 <button
@@ -934,15 +941,47 @@ export default function DraftChatPanel({
             </div>
           </div>
 
-          {/* Brief mode indicator */}
-          {briefMode && (
-            <div className="px-3 py-1.5 bg-amber-50 border-b border-amber-100 text-xs text-amber-700 flex items-center gap-1.5 shrink-0">
-              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              Appeal Brief mode — AI will generate with footnotes [^N]
-            </div>
-          )}
+          {/* Brief mode row — always visible; toggle + status + linked case chips */}
+          <div
+            className={`px-3 py-1.5 border-b text-xs flex items-center gap-2 flex-wrap shrink-0 ${
+              briefMode
+                ? 'bg-amber-50 border-amber-100 text-amber-700'
+                : 'bg-gray-50 border-gray-200 text-gray-500'
+            }`}
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <span className="font-medium">Appeal Brief mode</span>
+            <button
+              type="button"
+              onClick={() => setBriefMode(!briefMode)}
+              className={`relative inline-flex h-4 w-8 rounded-full transition-colors ${briefMode ? 'bg-amber-600' : 'bg-gray-300'}`}
+              title={briefMode ? 'Turn off Brief Mode' : 'Turn on Brief Mode'}
+            >
+              <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transform transition-transform mt-0.5 ${briefMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+            </button>
+            <span className="opacity-75">— inline citations</span>
+            {linkedCases && linkedCases.length > 0 && (
+              <div className="flex items-center gap-1 flex-wrap ml-1">
+                <span className="opacity-60">cases:</span>
+                {linkedCases.map(c => (
+                  <span
+                    key={c.id}
+                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] ${
+                      briefMode
+                        ? 'bg-white border-amber-200 text-amber-800'
+                        : 'bg-white border-gray-200 text-gray-600'
+                    }`}
+                    title={c.caseNumber || c.name}
+                  >
+                    <span className="font-medium">{c.name}</span>
+                    {c.caseNumber && <span className="opacity-60">{c.caseNumber}</span>}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Auto-Suggest mode indicator */}
           {autoSuggest && (

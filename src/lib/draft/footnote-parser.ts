@@ -21,6 +21,24 @@ export interface ParsedBriefContent {
 }
 
 /**
+ * Render AI brief text that already contains inline parenthetical citations
+ * (no [^N] markers) as HTML paragraphs. Handles bold/italic markdown and
+ * paragraph splits. Used for the "inline citation" brief mode.
+ */
+export function renderInlineBriefHtml(text: string): string {
+  let html = text.trim();
+  html = html
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>');
+  return html
+    .split(/\n\n+/)
+    .map(para => para.trim())
+    .filter(Boolean)
+    .map(para => `<p>${para.replace(/\n/g, '<br>')}</p>`)
+    .join('');
+}
+
+/**
  * Parse AI text with [^N] markers into body + footnotes.
  */
 export function parseFootnoteMarkers(text: string): ParsedBriefContent {

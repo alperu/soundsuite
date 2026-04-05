@@ -84,6 +84,7 @@ async function completeWithAnthropic(
   messages: AIMessage[],
   maxTokens: number,
   temperature: number,
+  jsonMode?: boolean,
 ): Promise<AICompletionResponse> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey });
@@ -92,20 +93,29 @@ async function completeWithAnthropic(
   const systemMsg = messages.find(m => m.role === 'system');
   const nonSystem = messages.filter(m => m.role !== 'system');
 
+  // jsonMode: prefill the assistant turn with `{` to force JSON continuation.
+  const outgoingMessages: Array<{ role: 'user' | 'assistant'; content: string }> = nonSystem.map(m => ({
+    role: m.role as 'user' | 'assistant',
+    content: m.content,
+  }));
+  if (jsonMode) {
+    outgoingMessages.push({ role: 'assistant', content: '{' });
+  }
+
   const response = await client.messages.create({
     model,
     max_tokens: maxTokens,
     temperature,
     ...(systemMsg ? { system: systemMsg.content } : {}),
-    messages: nonSystem.map(m => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    })),
+    messages: outgoingMessages,
   });
 
   const textBlock = response.content.find(b => b.type === 'text');
+  // Re-inject the prefilled `{` so callers see a complete JSON object.
+  const rawText = textBlock?.text ?? '';
+  const content = jsonMode ? '{' + rawText : rawText;
   return {
-    content: textBlock?.text ?? '',
+    content,
     model: response.model,
     provider: 'anthropic',
     usage: {
@@ -264,6 +274,15 @@ export async function* streamAI(req: AICompletionRequest): AsyncGenerator<Stream
   const maxTokens = req.maxTokens ?? 2048;
   const temperature = req.temperature ?? 0.3;
 
+  console.log('[streamAI] request', {
+    provider: req.provider,
+    model: req.model,
+    jsonMode: req.jsonMode === true,
+    temperature,
+    maxTokens,
+    messageCount: req.messages.length,
+  });
+
   try {
     if (req.provider === 'ollama') {
       yield* streamWithOllama(config, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking);
@@ -272,14 +291,14 @@ export async function* streamAI(req: AICompletionRequest): AsyncGenerator<Stream
 
     if (req.provider === 'anthropic') {
       const apiKey = getApiKey(config, 'anthropic');
-      yield* streamWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature);
+      yield* streamWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode);
       return;
     }
 
     const baseURL = OPENAI_COMPATIBLE_BASE_URLS[req.provider];
     if (baseURL) {
       const apiKey = getApiKey(config, req.provider);
-      yield* streamWithOpenAICompatible(apiKey, baseURL, req.model, req.messages, maxTokens, temperature, req.provider);
+      yield* streamWithOpenAICompatible(apiKey, baseURL, req.model, req.messages, maxTokens, temperature, req.provider, req.jsonMode);
       return;
     }
   } catch (err) {
@@ -468,9 +487,14 @@ async function* streamWithOpenAICompatible(
   maxTokens: number,
   temperature: number,
   provider: AIProviderKey,
+  jsonMode?: boolean,
 ): AsyncGenerator<StreamEvent> {
   const OpenAI = (await import('openai')).default;
   const client = new OpenAI({ apiKey, baseURL });
+
+  if (jsonMode) {
+    console.log(`[streamWithOpenAICompatible] jsonMode=true, setting response_format for ${provider}/${model}`);
+  }
 
   const stream = await client.chat.completions.create({
     model,
@@ -478,6 +502,10 @@ async function* streamWithOpenAICompatible(
     max_tokens: maxTokens,
     temperature,
     stream: true,
+    // Force strict JSON output at the API level. OpenAI, Groq, and Grok all
+    // honor response_format: { type: 'json_object' } when the prompt also
+    // contains the word "JSON" (which getAutoSuggestPrompt does).
+    ...(jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
   });
 
   let fullContent = '';
@@ -516,6 +544,7 @@ async function* streamWithAnthropic(
   messages: AIMessage[],
   maxTokens: number,
   temperature: number,
+  jsonMode?: boolean,
 ): AsyncGenerator<StreamEvent> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey });
@@ -523,21 +552,34 @@ async function* streamWithAnthropic(
   const systemMsg = messages.find(m => m.role === 'system');
   const nonSystem = messages.filter(m => m.role !== 'system');
 
+  // Anthropic has no native `response_format: json_object`. The canonical
+  // approach is to PREFILL the assistant turn with `{` so the model is forced
+  // into JSON-continuation mode from its very first token.
+  // https://docs.anthropic.com/en/docs/test-and-evaluate/strengthen-guardrails/increase-consistency#prefill-claudes-response
+  const outgoingMessages: Array<{ role: 'user' | 'assistant'; content: string }> = nonSystem.map(m => ({
+    role: m.role as 'user' | 'assistant',
+    content: m.content,
+  }));
+  if (jsonMode) {
+    outgoingMessages.push({ role: 'assistant', content: '{' });
+    console.log(`[streamWithAnthropic] jsonMode=true, prefilling assistant turn with "{" for ${model}`);
+  }
+
   // Use the async iterable stream API
   const response = await client.messages.create({
     model,
     max_tokens: maxTokens,
     temperature,
     ...(systemMsg ? { system: systemMsg.content } : {}),
-    messages: nonSystem.map(m => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    })),
+    messages: outgoingMessages,
     stream: true,
   });
 
-  let fullContent = '';
-  let batchBuffer = '';
+  // When we prefilled with `{`, the model's completion will NOT include the
+  // leading brace. We re-inject it into the content stream so downstream
+  // parsers see a complete JSON object.
+  let fullContent = jsonMode ? '{' : '';
+  let batchBuffer = jsonMode ? '{' : '';
   let inputTokens = 0;
   let outputTokens = 0;
 
@@ -614,7 +656,7 @@ export async function completeAI(req: AICompletionRequest): Promise<AICompletion
   const apiKey = getApiKey(config, req.provider);
 
   if (req.provider === 'anthropic') {
-    return completeWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature);
+    return completeWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode);
   }
 
   const baseURL = OPENAI_COMPATIBLE_BASE_URLS[req.provider];
