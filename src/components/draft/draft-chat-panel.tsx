@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useDraftStream } from '@/hooks/use-draft-stream';
 import { AI_PROVIDERS, AI_PROVIDER_KEYS, type AIProviderKey, type AIModelDef } from '@/lib/ai/models';
 import { AIThinkingLog, type AIProgressEntry } from '@/components/search/ai-thinking-log';
@@ -775,7 +776,7 @@ export default function DraftChatPanel({
                       {m.mode === 'deep' && (
                         <div className="text-[10px] text-indigo-500 font-medium mb-1 not-prose">Deep Search Result</div>
                       )}
-                      <ReactMarkdown>{m.content}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
                       {/* Action buttons */}
                       <div className="flex gap-1.5 mt-2 pt-2 border-t border-gray-200 not-prose">
                         {onInsertText && (
@@ -833,7 +834,7 @@ export default function DraftChatPanel({
               <div className="flex justify-start">
                 <div className="max-w-[85%] rounded-lg px-3 py-2 text-sm bg-gray-100 text-gray-800">
                   <div className="prose prose-sm max-w-none">
-                    <ReactMarkdown>{streamingText || '...'}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText || '...'}</ReactMarkdown>
                   </div>
                 </div>
               </div>
