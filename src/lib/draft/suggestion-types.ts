@@ -75,7 +75,7 @@ export type RawSuggestion = z.infer<typeof rawSuggestionSchema>;
 /** The full envelope the AI must return when autoSuggest=true. */
 export const suggestionEnvelopeSchema = z.object({
   suggestions: z.array(rawSuggestionSchema).max(20),
-  notes: z.string().max(500).optional(),
+  notes: z.string().max(4000).optional(),
 });
 
 export type SuggestionEnvelope = z.infer<typeof suggestionEnvelopeSchema>;

@@ -22,6 +22,20 @@ import { suggestionEnvelopeSchema } from '@/lib/draft/suggestion-types';
 import { randomUUID } from 'crypto';
 
 /**
+ * Truncate cosmetic-only fields on the parsed envelope (e.g. `notes`) so a
+ * verbose model response can't fail schema validation and discard all
+ * otherwise-valid suggestions. Mutates in place; no-op if input isn't a
+ * plain object.
+ */
+function sanitizeEnvelopeCosmetics(parsed: unknown): void {
+  if (!parsed || typeof parsed !== 'object') return;
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj.notes === 'string' && obj.notes.length > 4000) {
+    obj.notes = obj.notes.slice(0, 4000);
+  }
+}
+
+/**
  * POST /api/draft/chat
  * Context-aware chat for the draft editor — streams NDJSON with tokens and final result.
  * Optionally performs RAG against indexed case documents.
@@ -394,6 +408,7 @@ export async function POST(request: NextRequest) {
             }
 
             const parsed = extractJsonEnvelope(fullContent);
+            sanitizeEnvelopeCosmetics(parsed);
             const validated = suggestionEnvelopeSchema.safeParse(parsed);
             if (!validated.success || validated.data.suggestions.length === 0) {
               send({
@@ -575,6 +590,7 @@ export async function POST(request: NextRequest) {
               return;
             }
 
+            sanitizeEnvelopeCosmetics(parsed);
             const validated = suggestionEnvelopeSchema.safeParse(parsed);
             if (!validated.success) {
               console.error('[AutoSuggest][server] schema validation failed', {
