@@ -106,7 +106,7 @@ export async function rerank<T extends RerankableResult>(
     let usedModel = config.rerankModel;
 
     try {
-      const primary = await rerankViaVllm(query, results, config.rerankModel, config.rerankHost, effectiveTopN);
+      const primary = await rerankViaVllmWithRetry(query, results, config.rerankModel, config.rerankHost, effectiveTopN);
       reranked = primary.items;
       totalTokens = primary.totalTokens;
     } catch (primaryErr) {
@@ -117,7 +117,7 @@ export async function rerank<T extends RerankableResult>(
           fallbackModel: config.rerankFallbackModel,
           error: primaryErr instanceof Error ? primaryErr.message : String(primaryErr),
         });
-        const fallback = await rerankViaVllm(query, results, config.rerankFallbackModel, config.rerankHost, effectiveTopN);
+        const fallback = await rerankViaVllmWithRetry(query, results, config.rerankFallbackModel, config.rerankHost, effectiveTopN);
         reranked = fallback.items;
         totalTokens = fallback.totalTokens;
         usedModel = config.rerankFallbackModel;
@@ -148,11 +148,17 @@ export async function rerank<T extends RerankableResult>(
     });
     return reranked;
   } catch (err) {
+    // Undici packs the real socket errno in err.cause — surface it so
+    // future incidents don't hide behind the opaque "TypeError: fetch failed".
+    const cause = (err as { cause?: { code?: string; errno?: number; syscall?: string } })?.cause;
     logger.error('vLLM reranking failed, using original order', err instanceof Error ? err : new Error(String(err)), {
       host: config.rerankHost,
       model: config.rerankModel,
       fallbackModel: config.rerankFallbackModel || 'none',
       durationMs: Date.now() - startMs,
+      causeCode: cause?.code,
+      causeErrno: cause?.errno,
+      causeSyscall: cause?.syscall,
     });
     return results;
   } finally {
@@ -163,6 +169,64 @@ export async function rerank<T extends RerankableResult>(
 interface VllmRerankOutput<T> {
   items: T[];
   totalTokens: number;
+}
+
+/**
+ * Retry wrapper around `rerankViaVllm` that recovers from transient
+ * socket-level failures (stale keep-alive, brief worker restart, RST mid-
+ * write). HTTP error statuses from vLLM are passed through unchanged — they
+ * indicate real bugs and should not be retried.
+ *
+ * Context: Node's undici pool reuses TCP sockets, and vLLM's uvicorn server
+ * recycles idle connections after 5 s. If a reused socket has been closed
+ * peer-side, the next write fails with `TypeError: fetch failed` (wrapping
+ * ECONNRESET / EPIPE / UND_ERR_SOCKET). A single immediate retry opens a
+ * fresh socket and almost always succeeds.
+ */
+async function rerankViaVllmWithRetry<T extends RerankableResult>(
+  query: string,
+  results: T[],
+  model: string,
+  host: string,
+  topN: number,
+): Promise<VllmRerankOutput<T>> {
+  const MAX_ATTEMPTS = 2;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await rerankViaVllm(query, results, model, host, topN);
+    } catch (err) {
+      lastErr = err;
+      // Classify the error. Socket errors come from undici wrapped as
+      // TypeError('fetch failed') with .cause.code set to an errno.
+      // HTTP errors thrown by rerankViaVllm itself start with "vLLM rerank "
+      // and carry a status code — those are application-level, not retryable.
+      const causeCode = (err as { cause?: { code?: string } })?.cause?.code;
+      const directCode = (err as { code?: string })?.code;
+      const isSocketError =
+        (err instanceof TypeError && err.message === 'fetch failed') ||
+        causeCode === 'ECONNRESET' ||
+        causeCode === 'EPIPE' ||
+        causeCode === 'UND_ERR_SOCKET' ||
+        causeCode === 'UND_ERR_CLOSED' ||
+        directCode === 'ECONNRESET' ||
+        directCode === 'EPIPE';
+
+      if (!isSocketError || attempt === MAX_ATTEMPTS) throw err;
+
+      logger.warn('rerank transient socket error, retrying', {
+        attempt,
+        model,
+        host,
+        causeCode,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      // Tiny backoff — gives undici's pool a moment to drop the dead socket
+      // so attempt 2 opens a fresh one.
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  }
+  throw lastErr;
 }
 
 async function rerankViaVllm<T extends RerankableResult>(
