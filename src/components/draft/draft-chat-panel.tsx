@@ -124,6 +124,10 @@ export default function DraftChatPanel({
 }: DraftChatPanelProps) {
   // Tabs (persisted)
   const [activeTab, setActiveTab] = usePersistedState<'chat' | 'history' | 'workflows' | 'version' | 'suggestions'>('draft.chat.activeTab', 'chat');
+  // Mirror activeTab in a ref so long-lived DOM event handlers (dwell hover)
+  // can read the current value without re-subscribing on every tab change.
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
 
   // Chat input height (localStorage)
   const [chatInputHeight, setChatInputHeight] = useState(CHAT_INPUT_DEFAULT);
@@ -244,7 +248,11 @@ export default function DraftChatPanel({
       clearDwell();
       dwellTimer = setTimeout(() => {
         setEditorHighlightedId(id);
-        setActiveTab('suggestions');
+        // Only steal focus from the Chat tab — if the user has deliberately
+        // navigated to History/Workflows/Version/Suggestions, keep them there.
+        if (activeTabRef.current === 'chat') {
+          setActiveTab('suggestions');
+        }
       }, DWELL_MS);
     };
 
