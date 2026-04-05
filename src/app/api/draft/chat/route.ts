@@ -107,6 +107,16 @@ export async function POST(request: NextRequest) {
           controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'));
         };
 
+        // Structured progress helper — packs message + step + detail into the
+        // shape AIThinkingLog consumes on the client.
+        const sendProgress = (
+          step: string,
+          message: string,
+          detail?: Record<string, unknown>
+        ) => {
+          send({ type: 'progress', step, message, ...(detail ? { detail } : {}) });
+        };
+
         try {
           // Optional RAG: fetch case knowledge from all linked cases
           let knowledgeContext: string | undefined;
@@ -122,7 +132,7 @@ export async function POST(request: NextRequest) {
           // cards grounded in the actual record.
           // ----------------------------------------------------------------
           if (deepSearchFlag && effectiveCaseIds.length > 0) {
-            send({ type: 'progress', message: 'Deep research: decomposing query...' });
+            sendProgress('deep_start', `Deep research across ${effectiveCaseIds.length} case(s)...`);
             try {
               const registry = await getToolRegistry();
               // Deep search only accepts one caseId per invocation; run per case.
@@ -135,7 +145,21 @@ export async function POST(request: NextRequest) {
                   caseId: cid,
                   thinking,
                   onProgress: (p) => {
-                    send({ type: 'progress', message: p.message || p.step, step: p.step });
+                    // Forward the full DeepSearchProgress payload — sub-queries,
+                    // intent, stats — so the client thinking-log can render it.
+                    const detail: Record<string, unknown> = {};
+                    if (p.subQueries && p.subQueries.length > 0) detail.keywords = p.subQueries;
+                    if (p.searchStats?.totalRetrieved !== undefined) detail.totalSources = p.searchStats.totalRetrieved;
+                    if (p.searchStats?.finalAfterRerank !== undefined) detail.usedSources = p.searchStats.finalAfterRerank;
+                    if (p.subQueryIndex !== undefined && p.subQueryTotal !== undefined) {
+                      detail.patternHits = p.subQueryIndex + 1; // repurpose for "sub-query M of N"
+                      detail.vectorHits = p.subQueryTotal;
+                    }
+                    sendProgress(
+                      p.step,
+                      p.message || p.step,
+                      Object.keys(detail).length > 0 ? detail : undefined
+                    );
                   },
                 });
                 if (result.report) deepReports.push(result.report);
@@ -164,14 +188,18 @@ export async function POST(request: NextRequest) {
                       .join('\n\n---\n\n')}`
                   : '';
                 knowledgeContext = [reportBlock, sourcesBlock].filter(Boolean).join('\n\n');
-                send({
-                  type: 'progress',
-                  message: `Deep research complete — ${deepSources.length} sources across ${effectiveCaseIds.length} case(s)`,
-                });
+                sendProgress(
+                  'deep_done',
+                  `Deep research complete — ${deepSources.length} sources across ${effectiveCaseIds.length} case(s)`,
+                  {
+                    totalSources: deepSources.length,
+                    topCitations: deepSources.slice(0, 6).map((s) => s.citation || s.citationShort || `${s.document}, p.${s.page}`),
+                  }
+                );
               }
             } catch (err) {
               console.warn('[Draft Chat] Deep search failed, falling back to standard RAG:', err);
-              send({ type: 'progress', message: 'Deep research unavailable, using standard RAG' });
+              sendProgress('deep_fallback', 'Deep research unavailable, using standard RAG');
             }
           }
 
@@ -179,7 +207,11 @@ export async function POST(request: NextRequest) {
           // a supplement when deep search was skipped/failed and we still have
           // linked cases.
           if (!knowledgeContext && effectiveCaseIds.length > 0) {
-            send({ type: 'progress', message: `Searching ${effectiveCaseIds.length} linked case(s)...` });
+            sendProgress(
+              'rag_search',
+              `Searching ${effectiveCaseIds.length} linked case(s) (hybrid vector + keyword)...`,
+              { searchMode: 'hybrid' }
+            );
 
             try {
               const registry = await getToolRegistry();
@@ -212,21 +244,28 @@ export async function POST(request: NextRequest) {
                   })
                   .join('\n\n---\n\n');
 
-                send({
-                  type: 'progress',
-                  message: `Found ${sorted.length} relevant excerpts from ${effectiveCaseIds.length} case(s)`,
-                });
+                sendProgress(
+                  'rag_done',
+                  `Found ${sorted.length} relevant excerpts from ${effectiveCaseIds.length} case(s)`,
+                  {
+                    totalSources: allResults.length,
+                    usedSources: sorted.length,
+                    topCitations: sorted.slice(0, 6).map((r) => r.citation || r.citationShort || `${r.document}, p.${r.page}`),
+                  }
+                );
+              } else {
+                sendProgress('rag_empty', 'No relevant excerpts found in case documents');
               }
             } catch (err) {
               console.warn('[Draft Chat] RAG search failed:', err);
-              send({ type: 'progress', message: 'Case document search unavailable, proceeding without context' });
+              sendProgress('rag_error', 'Case document search unavailable, proceeding without context');
             }
           }
 
           // Search sibling drafts if vector search enabled
           if (vectorSearch && draftId) {
             try {
-              send({ type: 'progress', message: 'Searching draft content...' });
+              sendProgress('draft_search', 'Searching content across sibling drafts...');
 
               // Find all indexed drafts linked to the same cases
               const draftCaseLinks = await prisma.draftCase.findMany({
@@ -398,12 +437,20 @@ export async function POST(request: NextRequest) {
             }
             const sessionId = clientSessionId || randomUUID();
 
-            send({ type: 'progress', message: 'Loading learned preferences...' });
+            sendProgress('prefs_loading', 'Loading learned preferences...');
             const prefs = await summarisePreferences({
               draftId,
               caseId: draftRecord.caseId,
               documentType: draftRecord.documentType,
             });
+            if (prefs.rules.length > 0 || prefs.examples.length > 0) {
+              sendProgress(
+                'prefs_loaded',
+                `Loaded ${prefs.rules.length} preference rule(s) and ${prefs.examples.length} few-shot example(s) (~${prefs.estimatedTokens} tokens)`
+              );
+            } else {
+              sendProgress('prefs_empty', 'No learned preferences yet — starting fresh');
+            }
 
             const autoSuggestPrompt = getAutoSuggestPrompt({
               userQuery: query.trim(),
@@ -414,12 +461,18 @@ export async function POST(request: NextRequest) {
               maxSuggestions: 20,
             });
 
-            send({
-              type: 'progress',
-              message: `Generating structured suggestions with ${provider}/${effectiveModel}...`,
-            });
+            sendProgress(
+              'generating',
+              `Generating structured suggestions with ${provider}/${effectiveModel}...`,
+              {
+                provider,
+                model: effectiveModel,
+                contextChars: autoSuggestPrompt.length,
+              }
+            );
 
             let fullContent = '';
+            let lastHeartbeatAt = Date.now();
             for await (const event of streamAI({
               provider: provider as AIProviderKey,
               model: effectiveModel,
@@ -434,6 +487,15 @@ export async function POST(request: NextRequest) {
             })) {
               if (event.type === 'token') {
                 fullContent += event.text;
+                // Throttled heartbeat: emit a char-count update every ~600ms so
+                // the client thinking-log can show live progress during long runs.
+                const now = Date.now();
+                if (now - lastHeartbeatAt > 600) {
+                  lastHeartbeatAt = now;
+                  sendProgress('generating_tick', `Streaming response (${fullContent.length.toLocaleString()} chars)`, {
+                    contextChars: fullContent.length,
+                  });
+                }
               } else if (event.type === 'done') {
                 // Ensure we have the full content even if streaming was partial
                 if (!fullContent) fullContent = event.content;
@@ -449,6 +511,7 @@ export async function POST(request: NextRequest) {
               }
             }
 
+            sendProgress('parsing', `Parsing model output (${fullContent.length.toLocaleString()} chars)...`);
             const parsed = extractJsonEnvelope(fullContent);
             const validated = suggestionEnvelopeSchema.safeParse(parsed);
             if (!validated.success) {
@@ -460,9 +523,16 @@ export async function POST(request: NextRequest) {
               return;
             }
 
+            sendProgress(
+              'parsed',
+              `Parsed ${validated.data.suggestions.length} raw suggestion(s) — locating anchors in document`
+            );
+
             // Persist each suggestion, skip those whose anchor cannot be located.
             const persisted = [];
+            let index = 0;
             for (const raw of validated.data.suggestions) {
+              index++;
               const row = await persistSuggestion({
                 draftId,
                 sessionId,
@@ -472,6 +542,20 @@ export async function POST(request: NextRequest) {
               });
               if (row) {
                 persisted.push(row);
+                // Emit a per-suggestion thinking-log entry showing the actual
+                // proposed change. This gives the user live visibility into
+                // what the model is suggesting, independent of the card UI.
+                const origPreview = row.originalText.length > 40
+                  ? row.originalText.slice(0, 40) + '…'
+                  : row.originalText;
+                const propPreview = row.proposedText.length > 40
+                  ? row.proposedText.slice(0, 40) + '…'
+                  : row.proposedText;
+                sendProgress(
+                  'suggestion_created',
+                  `#${index} [${row.category}] "${origPreview}" → "${propPreview}"`,
+                  { keywords: [row.category] }
+                );
               } else {
                 send({
                   type: 'warning',
@@ -489,6 +573,11 @@ export async function POST(request: NextRequest) {
               });
             }
 
+            sendProgress(
+              'done',
+              `Done — ${persisted.length} suggestion(s) ready for review`,
+              { totalSources: persisted.length }
+            );
             send({ type: 'suggestions_done', count: persisted.length });
             return;
           }

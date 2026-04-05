@@ -1165,6 +1165,8 @@ export default function DraftChatPanel({
           suggestions={suggestionsState.suggestions}
           isStreaming={suggestionsState.isStreaming}
           lastError={suggestionsState.lastError}
+          progressLog={suggestionsState.progressLog}
+          runStartTime={suggestionsState.runStartTime}
           onAccept={handleSuggestionAccept}
           onDeny={handleSuggestionDeny}
           onIgnore={handleSuggestionIgnore}

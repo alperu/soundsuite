@@ -14,12 +14,17 @@ import type {
   DraftSuggestionDTO,
   SuggestionStatus,
 } from '@/lib/draft/suggestion-types';
+import { AIThinkingLog, type AIProgressEntry } from '@/components/search/ai-thinking-log';
 import { SuggestionRow } from './suggestion-row';
 
 export interface SuggestionQueuePanelProps {
   suggestions: DraftSuggestionDTO[];
   isStreaming: boolean;
   lastError: string | null;
+  /** Thinking-log entries from the most recent Auto-Suggest run. */
+  progressLog?: AIProgressEntry[];
+  /** Unix ms when the current run started; 0 when idle. */
+  runStartTime?: number;
   onAccept: (suggestion: DraftSuggestionDTO) => void;
   onDeny: (suggestion: DraftSuggestionDTO, tags: DenyReasonTagSlug[], freeText: string) => void;
   onIgnore: (suggestion: DraftSuggestionDTO) => void;
@@ -48,9 +53,12 @@ export function SuggestionQueuePanel({
   onBulkAction,
   onClearPreferences,
   regeneratingId,
+  progressLog,
+  runStartTime,
 }: SuggestionQueuePanelProps) {
   const [filter, setFilter] = useState<FilterKey>('pending');
   const [focusedId, setFocusedId] = useState<string | null>(null);
+  const [thinkingExpanded, setThinkingExpanded] = useState(true);
   const listRef = useRef<HTMLUListElement>(null);
 
   const counts = useMemo(() => {
@@ -124,8 +132,11 @@ export function SuggestionQueuePanel({
     [suggestions]
   );
 
-  // ---- Empty state ----
-  if (suggestions.length === 0 && !isStreaming) {
+  const hasLog = !!progressLog && progressLog.length > 0;
+  const logStart = runStartTime ?? 0;
+
+  // ---- Empty state (only when nothing is happening AND no history to show) ----
+  if (suggestions.length === 0 && !isStreaming && !hasLog) {
     return (
       <div className="flex h-full flex-col items-center justify-center p-8 text-center">
         <div className="mb-3 text-4xl">💡</div>
@@ -140,6 +151,20 @@ export function SuggestionQueuePanel({
 
   return (
     <div className="flex h-full flex-col">
+      {/* Thinking log — shows live progress (embedding search, deep research
+          sub-queries, model generation, per-suggestion creation, warnings). */}
+      {hasLog && (
+        <div className="shrink-0 border-b border-gray-200 bg-white p-2">
+          <AIThinkingLog
+            entries={progressLog!}
+            expanded={thinkingExpanded}
+            onToggle={() => setThinkingExpanded((v) => !v)}
+            startTime={logStart || Date.now()}
+            loading={isStreaming}
+          />
+        </div>
+      )}
+
       {/* Filter bar */}
       <div className="flex shrink-0 items-center gap-1 border-b border-gray-200 bg-gray-50 px-2 py-1.5">
         {(['pending', 'accepted', 'denied', 'ignored', 'stale'] as FilterKey[]).map((key) => {
@@ -200,8 +225,8 @@ export function SuggestionQueuePanel({
         <div className="shrink-0 border-b border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-700">{lastError}</div>
       )}
 
-      {/* Streaming indicator */}
-      {isStreaming && (
+      {/* Streaming indicator (hidden when the thinking log is already showing live state) */}
+      {isStreaming && !hasLog && (
         <div className="flex shrink-0 items-center gap-2 border-b border-purple-200 bg-purple-50 px-2 py-1.5 text-[11px] text-purple-700">
           <div className="h-2 w-2 animate-pulse rounded-full bg-purple-500" />
           Generating suggestions…

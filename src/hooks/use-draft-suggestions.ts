@@ -14,6 +14,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { AIProgressEntry } from '@/components/search/ai-thinking-log';
 import type {
   DenyReasonTagSlug,
   DraftSuggestionDTO,
@@ -42,6 +43,11 @@ export interface UseDraftSuggestionsReturn {
   pendingCount: number;
   isStreaming: boolean;
   lastError: string | null;
+
+  /** Thinking-log entries from the most recent run (progress + warnings). */
+  progressLog: AIProgressEntry[];
+  /** Unix ms when the current run started (for AIThinkingLog elapsed timer). 0 when idle. */
+  runStartTime: number;
 
   /** Start an Auto-Suggest generation run. */
   startAutoSuggest: (params: AutoSuggestRequest) => Promise<void>;
@@ -86,6 +92,8 @@ export function useDraftSuggestions(options: UseDraftSuggestionsOptions): UseDra
   const [suggestions, setSuggestions] = useState<DraftSuggestionDTO[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
+  const [progressLog, setProgressLog] = useState<AIProgressEntry[]>([]);
+  const [runStartTime, setRunStartTime] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
   // Keep callback refs stable so the effect below doesn't re-run them unnecessarily.
@@ -129,6 +137,8 @@ export function useDraftSuggestions(options: UseDraftSuggestionsOptions): UseDra
 
     setIsStreaming(true);
     setLastError(null);
+    setProgressLog([]);
+    setRunStartTime(Date.now());
 
     try {
       const response = await fetch(url, {
@@ -150,12 +160,15 @@ export function useDraftSuggestions(options: UseDraftSuggestionsOptions): UseDra
       const processLine = (line: string) => {
         const trimmed = line.trim();
         if (!trimmed) return;
-        let event: SuggestionStreamEvent;
+        // The raw event may carry fields beyond SuggestionStreamEvent — in
+        // particular, `progress` events now include step + detail.
+        let rawEvent: Record<string, unknown>;
         try {
-          event = JSON.parse(trimmed) as SuggestionStreamEvent;
+          rawEvent = JSON.parse(trimmed) as Record<string, unknown>;
         } catch {
           return;
         }
+        const event = rawEvent as unknown as SuggestionStreamEvent;
         if (event.type === 'suggestion') {
           // Insert or update by id.
           setSuggestions((prev) => {
@@ -173,12 +186,62 @@ export function useDraftSuggestions(options: UseDraftSuggestionsOptions): UseDra
         } else if (event.type === 'regenerate_done') {
           callbacksRef.current.onStreamComplete?.(1);
         } else if (event.type === 'warning') {
+          // Append warnings to the thinking log with a ⚠ marker, AND fire the
+          // callback so callers can toast if they want.
+          setProgressLog((prev) => [
+            ...prev,
+            {
+              type: 'progress',
+              step: 'warning',
+              message: `⚠ ${event.message}`,
+              timestamp: Date.now(),
+            } as AIProgressEntry,
+          ]);
           callbacksRef.current.onWarning?.(event.message);
+        } else if (event.type === 'progress') {
+          // Coalesce consecutive 'generating_tick' heartbeats — we only want
+          // the latest one visible, not a pile-up of per-tick entries.
+          const step = (rawEvent.step as string | undefined) ?? 'progress';
+          const message = (rawEvent.message as string | undefined) ?? '';
+          const detail = rawEvent.detail as AIProgressEntry['detail'] | undefined;
+          setProgressLog((prev) => {
+            if (step === 'generating_tick' && prev.length > 0 && prev[prev.length - 1].step === 'generating_tick') {
+              const next = prev.slice(0, -1);
+              next.push({
+                type: 'progress',
+                step,
+                message,
+                timestamp: Date.now(),
+                ...(detail ? { detail } : {}),
+              } as AIProgressEntry);
+              return next;
+            }
+            return [
+              ...prev,
+              {
+                type: 'progress',
+                step,
+                message,
+                timestamp: Date.now(),
+                ...(detail ? { detail } : {}),
+              } as AIProgressEntry,
+            ];
+          });
         } else if (event.type === 'error') {
           setLastError(event.error);
+          setProgressLog((prev) => [
+            ...prev,
+            {
+              type: 'progress',
+              step: 'error',
+              message: `✗ ${event.error}`,
+              timestamp: Date.now(),
+            } as AIProgressEntry,
+          ]);
           callbacksRef.current.onError?.(event.error, event.raw);
         }
-        // progress/token/result events intentionally ignored in suggest mode
+        // token/result events intentionally ignored in suggest mode — we get
+        // the char-count progress via 'generating_tick' progress events.
       };
 
       while (true) {
@@ -307,6 +370,8 @@ export function useDraftSuggestions(options: UseDraftSuggestionsOptions): UseDra
     pendingCount,
     isStreaming,
     lastError,
+    progressLog,
+    runStartTime,
     startAutoSuggest,
     regenerate,
     abort,
