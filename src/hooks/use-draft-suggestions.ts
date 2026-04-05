@@ -140,6 +140,14 @@ export function useDraftSuggestions(options: UseDraftSuggestionsOptions): UseDra
     setProgressLog([]);
     setRunStartTime(Date.now());
 
+    console.log('[useDraftSuggestions] consumeStream start', {
+      url,
+      bodyKeys: Object.keys(body as object),
+      autoSuggest: (body as { autoSuggest?: boolean }).autoSuggest,
+      draftId: (body as { draftId?: string }).draftId,
+    });
+
+    let eventCount = 0;
     try {
       const response = await fetch(url, {
         method: 'POST',
@@ -147,6 +155,7 @@ export function useDraftSuggestions(options: UseDraftSuggestionsOptions): UseDra
         body: JSON.stringify(body),
         signal: controller.signal,
       });
+      console.log('[useDraftSuggestions] fetch response', { ok: response.ok, status: response.status });
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({ error: response.statusText }));
         throw new Error(errBody.error || `HTTP ${response.status}`);
@@ -166,8 +175,16 @@ export function useDraftSuggestions(options: UseDraftSuggestionsOptions): UseDra
         try {
           rawEvent = JSON.parse(trimmed) as Record<string, unknown>;
         } catch {
+          console.warn('[useDraftSuggestions] failed to parse NDJSON line', { line: trimmed.slice(0, 200) });
           return;
         }
+        eventCount++;
+        console.log('[useDraftSuggestions] event', {
+          n: eventCount,
+          type: rawEvent.type,
+          step: rawEvent.step,
+          preview: JSON.stringify(rawEvent).slice(0, 200),
+        });
         const event = rawEvent as unknown as SuggestionStreamEvent;
         if (event.type === 'suggestion') {
           // Insert or update by id.
@@ -255,11 +272,16 @@ export function useDraftSuggestions(options: UseDraftSuggestionsOptions): UseDra
       if (buffer.trim()) processLine(buffer);
     } catch (err: unknown) {
       const e = err as Error;
-      if (e.name === 'AbortError') return;
+      if (e.name === 'AbortError') {
+        console.log('[useDraftSuggestions] stream aborted by user');
+        return;
+      }
       const msg = e.message || 'Stream failed';
+      console.error('[useDraftSuggestions] stream error', { message: msg, eventCount });
       setLastError(msg);
       callbacksRef.current.onError?.(msg);
     } finally {
+      console.log('[useDraftSuggestions] stream finally', { eventCount });
       setIsStreaming(false);
       abortRef.current = null;
     }

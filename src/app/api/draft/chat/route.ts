@@ -461,6 +461,19 @@ export async function POST(request: NextRequest) {
               maxSuggestions: 20,
             });
 
+            console.log('[AutoSuggest][server] generating', {
+              draftId,
+              sessionId,
+              provider,
+              model: effectiveModel,
+              promptChars: autoSuggestPrompt.length,
+              documentChars: documentContent.length,
+              jsonMode: true,
+              temperature: 0.1,
+              hasKnowledgeContext: !!knowledgeContext,
+              knowledgeContextChars: knowledgeContext?.length ?? 0,
+            });
+
             sendProgress(
               'generating',
               `Generating structured suggestions with ${provider}/${effectiveModel}...`,
@@ -473,53 +486,121 @@ export async function POST(request: NextRequest) {
 
             let fullContent = '';
             let lastHeartbeatAt = Date.now();
-            for await (const event of streamAI({
-              provider: provider as AIProviderKey,
-              model: effectiveModel,
-              messages: [
-                { role: 'system', content: autoSuggestPrompt },
-                { role: 'user', content: query.trim() },
-              ],
-              maxTokens: reqMaxTokens || 4096,
-              temperature: 0.5,
-              jsonMode: true,
-              thinking,
-            })) {
-              if (event.type === 'token') {
-                fullContent += event.text;
-                // Throttled heartbeat: emit a char-count update every ~600ms so
-                // the client thinking-log can show live progress during long runs.
-                const now = Date.now();
-                if (now - lastHeartbeatAt > 600) {
-                  lastHeartbeatAt = now;
-                  sendProgress('generating_tick', `Streaming response (${fullContent.length.toLocaleString()} chars)`, {
-                    contextChars: fullContent.length,
+            let streamError: Error | null = null;
+            try {
+              for await (const event of streamAI({
+                provider: provider as AIProviderKey,
+                model: effectiveModel,
+                messages: [
+                  { role: 'system', content: autoSuggestPrompt },
+                  { role: 'user', content: query.trim() },
+                ],
+                maxTokens: reqMaxTokens || 4096,
+                // Low temperature for structured output — higher values cause
+                // models to deviate from JSON format.
+                temperature: 0.1,
+                jsonMode: true,
+                thinking,
+              })) {
+                if (event.type === 'token') {
+                  fullContent += event.text;
+                  // Throttled heartbeat: emit a char-count update every ~600ms so
+                  // the client thinking-log can show live progress during long runs.
+                  const now = Date.now();
+                  if (now - lastHeartbeatAt > 600) {
+                    lastHeartbeatAt = now;
+                    sendProgress('generating_tick', `Streaming response (${fullContent.length.toLocaleString()} chars)`, {
+                      contextChars: fullContent.length,
+                    });
+                  }
+                } else if (event.type === 'done') {
+                  // Ensure we have the full content even if streaming was partial
+                  if (!fullContent) fullContent = event.content;
+                  send({
+                    type: 'result',
+                    data: {
+                      text: '',
+                      model: event.model,
+                      provider: event.provider,
+                      usage: event.usage,
+                    },
                   });
                 }
-              } else if (event.type === 'done') {
-                // Ensure we have the full content even if streaming was partial
-                if (!fullContent) fullContent = event.content;
-                send({
-                  type: 'result',
-                  data: {
-                    text: '',
-                    model: event.model,
-                    provider: event.provider,
-                    usage: event.usage,
-                  },
-                });
               }
+            } catch (err) {
+              streamError = err as Error;
+              console.error('[AutoSuggest][server] streamAI threw', {
+                error: streamError.message,
+                stack: streamError.stack?.slice(0, 500),
+                provider,
+                model: effectiveModel,
+              });
+            }
+
+            console.log('[AutoSuggest][server] stream complete', {
+              fullContentChars: fullContent.length,
+              fullContentPreview: fullContent.slice(0, 300),
+              streamError: streamError?.message ?? null,
+            });
+
+            if (streamError) {
+              send({
+                type: 'error',
+                error: `AI provider error: ${streamError.message}`,
+                raw: fullContent.slice(0, 500),
+              });
+              return;
+            }
+
+            if (!fullContent || fullContent.trim().length === 0) {
+              console.error('[AutoSuggest][server] empty model response');
+              send({
+                type: 'error',
+                error: `Model returned an empty response. Check that ${provider}/${effectiveModel} is reachable and has a model loaded.`,
+              });
+              return;
             }
 
             sendProgress('parsing', `Parsing model output (${fullContent.length.toLocaleString()} chars)...`);
             const parsed = extractJsonEnvelope(fullContent);
-            const validated = suggestionEnvelopeSchema.safeParse(parsed);
-            if (!validated.success) {
+            if (!parsed) {
+              console.error('[AutoSuggest][server] extractJsonEnvelope returned null', {
+                fullContentPreview: fullContent.slice(0, 500),
+              });
               send({
                 type: 'error',
-                error: 'Model did not return valid suggestions JSON',
+                error: 'Could not extract JSON object from model response',
                 raw: fullContent.slice(0, 500),
               });
+              return;
+            }
+
+            const validated = suggestionEnvelopeSchema.safeParse(parsed);
+            if (!validated.success) {
+              console.error('[AutoSuggest][server] schema validation failed', {
+                zodErrors: validated.error.issues.slice(0, 5),
+                parsedKeys: typeof parsed === 'object' && parsed ? Object.keys(parsed as object) : 'not-an-object',
+              });
+              send({
+                type: 'error',
+                error: 'Model JSON did not match the expected suggestion schema',
+                raw: fullContent.slice(0, 500),
+              });
+              return;
+            }
+
+            console.log('[AutoSuggest][server] parsed envelope', {
+              rawSuggestionCount: validated.data.suggestions.length,
+              categories: validated.data.suggestions.map((s) => s.category),
+            });
+
+            if (validated.data.suggestions.length === 0) {
+              console.warn('[AutoSuggest][server] model returned zero suggestions');
+              sendProgress(
+                'done',
+                '⚠ Model returned zero suggestions. Try rephrasing your request or lowering the model temperature.'
+              );
+              send({ type: 'suggestions_done', count: 0 });
               return;
             }
 
@@ -562,6 +643,24 @@ export async function POST(request: NextRequest) {
                   message: `Could not locate "${raw.anchorText.slice(0, 40)}..." — skipped`,
                 });
               }
+            }
+
+            console.log('[AutoSuggest][server] persist complete', {
+              rawCount: validated.data.suggestions.length,
+              persistedCount: persisted.length,
+              anchorFailures: validated.data.suggestions.length - persisted.length,
+            });
+
+            // If every suggestion failed to locate its anchor, explain that
+            // explicitly instead of silently finishing with count=0.
+            if (persisted.length === 0) {
+              console.warn('[AutoSuggest][server] all anchors failed to locate');
+              sendProgress(
+                'done',
+                `⚠ All ${validated.data.suggestions.length} suggestions had anchor text that could not be located in the document. The model may have paraphrased instead of copying verbatim.`
+              );
+              send({ type: 'suggestions_done', count: 0 });
+              return;
             }
 
             // Detect conflicts between persisted rows and stream them to the client.

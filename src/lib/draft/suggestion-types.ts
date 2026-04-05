@@ -112,7 +112,7 @@ export interface DraftSuggestionDTO {
 // ---------------------------------------------------------------------------
 
 export type SuggestionStreamEvent =
-  | { type: 'progress'; message: string }
+  | { type: 'progress'; step?: string; message: string; detail?: Record<string, unknown> }
   | { type: 'token'; text: string }                              // ignored in suggest mode, kept for debug
   | { type: 'suggestion'; suggestion: DraftSuggestionDTO }
   | { type: 'suggestions_done'; count: number }

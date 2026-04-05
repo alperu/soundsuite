@@ -39,12 +39,23 @@ export interface ResolvedAnchor {
  * Returns null if the text cannot be located at all — the server should drop
  * such suggestions rather than storing them with bogus positions.
  */
+/** Normalize Unicode smart/curly quotes to ASCII straight quotes. */
+function normalizeQuotes(s: string): string {
+  return s
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'") // curly single quotes
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"') // curly double quotes
+    .replace(/[\u2013\u2014]/g, '-');              // en-dash, em-dash → hyphen
+}
+
 export function locateAnchor(
   documentText: string,
   anchorText: string,
   anchorHint?: string
 ): ResolvedAnchor | null {
-  if (!anchorText || anchorText.length === 0) return null;
+  if (!anchorText || anchorText.length === 0) {
+    console.warn('[locateAnchor] empty anchorText');
+    return null;
+  }
 
   // First try verbatim.
   const positions: number[] = [];
@@ -58,11 +69,24 @@ export function locateAnchor(
   }
 
   if (positions.length === 0) {
-    // Whitespace-tolerant fallback: normalise both and search.
-    const normalizedDoc = documentText.replace(/\s+/g, ' ');
-    const normalizedAnchor = anchorText.replace(/\s+/g, ' ').trim();
+    // Quote-and-whitespace-tolerant fallback: normalize smart quotes and
+    // collapse whitespace in both sides, then search.
+    const normalizedDoc = normalizeQuotes(documentText).replace(/\s+/g, ' ');
+    const normalizedAnchor = normalizeQuotes(anchorText).replace(/\s+/g, ' ').trim();
     const idx = normalizedDoc.indexOf(normalizedAnchor);
-    if (idx === -1) return null;
+    if (idx === -1) {
+      console.warn('[locateAnchor] no match', {
+        anchorPreview: anchorText.slice(0, 60),
+        anchorLen: anchorText.length,
+        docLen: documentText.length,
+        normalizedAnchorPreview: normalizedAnchor.slice(0, 60),
+      });
+      return null;
+    }
+    console.log('[locateAnchor] matched via normalized fallback', {
+      anchorPreview: anchorText.slice(0, 60),
+      normalizedIdx: idx,
+    });
     // Approximate the original-text position by counting characters up to idx.
     // We walk the original doc, skipping extra whitespace, until we reach the
     // normalized position. This is best-effort; close enough for ProseMirror.
@@ -267,7 +291,10 @@ export function rowToDTO(
  * Callers should run the result through suggestionEnvelopeSchema.safeParse.
  */
 export function extractJsonEnvelope(text: string): unknown | null {
-  if (!text) return null;
+  if (!text) {
+    console.warn('[extractJsonEnvelope] empty input');
+    return null;
+  }
   // Strip code fences if present.
   const cleaned = text
     .replace(/^\s*```(?:json)?\s*/i, '')
@@ -276,12 +303,24 @@ export function extractJsonEnvelope(text: string): unknown | null {
 
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
-  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) return null;
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+    console.warn('[extractJsonEnvelope] no braces found', {
+      length: text.length,
+      preview: text.slice(0, 200),
+    });
+    return null;
+  }
 
   const candidate = cleaned.slice(firstBrace, lastBrace + 1);
   try {
     return JSON.parse(candidate);
-  } catch {
+  } catch (err) {
+    console.warn('[extractJsonEnvelope] JSON.parse failed', {
+      error: (err as Error).message,
+      candidateLength: candidate.length,
+      candidateStart: candidate.slice(0, 200),
+      candidateEnd: candidate.slice(-200),
+    });
     return null;
   }
 }
