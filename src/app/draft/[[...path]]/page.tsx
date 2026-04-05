@@ -1067,6 +1067,7 @@ export default function DraftPage() {
           draftVersion={activeDraft?.version}
           draftIndexedVersion={activeDraft?.indexedVersion}
           draftIndexingStatus={activeDraft?.indexingStatus}
+          draftEditorRef={editorRef}
         />
       </div>
 

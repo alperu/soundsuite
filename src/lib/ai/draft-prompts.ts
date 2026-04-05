@@ -2,6 +2,8 @@
  * System prompts for AI-powered draft text transformations and chat.
  */
 
+import type { SuggestionCategory } from '@/lib/draft/suggestion-types';
+
 export type TransformAction = 'adjust_tone' | 'fix_grammar' | 'extend' | 'simplify' | 'legalize';
 
 export type ToneOption = 'formal' | 'persuasive' | 'neutral' | 'aggressive' | 'sympathetic';
@@ -191,6 +193,179 @@ Generate the conclusion and prayer for relief.
     prompt += `## Case Knowledge (from indexed court documents)\n\nThe following excerpts are from the actual case record and related documents. Use these as the basis for your citations and arguments:\n\n${knowledgeContext}\n\n`;
     prompt += `IMPORTANT: When referencing these excerpts, use the citation format provided (e.g., "2 CR 145" or "3 RR 210:15-22"). Create footnotes for each reference.\n\n`;
   }
+
+  return prompt;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-Suggest Prompt (structured output mode)
+// ---------------------------------------------------------------------------
+
+export interface AutoSuggestPromptOptions {
+  /** The user's free-form instruction (e.g. "tighten the tone"). */
+  userQuery: string;
+  /** Full or smart-windowed document text the AI should analyze. */
+  documentContent: string;
+  /** Optional selection — if present, the AI should focus suggestions on this range. */
+  selectedText?: string;
+  /** RAG results from case knowledge to ground suggestions. */
+  knowledgeContext?: string;
+  /** Learned user preferences block (markdown). Empty string if no history. */
+  preferencesMarkdown?: string;
+  /** Max suggestions the model may return (hard cap). */
+  maxSuggestions?: number;
+}
+
+/**
+ * System prompt for Auto-Suggest mode. Forces the AI to return a strict JSON
+ * envelope of suggestion objects, each pointing at verbatim text in the draft.
+ *
+ * The returned JSON is parsed by src/app/api/draft/chat/route.ts using the
+ * zod schema in src/lib/draft/suggestion-types.ts.
+ */
+export function getAutoSuggestPrompt(options: AutoSuggestPromptOptions): string {
+  const {
+    userQuery,
+    documentContent,
+    selectedText,
+    knowledgeContext,
+    preferencesMarkdown,
+    maxSuggestions = 20,
+  } = options;
+
+  let prompt = `${BASE_ROLE}
+
+You are in **Auto-Suggest mode**. Instead of replying with free-form prose, you must return a structured JSON object containing specific, actionable edit proposals for the user's draft document. Each proposal targets a verbatim span of text and offers a replacement.
+
+## CRITICAL: Output Format
+
+Return ONLY a JSON object matching this exact schema. No prose, no code fences, no markdown before or after.
+
+\`\`\`json
+{
+  "suggestions": [
+    {
+      "anchorText": "exact substring from the document, copy-pasted verbatim",
+      "anchorHint": "<= 40 char disambiguator (optional, e.g. 'para 3, issue II')",
+      "proposedText": "the replacement text",
+      "category": "tone | grammar | structure | citation | clarity | other",
+      "reason": "one-sentence rationale, <= 240 chars",
+      "confidence": 0.85
+    }
+  ],
+  "notes": "optional short meta-note"
+}
+\`\`\`
+
+## Rules
+
+1. **anchorText MUST be copy-pasted verbatim** from the document below. If you cannot find the text you want to change as a verbatim substring, OMIT that suggestion. Do not paraphrase the anchor.
+2. **anchorText must be unique enough to locate** — include enough surrounding context (but no more than needed) to disambiguate from repeated phrases. Use \`anchorHint\` if further disambiguation helps a human.
+3. **Return at most ${maxSuggestions} suggestions.** Prefer high-impact changes over trivial ones.
+4. **Every suggestion needs a category** from: tone, grammar, structure, citation, clarity, other.
+5. **Never repeat a suggestion** the user has denied with the same rationale (see User Preferences below).
+6. **Preserve legal substance** — never alter case holdings, statute references, or factual assertions.
+7. **proposedText should stand alone** — when inserted in place of anchorText, the document should read naturally.
+8. **Do NOT include any text outside the JSON object.** No preamble, no explanation, no code fences.
+
+`;
+
+  if (preferencesMarkdown && preferencesMarkdown.trim().length > 0) {
+    prompt += `${preferencesMarkdown.trim()}\n\n`;
+  }
+
+  if (selectedText && selectedText.trim().length > 0) {
+    prompt += `## User Selection (focus your suggestions here)\n\n${selectedText}\n\n`;
+  }
+
+  prompt += `## User Request\n\n${userQuery}\n\n`;
+
+  prompt += `## Current Document\n\n${documentContent}\n\n`;
+
+  if (knowledgeContext && knowledgeContext.trim().length > 0) {
+    prompt += `## Case Knowledge (from indexed documents)\n\n${knowledgeContext}\n\n`;
+    prompt += `Ground your suggestions in the actual record when applicable.\n\n`;
+  }
+
+  prompt += `Now produce the JSON. Remember: verbatim anchors, strict schema, no prose.`;
+
+  return prompt;
+}
+
+// ---------------------------------------------------------------------------
+// Regenerate-suggestion Prompt (4th button)
+// ---------------------------------------------------------------------------
+
+export interface RegenerateSuggestionPromptOptions {
+  userQuery: string;
+  documentContent: string;
+  originalText: string;
+  previousProposedText: string;
+  previousReason: string;
+  previousCategory: SuggestionCategory;
+  preferencesMarkdown?: string;
+}
+
+/**
+ * Prompt for the Regenerate button — asks the model for a MEANINGFULLY
+ * different phrasing of the same underlying change.
+ */
+export function getRegenerateSuggestionPrompt(options: RegenerateSuggestionPromptOptions): string {
+  const {
+    userQuery,
+    documentContent,
+    originalText,
+    previousProposedText,
+    previousReason,
+    previousCategory,
+    preferencesMarkdown,
+  } = options;
+
+  let prompt = `${BASE_ROLE}
+
+You are in **Regenerate mode**. The user previously saw a suggestion but clicked Regenerate because they want a DIFFERENT phrasing of the same underlying change. Produce one new suggestion that addresses the same goal but differs meaningfully from the previous proposal.
+
+## CRITICAL: Output Format
+
+Return ONLY a JSON object with exactly ONE suggestion in the array. No prose, no code fences.
+
+\`\`\`json
+{
+  "suggestions": [
+    {
+      "anchorText": "${originalText.replace(/"/g, '\\"').slice(0, 200)}",
+      "proposedText": "a new phrasing — MUST differ from the previous proposal",
+      "category": "${previousCategory}",
+      "reason": "<= 240 chars",
+      "confidence": 0.0
+    }
+  ]
+}
+\`\`\`
+
+## Rules
+1. Keep the **same anchorText** (the original text to replace).
+2. **Do NOT repeat the previous proposed text** or produce a trivially similar variant.
+3. Same category unless the prior suggestion was miscategorised.
+4. Preserve legal substance.
+5. Return exactly one suggestion. No prose outside the JSON.
+
+## Previous Suggestion (rejected by user — do not repeat it)
+
+- Original text: ${originalText}
+- Previous proposal: ${previousProposedText}
+- Previous rationale: ${previousReason}
+- Category: ${previousCategory}
+
+`;
+
+  if (preferencesMarkdown && preferencesMarkdown.trim().length > 0) {
+    prompt += `${preferencesMarkdown.trim()}\n\n`;
+  }
+
+  prompt += `## Original User Intent\n\n${userQuery}\n\n`;
+  prompt += `## Current Document\n\n${documentContent}\n\n`;
+  prompt += `Produce a meaningfully different alternative. JSON only.`;
 
   return prompt;
 }

@@ -1,9 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { streamAI } from '@/lib/ai/ai-provider';
 import { AIProviderKey, AI_PROVIDER_KEYS, AI_PROVIDERS } from '@/lib/ai/models';
-import { getDraftChatSystemPrompt, getAppealBriefPrompt } from '@/lib/ai/draft-prompts';
+import {
+  getDraftChatSystemPrompt,
+  getAppealBriefPrompt,
+  getAutoSuggestPrompt,
+  getRegenerateSuggestionPrompt,
+} from '@/lib/ai/draft-prompts';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 import { prisma } from '@/lib/db/prisma';
+import { summarisePreferences } from '@/lib/draft/preferences';
+import {
+  persistSuggestion,
+  regenerateSuggestion,
+  rowToDTO,
+  detectConflicts,
+  extractJsonEnvelope,
+} from '@/lib/draft/suggestion-persist';
+import { suggestionEnvelopeSchema } from '@/lib/draft/suggestion-types';
+import { randomUUID } from 'crypto';
 
 /**
  * POST /api/draft/chat
@@ -28,6 +43,9 @@ export async function POST(request: NextRequest) {
       sectionType,
       vectorSearch,
       draftId,
+      autoSuggest,
+      sessionId: clientSessionId,
+      regenerateFromSuggestionId,
     } = body as {
       query: string;
       caseId?: string;
@@ -43,6 +61,9 @@ export async function POST(request: NextRequest) {
       sectionType?: 'issues' | 'facts' | 'summary' | 'argument' | 'conclusion' | 'general';
       vectorSearch?: boolean;
       draftId?: string;
+      autoSuggest?: boolean;
+      sessionId?: string;
+      regenerateFromSuggestionId?: string;
     };
 
     // Support both single caseId and array of caseIds
@@ -201,8 +222,210 @@ export async function POST(request: NextRequest) {
             }
           }
 
-          // Build system prompt — use brief prompt when in brief mode
           const hasSelection = !!selectedText?.trim();
+
+          // ------------------------------------------------------------
+          // Regenerate path — produces a single alternative suggestion
+          // ------------------------------------------------------------
+          if (regenerateFromSuggestionId) {
+            const existing = await prisma.draftSuggestion.findUnique({
+              where: { id: regenerateFromSuggestionId },
+            });
+            if (!existing) {
+              send({ type: 'error', error: 'Suggestion not found for regeneration' });
+              return;
+            }
+            if (existing.regenerationCount >= 3) {
+              send({ type: 'error', error: 'Regeneration limit reached (max 3)' });
+              return;
+            }
+
+            // Load preferences (scoped to draft)
+            const draftRecord = draftId
+              ? await prisma.draft.findUnique({
+                  where: { id: draftId },
+                  select: { documentType: true, caseId: true },
+                })
+              : null;
+            const prefs = await summarisePreferences({
+              draftId: draftId ?? existing.draftId,
+              caseId: draftRecord?.caseId,
+              documentType: draftRecord?.documentType,
+            });
+
+            const regeneratePrompt = getRegenerateSuggestionPrompt({
+              userQuery: query.trim(),
+              documentContent,
+              originalText: existing.originalText,
+              previousProposedText: existing.proposedText,
+              previousReason: existing.reason,
+              previousCategory: existing.category as never,
+              preferencesMarkdown: prefs.markdown || undefined,
+            });
+
+            send({ type: 'progress', message: 'Regenerating alternative phrasing...' });
+
+            let fullContent = '';
+            for await (const event of streamAI({
+              provider: provider as AIProviderKey,
+              model: effectiveModel,
+              messages: [
+                { role: 'system', content: regeneratePrompt },
+                { role: 'user', content: 'Produce one alternative suggestion as JSON.' },
+              ],
+              maxTokens: Math.min(reqMaxTokens || 1024, 2048),
+              temperature: 0.8, // higher temp → more diverse alternative
+              jsonMode: true,
+            })) {
+              if (event.type === 'token') {
+                fullContent += event.text;
+              } else if (event.type === 'done') {
+                fullContent = event.content;
+              }
+            }
+
+            const parsed = extractJsonEnvelope(fullContent);
+            const validated = suggestionEnvelopeSchema.safeParse(parsed);
+            if (!validated.success || validated.data.suggestions.length === 0) {
+              send({
+                type: 'error',
+                error: 'Model did not return a valid alternative suggestion',
+                raw: fullContent.slice(0, 500),
+              });
+              return;
+            }
+
+            const updated = await regenerateSuggestion(
+              regenerateFromSuggestionId,
+              validated.data.suggestions[0],
+              documentContent
+            );
+            if (!updated) {
+              send({ type: 'error', error: 'Failed to update suggestion' });
+              return;
+            }
+
+            send({ type: 'suggestion', suggestion: rowToDTO(updated) });
+            send({ type: 'regenerate_done', suggestionId: updated.id });
+            return;
+          }
+
+          // ------------------------------------------------------------
+          // Auto-Suggest path — structured JSON suggestions
+          // ------------------------------------------------------------
+          if (autoSuggest) {
+            if (!draftId) {
+              send({ type: 'error', error: 'draftId is required for Auto-Suggest mode' });
+              return;
+            }
+            const draftRecord = await prisma.draft.findUnique({
+              where: { id: draftId },
+              select: { version: true, documentType: true, caseId: true },
+            });
+            if (!draftRecord) {
+              send({ type: 'error', error: 'Draft not found' });
+              return;
+            }
+            const sessionId = clientSessionId || randomUUID();
+
+            send({ type: 'progress', message: 'Loading learned preferences...' });
+            const prefs = await summarisePreferences({
+              draftId,
+              caseId: draftRecord.caseId,
+              documentType: draftRecord.documentType,
+            });
+
+            const autoSuggestPrompt = getAutoSuggestPrompt({
+              userQuery: query.trim(),
+              documentContent,
+              selectedText: hasSelection ? selectedText : undefined,
+              knowledgeContext,
+              preferencesMarkdown: prefs.markdown || undefined,
+              maxSuggestions: 20,
+            });
+
+            send({
+              type: 'progress',
+              message: `Generating structured suggestions with ${provider}/${effectiveModel}...`,
+            });
+
+            let fullContent = '';
+            for await (const event of streamAI({
+              provider: provider as AIProviderKey,
+              model: effectiveModel,
+              messages: [
+                { role: 'system', content: autoSuggestPrompt },
+                { role: 'user', content: query.trim() },
+              ],
+              maxTokens: reqMaxTokens || 4096,
+              temperature: 0.5,
+              jsonMode: true,
+              thinking,
+            })) {
+              if (event.type === 'token') {
+                fullContent += event.text;
+              } else if (event.type === 'done') {
+                // Ensure we have the full content even if streaming was partial
+                if (!fullContent) fullContent = event.content;
+                send({
+                  type: 'result',
+                  data: {
+                    text: '',
+                    model: event.model,
+                    provider: event.provider,
+                    usage: event.usage,
+                  },
+                });
+              }
+            }
+
+            const parsed = extractJsonEnvelope(fullContent);
+            const validated = suggestionEnvelopeSchema.safeParse(parsed);
+            if (!validated.success) {
+              send({
+                type: 'error',
+                error: 'Model did not return valid suggestions JSON',
+                raw: fullContent.slice(0, 500),
+              });
+              return;
+            }
+
+            // Persist each suggestion, skip those whose anchor cannot be located.
+            const persisted = [];
+            for (const raw of validated.data.suggestions) {
+              const row = await persistSuggestion({
+                draftId,
+                sessionId,
+                draftVersion: draftRecord.version,
+                raw,
+                documentText: documentContent,
+              });
+              if (row) {
+                persisted.push(row);
+              } else {
+                send({
+                  type: 'warning',
+                  message: `Could not locate "${raw.anchorText.slice(0, 40)}..." — skipped`,
+                });
+              }
+            }
+
+            // Detect conflicts between persisted rows and stream them to the client.
+            const conflictMap = detectConflicts(persisted);
+            for (const row of persisted) {
+              send({
+                type: 'suggestion',
+                suggestion: rowToDTO(row, { conflictsWith: conflictMap.get(row.id) }),
+              });
+            }
+
+            send({ type: 'suggestions_done', count: persisted.length });
+            return;
+          }
+
+          // ------------------------------------------------------------
+          // Default path — free-form chat (unchanged)
+          // ------------------------------------------------------------
           const systemPrompt = briefMode
             ? getAppealBriefPrompt({
                 documentContent,

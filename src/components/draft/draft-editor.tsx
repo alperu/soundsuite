@@ -57,6 +57,7 @@ const Image = BaseImage.extend({
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 import { FontSize } from '@/lib/draft/font-size-extension';
 import { TableOfContents } from '@/lib/draft/toc-extension';
+import { SuggestionTrackingExtension } from '@/lib/draft/suggestion-tracking-extension';
 import { Extension } from '@tiptap/core';
 import { InvisibleCharacters, HardBreakNode, ParagraphNode } from '@tiptap/extension-invisible-characters';
 import { SearchAndReplace } from '@sereneinserenade/tiptap-search-and-replace';
@@ -100,6 +101,20 @@ export interface DraftEditorHandle {
   getHTML: () => string;
   getJSON: () => Record<string, unknown>;
   getMarkdown: () => string;
+
+  // Auto-Suggest / tracking-plugin integration
+  /** Install a suggestion anchor so its position stays live across edits. */
+  addSuggestionAnchor: (payload: { id: string; from: number; to: number }) => void;
+  /** Remove an anchor without modifying the document. */
+  removeSuggestionAnchor: (id: string) => void;
+  /** Accept a pending suggestion by replacing the live anchor range with proposedText. Returns ok/stale/not-found. */
+  acceptSuggestion: (id: string, proposedText: string) => { ok: boolean; reason?: 'stale' | 'not-found' };
+  /** Briefly highlight and scroll to a suggestion's anchor range. */
+  flashSuggestion: (id: string) => void;
+  /** Resolve the current live range of a suggestion, or null if stale. */
+  resolveSuggestionRange: (id: string) => { from: number; to: number } | null;
+  /** Replace all tracked anchors in one shot (used on rehydration). */
+  replaceSuggestionAnchors: (anchors: Array<{ id: string; from: number; to: number }>) => void;
 }
 
 interface PageSettings {
@@ -182,6 +197,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
         TableCell,
         TableHeader,
         TableOfContents,
+        SuggestionTrackingExtension,
         Subscript,
         Superscript,
         CharacterCount,
@@ -367,6 +383,87 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       getHTML: () => editor?.getHTML() ?? '',
       getJSON: () => (editor?.getJSON() as Record<string, unknown>) ?? {},
       getMarkdown: () => editor?.getText() ?? '',
+
+      // Auto-Suggest / tracking-plugin API
+      addSuggestionAnchor: ({ id, from, to }) => {
+        if (!editor) return;
+        (editor.commands as unknown as {
+          addSuggestionAnchor: (p: { id: string; from: number; to: number }) => boolean;
+        }).addSuggestionAnchor({ id, from, to });
+      },
+      removeSuggestionAnchor: (id: string) => {
+        if (!editor) return;
+        (editor.commands as unknown as {
+          removeSuggestionAnchor: (p: { id: string }) => boolean;
+        }).removeSuggestionAnchor({ id });
+      },
+      acceptSuggestion: (id: string, proposedText: string) => {
+        if (!editor) return { ok: false, reason: 'not-found' as const };
+        const storage = (editor.storage as unknown as {
+          suggestionTracking?: { resolveAnchor: (id: string) => { from: number; to: number } | null };
+        }).suggestionTracking;
+        const range = storage?.resolveAnchor(id);
+        if (!range) return { ok: false, reason: 'stale' as const };
+        // Single chained transaction = one undo step.
+        editor
+          .chain()
+          .focus()
+          .deleteRange(range)
+          .insertContentAt(range.from, proposedText)
+          .run();
+        // Remove the anchor so it doesn't linger as a collapsed/stale range.
+        (editor.commands as unknown as {
+          removeSuggestionAnchor: (p: { id: string }) => boolean;
+        }).removeSuggestionAnchor({ id });
+        return { ok: true };
+      },
+      flashSuggestion: (id: string) => {
+        if (!editor) return;
+        const storage = (editor.storage as unknown as {
+          suggestionTracking?: { resolveAnchor: (id: string) => { from: number; to: number } | null };
+        }).suggestionTracking;
+        const range = storage?.resolveAnchor(id);
+        (editor.commands as unknown as {
+          flashSuggestionAnchor: (p: { id: string }) => boolean;
+        }).flashSuggestionAnchor({ id });
+        if (range) {
+          // Scroll the anchor into view.
+          try {
+            const domAtPos = editor.view.domAtPos(range.from);
+            const domNode = domAtPos.node instanceof HTMLElement
+              ? domAtPos.node
+              : (domAtPos.node as Node).parentElement;
+            if (domNode) {
+              const scrollContainer = editor.view.dom.closest('.overflow-auto, .overflow-y-auto') || editor.view.dom.parentElement;
+              if (scrollContainer) {
+                const nodeRect = (domNode as HTMLElement).getBoundingClientRect();
+                const containerRect = scrollContainer.getBoundingClientRect();
+                scrollContainer.scrollBy({
+                  top: nodeRect.top - containerRect.top - 120,
+                  behavior: 'smooth',
+                });
+              }
+            }
+          } catch {
+            // ignore scroll failures
+          }
+        }
+      },
+      resolveSuggestionRange: (id: string) => {
+        if (!editor) return null;
+        const storage = (editor.storage as unknown as {
+          suggestionTracking?: { resolveAnchor: (id: string) => { from: number; to: number } | null };
+        }).suggestionTracking;
+        return storage?.resolveAnchor(id) ?? null;
+      },
+      replaceSuggestionAnchors: (anchors) => {
+        if (!editor) return;
+        (editor.commands as unknown as {
+          replaceAllSuggestionAnchors: (
+            anchors: Array<{ id: string; from: number; to: number }>
+          ) => boolean;
+        }).replaceAllSuggestionAnchors(anchors);
+      },
     }), [editor, getSelection]);
 
     // Zoom wrapper ref + Ctrl+scroll handler (must be before early returns)
@@ -525,6 +622,28 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
             background-color: #fb923c;
             color: white;
             border-radius: 2px;
+          }
+
+          /* --- Auto-suggest anchor highlight (tracking plugin) --- */
+          .draft-editor-wrapper .suggestion-anchor {
+            background-color: rgba(168, 85, 247, 0.08);
+            border-bottom: 2px dashed rgba(168, 85, 247, 0.55);
+            border-radius: 2px;
+            padding-bottom: 1px;
+            transition: background-color 0.2s ease, border-color 0.2s ease;
+          }
+          .draft-editor-wrapper .suggestion-anchor:hover {
+            background-color: rgba(168, 85, 247, 0.15);
+          }
+          .draft-editor-wrapper .suggestion-anchor.suggestion-flash {
+            background-color: rgba(250, 204, 21, 0.55);
+            border-bottom-color: rgba(202, 138, 4, 0.9);
+            animation: suggestion-flash-pulse 1.5s ease-out;
+          }
+          @keyframes suggestion-flash-pulse {
+            0%   { background-color: rgba(250, 204, 21, 0.8); }
+            60%  { background-color: rgba(250, 204, 21, 0.55); }
+            100% { background-color: rgba(168, 85, 247, 0.08); }
           }
 
           /* --- Invisible characters extension styling (¶ ↵) --- */

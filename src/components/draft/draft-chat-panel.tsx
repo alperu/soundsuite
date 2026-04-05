@@ -1,15 +1,19 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useDraftStream } from '@/hooks/use-draft-stream';
+import { useDraftSuggestions } from '@/hooks/use-draft-suggestions';
 import { AI_PROVIDERS, AI_PROVIDER_KEYS, type AIProviderKey, type AIModelDef } from '@/lib/ai/models';
 import { AIThinkingLog, type AIProgressEntry } from '@/components/search/ai-thinking-log';
 import DraftVersionHistory from '@/components/draft/draft-version-history';
 import { DraftChatHistory } from '@/components/draft/draft-chat-history';
+import { SuggestionQueuePanel } from '@/components/draft/suggestion-queue-panel';
 import { parseFootnoteMarkers, insertBriefWithFootnotes } from '@/lib/draft/footnote-parser';
 import { usePersistedState } from '@/hooks/use-persisted-state';
+import type { DraftEditorHandle } from '@/components/draft/draft-editor';
+import type { DraftSuggestionDTO, DenyReasonTagSlug } from '@/lib/draft/suggestion-types';
 
 /**
  * Build a smart context window from the document content.
@@ -34,7 +38,8 @@ function buildSmartContext(content: string, maxLen = 20000): string {
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
-  mode?: 'ai' | 'deep';
+  mode?: 'ai' | 'deep' | 'suggest';
+  sessionId?: string;
 }
 
 interface WorkflowTemplate {
@@ -60,6 +65,8 @@ interface DraftChatPanelProps {
   draftVersion?: number;
   draftIndexedVersion?: number | null;
   draftIndexingStatus?: string | null;
+  /** Editor ref for Auto-Suggest anchor installation + apply. */
+  draftEditorRef?: React.RefObject<DraftEditorHandle | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -111,9 +118,10 @@ export default function DraftChatPanel({
   draftVersion,
   draftIndexedVersion,
   draftIndexingStatus,
+  draftEditorRef,
 }: DraftChatPanelProps) {
   // Tabs (persisted)
-  const [activeTab, setActiveTab] = usePersistedState<'chat' | 'history' | 'workflows' | 'version'>('draft.chat.activeTab', 'chat');
+  const [activeTab, setActiveTab] = usePersistedState<'chat' | 'history' | 'workflows' | 'version' | 'suggestions'>('draft.chat.activeTab', 'chat');
 
   // Chat input height (localStorage)
   const [chatInputHeight, setChatInputHeight] = useState(CHAT_INPUT_DEFAULT);
@@ -141,7 +149,9 @@ export default function DraftChatPanel({
   const [maxTokens, setMaxTokens] = usePersistedState<number>('draft.chat.maxTokens', 2048);
   const [briefMode, setBriefMode] = usePersistedState<boolean>('draft.chat.briefMode', false);
   const [vectorSearch, setVectorSearch] = usePersistedState<boolean>('draft.chat.vectorSearch', true);
+  const [autoSuggest, setAutoSuggest] = usePersistedState<boolean>('draft.chat.autoSuggest', false);
   const [draftIndexing, setDraftIndexing] = useState(false);
+  const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
 
   // Chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -171,7 +181,41 @@ export default function DraftChatPanel({
   const [deepError, setDeepError] = useState<string | null>(null);
   const deepAbortRef = useRef<AbortController | null>(null);
 
-  const isAnyStreaming = isStreaming || deepLoading;
+  // ---------------------------------------------------------------------------
+  // Auto-Suggest state — owned by the useDraftSuggestions hook
+  // ---------------------------------------------------------------------------
+  const suggestionsState = useDraftSuggestions({
+    draftId,
+    onSuggestionArrived: (suggestion) => {
+      // Install the anchor in the editor so its position stays live across edits.
+      draftEditorRef?.current?.addSuggestionAnchor({
+        id: suggestion.id,
+        from: suggestion.anchorFrom,
+        to: suggestion.anchorTo,
+      });
+    },
+    onStreamComplete: (count) => {
+      // After a fresh run, auto-switch to the Suggestions tab so the user sees results.
+      if (count > 0) setActiveTab('suggestions');
+      setRegeneratingId(null);
+    },
+    onError: () => setRegeneratingId(null),
+  });
+
+  // When the hook rehydrates pending suggestions on mount, install their anchors too.
+  const lastRehydrateRef = useRef<string>('');
+  useEffect(() => {
+    if (!draftEditorRef?.current || !draftId) return;
+    const pending = suggestionsState.suggestions.filter((s) => s.status === 'pending');
+    const fingerprint = pending.map((s) => `${s.id}:${s.anchorFrom}:${s.anchorTo}`).join('|');
+    if (fingerprint === lastRehydrateRef.current) return;
+    lastRehydrateRef.current = fingerprint;
+    draftEditorRef.current.replaceSuggestionAnchors(
+      pending.map((s) => ({ id: s.id, from: s.anchorFrom, to: s.anchorTo }))
+    );
+  }, [suggestionsState.suggestions, draftEditorRef, draftId]);
+
+  const isAnyStreaming = isStreaming || deepLoading || suggestionsState.isStreaming;
 
   // ---------------------------------------------------------------------------
   // Fetch Ollama models
@@ -387,12 +431,49 @@ export default function DraftChatPanel({
     const sid = sessionId || `draft-session-${Date.now()}`;
     if (!sessionId) setSessionId(sid);
 
-    const userMsg: ChatMessage = { role: 'user', content: query, mode: deepSearch ? 'deep' : 'ai' };
+    const mode: ChatMessage['mode'] = autoSuggest ? 'suggest' : deepSearch ? 'deep' : 'ai';
+    const userMsg: ChatMessage = { role: 'user', content: query, mode };
     setMessages(prev => [...prev, userMsg]);
 
     const history = messages.map(m => ({ role: m.role, content: m.content }));
 
-    if (deepSearch) {
+    if (autoSuggest) {
+      // Auto-Suggest path: structured JSON suggestions via useDraftSuggestions hook.
+      if (!draftId) {
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: '⚠️ Auto-Suggest requires a saved draft. Save the draft first.', mode: 'suggest' },
+        ]);
+        return;
+      }
+      setProgressLog([]);
+      setSearchStartTime(Date.now());
+      try {
+        await suggestionsState.startAutoSuggest({
+          query,
+          documentContent: buildSmartContext(documentContent),
+          selectedText: hasSelection ? selectedText : undefined,
+          provider,
+          model: effectiveModel,
+          caseIds: caseIds?.length ? caseIds : caseId ? [caseId] : undefined,
+          thinking: thinkingMode,
+          maxTokens,
+          vectorSearch,
+          sessionId: sid,
+        });
+      } finally {
+        // Append a synthetic assistant marker so history stays coherent.
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `Generated suggestions — see the Suggestions tab.`,
+            mode: 'suggest',
+            sessionId: sid,
+          },
+        ]);
+      }
+    } else if (deepSearch) {
       await doDeepSearch(query, history.slice(-10));
     } else {
       // Reset thinking log for regular stream
@@ -417,7 +498,6 @@ export default function DraftChatPanel({
     }
 
     // Persist session after the exchange
-    const updatedMessages = [...messages, userMsg];
     // The assistant message gets added via useEffect, so defer persist
     setTimeout(() => {
       setMessages(current => {
@@ -425,7 +505,84 @@ export default function DraftChatPanel({
         return current;
       });
     }, 500);
-  }, [input, isAnyStreaming, sessionId, deepSearch, messages, caseId, documentContent, selectedText, hasSelection, provider, model, thinkingMode, maxTokens, send, doDeepSearch, persistSession]);
+  }, [input, isAnyStreaming, sessionId, autoSuggest, deepSearch, messages, caseIds, caseId, documentContent, selectedText, hasSelection, provider, model, thinkingMode, maxTokens, briefMode, vectorSearch, draftId, send, doDeepSearch, persistSession, suggestionsState]);
+
+  // ---------------------------------------------------------------------------
+  // Auto-Suggest action handlers (Accept / Deny / Ignore / Regenerate / Reopen / Jump)
+  // ---------------------------------------------------------------------------
+
+  const handleSuggestionAccept = useCallback(
+    async (suggestion: DraftSuggestionDTO) => {
+      const result = draftEditorRef?.current?.acceptSuggestion(suggestion.id, suggestion.proposedText);
+      if (!result || !result.ok) {
+        // Range is stale — mark the row as stale server-side.
+        await suggestionsState.updateStatus(suggestion.id, 'pending');
+        return;
+      }
+      await suggestionsState.updateStatus(suggestion.id, 'accepted');
+    },
+    [draftEditorRef, suggestionsState]
+  );
+
+  const handleSuggestionDeny = useCallback(
+    async (suggestion: DraftSuggestionDTO, tags: DenyReasonTagSlug[], freeText: string) => {
+      draftEditorRef?.current?.removeSuggestionAnchor(suggestion.id);
+      await suggestionsState.updateStatus(suggestion.id, 'denied', {
+        denyReasonTags: tags,
+        denyReasonText: freeText || null,
+      });
+    },
+    [draftEditorRef, suggestionsState]
+  );
+
+  const handleSuggestionIgnore = useCallback(
+    async (suggestion: DraftSuggestionDTO) => {
+      draftEditorRef?.current?.removeSuggestionAnchor(suggestion.id);
+      await suggestionsState.updateStatus(suggestion.id, 'ignored');
+    },
+    [draftEditorRef, suggestionsState]
+  );
+
+  const handleSuggestionRegenerate = useCallback(
+    async (suggestion: DraftSuggestionDTO) => {
+      if (!draftId) return;
+      setRegeneratingId(suggestion.id);
+      try {
+        await suggestionsState.regenerate(suggestion.id, {
+          query: `Regenerate alternative phrasing for: ${suggestion.originalText.slice(0, 200)}`,
+          documentContent: buildSmartContext(documentContent),
+          provider,
+          model,
+          caseIds: caseIds?.length ? caseIds : caseId ? [caseId] : undefined,
+          thinking: thinkingMode,
+          maxTokens,
+        });
+      } finally {
+        setRegeneratingId(null);
+      }
+    },
+    [draftId, suggestionsState, documentContent, provider, model, caseIds, caseId, thinkingMode, maxTokens]
+  );
+
+  const handleSuggestionReopen = useCallback(
+    async (suggestion: DraftSuggestionDTO) => {
+      // Re-install the anchor and mark pending again.
+      draftEditorRef?.current?.addSuggestionAnchor({
+        id: suggestion.id,
+        from: suggestion.anchorFrom,
+        to: suggestion.anchorTo,
+      });
+      await suggestionsState.updateStatus(suggestion.id, 'pending');
+    },
+    [draftEditorRef, suggestionsState]
+  );
+
+  const handleSuggestionJump = useCallback(
+    (suggestion: DraftSuggestionDTO) => {
+      draftEditorRef?.current?.flashSuggestion(suggestion.id);
+    },
+    [draftEditorRef]
+  );
 
   // ---------------------------------------------------------------------------
   // New chat
@@ -530,6 +687,25 @@ export default function DraftChatPanel({
   const isIndexStale = (draftVersion || 0) > (draftIndexedVersion || 0);
   const isIndexed = draftIndexingStatus === 'INDEXED';
 
+  // Mutually exclusive toggles: Auto-Suggest vs Deep Search
+  const handleToggleAutoSuggest = useCallback(() => {
+    setAutoSuggest((prev) => {
+      const next = !prev;
+      if (next && deepSearch) setDeepSearch(false);
+      return next;
+    });
+  }, [deepSearch, setAutoSuggest, setDeepSearch]);
+
+  const handleToggleDeepSearch = useCallback(() => {
+    setDeepSearch((prev) => {
+      const next = !prev;
+      if (next && autoSuggest) setAutoSuggest(false);
+      return next;
+    });
+  }, [autoSuggest, setAutoSuggest, setDeepSearch]);
+
+  const pendingSuggestionCount = suggestionsState.pendingCount;
+
   return (
     <div className="flex flex-col h-full">
       {/* Tabs + New Chat */}
@@ -563,6 +739,29 @@ export default function DraftChatPanel({
           }`}
         >
           Workflows
+        </button>
+        <button
+          onClick={() => setActiveTab('suggestions')}
+          className={`flex-1 relative px-3 py-2 text-sm font-medium ${
+            activeTab === 'suggestions'
+              ? 'text-purple-700 border-b-2 border-purple-600'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+          title="Auto-Suggest review queue"
+        >
+          <span className="inline-flex items-center gap-1">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+            </svg>
+            Suggest
+            {pendingSuggestionCount > 0 && (
+              <span className={`rounded-full px-1.5 text-[9px] font-semibold ${
+                activeTab === 'suggestions' ? 'bg-purple-600 text-white' : 'bg-purple-100 text-purple-700'
+              } ${suggestionsState.isStreaming ? 'animate-pulse' : ''}`}>
+                {pendingSuggestionCount}
+              </span>
+            )}
+          </span>
         </button>
         <button
           onClick={() => setActiveTab('version')}
@@ -634,12 +833,25 @@ export default function DraftChatPanel({
 
             {/* Toggle controls row */}
             <div className="flex items-center gap-3 flex-wrap">
+              {/* Auto-Suggest toggle (mutually exclusive with Deep Search) */}
+              <div className="flex items-center gap-1.5">
+                <label className="text-[10px] font-medium text-gray-500" title="Ask AI for structured accept/deny/ignore suggestions">Suggest</label>
+                <button
+                  type="button"
+                  onClick={handleToggleAutoSuggest}
+                  className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${autoSuggest ? 'bg-purple-600' : 'bg-gray-200'}`}
+                  title={autoSuggest ? 'Auto-Suggest ON — AI returns accept/deny cards' : 'Turn on Auto-Suggest'}
+                >
+                  <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${autoSuggest ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                </button>
+              </div>
+
               {/* Deep Search toggle */}
               <div className="flex items-center gap-1.5">
                 <label className="text-[10px] font-medium text-gray-500">Deep</label>
                 <button
                   type="button"
-                  onClick={() => setDeepSearch(!deepSearch)}
+                  onClick={handleToggleDeepSearch}
                   className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${deepSearch ? 'bg-indigo-600' : 'bg-gray-200'}`}
                 >
                   <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${deepSearch ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
@@ -726,6 +938,16 @@ export default function DraftChatPanel({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
               Appeal Brief mode — AI will generate with footnotes [^N]
+            </div>
+          )}
+
+          {/* Auto-Suggest mode indicator */}
+          {autoSuggest && (
+            <div className="px-3 py-1.5 bg-purple-50 border-b border-purple-100 text-xs text-purple-700 flex items-center gap-1.5 shrink-0">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+              </svg>
+              Auto-Suggest mode — replies become Accept / Deny / Ignore cards
             </div>
           )}
 
@@ -932,6 +1154,35 @@ export default function DraftChatPanel({
             </div>
           </div>
         </>
+      ) : activeTab === 'suggestions' ? (
+        /* Auto-Suggest review queue (PR-style) */
+        <SuggestionQueuePanel
+          suggestions={suggestionsState.suggestions}
+          isStreaming={suggestionsState.isStreaming}
+          lastError={suggestionsState.lastError}
+          onAccept={handleSuggestionAccept}
+          onDeny={handleSuggestionDeny}
+          onIgnore={handleSuggestionIgnore}
+          onRegenerate={handleSuggestionRegenerate}
+          onReopen={handleSuggestionReopen}
+          onJump={handleSuggestionJump}
+          onBulkAction={async (action, ids) => {
+            for (const id of ids) {
+              const sug = suggestionsState.suggestions.find((s) => s.id === id);
+              if (!sug) continue;
+              if (action === 'accept-safe') await handleSuggestionAccept(sug);
+              else if (action === 'deny-all') await suggestionsState.updateStatus(id, 'denied');
+              else if (action === 'ignore-all') await suggestionsState.updateStatus(id, 'ignored');
+            }
+          }}
+          onClearPreferences={draftId ? async () => {
+            if (!confirm('Delete all learned preferences for this draft? This cannot be undone.')) return;
+            try {
+              await fetch(`/api/draft/preferences?draftId=${encodeURIComponent(draftId)}`, { method: 'DELETE' });
+            } catch {}
+          } : undefined}
+          regeneratingId={regeneratingId}
+        />
       ) : activeTab === 'history' ? (
         /* Chat History tab */
         <DraftChatHistory
