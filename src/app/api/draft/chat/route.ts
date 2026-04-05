@@ -9,6 +9,7 @@ import {
 } from '@/lib/ai/draft-prompts';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 import { prisma } from '@/lib/db/prisma';
+import { deepSearch } from '@/lib/search/deep-search';
 import { summarisePreferences } from '@/lib/draft/preferences';
 import {
   persistSuggestion,
@@ -44,6 +45,7 @@ export async function POST(request: NextRequest) {
       vectorSearch,
       draftId,
       autoSuggest,
+      deepSearch: deepSearchFlag,
       sessionId: clientSessionId,
       regenerateFromSuggestionId,
     } = body as {
@@ -62,6 +64,7 @@ export async function POST(request: NextRequest) {
       vectorSearch?: boolean;
       draftId?: string;
       autoSuggest?: boolean;
+      deepSearch?: boolean;
       sessionId?: string;
       regenerateFromSuggestionId?: string;
     };
@@ -108,7 +111,74 @@ export async function POST(request: NextRequest) {
           // Optional RAG: fetch case knowledge from all linked cases
           let knowledgeContext: string | undefined;
 
-          if (effectiveCaseIds.length > 0) {
+          // ----------------------------------------------------------------
+          // Deep Search integration — when deepSearch=true, run the iterative
+          // multi-sub-query research flow instead of (or in addition to) the
+          // single-pass RAG below. The deep-search report becomes the primary
+          // knowledgeContext, and its ranked sources are merged in as citations.
+          //
+          // Deep Search + Auto-Suggest together means: deep-research the case
+          // first, then use that rich context to produce structured suggestion
+          // cards grounded in the actual record.
+          // ----------------------------------------------------------------
+          if (deepSearchFlag && effectiveCaseIds.length > 0) {
+            send({ type: 'progress', message: 'Deep research: decomposing query...' });
+            try {
+              const registry = await getToolRegistry();
+              // Deep search only accepts one caseId per invocation; run per case.
+              const deepReports: string[] = [];
+              const deepSources: Array<{ text: string; document: string; page: number; citation?: string; citationShort?: string }> = [];
+              for (const cid of effectiveCaseIds) {
+                const result = await deepSearch(query.trim(), registry, {
+                  provider: provider as AIProviderKey,
+                  model: effectiveModel,
+                  caseId: cid,
+                  thinking,
+                  onProgress: (p) => {
+                    send({ type: 'progress', message: p.message || p.step, step: p.step });
+                  },
+                });
+                if (result.report) deepReports.push(result.report);
+                for (const s of result.sources) {
+                  deepSources.push({
+                    text: s.text,
+                    document: s.document,
+                    page: s.page,
+                    citation: s.citation,
+                    citationShort: s.citationShort,
+                  });
+                }
+              }
+              if (deepReports.length > 0 || deepSources.length > 0) {
+                // Build knowledgeContext = synthesized report(s) + underlying excerpts.
+                const reportBlock = deepReports.length > 0
+                  ? `## Deep Research Synthesis\n\n${deepReports.join('\n\n---\n\n')}`
+                  : '';
+                const sourcesBlock = deepSources.length > 0
+                  ? `## Retrieved Excerpts\n\n${deepSources
+                      .slice(0, 25)
+                      .map((r) => {
+                        const cite = r.citation || r.citationShort || `${r.document}, p.${r.page}`;
+                        return `[${cite}]\n${r.text}`;
+                      })
+                      .join('\n\n---\n\n')}`
+                  : '';
+                knowledgeContext = [reportBlock, sourcesBlock].filter(Boolean).join('\n\n');
+                send({
+                  type: 'progress',
+                  message: `Deep research complete — ${deepSources.length} sources across ${effectiveCaseIds.length} case(s)`,
+                });
+              }
+            } catch (err) {
+              console.warn('[Draft Chat] Deep search failed, falling back to standard RAG:', err);
+              send({ type: 'progress', message: 'Deep research unavailable, using standard RAG' });
+            }
+          }
+
+          // Standard single-pass RAG — runs when deep search didn't run, OR as
+          // a supplement when deep search was skipped/failed and we still have
+          // linked cases.
+          if (!knowledgeContext && effectiveCaseIds.length > 0) {
             send({ type: 'progress', message: `Searching ${effectiveCaseIds.length} linked case(s)...` });
 
             try {

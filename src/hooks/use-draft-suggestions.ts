@@ -75,6 +75,8 @@ export interface AutoSuggestRequest {
   thinking?: boolean;
   maxTokens?: number;
   vectorSearch?: boolean;
+  /** When true, the server runs iterative Deep Research before producing suggestions. */
+  deepSearch?: boolean;
   sessionId?: string;
 }
 

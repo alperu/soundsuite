@@ -439,6 +439,8 @@ export default function DraftChatPanel({
 
     if (autoSuggest) {
       // Auto-Suggest path: structured JSON suggestions via useDraftSuggestions hook.
+      // When deepSearch is ALSO on, the server runs iterative deep research first
+      // and feeds the synthesized report into the Auto-Suggest prompt as context.
       if (!draftId) {
         setMessages((prev) => [
           ...prev,
@@ -459,15 +461,17 @@ export default function DraftChatPanel({
           thinking: thinkingMode,
           maxTokens,
           vectorSearch,
+          deepSearch, // compose with deep research when both toggles are on
           sessionId: sid,
         });
       } finally {
         // Append a synthetic assistant marker so history stays coherent.
+        const modeLabel = deepSearch ? 'Deep Research + Auto-Suggest' : 'Auto-Suggest';
         setMessages((prev) => [
           ...prev,
           {
             role: 'assistant',
-            content: `Generated suggestions — see the Suggestions tab.`,
+            content: `${modeLabel} — see the Suggestions tab.`,
             mode: 'suggest',
             sessionId: sid,
           },
@@ -556,12 +560,15 @@ export default function DraftChatPanel({
           caseIds: caseIds?.length ? caseIds : caseId ? [caseId] : undefined,
           thinking: thinkingMode,
           maxTokens,
+          // Regenerate keeps the same research strategy as the original run —
+          // cheap single-pass RAG unless the user has Deep Search toggled on.
+          deepSearch,
         });
       } finally {
         setRegeneratingId(null);
       }
     },
-    [draftId, suggestionsState, documentContent, provider, model, caseIds, caseId, thinkingMode, maxTokens]
+    [draftId, suggestionsState, documentContent, provider, model, caseIds, caseId, thinkingMode, maxTokens, deepSearch]
   );
 
   const handleSuggestionReopen = useCallback(
@@ -687,22 +694,18 @@ export default function DraftChatPanel({
   const isIndexStale = (draftVersion || 0) > (draftIndexedVersion || 0);
   const isIndexed = draftIndexingStatus === 'INDEXED';
 
-  // Mutually exclusive toggles: Auto-Suggest vs Deep Search
+  // Auto-Suggest and Deep Search are orthogonal: Deep Search controls the
+  // research strategy (iterative multi-sub-query vs single-pass RAG), while
+  // Auto-Suggest controls the output format (structured cards vs free-form).
+  // They compose: toggling both ON runs deep research first, then produces
+  // structured suggestion cards grounded in the deep-research report.
   const handleToggleAutoSuggest = useCallback(() => {
-    setAutoSuggest((prev) => {
-      const next = !prev;
-      if (next && deepSearch) setDeepSearch(false);
-      return next;
-    });
-  }, [deepSearch, setAutoSuggest, setDeepSearch]);
+    setAutoSuggest((prev) => !prev);
+  }, [setAutoSuggest]);
 
   const handleToggleDeepSearch = useCallback(() => {
-    setDeepSearch((prev) => {
-      const next = !prev;
-      if (next && autoSuggest) setAutoSuggest(false);
-      return next;
-    });
-  }, [autoSuggest, setAutoSuggest, setDeepSearch]);
+    setDeepSearch((prev) => !prev);
+  }, [setDeepSearch]);
 
   const pendingSuggestionCount = suggestionsState.pendingCount;
 
@@ -947,7 +950,9 @@ export default function DraftChatPanel({
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
               </svg>
-              Auto-Suggest mode — replies become Accept / Deny / Ignore cards
+              {deepSearch
+                ? 'Deep Research + Auto-Suggest — iterative research, then structured Accept / Deny / Ignore cards'
+                : 'Auto-Suggest mode — replies become Accept / Deny / Ignore cards'}
             </div>
           )}
 
