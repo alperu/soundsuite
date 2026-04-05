@@ -224,7 +224,7 @@ class RerankerLifecycle {
 
     // Try direct HTTP first
     try {
-      const url = `${this.agentBase}${path}`;
+      const url = `${this.agentBase}/api${path}`;
       const opts: RequestInit = {
         method,
         signal: AbortSignal.timeout(5_000),
