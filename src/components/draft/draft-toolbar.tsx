@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useState, lazy, Suspense } from 'react';
+import React, { useRef, useState, useEffect, lazy, Suspense } from 'react';
 import type { Editor } from '@tiptap/react';
 
 const ImageInsertModal = lazy(() => import('./image-insert-modal'));
@@ -18,19 +18,21 @@ const FONT_FAMILIES = [
 
 const FONT_SIZES = [
   { value: '', label: 'Size' },
-  { value: '10px', label: '10' },
-  { value: '11px', label: '11' },
-  { value: '12px', label: '12' },
-  { value: '13px', label: '13' },
-  { value: '14px', label: '14' },
-  { value: '16px', label: '16' },
-  { value: '18px', label: '18' },
-  { value: '20px', label: '20' },
-  { value: '24px', label: '24' },
-  { value: '28px', label: '28' },
-  { value: '32px', label: '32' },
-  { value: '36px', label: '36' },
-  { value: '48px', label: '48' },
+  { value: '8pt', label: '8' },
+  { value: '9pt', label: '9' },
+  { value: '10pt', label: '10' },
+  { value: '11pt', label: '11' },
+  { value: '12pt', label: '12' },
+  { value: '13pt', label: '13' },
+  { value: '14pt', label: '14' },
+  { value: '16pt', label: '16' },
+  { value: '18pt', label: '18' },
+  { value: '20pt', label: '20' },
+  { value: '24pt', label: '24' },
+  { value: '28pt', label: '28' },
+  { value: '32pt', label: '32' },
+  { value: '36pt', label: '36' },
+  { value: '48pt', label: '48' },
 ];
 
 interface DraftToolbarProps {
@@ -743,6 +745,26 @@ export default function DraftToolbar({
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [tocOpen, setTocOpen] = useState(false);
 
+  // Track font size on selection change so the dropdown always shows the current value.
+  // The editor parent has shouldRerenderOnTransaction: false, so the toolbar won't
+  // re-render on selection changes — we need our own listener.
+  const defaultFS = styleDefaults?.defaultFontSize || '12pt';
+  const [selFontSize, setSelFontSize] = useState<string>(defaultFS);
+  useEffect(() => {
+    if (!editor) return;
+    const update = () => {
+      const fs = editor.getAttributes('textStyle').fontSize || defaultFS;
+      setSelFontSize(fs);
+    };
+    editor.on('selectionUpdate', update);
+    editor.on('transaction', update);
+    update();
+    return () => {
+      editor.off('selectionUpdate', update);
+      editor.off('transaction', update);
+    };
+  }, [editor, defaultFS]);
+
   const handleExport = async () => {
     setExporting(true);
     try {
@@ -794,7 +816,7 @@ export default function DraftToolbar({
       {/* Font size dropdown */}
       <Tooltip label="Font Size">
         <select
-          value={editor.getAttributes('textStyle').fontSize || ''}
+          value={selFontSize}
           onChange={(e) => {
             const size = e.target.value;
             if (size) {

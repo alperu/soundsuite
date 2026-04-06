@@ -639,17 +639,17 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
           /* --- Style defaults from admin config --- */
           .draft-editor-wrapper .ProseMirror {
             font-family: ${styleDefaults?.defaultFont || 'Times New Roman'}, serif;
-            font-size: ${styleDefaults?.defaultFontSize || '12px'};
+            font-size: ${styleDefaults?.defaultFontSize || '12pt'};
             line-height: ${styleDefaults?.lineSpacing || '1.5'};
           }
           .draft-editor-wrapper .ProseMirror p {
             margin-bottom: ${styleDefaults?.paragraphSpacing || '12px'};
           }
-          .draft-editor-wrapper .ProseMirror h1 { font-size: ${styleDefaults?.h1Size || '24px'}; margin-bottom: ${styleDefaults?.paragraphSpacing || '12px'}; }
-          .draft-editor-wrapper .ProseMirror h2 { font-size: ${styleDefaults?.h2Size || '20px'}; margin-bottom: ${styleDefaults?.paragraphSpacing || '12px'}; }
-          .draft-editor-wrapper .ProseMirror h3 { font-size: ${styleDefaults?.h3Size || '16px'}; margin-bottom: ${styleDefaults?.paragraphSpacing || '12px'}; }
-          .draft-editor-wrapper .ProseMirror h4 { font-size: ${styleDefaults?.h4Size || '14px'}; margin-bottom: ${styleDefaults?.paragraphSpacing || '12px'}; }
-          .draft-editor-wrapper .ProseMirror h5 { font-size: ${styleDefaults?.h5Size || '12px'}; margin-bottom: ${styleDefaults?.paragraphSpacing || '12px'}; }
+          .draft-editor-wrapper .ProseMirror h1 { font-size: ${styleDefaults?.h1Size || '24pt'}; margin-bottom: ${styleDefaults?.paragraphSpacing || '12px'}; }
+          .draft-editor-wrapper .ProseMirror h2 { font-size: ${styleDefaults?.h2Size || '20pt'}; margin-bottom: ${styleDefaults?.paragraphSpacing || '12px'}; }
+          .draft-editor-wrapper .ProseMirror h3 { font-size: ${styleDefaults?.h3Size || '16pt'}; margin-bottom: ${styleDefaults?.paragraphSpacing || '12px'}; }
+          .draft-editor-wrapper .ProseMirror h4 { font-size: ${styleDefaults?.h4Size || '14pt'}; margin-bottom: ${styleDefaults?.paragraphSpacing || '12px'}; }
+          .draft-editor-wrapper .ProseMirror h5 { font-size: ${styleDefaults?.h5Size || '12pt'}; margin-bottom: ${styleDefaults?.paragraphSpacing || '12px'}; }
 
           /* --- Page breaks (continuous mode) --- */
           .draft-editor-wrapper hr {

@@ -178,8 +178,8 @@ export default function DraftPage() {
   // Style defaults from admin config
   const [styleDefaults, setStyleDefaults] = useState({
     defaultFont: 'Times New Roman',
-    defaultFontSize: '12px',
-    h1Size: '24px', h2Size: '20px', h3Size: '16px', h4Size: '14px', h5Size: '12px',
+    defaultFontSize: '12pt',
+    h1Size: '24pt', h2Size: '20pt', h3Size: '16pt', h4Size: '14pt', h5Size: '12pt',
     lineSpacing: '1.5',
     paragraphSpacing: '12px',
   });
@@ -201,12 +201,12 @@ export default function DraftPage() {
         const adminFont = cfg.draftDefaultFont || 'Times New Roman';
         setStyleDefaults({
           defaultFont: adminFont,
-          defaultFontSize: cfg.draftDefaultFontSize || '12px',
-          h1Size: cfg.draftH1Size || '24px',
-          h2Size: cfg.draftH2Size || '20px',
-          h3Size: cfg.draftH3Size || '16px',
-          h4Size: cfg.draftH4Size || '14px',
-          h5Size: cfg.draftH5Size || '12px',
+          defaultFontSize: cfg.draftDefaultFontSize || '12pt',
+          h1Size: cfg.draftH1Size || '24pt',
+          h2Size: cfg.draftH2Size || '20pt',
+          h3Size: cfg.draftH3Size || '16pt',
+          h4Size: cfg.draftH4Size || '14pt',
+          h5Size: cfg.draftH5Size || '12pt',
           lineSpacing: cfg.draftLineSpacing || '1.5',
           paragraphSpacing: cfg.draftParagraphSpacing || '12px',
         });

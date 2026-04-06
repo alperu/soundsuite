@@ -2217,12 +2217,12 @@ function DraftAdminPanel({ initialConfig }: { initialConfig: any }) {
 
   // Style defaults
   const [defaultFont, setDefaultFont] = useState(initialConfig?.draftDefaultFont || 'Times New Roman');
-  const [defaultFontSize, setDefaultFontSize] = useState(initialConfig?.draftDefaultFontSize || '12px');
-  const [h1Size, setH1Size] = useState(initialConfig?.draftH1Size || '24px');
-  const [h2Size, setH2Size] = useState(initialConfig?.draftH2Size || '20px');
-  const [h3Size, setH3Size] = useState(initialConfig?.draftH3Size || '16px');
-  const [h4Size, setH4Size] = useState(initialConfig?.draftH4Size || '14px');
-  const [h5Size, setH5Size] = useState(initialConfig?.draftH5Size || '12px');
+  const [defaultFontSize, setDefaultFontSize] = useState(initialConfig?.draftDefaultFontSize || '12pt');
+  const [h1Size, setH1Size] = useState(initialConfig?.draftH1Size || '24pt');
+  const [h2Size, setH2Size] = useState(initialConfig?.draftH2Size || '20pt');
+  const [h3Size, setH3Size] = useState(initialConfig?.draftH3Size || '16pt');
+  const [h4Size, setH4Size] = useState(initialConfig?.draftH4Size || '14pt');
+  const [h5Size, setH5Size] = useState(initialConfig?.draftH5Size || '12pt');
   const [lineSpacing, setLineSpacing] = useState(initialConfig?.draftLineSpacing || '1.5');
   const [paragraphSpacing, setParagraphSpacing] = useState(initialConfig?.draftParagraphSpacing || '12px');
 
@@ -2263,7 +2263,7 @@ function DraftAdminPanel({ initialConfig }: { initialConfig: any }) {
   };
 
   const inputClass = 'w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md bg-white';
-  const sizeOptions = ['10px', '11px', '12px', '13px', '14px', '16px', '18px', '20px', '24px', '28px', '32px', '36px', '48px'];
+  const sizeOptions = ['8pt', '9pt', '10pt', '11pt', '12pt', '13pt', '14pt', '16pt', '18pt', '20pt', '24pt', '28pt', '32pt', '36pt', '48pt'];
   const fontOptions = ['Times New Roman', 'Arial', 'Courier New', 'Georgia', 'Garamond', 'Calibri', 'Verdana', 'Helvetica'];
 
   return (

@@ -89,7 +89,11 @@ function parseFontSize(size: string | undefined): number | undefined {
   if (!size) return undefined;
   const num = parseFloat(size);
   if (isNaN(num)) return undefined;
-  // size is in px, convert to half-points
+  if (size.includes('pt')) {
+    // pt → half-points directly (1pt = 2 half-points)
+    return Math.round(num * 2);
+  }
+  // assume px, convert to half-points
   return pxToHalfPt(num);
 }
 
@@ -622,7 +626,7 @@ export async function exportToDocx(
     4: parseFontSize(options.h4Size) || 28,
     5: parseFontSize(options.h5Size) || 24,
   };
-  _defaultBodySize = parseFontSize(options.defaultFontSize) || pxToHalfPt(12);
+  _defaultBodySize = parseFontSize(options.defaultFontSize) || 24; // 24 half-pts = 12pt
   _defaultFont = options.defaultFont || 'Times New Roman';
 
   const lineMultiplier = parseFloat(options.lineSpacing || '1.5') || 1.5;

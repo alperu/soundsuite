@@ -161,12 +161,12 @@ export async function getConfig(): Promise<AppConfig> {
     draftMarginRight: parseInt(configMap.get('draft.marginRight') || '96', 10),
     // Draft style defaults
     draftDefaultFont: configMap.get('draft.defaultFont') || 'Times New Roman',
-    draftDefaultFontSize: configMap.get('draft.defaultFontSize') || '12px',
-    draftH1Size: configMap.get('draft.h1Size') || '24px',
-    draftH2Size: configMap.get('draft.h2Size') || '20px',
-    draftH3Size: configMap.get('draft.h3Size') || '16px',
-    draftH4Size: configMap.get('draft.h4Size') || '14px',
-    draftH5Size: configMap.get('draft.h5Size') || '12px',
+    draftDefaultFontSize: configMap.get('draft.defaultFontSize') || '12pt',
+    draftH1Size: configMap.get('draft.h1Size') || '24pt',
+    draftH2Size: configMap.get('draft.h2Size') || '20pt',
+    draftH3Size: configMap.get('draft.h3Size') || '16pt',
+    draftH4Size: configMap.get('draft.h4Size') || '14pt',
+    draftH5Size: configMap.get('draft.h5Size') || '12pt',
     draftLineSpacing: configMap.get('draft.lineSpacing') || '1.5',
     draftParagraphSpacing: configMap.get('draft.paragraphSpacing') || '12px',
     // Reranking
