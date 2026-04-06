@@ -941,9 +941,9 @@ export default function DraftPage() {
                 {pdfExporting ? (
                   <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
                 ) : (
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><path d="M12 18v-6m-3 3l3 3 3-3" /></svg>
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2" /><polyline points="8 12 12 16 16 12" /><line x1="12" y1="16" x2="12" y2="4" /></svg>
                 )}
-                PDF
+                <span>Export <span className="text-red-600 font-bold">.pdf</span></span>
               </button>
               <span className="text-gray-500">
                 {activeDraft.documentType} — {activeDraft.title}

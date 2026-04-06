@@ -806,308 +806,158 @@ export default function DraftToolbar({
 
   if (!editor) return null;
 
+  const ribbonGroup = "flex items-center gap-0.5 px-1.5 py-0.5 border border-gray-200 rounded bg-white";
+
   return (
-    <div className="flex items-center gap-1 px-2 py-1 bg-gray-50 border-b border-gray-200 shrink-0 overflow-x-auto">
-      {/* Font family dropdown */}
-      <Tooltip label="Font Family">
-        <FontFamilyDropdown editor={editor} value={fontFamily} onChange={onFontFamilyChange} />
-      </Tooltip>
-
-      {/* Font size dropdown */}
-      <Tooltip label="Font Size">
-        <select
-          value={selFontSize}
-          onChange={(e) => {
-            const size = e.target.value;
-            if (size) {
-              (editor.chain().focus() as any).setFontSize(size).run();
-            } else {
-              (editor.chain().focus() as any).unsetFontSize().run();
-            }
-          }}
-          className="h-8 px-1 text-xs border border-gray-200 rounded bg-white text-gray-700 cursor-pointer"
-        >
-          {FONT_SIZES.map(s => (
-            <option key={s.value} value={s.value}>{s.label}</option>
-          ))}
-        </select>
-      </Tooltip>
-
-      {/* Heading buttons H1-H5 + Paragraph */}
-      <ToolbarButton
-        onClick={() => editor.chain().focus().setParagraph().run()}
-        active={!editor.isActive('heading')}
-        title="Paragraph"
-      >
-        <span className="text-[11px] font-bold leading-none">P</span>
-      </ToolbarButton>
-      {([1, 2, 3, 4, 5] as const).map(level => (
-        <ToolbarButton
-          key={level}
-          onClick={() => editor.chain().focus().toggleHeading({ level }).run()}
-          active={editor.isActive('heading', { level })}
-          title={`Heading ${level}`}
-        >
-          <span className="text-[11px] font-bold leading-none">H{level}</span>
-        </ToolbarButton>
-      ))}
-
-      <Separator />
-
-      {/* Text formatting */}
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleBold().run()}
-        active={editor.isActive('bold')}
-        title="Bold"
-        shortcut="Ctrl+B"
-      >
-        <BoldIcon />
-      </ToolbarButton>
-
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleItalic().run()}
-        active={editor.isActive('italic')}
-        title="Italic"
-        shortcut="Ctrl+I"
-      >
-        <ItalicIcon />
-      </ToolbarButton>
-
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleUnderline().run()}
-        active={editor.isActive('underline')}
-        title="Underline"
-        shortcut="Ctrl+U"
-      >
-        <UnderlineIcon />
-      </ToolbarButton>
-
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleStrike().run()}
-        active={editor.isActive('strike')}
-        title="Strikethrough"
-        shortcut="Ctrl+Shift+S"
-      >
-        <StrikethroughIcon />
-      </ToolbarButton>
-
-      {/* Subscript */}
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleSubscript().run()}
-        active={editor.isActive('subscript')}
-        title="Subscript"
-      >
-        <span className="text-[11px] font-bold leading-none">X<sub style={{fontSize:'7px'}}>2</sub></span>
-      </ToolbarButton>
-
-      {/* Superscript */}
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleSuperscript().run()}
-        active={editor.isActive('superscript')}
-        title="Superscript"
-      >
-        <span className="text-[11px] font-bold leading-none">X<sup style={{fontSize:'7px'}}>2</sup></span>
-      </ToolbarButton>
-
-      {/* Paint Format */}
-      <ToolbarButton
-        onClick={() => {
-          if (paintFormat) {
-            // Apply stored format to current selection
-            const chain = editor.chain().focus();
-            if (paintFormat.bold) chain.setBold(); else chain.unsetBold();
-            if (paintFormat.italic) chain.setItalic(); else chain.unsetItalic();
-            if (paintFormat.underline) (chain as any).setUnderline(); else (chain as any).unsetUnderline();
-            if (paintFormat.strike) chain.setStrike(); else chain.unsetStrike();
-            if (paintFormat.highlight) chain.setHighlight(); else chain.unsetHighlight();
-            if (paintFormat.fontFamily) (chain as any).setFontFamily(paintFormat.fontFamily);
-            if (paintFormat.fontSize) (chain as any).setFontSize(paintFormat.fontSize);
-            chain.run();
-            setPaintFormat(null);
-          } else {
-            // Copy format from current position
-            const marks: Record<string, any> = {
-              bold: editor.isActive('bold'),
-              italic: editor.isActive('italic'),
-              underline: editor.isActive('underline'),
-              strike: editor.isActive('strike'),
-              highlight: editor.isActive('highlight'),
-              fontFamily: editor.getAttributes('textStyle').fontFamily || null,
-              fontSize: editor.getAttributes('textStyle').fontSize || null,
-            };
-            setPaintFormat(marks);
-          }
-        }}
-        active={!!paintFormat}
-        title={paintFormat ? 'Click text to apply format (Esc to cancel)' : 'Copy Format (Format Painter)'}
-      >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M10.5 1.5l2 2-1 1-2-2 1-1zM4 8l5-5 2 2-5 5H4V8zm-1 4h10v1.5H3V12z" />
-        </svg>
-      </ToolbarButton>
-
-      <Separator />
-
-      {/* Lists */}
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleBulletList().run()}
-        active={editor.isActive('bulletList')}
-        title="Bullet List"
-      >
-        <BulletListIcon />
-      </ToolbarButton>
-
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleOrderedList().run()}
-        active={editor.isActive('orderedList')}
-        title="Ordered List"
-      >
-        <OrderedListIcon />
-      </ToolbarButton>
-
-      <Separator />
-
-      {/* Alignment */}
-      <ToolbarButton
-        onClick={() => editor.chain().focus().setTextAlign('left').run()}
-        active={editor.isActive({ textAlign: 'left' })}
-        title="Align Left"
-      >
-        <AlignLeftIcon />
-      </ToolbarButton>
-
-      <ToolbarButton
-        onClick={() => editor.chain().focus().setTextAlign('center').run()}
-        active={editor.isActive({ textAlign: 'center' })}
-        title="Align Center"
-      >
-        <AlignCenterIcon />
-      </ToolbarButton>
-
-      <ToolbarButton
-        onClick={() => editor.chain().focus().setTextAlign('right').run()}
-        active={editor.isActive({ textAlign: 'right' })}
-        title="Align Right"
-      >
-        <AlignRightIcon />
-      </ToolbarButton>
-
-      <ToolbarButton
-        onClick={() => editor.chain().focus().setTextAlign('justify').run()}
-        active={editor.isActive({ textAlign: 'justify' })}
-        title="Justify"
-      >
-        <AlignJustifyIcon />
-      </ToolbarButton>
-
-      <Separator />
-
-      {/* Highlight */}
-      <ToolbarButton
-        onClick={() => editor.chain().focus().toggleHighlight().run()}
-        active={editor.isActive('highlight')}
-        title="Highlight"
-        shortcut="Ctrl+Shift+H"
-      >
-        <HighlightIcon />
-      </ToolbarButton>
-
-      <Separator />
-
-      {/* Hyperlink */}
-      <div className="relative">
-        <Tooltip label={editor.isActive('link') ? 'Edit Link' : 'Insert Link'} shortcut="Ctrl+K">
-          <button
-            ref={linkBtnRef}
-            type="button"
-            onClick={() => setLinkDialogOpen(!linkDialogOpen)}
-            className={`w-8 h-8 flex items-center justify-center rounded text-sm font-medium transition-colors cursor-pointer
-              ${editor.isActive('link') ? 'bg-blue-500 text-white' : 'text-gray-700 hover:bg-gray-200'}`}
-          >
-            <LinkIcon />
-          </button>
+    <div className="flex flex-wrap items-center gap-1 px-2 py-1 bg-gray-50 border-b border-gray-200 shrink-0">
+      {/* ── Font group ── */}
+      <div className={ribbonGroup}>
+        <Tooltip label="Font Family">
+          <FontFamilyDropdown editor={editor} value={fontFamily} onChange={onFontFamilyChange} />
         </Tooltip>
-        {linkDialogOpen && (
-          <LinkDialog editor={editor} onClose={() => setLinkDialogOpen(false)} anchorRef={linkBtnRef} />
-        )}
+        <Tooltip label="Font Size">
+          <select
+            value={selFontSize}
+            onChange={(e) => {
+              const size = e.target.value;
+              if (size) {
+                (editor.chain().focus() as any).setFontSize(size).run();
+              } else {
+                (editor.chain().focus() as any).unsetFontSize().run();
+              }
+            }}
+            className="h-7 px-1 text-xs border border-gray-200 rounded bg-white text-gray-700 cursor-pointer"
+          >
+            {FONT_SIZES.map(s => (
+              <option key={s.value} value={s.value}>{s.label}</option>
+            ))}
+          </select>
+        </Tooltip>
       </div>
 
-      {editor.isActive('link') && (
+      {/* ── Headings group ── */}
+      <div className={ribbonGroup}>
         <ToolbarButton
-          onClick={() => editor.chain().focus().extendMarkRange('link').unsetLink().run()}
-          title="Remove Link"
+          onClick={() => editor.chain().focus().setParagraph().run()}
+          active={!editor.isActive('heading')}
+          title="Paragraph"
         >
-          <UnlinkIcon />
+          <span className="text-[11px] font-bold leading-none">P</span>
         </ToolbarButton>
-      )}
+        {([1, 2, 3, 4, 5] as const).map(level => (
+          <ToolbarButton
+            key={level}
+            onClick={() => editor.chain().focus().toggleHeading({ level }).run()}
+            active={editor.isActive('heading', { level })}
+            title={`Heading ${level}`}
+          >
+            <span className="text-[11px] font-bold leading-none">H{level}</span>
+          </ToolbarButton>
+        ))}
+      </div>
 
-      {/* Insert Table of Contents */}
-      <ToolbarButton
-        onClick={() => (editor.chain().focus() as any).insertTableOfContents().run()}
-        title="Insert Table of Contents at cursor"
-      >
-        <TOCIcon />
-      </ToolbarButton>
+      {/* ── Text format group ── */}
+      <div className={ribbonGroup}>
+        <ToolbarButton onClick={() => editor.chain().focus().toggleBold().run()} active={editor.isActive('bold')} title="Bold" shortcut="Ctrl+B"><BoldIcon /></ToolbarButton>
+        <ToolbarButton onClick={() => editor.chain().focus().toggleItalic().run()} active={editor.isActive('italic')} title="Italic" shortcut="Ctrl+I"><ItalicIcon /></ToolbarButton>
+        <ToolbarButton onClick={() => editor.chain().focus().toggleUnderline().run()} active={editor.isActive('underline')} title="Underline" shortcut="Ctrl+U"><UnderlineIcon /></ToolbarButton>
+        <ToolbarButton onClick={() => editor.chain().focus().toggleStrike().run()} active={editor.isActive('strike')} title="Strikethrough" shortcut="Ctrl+Shift+S"><StrikethroughIcon /></ToolbarButton>
+        <ToolbarButton onClick={() => editor.chain().focus().toggleSubscript().run()} active={editor.isActive('subscript')} title="Subscript">
+          <span className="text-[11px] font-bold leading-none">X<sub style={{fontSize:'7px'}}>2</sub></span>
+        </ToolbarButton>
+        <ToolbarButton onClick={() => editor.chain().focus().toggleSuperscript().run()} active={editor.isActive('superscript')} title="Superscript">
+          <span className="text-[11px] font-bold leading-none">X<sup style={{fontSize:'7px'}}>2</sup></span>
+        </ToolbarButton>
+        <ToolbarButton onClick={() => editor.chain().focus().toggleHighlight().run()} active={editor.isActive('highlight')} title="Highlight" shortcut="Ctrl+Shift+H"><HighlightIcon /></ToolbarButton>
+        <ToolbarButton
+          onClick={() => {
+            if (paintFormat) {
+              const chain = editor.chain().focus();
+              if (paintFormat.bold) chain.setBold(); else chain.unsetBold();
+              if (paintFormat.italic) chain.setItalic(); else chain.unsetItalic();
+              if (paintFormat.underline) (chain as any).setUnderline(); else (chain as any).unsetUnderline();
+              if (paintFormat.strike) chain.setStrike(); else chain.unsetStrike();
+              if (paintFormat.highlight) chain.setHighlight(); else chain.unsetHighlight();
+              if (paintFormat.fontFamily) (chain as any).setFontFamily(paintFormat.fontFamily);
+              if (paintFormat.fontSize) (chain as any).setFontSize(paintFormat.fontSize);
+              chain.run();
+              setPaintFormat(null);
+            } else {
+              const marks: Record<string, any> = {
+                bold: editor.isActive('bold'),
+                italic: editor.isActive('italic'),
+                underline: editor.isActive('underline'),
+                strike: editor.isActive('strike'),
+                highlight: editor.isActive('highlight'),
+                fontFamily: editor.getAttributes('textStyle').fontFamily || null,
+                fontSize: editor.getAttributes('textStyle').fontSize || null,
+              };
+              setPaintFormat(marks);
+            }
+          }}
+          active={!!paintFormat}
+          title={paintFormat ? 'Click text to apply format (Esc to cancel)' : 'Copy Format (Format Painter)'}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M10.5 1.5l2 2-1 1-2-2 1-1zM4 8l5-5 2 2-5 5H4V8zm-1 4h10v1.5H3V12z" />
+          </svg>
+        </ToolbarButton>
+      </div>
 
-      {/* Insert Footnote */}
-      <ToolbarButton
-        onClick={() => { editor.chain().focus().run(); (editor.commands as any).addFootnote(); }}
-        title="Insert Footnote"
-      >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-          <text x="2" y="9" fontSize="8" fontWeight="bold" fontFamily="serif">F</text>
-          <text x="8" y="12" fontSize="6" fontFamily="serif">n</text>
-        </svg>
-      </ToolbarButton>
+      {/* ── Lists + Alignment group ── */}
+      <div className={ribbonGroup}>
+        <ToolbarButton onClick={() => editor.chain().focus().toggleBulletList().run()} active={editor.isActive('bulletList')} title="Bullet List"><BulletListIcon /></ToolbarButton>
+        <ToolbarButton onClick={() => editor.chain().focus().toggleOrderedList().run()} active={editor.isActive('orderedList')} title="Ordered List"><OrderedListIcon /></ToolbarButton>
+        <span className="w-px h-5 bg-gray-200 mx-0.5" />
+        <ToolbarButton onClick={() => editor.chain().focus().setTextAlign('left').run()} active={editor.isActive({ textAlign: 'left' })} title="Align Left"><AlignLeftIcon /></ToolbarButton>
+        <ToolbarButton onClick={() => editor.chain().focus().setTextAlign('center').run()} active={editor.isActive({ textAlign: 'center' })} title="Align Center"><AlignCenterIcon /></ToolbarButton>
+        <ToolbarButton onClick={() => editor.chain().focus().setTextAlign('right').run()} active={editor.isActive({ textAlign: 'right' })} title="Align Right"><AlignRightIcon /></ToolbarButton>
+        <ToolbarButton onClick={() => editor.chain().focus().setTextAlign('justify').run()} active={editor.isActive({ textAlign: 'justify' })} title="Justify"><AlignJustifyIcon /></ToolbarButton>
+      </div>
 
-      <Separator />
-
-      {/* Page Break (horizontal rule) */}
-      <ToolbarButton
-        onClick={() => editor.chain().focus().setHorizontalRule().run()}
-        title="Insert Page Break"
-      >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-          <rect x="2" y="2" width="12" height="1.5" rx="0.5" opacity="0.3" />
-          <rect x="2" y="7" width="12" height="2" rx="0.5" />
-          <rect x="2" y="12.5" width="12" height="1.5" rx="0.5" opacity="0.3" />
-        </svg>
-      </ToolbarButton>
-
-      {/* Show/Hide Formatting Marks (¶) */}
-      <ToolbarButton
-        onClick={() => onToggleShowMarks?.()}
-        active={showMarks}
-        title={showMarks ? 'Hide Formatting Marks' : 'Show Formatting Marks (¶ ↵ ·)'}
-      >
-        <span className="text-sm font-bold leading-none" style={{ fontFamily: 'serif' }}>¶</span>
-      </ToolbarButton>
-
-      {/* Page View Toggle */}
-      <ToolbarButton
-        onClick={() => onTogglePageView?.()}
-        active={pageView}
-        title={pageView ? 'Switch to Continuous View' : 'Switch to Page View'}
-      >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="3" y="1" width="10" height="6" rx="1" />
-          <rect x="3" y="9" width="10" height="6" rx="1" />
-        </svg>
-      </ToolbarButton>
-
-      <Separator />
-
-      {/* Insert Image / Exhibit */}
-      <ToolbarButton
-        onClick={() => setImageModalOpen(true)}
-        title="Insert Image / Exhibit"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-          <circle cx="8.5" cy="8.5" r="1.5" />
-          <polyline points="21 15 16 10 5 21" />
-        </svg>
-      </ToolbarButton>
+      {/* ── Insert group ── */}
+      <div className={ribbonGroup}>
+        <div className="relative">
+          <Tooltip label={editor.isActive('link') ? 'Edit Link' : 'Insert Link'} shortcut="Ctrl+K">
+            <button
+              ref={linkBtnRef}
+              type="button"
+              onClick={() => setLinkDialogOpen(!linkDialogOpen)}
+              className={`w-7 h-7 flex items-center justify-center rounded text-sm font-medium transition-colors cursor-pointer
+                ${editor.isActive('link') ? 'bg-blue-500 text-white' : 'text-gray-700 hover:bg-gray-200'}`}
+            >
+              <LinkIcon />
+            </button>
+          </Tooltip>
+          {linkDialogOpen && (
+            <LinkDialog editor={editor} onClose={() => setLinkDialogOpen(false)} anchorRef={linkBtnRef} />
+          )}
+        </div>
+        {editor.isActive('link') && (
+          <ToolbarButton onClick={() => editor.chain().focus().extendMarkRange('link').unsetLink().run()} title="Remove Link"><UnlinkIcon /></ToolbarButton>
+        )}
+        <ToolbarButton onClick={() => (editor.chain().focus() as any).insertTableOfContents().run()} title="Insert Table of Contents"><TOCIcon /></ToolbarButton>
+        <ToolbarButton onClick={() => { editor.chain().focus().run(); (editor.commands as any).addFootnote(); }} title="Insert Footnote">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <text x="2" y="9" fontSize="8" fontWeight="bold" fontFamily="serif">F</text>
+            <text x="8" y="12" fontSize="6" fontFamily="serif">n</text>
+          </svg>
+        </ToolbarButton>
+        <ToolbarButton onClick={() => setImageModalOpen(true)} title="Insert Image / Exhibit">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <polyline points="21 15 16 10 5 21" />
+          </svg>
+        </ToolbarButton>
+        <ToolbarButton onClick={() => editor.chain().focus().setHorizontalRule().run()} title="Insert Page Break">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <rect x="2" y="2" width="12" height="1.5" rx="0.5" opacity="0.3" />
+            <rect x="2" y="7" width="12" height="2" rx="0.5" />
+            <rect x="2" y="12.5" width="12" height="1.5" rx="0.5" opacity="0.3" />
+          </svg>
+        </ToolbarButton>
+      </div>
 
       {imageModalOpen && caseId && draftId && (
         <Suspense fallback={null}>
@@ -1117,9 +967,7 @@ export default function DraftToolbar({
             provider={provider || 'ollama'}
             model={model || ''}
             onInsert={(url, alt) => {
-              // Insert image
               editor.chain().focus().setImage({ src: url, alt }).run();
-              // Insert exhibit label + description as bold caption below the image
               if (alt && alt !== 'Exhibit image') {
                 editor.commands.createParagraphNear();
                 editor.commands.insertContent({
@@ -1136,28 +984,29 @@ export default function DraftToolbar({
         </Suspense>
       )}
 
-      <Separator />
+      {/* ── View group ── */}
+      <div className={ribbonGroup}>
+        <ToolbarButton onClick={() => onToggleShowMarks?.()} active={showMarks} title={showMarks ? 'Hide Formatting Marks' : 'Show Formatting Marks (¶ ↵ ·)'}>
+          <span className="text-sm font-bold leading-none" style={{ fontFamily: 'serif' }}>¶</span>
+        </ToolbarButton>
+        <ToolbarButton onClick={() => onTogglePageView?.()} active={pageView} title={pageView ? 'Switch to Continuous View' : 'Switch to Page View'}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="1" width="10" height="6" rx="1" />
+            <rect x="3" y="9" width="10" height="6" rx="1" />
+          </svg>
+        </ToolbarButton>
+        <ToolbarButton onClick={onToggleTrackChanges} active={trackChanges} title={trackChanges ? 'Track Changes: ON' : 'Track Changes: OFF'}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+            <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+          </svg>
+        </ToolbarButton>
+      </div>
 
-      {/* Track Changes */}
-      <ToolbarButton
-        onClick={onToggleTrackChanges}
-        active={trackChanges}
-        title={trackChanges ? 'Track Changes: ON' : 'Track Changes: OFF'}
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
-          <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-        </svg>
-      </ToolbarButton>
-
-      <Separator />
-
-      {/* Word/DOCX buttons moved to top bar in page.tsx */}
-
-      {/* Spacer */}
+      {/* ── Spacer ── */}
       <div className="flex-1" />
 
-      {/* Zoom controls */}
+      {/* ── Zoom + status group ── */}
       {onZoomChange && (
         <div className="flex items-center gap-0.5 mr-2">
           <button
