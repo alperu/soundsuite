@@ -745,6 +745,54 @@ export default function DraftToolbar({
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [tocOpen, setTocOpen] = useState(false);
 
+  // ── Paint Format (Format Painter) ──
+  // When paintFormat is set, the next mouseup in the editor applies the stored
+  // format to the current selection, then clears. Escape cancels.
+  useEffect(() => {
+    if (!editor || !paintFormat) return;
+    const dom = editor.view.dom as HTMLElement;
+
+    // Change cursor to crosshair while format painter is active
+    dom.style.cursor = 'copy';
+
+    const applyFormat = () => {
+      const { from, to } = editor.state.selection;
+      if (from === to) {
+        // No selection — select the word under cursor, then apply
+        editor.chain().focus().selectParentNode().run();
+      }
+      const chain = editor.chain().focus();
+      if (paintFormat.bold) chain.setBold(); else chain.unsetBold();
+      if (paintFormat.italic) chain.setItalic(); else chain.unsetItalic();
+      if (paintFormat.underline) (chain as any).setUnderline(); else (chain as any).unsetUnderline();
+      if (paintFormat.strike) chain.setStrike(); else chain.unsetStrike();
+      if (paintFormat.highlight) chain.setHighlight(); else chain.unsetHighlight();
+      if (paintFormat.fontFamily) (chain as any).setFontFamily(paintFormat.fontFamily);
+      if (paintFormat.fontSize) (chain as any).setFontSize(paintFormat.fontSize);
+      chain.run();
+      setPaintFormat(null);
+    };
+
+    const handleMouseUp = () => {
+      // Small delay so selection registers first
+      setTimeout(applyFormat, 10);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setPaintFormat(null);
+      }
+    };
+
+    dom.addEventListener('mouseup', handleMouseUp);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      dom.style.cursor = '';
+      dom.removeEventListener('mouseup', handleMouseUp);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [editor, paintFormat]);
+
   // Track font size on selection change so the dropdown always shows the current value.
   // The editor parent has shouldRerenderOnTransaction: false, so the toolbar won't
   // re-render on selection changes — we need our own listener.
@@ -872,17 +920,10 @@ export default function DraftToolbar({
         <ToolbarButton
           onClick={() => {
             if (paintFormat) {
-              const chain = editor.chain().focus();
-              if (paintFormat.bold) chain.setBold(); else chain.unsetBold();
-              if (paintFormat.italic) chain.setItalic(); else chain.unsetItalic();
-              if (paintFormat.underline) (chain as any).setUnderline(); else (chain as any).unsetUnderline();
-              if (paintFormat.strike) chain.setStrike(); else chain.unsetStrike();
-              if (paintFormat.highlight) chain.setHighlight(); else chain.unsetHighlight();
-              if (paintFormat.fontFamily) (chain as any).setFontFamily(paintFormat.fontFamily);
-              if (paintFormat.fontSize) (chain as any).setFontSize(paintFormat.fontSize);
-              chain.run();
+              // Click again to cancel
               setPaintFormat(null);
             } else {
+              // Copy format from current cursor position
               const marks: Record<string, any> = {
                 bold: editor.isActive('bold'),
                 italic: editor.isActive('italic'),
@@ -896,7 +937,7 @@ export default function DraftToolbar({
             }
           }}
           active={!!paintFormat}
-          title={paintFormat ? 'Click text to apply format (Esc to cancel)' : 'Copy Format (Format Painter)'}
+          title={paintFormat ? 'Format Painter active — select text to apply, Esc or click here to cancel' : 'Copy Format (Format Painter)'}
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
             <path d="M10.5 1.5l2 2-1 1-2-2 1-1zM4 8l5-5 2 2-5 5H4V8zm-1 4h10v1.5H3V12z" />

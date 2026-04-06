@@ -375,14 +375,7 @@ export async function exportToPdf(
     },
   };
 
-  return new Promise((resolve, reject) => {
-    try {
-      const pdfDocGenerator = (pdfMake as any).createPdf(docDefinition);
-      pdfDocGenerator.getBlob((blob: Blob) => {
-        resolve(blob);
-      });
-    } catch (err) {
-      reject(err);
-    }
-  });
+  // pdfmake 0.3.x changed getBlob() from callback-based to promise-based.
+  const pdfDocGenerator = (pdfMake as any).createPdf(docDefinition);
+  return pdfDocGenerator.getBlob();
 }
