@@ -87,6 +87,10 @@ export interface AutoSuggestRequest {
   vectorSearch?: boolean;
   /** When true, the server runs iterative Deep Research before producing suggestions. */
   deepSearch?: boolean;
+  /** Max characters of document text to send (server applies windowing). */
+  documentWindowSize?: number;
+  /** Hard cap on number of suggestions the model may return. */
+  maxSuggestions?: number;
   sessionId?: string;
 }
 

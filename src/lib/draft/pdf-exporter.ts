@@ -42,6 +42,17 @@ function pxToPt(px: number): number {
   return Math.round(px / 1.333);
 }
 
+/** Map a CSS/editor font family name to a pdfmake-registered font name. */
+function resolvePdfFont(fontFamily: string | undefined): string {
+  if (!fontFamily) return 'Roboto';
+  const f = fontFamily.toLowerCase().replace(/['"]/g, '').trim();
+  if (f.includes('times') || f.includes('georgia') || f.includes('serif')) return 'Times';
+  if (f.includes('courier') || f.includes('monospace') || f.includes('mono')) return 'Courier';
+  if (f.includes('helvetica') || f.includes('arial') || f.includes('sans')) return 'Helvetica';
+  if (f.includes('roboto')) return 'Roboto';
+  return 'Roboto';
+}
+
 function parseFontSizePt(size: string | undefined): number | undefined {
   if (!size) return undefined;
   const num = parseFloat(size);
@@ -303,7 +314,39 @@ export async function exportToPdf(
   const pdfFontsModule = await import('pdfmake/build/vfs_fonts');
   const pdfMake = pdfMakeModule.default || pdfMakeModule;
   const pdfFonts = pdfFontsModule.default || pdfFontsModule;
-  (pdfMake as any).vfs = (pdfFonts as any).pdfMake?.vfs || pdfFonts;
+  const vfs = (pdfFonts as any).default ?? pdfFonts;
+  if (typeof (pdfMake as any).addVirtualFileSystem === 'function') {
+    (pdfMake as any).addVirtualFileSystem(vfs);
+  } else {
+    (pdfMake as any).vfs = (vfs as any).pdfMake?.vfs ?? vfs;
+  }
+  (pdfMake as any).fonts = {
+    Roboto: {
+      normal: 'Roboto-Regular.ttf',
+      bold: 'Roboto-Medium.ttf',
+      italics: 'Roboto-Italic.ttf',
+      bolditalics: 'Roboto-MediumItalic.ttf',
+    },
+    // Standard PDF built-in fonts (no VFS embedding needed)
+    Times: {
+      normal: 'Times-Roman',
+      bold: 'Times-Bold',
+      italics: 'Times-Italic',
+      bolditalics: 'Times-BoldItalic',
+    },
+    Helvetica: {
+      normal: 'Helvetica',
+      bold: 'Helvetica-Bold',
+      italics: 'Helvetica-Oblique',
+      bolditalics: 'Helvetica-BoldOblique',
+    },
+    Courier: {
+      normal: 'Courier',
+      bold: 'Courier-Bold',
+      italics: 'Courier-Oblique',
+      bolditalics: 'Courier-BoldOblique',
+    },
+  };
 
   const content = (tiptapJson.content || []) as TipTapNode[];
 
@@ -339,6 +382,7 @@ export async function exportToPdf(
       pxToPoints(options.marginBottom || 96),
     ],
     defaultStyle: {
+      font: resolvePdfFont(options.defaultFont),
       fontSize: defaultFontSize,
       lineHeight: lineSpacing,
     },

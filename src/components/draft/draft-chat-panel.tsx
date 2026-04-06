@@ -10,6 +10,7 @@ import { AIThinkingLog, type AIProgressEntry } from '@/components/search/ai-thin
 import DraftVersionHistory from '@/components/draft/draft-version-history';
 import { DraftChatHistory } from '@/components/draft/draft-chat-history';
 import { SuggestionQueuePanel } from '@/components/draft/suggestion-queue-panel';
+import { SpeedPresetModal, estimateRange, SPEED_PRESETS, type SpeedSettings, type SpeedPreset } from '@/components/draft/speed-preset-panel';
 import { usePersistedState } from '@/hooks/use-persisted-state';
 import type { DraftEditorHandle } from '@/components/draft/draft-editor';
 import type { DraftSuggestionDTO, DenyReasonTagSlug } from '@/lib/draft/suggestion-types';
@@ -152,7 +153,15 @@ export default function DraftChatPanel({
   // Toggles
   const [deepSearch, setDeepSearch] = usePersistedState<boolean>('draft.chat.deepSearch', false);
   const [thinkingMode, setThinkingMode] = usePersistedState<boolean>('draft.chat.thinking', true);
-  const [maxTokens, setMaxTokens] = usePersistedState<number>('draft.chat.maxTokens', 2048);
+  const [speedSettings, setSpeedSettings] = usePersistedState<SpeedSettings>('draft.chat.speedSettings', {
+    preset: 'medium',
+    docWindow: SPEED_PRESETS.medium.docWindow,
+    maxSuggestions: SPEED_PRESETS.medium.maxSuggestions,
+    maxTokens: SPEED_PRESETS.medium.maxTokens,
+  });
+  const [speedModalOpen, setSpeedModalOpen] = useState(false);
+  // Convenience alias — all non-auto-suggest AI calls use the same token budget.
+  const maxTokens = speedSettings.maxTokens;
   const [briefMode, setBriefMode] = usePersistedState<boolean>('draft.chat.briefMode', false);
   const [vectorSearch, setVectorSearch] = usePersistedState<boolean>('draft.chat.vectorSearch', true);
   const [autoSuggest, setAutoSuggest] = usePersistedState<boolean>('draft.chat.autoSuggest', false);
@@ -550,18 +559,20 @@ export default function DraftChatPanel({
       try {
         await suggestionsState.startAutoSuggest({
           query,
-          // Send the FULL document — NOT smart-windowed. The server needs the
-          // full text so locateAnchor() can find every verbatim anchor the
-          // model proposes, regardless of which section it targeted.
+          // Send the FULL document — the server applies windowing based on the
+          // selected speed preset so it can still find verbatim anchors within
+          // the windowed portion.
           documentContent,
           selectedText: hasSelection ? selectedText : undefined,
           provider,
           model: effectiveModel,
           caseIds: caseIds?.length ? caseIds : caseId ? [caseId] : undefined,
           thinking: thinkingMode,
-          maxTokens,
+          maxTokens: speedSettings.maxTokens,
           vectorSearch,
           deepSearch, // compose with deep research when both toggles are on
+          documentWindowSize: speedSettings.docWindow,
+          maxSuggestions: speedSettings.maxSuggestions,
           sessionId: sid,
         });
       } finally {
@@ -953,6 +964,7 @@ export default function DraftChatPanel({
               {/* Auto-Suggest toggle (mutually exclusive with Deep Search) */}
               <div className="flex items-center gap-1.5">
                 <label className="text-[10px] font-medium text-gray-500" title="Ask AI for structured accept/deny/ignore suggestions">Suggest</label>
+                <span className="text-[9px] text-gray-400 font-medium">{speedSettings.preset}</span>
                 <button
                   type="button"
                   onClick={handleToggleAutoSuggest}
@@ -987,21 +999,6 @@ export default function DraftChatPanel({
                 </button>
               </div>
 
-              {/* Max Tokens */}
-              <div className="flex items-center gap-1.5">
-                <label className="text-[10px] font-medium text-gray-500">Tokens</label>
-                <select
-                  value={maxTokens}
-                  onChange={e => setMaxTokens(Number(e.target.value))}
-                  className="text-[10px] border border-gray-200 rounded px-1 py-0.5 bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-400"
-                >
-                  <option value={512}>512</option>
-                  <option value={1024}>1k</option>
-                  <option value={2048}>2k</option>
-                  <option value={4096}>4k</option>
-                </select>
-              </div>
-
               {/* Vector Search toggle */}
               <div className="flex items-center gap-1.5">
                 <button
@@ -1031,6 +1028,18 @@ export default function DraftChatPanel({
                   className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${vectorSearch ? 'bg-emerald-600' : 'bg-gray-200'}`}
                 >
                   <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${vectorSearch ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                </button>
+                {/* Speed settings gear */}
+                <button
+                  type="button"
+                  onClick={() => setSpeedModalOpen(true)}
+                  className="ml-0.5 flex h-5 w-5 items-center justify-center rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+                  title={`Speed: ${speedSettings.preset} · ${Math.round(speedSettings.docWindow / 1000)}K window · ${speedSettings.maxSuggestions} suggestions · ${estimateRange(speedSettings, deepSearch, thinkingMode)}`}
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
                 </button>
               </div>
             </div>
@@ -1401,6 +1410,16 @@ export default function DraftChatPanel({
             Select a draft to view version history
           </div>
         )
+      )}
+      {/* Speed preset modal */}
+      {speedModalOpen && (
+        <SpeedPresetModal
+          current={speedSettings}
+          deepSearch={deepSearch}
+          thinkingMode={thinkingMode}
+          onApply={(s) => { setSpeedSettings(s); setSpeedModalOpen(false); }}
+          onClose={() => setSpeedModalOpen(false)}
+        />
       )}
     </div>
   );

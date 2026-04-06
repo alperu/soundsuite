@@ -36,6 +36,18 @@ function sanitizeEnvelopeCosmetics(parsed: unknown): void {
 }
 
 /**
+ * Window the document content for Auto-Suggest — keeps the first 3K chars (for context) and
+ * fills the rest from the tail so the model sees the most relevant end of long documents.
+ * Using the full document can add 60–120s on large briefs; 15–20K chars is enough for quality suggestions.
+ */
+function applyAutoSuggestWindow(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  const head = text.slice(0, 3_000);
+  const tail = text.slice(-(maxLen - 3_000));
+  return `${head}\n\n[…${Math.round((text.length - maxLen) / 1000)}K chars omitted…]\n\n${tail}`;
+}
+
+/**
  * POST /api/draft/chat
  * Context-aware chat for the draft editor — streams NDJSON with tokens and final result.
  * Optionally performs RAG against indexed case documents.
@@ -62,6 +74,8 @@ export async function POST(request: NextRequest) {
       deepSearch: deepSearchFlag,
       sessionId: clientSessionId,
       regenerateFromSuggestionId,
+      documentWindowSize,
+      maxSuggestions: reqMaxSuggestions,
     } = body as {
       query: string;
       caseId?: string;
@@ -81,6 +95,8 @@ export async function POST(request: NextRequest) {
       deepSearch?: boolean;
       sessionId?: string;
       regenerateFromSuggestionId?: string;
+      documentWindowSize?: number;
+      maxSuggestions?: number;
     };
 
     // Support both single caseId and array of caseIds
@@ -467,13 +483,17 @@ export async function POST(request: NextRequest) {
               sendProgress('prefs_empty', 'No learned preferences yet — starting fresh');
             }
 
+            // Apply document windowing — reduces LLM prefill time significantly on large docs.
+            const windowSize = typeof documentWindowSize === 'number' ? documentWindowSize : 15_000;
+            const windowedDoc = applyAutoSuggestWindow(documentContent, windowSize);
+
             const autoSuggestPrompt = getAutoSuggestPrompt({
               userQuery: query.trim(),
-              documentContent,
+              documentContent: windowedDoc,
               selectedText: hasSelection ? selectedText : undefined,
               knowledgeContext,
               preferencesMarkdown: prefs.markdown || undefined,
-              maxSuggestions: 20,
+              maxSuggestions: typeof reqMaxSuggestions === 'number' ? reqMaxSuggestions : 10,
             });
 
             console.log('[AutoSuggest][server] generating', {
@@ -482,7 +502,9 @@ export async function POST(request: NextRequest) {
               provider,
               model: effectiveModel,
               promptChars: autoSuggestPrompt.length,
-              documentChars: documentContent.length,
+              documentChars: windowedDoc.length,
+              originalDocChars: documentContent.length,
+              windowSize,
               jsonMode: true,
               temperature: 0.1,
               hasKnowledgeContext: !!knowledgeContext,
@@ -635,7 +657,7 @@ export async function POST(request: NextRequest) {
                 sessionId,
                 draftVersion: draftRecord.version,
                 raw,
-                documentText: documentContent,
+                documentText: windowedDoc,
               });
               if (row) {
                 persisted.push(row);
