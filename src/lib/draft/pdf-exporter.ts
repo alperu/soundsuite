@@ -42,14 +42,13 @@ function pxToPt(px: number): number {
   return Math.round(px / 1.333);
 }
 
-/** Map a CSS/editor font family name to a pdfmake-registered font name. */
-function resolvePdfFont(fontFamily: string | undefined): string {
-  if (!fontFamily) return 'Roboto';
-  const f = fontFamily.toLowerCase().replace(/['"]/g, '').trim();
-  if (f.includes('times') || f.includes('georgia') || f.includes('serif')) return 'Times';
-  if (f.includes('courier') || f.includes('monospace') || f.includes('mono')) return 'Courier';
-  if (f.includes('helvetica') || f.includes('arial') || f.includes('sans')) return 'Helvetica';
-  if (f.includes('roboto')) return 'Roboto';
+/**
+ * Map a CSS/editor font family name to a pdfmake-registered font name.
+ * pdfmake 0.3.x browser bundle only ships Roboto TTFs — standard PDF built-in
+ * fonts (Times, Helvetica, Courier) require .afm files not included in vfs_fonts.
+ * All fonts therefore resolve to Roboto for PDF output.
+ */
+function resolvePdfFont(_fontFamily: string | undefined): string {
   return 'Roboto';
 }
 
@@ -320,31 +319,15 @@ export async function exportToPdf(
   } else {
     (pdfMake as any).vfs = (vfs as any).pdfMake?.vfs ?? vfs;
   }
+  // pdfmake 0.3.x browser bundle only ships Roboto TTFs in vfs_fonts.
+  // Standard PDF built-in fonts (Times, Helvetica, Courier) require .afm
+  // metric files that are not bundled — using them throws a VFS error.
   (pdfMake as any).fonts = {
     Roboto: {
       normal: 'Roboto-Regular.ttf',
       bold: 'Roboto-Medium.ttf',
       italics: 'Roboto-Italic.ttf',
       bolditalics: 'Roboto-MediumItalic.ttf',
-    },
-    // Standard PDF built-in fonts (no VFS embedding needed)
-    Times: {
-      normal: 'Times-Roman',
-      bold: 'Times-Bold',
-      italics: 'Times-Italic',
-      bolditalics: 'Times-BoldItalic',
-    },
-    Helvetica: {
-      normal: 'Helvetica',
-      bold: 'Helvetica-Bold',
-      italics: 'Helvetica-Oblique',
-      bolditalics: 'Helvetica-BoldOblique',
-    },
-    Courier: {
-      normal: 'Courier',
-      bold: 'Courier-Bold',
-      italics: 'Courier-Oblique',
-      bolditalics: 'Courier-BoldOblique',
     },
   };
 
