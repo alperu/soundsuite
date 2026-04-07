@@ -56,7 +56,8 @@ function parseFontSizePt(size: string | undefined): number | undefined {
   if (!size) return undefined;
   const num = parseFloat(size);
   if (isNaN(num)) return undefined;
-  return pxToPt(num);
+  if (size.trimEnd().endsWith('pt')) return Math.round(num); // already points
+  return pxToPt(num); // assume px
 }
 
 function pxToPoints(px: number): number {
@@ -131,7 +132,7 @@ function convertInlineContent(nodes: TipTapNode[]): PdfTextSegment[] {
             seg.sup = true;
             break;
           case 'textStyle':
-            if (mark.attrs?.fontFamily) seg.font = mark.attrs.fontFamily;
+            if (mark.attrs?.fontFamily) seg.font = resolvePdfFont(mark.attrs.fontFamily);
             if (mark.attrs?.fontSize) {
               const size = parseFontSizePt(mark.attrs.fontSize);
               if (size) seg.fontSize = size;
