@@ -67,6 +67,9 @@ eng.traineddata
 /marketing/
 /screenshots/
 chat.txt
+tmp-*.js
+tmp-*.mjs
+.mcp.json
 
 # Claude Code (user-specific)
 .claude/
