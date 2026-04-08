@@ -10,7 +10,9 @@ A local, self-hosted document intelligence platform for legal case management. S
 - **Vector Search** — Semantic search across all case documents powered by LanceDB with support for local (Ollama, Transformers.js) and cloud (OpenAI, Anthropic) embedding providers
 - **14 MCP Analysis Tools** — Contradiction detection, argument structure extraction, timeline reconstruction, citation analysis, entity extraction, privilege review, tone analysis, and more
 - **AI-Powered Search** — Deep Search decomposes questions into sub-queries for comprehensive answers with citations
-- **Draft Editor** — Rich text editor with AI chat, suggestions, workflow templates, import/export .docx and .pdf
+- **Draft Editor** — Full-featured rich text editor with ribbon toolbar, outline navigation, version history, and import/export for .docx and .pdf
+- **AI Writing Assistant** — In-editor AI chat, context-aware suggestions, and auto-complete powered by Claude, GPT, or Ollama models
+- **Document Workflows** — Structured templates for appeal briefs, motions, and responses with guided sections and citation formatting
 - **Case Explorer** — Built-in PDF viewer with document tree, table of contents, and page navigation
 - **Dashboard** — Real-time processing status, service health monitoring, and document management
 - **100% Local** — All processing runs on your machine. Documents never leave your computer.
