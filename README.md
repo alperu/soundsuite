@@ -43,18 +43,13 @@ cp .env.example .env
 # Edit .env with your configuration
 ```
 
-4. Initialize the database:
+4. Start the application:
 
 ```bash
-npx prisma generate
-npx prisma migrate dev --name init
+npm run svc:start dev
 ```
 
-5. Run the development server:
-
-```bash
-npm run dev
-```
+The database is automatically created and migrated on first startup.
 
 Open [http://localhost:3000](http://localhost:3000) to see the dashboard.
 
@@ -90,8 +85,8 @@ Sound Suite supports three embedding providers:
 
 ## Development
 
-This project is under active development. See the implementation plan in `.kiro/specs/sound-suite/tasks.md` for the roadmap.
+This project is under active development.
 
 ## License
 
-MIT
+[Polyform Noncommercial 1.0.0](LICENSE) — free for personal, research, and nonprofit use. See [LICENSE](LICENSE) for full terms.
