@@ -85,6 +85,7 @@ async function completeWithAnthropic(
   maxTokens: number,
   temperature: number,
   jsonMode?: boolean,
+  thinking?: boolean,
 ): Promise<AICompletionResponse> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey });
@@ -98,12 +99,21 @@ async function completeWithAnthropic(
     content: m.content,
   }));
 
+  // Adaptive thinking is Opus-4.7-only; any other model gets no `thinking`
+  // key in the request body, so 4.6 behaviour is unchanged. When adaptive
+  // thinking IS attached, Anthropic requires temperature=1.
+  const { thinkingExtras, temperatureOverride } = anthropicThinkingParam(model, thinking);
+  const effectiveTemperature = temperatureOverride ?? temperature;
+  if (temperatureOverride !== null && temperatureOverride !== temperature) {
+    console.log(`[completeWithAnthropic] adaptive thinking forces temperature=${temperatureOverride} (caller asked ${temperature})`);
+  }
+
   // jsonMode: forced tool use (canonical approach for Claude 4+).
   if (jsonMode) {
     const response = await client.messages.create({
       model,
       max_tokens: maxTokens,
-      temperature,
+      temperature: effectiveTemperature,
       ...(systemMsg ? { system: systemMsg.content } : {}),
       messages: outgoingMessages,
       tools: [
@@ -115,6 +125,7 @@ async function completeWithAnthropic(
         },
       ],
       tool_choice: { type: 'tool' as const, name: 'emit_json_result' },
+      ...thinkingExtras,
     });
 
     // Extract the tool_use block and serialize its input to JSON.
@@ -137,9 +148,10 @@ async function completeWithAnthropic(
   const response = await client.messages.create({
     model,
     max_tokens: maxTokens,
-    temperature,
+    temperature: effectiveTemperature,
     ...(systemMsg ? { system: systemMsg.content } : {}),
     messages: outgoingMessages,
+    ...thinkingExtras,
   });
 
   const textBlock = response.content.find(b => b.type === 'text');
@@ -291,7 +303,35 @@ async function completeWithOllama(
 
 export type StreamEvent =
   | { type: 'token'; text: string }
+  | { type: 'thinking'; text: string }
   | { type: 'done'; content: string; model: string; provider: AIProviderKey; usage: { inputTokens: number; outputTokens: number } };
+
+/**
+ * Build the `thinking` request parameter for Anthropic models that support
+ * adaptive thinking (Opus 4.7+), plus the temperature Anthropic requires
+ * when thinking is active. Returns an empty thinking object for every other
+ * model so 4.6 and earlier get byte-identical requests to before this feature
+ * existed.
+ *
+ * Anthropic enforces `temperature === 1` whenever `thinking: { type: 'adaptive' }`
+ * (or `{ type: 'enabled' }`) is sent — any other value returns HTTP 400 with
+ * `invalid_request_error: temperature may only be set to 1 when thinking is
+ * enabled or in adaptive mode`. So we override the caller's temperature only
+ * when we actually attach a thinking block; otherwise the caller's value is
+ * respected.
+ */
+function anthropicThinkingParam(model: string, thinking: boolean | undefined): {
+  thinkingExtras: { thinking: { type: 'adaptive' } } | Record<string, never>;
+  temperatureOverride: number | null;
+} {
+  if (thinking === true && model.startsWith('claude-opus-4-7')) {
+    return {
+      thinkingExtras: { thinking: { type: 'adaptive' as const } },
+      temperatureOverride: 1,
+    };
+  }
+  return { thinkingExtras: {}, temperatureOverride: null };
+}
 
 /**
  * Stream a chat completion from any provider.
@@ -320,7 +360,7 @@ export async function* streamAI(req: AICompletionRequest): AsyncGenerator<Stream
 
     if (req.provider === 'anthropic') {
       const apiKey = getApiKey(config, 'anthropic');
-      yield* streamWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode);
+      yield* streamWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking);
       return;
     }
 
@@ -574,6 +614,7 @@ async function* streamWithAnthropic(
   maxTokens: number,
   temperature: number,
   jsonMode?: boolean,
+  thinking?: boolean,
 ): AsyncGenerator<StreamEvent> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey });
@@ -585,6 +626,15 @@ async function* streamWithAnthropic(
     role: m.role as 'user' | 'assistant',
     content: m.content,
   }));
+
+  // Adaptive thinking is Opus-4.7-only; otherwise empty so 4.6 requests
+  // are byte-identical to pre-feature behaviour. When adaptive thinking is
+  // attached, Anthropic requires temperature=1.
+  const { thinkingExtras, temperatureOverride } = anthropicThinkingParam(model, thinking);
+  const effectiveTemperature = temperatureOverride ?? temperature;
+  if (temperatureOverride !== null && temperatureOverride !== temperature) {
+    console.log(`[streamWithAnthropic] adaptive thinking forces temperature=${temperatureOverride} (caller asked ${temperature})`);
+  }
 
   // Anthropic has no native `response_format: json_object`. For JSON mode we
   // use FORCED TOOL USE — the canonical approach for Claude 4+. We define a
@@ -599,7 +649,7 @@ async function* streamWithAnthropic(
     const response = await client.messages.create({
       model,
       max_tokens: maxTokens,
-      temperature,
+      temperature: effectiveTemperature,
       ...(systemMsg ? { system: systemMsg.content } : {}),
       messages: outgoingMessages,
       tools: [
@@ -616,6 +666,7 @@ async function* streamWithAnthropic(
       ],
       tool_choice: { type: 'tool' as const, name: 'emit_json_result' },
       stream: true,
+      ...thinkingExtras,
     });
 
     let fullContent = '';
@@ -637,6 +688,16 @@ async function* streamWithAnthropic(
             batchBuffer = '';
           }
         }
+      } else if (
+        event.type === 'content_block_delta' &&
+        (event.delta as { type?: string }).type === 'thinking_delta'
+      ) {
+        // Adaptive-thinking reasoning chunks — surface separately so the
+        // client thinking-log can render them without polluting the JSON
+        // payload parser above. `signature_delta` events are ignored; we
+        // don't currently replay thinking blocks in multi-turn tool use.
+        const chunk = (event.delta as { thinking?: string }).thinking ?? '';
+        if (chunk) yield { type: 'thinking', text: chunk };
       } else if (event.type === 'message_delta') {
         outputTokens = (event as any).usage?.output_tokens ?? outputTokens;
       } else if (event.type === 'message_start') {
@@ -665,10 +726,11 @@ async function* streamWithAnthropic(
   const response = await client.messages.create({
     model,
     max_tokens: maxTokens,
-    temperature,
+    temperature: effectiveTemperature,
     ...(systemMsg ? { system: systemMsg.content } : {}),
     messages: outgoingMessages,
     stream: true,
+    ...thinkingExtras,
   });
 
   let fullContent = '';
@@ -685,6 +747,15 @@ async function* streamWithAnthropic(
         yield { type: 'token', text: batchBuffer };
         batchBuffer = '';
       }
+    } else if (
+      event.type === 'content_block_delta' &&
+      event.delta.type === 'thinking_delta'
+    ) {
+      // Adaptive-thinking reasoning chunks — surface separately so the
+      // client thinking-log can render them. `signature_delta` ignored
+      // (not replaying thinking blocks in multi-turn tool use yet).
+      const chunk = event.delta.thinking;
+      if (chunk) yield { type: 'thinking', text: chunk };
     } else if (event.type === 'message_delta') {
       outputTokens = (event as any).usage?.output_tokens ?? outputTokens;
     } else if (event.type === 'message_start') {
@@ -749,7 +820,7 @@ export async function completeAI(req: AICompletionRequest): Promise<AICompletion
   const apiKey = getApiKey(config, req.provider);
 
   if (req.provider === 'anthropic') {
-    return completeWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode);
+    return completeWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking);
   }
 
   const baseURL = OPENAI_COMPATIBLE_BASE_URLS[req.provider];

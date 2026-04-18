@@ -412,7 +412,7 @@ export async function POST(request: NextRequest) {
                 { role: 'system', content: regeneratePrompt },
                 { role: 'user', content: 'Produce one alternative suggestion as JSON.' },
               ],
-              maxTokens: Math.min(reqMaxTokens || 1024, 2048),
+              maxTokens: reqMaxTokens || 1024,
               temperature: 0.8, // higher temp → more diverse alternative
               jsonMode: true,
             })) {

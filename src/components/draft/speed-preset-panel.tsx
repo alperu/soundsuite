@@ -69,7 +69,7 @@ export const SPEED_PRESETS: Record<SpeedPreset, PresetDef> = {
 };
 
 const DOC_WINDOW_QUICK: number[] = [5_000, 8_000, 15_000, 20_000, 30_000, 50_000];
-const TOKEN_QUICK: number[] = [512, 1_024, 2_048, 4_096, 8_192, 16_384];
+const TOKEN_QUICK: number[] = [512, 1_024, 2_048, 4_096, 8_192, 16_384, 32_768];
 
 function fmtWindow(n: number): string {
   return n >= 1000 ? `${Math.round(n / 1000)}K` : String(n);

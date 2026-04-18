@@ -155,14 +155,52 @@ function fromMarkdown(content: string, fileName: string): ChatSession {
       }
     }
 
-    // Remove sources details block
-    text = text.replace(/<details>[\s\S]*?<\/details>/, '').trim();
+    // Extract structured data from the markdown-serialized metadata blocks
+    // before stripping them, so loadSession can restore the full UI state.
+    let sources: ChatTurn['sources'];
+    let subQueries: ChatTurn['subQueries'];
+    let searchStats: ChatTurn['searchStats'];
+
+    if (isAssistant) {
+      // Stats comment: <!-- stats: 4 sub-queries, 100 retrieved, 75 unique, 75 after rerank -->
+      const statsMatch = text.match(/<!-- stats: (\d+) sub-queries?, (\d+) retrieved, (\d+) unique, (\d+) after rerank -->/);
+      if (statsMatch) {
+        searchStats = {
+          subQueryCount: parseInt(statsMatch[1]),
+          totalRetrieved: parseInt(statsMatch[2]),
+          uniqueAfterDedup: parseInt(statsMatch[3]),
+          finalAfterRerank: parseInt(statsMatch[4]),
+        };
+      }
+
+      // Sub-queries: <details><summary>Sub-queries</summary>\n\n- q1\n- q2\n</details>
+      const sqMatch = text.match(/<details><summary>Sub-queries<\/summary>\s*\n([\s\S]*?)\n<\/details>/);
+      if (sqMatch) {
+        subQueries = sqMatch[1].split('\n').filter(l => l.startsWith('- ')).map(l => l.slice(2).trim());
+      }
+
+      // Sources: <details><summary>Sources</summary>\n\n- **cite**: text...\n</details>
+      const srcMatch = text.match(/<details><summary>Sources<\/summary>\s*\n([\s\S]*?)\n<\/details>/);
+      if (srcMatch) {
+        sources = srcMatch[1].split('\n').filter(l => l.startsWith('- **')).map(l => {
+          const m = l.match(/^- \*\*(.+?)\*\*: (.+)$/);
+          return m ? { text: m[2].replace(/\.\.\.$/,''), document: '', page: 0, citation: m[1] } : { text: l.slice(2), document: '', page: 0 };
+        });
+      }
+    }
+
+    // Strip all metadata / details blocks from the content text
+    text = text.replace(/\n*<!-- stats: .+? -->/g, '').trim();
+    text = text.replace(/<details>[\s\S]*?<\/details>/g, '').trim();
 
     turns.push({
       role: isUser ? 'user' : 'assistant',
       content: text,
       ...(mode ? { mode: mode as ChatTurn['mode'] } : {}),
       ...(searchTime != null ? { searchTime } : {}),
+      ...(sources ? { sources } : {}),
+      ...(subQueries ? { subQueries } : {}),
+      ...(searchStats ? { searchStats } : {}),
     });
   }
 

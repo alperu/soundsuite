@@ -134,3 +134,29 @@ The Stop hook will read it, commit with that message, and delete the file. If yo
 - `public/exhibits/` — extracted exhibit images (gitignored)
 - `logs/` — service logs
 - `.pids/` — service PID file
+
+### Marketing Website (Statamic) Deployment
+
+The marketing site at `marketing/website/` is a separate Statamic CMS project with its own git repo. The entire `marketing/` tree is gitignored from this root repo (see `.gitignore:67`), so it does not show up in `git status` here.
+
+**Local dev:** `cd marketing/website/src && composer dev` runs Statamic on `http://localhost:8000`. Stache is the content cache — refresh after editing files: `php artisan statamic:stache:refresh`.
+
+**Deploy to production (`soundsuite.ai`):** two scripts, both now rsync-based over SSH (see `scripts/private/_common.sh` for `rsync_files` / `rsync_one` / `rsync_tree` helpers). SSH credentials live in `scripts/private/.passw` (`HOST`, `USERNAME`, `REMOTE_PATH`, `PORT`, `SSH_KEY_PATH`, `SSH_KEY_PASSPHRASE`, `PASSWORD`).
+
+- **`scripts/private/deploy.sh`** — full-site deploy. Builds vite, runs `composer install --no-dev`, rsync's `src/` with `--exclude-from` (no `--delete`, so `.env` / `storage/` / `public/exhibits/` are preserved), then cache flush + `statamic:static:clear`. Interactive `y/N` unless `--yes`.
+- **`scripts/update-remote.sh`** — composer-only deploy. Rsync's `composer.json` + `composer.lock` (~30 KB), runs `composer install --no-dev --no-scripts` on the server, then `package:discover`, cache flush, and an OPcache reset via a token-gated public endpoint. Use this for routine dependency bumps paired with `update-local.sh` / `update-statamic.sh` / `update-mcp-plugin.sh`.
+
+**Deploy landmines — DO NOT re-introduce:**
+
+1. **Never add `php artisan vendor:publish --tag=statamic --force` to any deploy or update script.** The `statamic` tag is a superset that includes `statamic-config`, which overwrites every `config/statamic/*.php` file with the vendor default. On 2026-04-14 this took the site down: `users.php` was reverted from the customized `'repository' => 'file'` to vendor default `'repository' => 'eloquent'`, which 500'd the CP because Eloquent queried a users table this file-repo site doesn't have. If CP/frontend/addon **assets** need re-publishing after a major upgrade, publish only the asset groups manually: `--tag=statamic-cp`, `--tag=statamic-frontend`, `--tag=statamic-mcp`, `--tag=seo-pro`. Skip `--force` on configs. Routine deploys should not publish at all.
+2. **Remote composer detection must validate executability, not just presence.** `composer.phar` lives at `~/public_html/composer.phar` on this host and is NOT in `$PATH`. A naive `[ -x "$candidate" ]` check with a bare name resolves via cwd but bash command exec won't search cwd — so `COMPOSER="composer.phar"; "$COMPOSER" install` fails with "command not found". Either use `command -v`'s resolved path, or require a `/` in the candidate before accepting `[ -x ]`. This was the bug that caused the 2026-04-14 outage (stage 1 silently skipped `composer install`; stage 2 then ran `--force` publish against a lockfile mismatch).
+3. **`composer install | tail -N` under plain `set -e` masks failures.** Pipelines report the last command's exit status (0 from `tail`), so a failing composer invocation slides past. Use `set -eo pipefail` in any remote stage script that pipes composer/artisan through `tail`.
+4. **Static cache:** production has `STATAMIC_STATIC_CACHING_STRATEGY=full`. Every deploy must end with `php artisan statamic:static:clear` or content changes won't appear until files age out. (`deploy.sh` and `update-remote.sh` already do this — don't strip it.)
+
+**Blog index template gotcha:** `marketing/website/src/resources/views/blog.antlers.html` must use `{{ collection:articles sort="date:desc" }}`. If you ever see hardcoded `<a href="/blog/...">` tags in that template, new posts won't appear on `/blog`. Add a new post by dropping a markdown file at `marketing/website/src/content/collections/articles/YYYY-MM-DD.{slug}.md` matching the `blog` blueprint (`title`, `subtitle`, `author`, `category`, `reading_time`, `date` as unix timestamp).
+
+**Verifying a deploy:**
+```bash
+curl -s --max-time 10 -o /dev/null -w "%{http_code}\n" https://soundsuite.ai/blog
+curl -s --max-time 10 https://soundsuite.ai/blog | grep -oE 'href="/blog/[a-z-]+"' | sort -u
+```

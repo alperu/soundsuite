@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { AI_PROVIDERS, AI_PROVIDER_KEYS, AIProviderKey, AIModelDef } from '@/lib/ai/models';
 import { getPreference, setPreference } from '@/lib/indexed-db';
@@ -296,6 +296,7 @@ export default function SearchInterface({
   const [deepSearchMode, setDeepSearchMode] = usePersistedState<boolean>('search.deepSearchMode', hasExplicitPath ? initialDeepMode : false);
   const [thinkingMode, setThinkingMode] = usePersistedState<boolean>('search.thinkingMode', true);
   const [maxTokens, setMaxTokens] = usePersistedState<number>('search.maxTokens', 2048);
+  const [inputHeight, setInputHeight] = usePersistedState<number>('search.inputHeight', 72);
   const [aiTurns, setAiTurns] = useState<AIConversationTurn[]>([]);
   const [deepTurns, setDeepTurns] = useState<DeepSearchTurn[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>(() => `session-${Date.now()}`);
@@ -456,6 +457,18 @@ export default function SearchInterface({
       setAiModel(models[0]?.id ?? '');
     }
   };
+
+  const handleCaseFilterChange = useCallback((newCaseId: string) => {
+    if (newCaseId === aiCaseId) return;
+    setAiCaseId(newCaseId);
+    setAiTurns([]);
+    setDeepTurns([]);
+    setAiResults([]);
+    setAiError(null);
+    setDeepProgress(null);
+    setStreamingAnswer(null);
+    setCurrentSessionId(`session-${Date.now()}`);
+  }, [aiCaseId, setAiCaseId]);
 
   const toggleCompareProvider = (key: string) => {
     setCompareSelections(prev => {
@@ -891,10 +904,10 @@ export default function SearchInterface({
               query: userTurn.content,
               result: {
                 report: assistantTurn.content,
-                sources: [],
-                subQueries: [],
+                sources: assistantTurn.sources || [],
+                subQueries: assistantTurn.subQueries || [],
                 intent: '',
-                searchStats: { totalRetrieved: 0, uniqueAfterDedup: 0, finalAfterRerank: 0, subQueryCount: 0 },
+                searchStats: assistantTurn.searchStats || { totalRetrieved: 0, uniqueAfterDedup: 0, finalAfterRerank: 0, subQueryCount: 0 },
                 model: session.model,
                 provider: session.provider,
               },
@@ -1105,7 +1118,7 @@ export default function SearchInterface({
                 <div className="w-px h-6 bg-gray-200" />
                 <select
                   value={aiCaseId}
-                  onChange={e => setAiCaseId(e.target.value)}
+                  onChange={e => handleCaseFilterChange(e.target.value)}
                   className="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white max-w-[300px]"
                 >
                   <option value="">All Cases</option>
@@ -1119,7 +1132,7 @@ export default function SearchInterface({
                 <div className="w-px h-6 bg-gray-200" />
                 <select
                   value={aiCaseId}
-                  onChange={e => setAiCaseId(e.target.value)}
+                  onChange={e => handleCaseFilterChange(e.target.value)}
                   className="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white max-w-[300px]"
                 >
                   <option value="">All Cases</option>
@@ -1241,6 +1254,9 @@ export default function SearchInterface({
                       <option value={1024}>1k</option>
                       <option value={2048}>2k</option>
                       <option value={4096}>4k</option>
+                      <option value={8192}>8k</option>
+                      <option value={16384}>16k</option>
+                      <option value={32768}>32k</option>
                     </select>
                   </div>
                 </div>
@@ -1440,21 +1456,40 @@ export default function SearchInterface({
                 </div>
               </div>
 
-              {/* Fixed bottom input */}
-              <div className="flex-shrink-0 border-t border-gray-200 bg-white px-6 py-4">
+              {/* Fixed bottom input with drag-resizable top edge */}
+              <div className="flex-shrink-0 bg-white">
+                {/* Drag handle — matches sidebar ResizableDivider pattern */}
+                <div
+                  className="h-1 cursor-ns-resize hover:bg-blue-400 active:bg-blue-500 transition-colors border-t border-gray-200"
+                  onMouseDown={e => {
+                    e.preventDefault();
+                    const startY = e.clientY;
+                    const startH = inputHeight;
+                    document.body.style.cursor = 'ns-resize';
+                    document.body.style.userSelect = 'none';
+                    const onMove = (ev: MouseEvent) => {
+                      const delta = startY - ev.clientY;
+                      setInputHeight(Math.max(48, Math.min(window.innerHeight * 0.5, startH + delta)));
+                    };
+                    const onUp = () => {
+                      document.removeEventListener('mousemove', onMove);
+                      document.removeEventListener('mouseup', onUp);
+                      document.body.style.cursor = '';
+                      document.body.style.userSelect = '';
+                    };
+                    document.addEventListener('mousemove', onMove);
+                    document.addEventListener('mouseup', onUp);
+                  }}
+                  title="Drag to resize input area"
+                />
+                <div className="px-6 py-4">
                 <div className="max-w-3xl mx-auto">
                   <form onSubmit={handleAISearch} className="flex items-end gap-3">
                     <textarea
                       id="ai-query"
                       ref={aiQueryRef}
                       value={aiQuery}
-                      onChange={e => {
-                        setAiQuery(e.target.value);
-                        // Auto-resize textarea
-                        const el = e.target;
-                        el.style.height = 'auto';
-                        el.style.height = Math.min(el.scrollHeight, 150) + 'px';
-                      }}
+                      onChange={e => setAiQuery(e.target.value)}
                       onKeyDown={e => {
                         if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault();
@@ -1464,9 +1499,8 @@ export default function SearchInterface({
                         }
                       }}
                       placeholder={hasConversation ? 'Ask a follow-up...' : 'Ask a question about your legal documents...'}
-                      rows={1}
-                      className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent resize-none overflow-hidden"
-                      style={{ minHeight: '42px', maxHeight: '150px' }}
+                      className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent resize-none overflow-y-auto"
+                      style={{ height: inputHeight }}
                     />
                     <button
                       type="submit"
@@ -1479,6 +1513,7 @@ export default function SearchInterface({
                   <p className="text-[10px] text-gray-400 mt-1.5 text-center">
                     Enter to send, Shift+Enter for new line
                   </p>
+                </div>
                 </div>
               </div>
             </>
@@ -1971,7 +2006,7 @@ function EmptyState({ mode }: { mode: 'ai' | 'direct' }) {
 // AI Result Card
 // ---------------------------------------------------------------------------
 
-function AIResultCard({ result, compact = false, colorIndex, searchTime }: { result: AISearchResult; compact?: boolean; colorIndex?: number; searchTime?: number | null }) {
+const AIResultCard = React.memo(function AIResultCard({ result, compact = false, colorIndex, searchTime }: { result: AISearchResult; compact?: boolean; colorIndex?: number; searchTime?: number | null }) {
   const [showSources, setShowSources] = useState(false);
   const [showWorkflowSave, setShowWorkflowSave] = useState(false);
   const [workflows, setWorkflows] = useState<Array<{ id: string; title: string }>>([]);
@@ -2156,7 +2191,7 @@ function AIResultCard({ result, compact = false, colorIndex, searchTime }: { res
       )}
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Deep Search Progress Card
@@ -2239,7 +2274,7 @@ function DeepSearchProgressCard({ progress }: { progress: DeepSearchProgress }) 
 // Deep Search Result Card
 // ---------------------------------------------------------------------------
 
-function DeepSearchResultCard({ result, searchTime }: { result: DeepSearchResult; searchTime: number | null }) {
+const DeepSearchResultCard = React.memo(function DeepSearchResultCard({ result, searchTime }: { result: DeepSearchResult; searchTime: number | null }) {
   const [showSubQueries, setShowSubQueries] = useState(false);
   const [showSources, setShowSources] = useState(false);
 
@@ -2294,7 +2329,23 @@ function DeepSearchResultCard({ result, searchTime }: { result: DeepSearchResult
             <span className="text-sm font-medium text-gray-900">Research Report</span>
             <span className="text-xs bg-white/60 px-1.5 py-0.5 rounded text-gray-600 font-mono">{getProviderName(result.provider)}: {result.model}</span>
           </div>
-          <CopyButton text={result.report} />
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => {
+                const blob = new Blob([result.report], { type: 'text/plain;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const w = window.open(url, '_blank');
+                if (w) setTimeout(() => URL.revokeObjectURL(url), 60000);
+              }}
+              className="p-1.5 rounded hover:bg-gray-200 transition-colors"
+              title="Open full report in new tab"
+            >
+              <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+              </svg>
+            </button>
+            <CopyButton text={result.report} />
+          </div>
         </div>
         <div className="px-6 py-5">
           <div className="prose prose-sm max-w-none text-gray-800">
@@ -2382,4 +2433,4 @@ function DeepSearchResultCard({ result, searchTime }: { result: DeepSearchResult
       )}
     </div>
   );
-}
+});

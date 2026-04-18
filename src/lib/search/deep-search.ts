@@ -474,15 +474,28 @@ ${contextBlock}`;
 
   try {
     return await callLLM(REPORT_SYSTEM_PROMPT, userContent, {
-      maxTokens: 6144,
+      maxTokens: 16384,
       temperature: 0.3,
       provider: options?.provider,
       model: options?.model,
       thinking: options?.thinking,
     });
-  } catch {
-    // Report generation failed — return sources without narrative
-    return `## Deep Search Results\n\nReport generation failed. Found ${sources.length} relevant sources.\n\nPlease review the sources panel below for the raw results.`;
+  } catch (err) {
+    // Surface the real error — the old bare catch hid it and only returned
+    // the "Report generation failed" fallback, making every such failure
+    // indistinguishable from every other (400 vs timeout vs auth vs …).
+    const msg = err instanceof Error ? err.message : String(err);
+    const status = (err as { status?: number })?.status;
+    console.error('[Deep Search] generateReport failed', {
+      provider: options?.provider,
+      model: options?.model,
+      thinking: options?.thinking,
+      sources: sources.length,
+      contextChars: totalChars,
+      status,
+      error: msg,
+    });
+    return `## Deep Search Results\n\nReport generation failed${status ? ` (${status})` : ''}: ${msg}\n\nFound ${sources.length} relevant sources — review the sources panel below.`;
   }
 }
 
@@ -495,7 +508,7 @@ export async function deepSearch(
   registry: ToolRegistry,
   options: DeepSearchOptions = {},
 ): Promise<DeepSearchResult> {
-  const { provider, model, caseId, onProgress, history, workflowContext } = options;
+  const { provider, model, caseId, onProgress, history, workflowContext, thinking } = options;
   const emit = onProgress || (() => {});
 
   console.log(`[Deep Search] Starting for query: "${query.slice(0, 100)}"`);
@@ -562,6 +575,7 @@ export async function deepSearch(
     model,
     history,
     workflowContext,
+    thinking,
   });
 
   console.log(`[Deep Search] Completed in ${Date.now() - t0}ms`);

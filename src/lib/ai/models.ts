@@ -38,6 +38,7 @@ export const AI_PROVIDERS: Record<AIProviderKey, AIProviderDef> = {
     name: 'Anthropic',
     configKey: 'claudeApiKey',
     models: [
+      { id: 'claude-opus-4-7', label: 'Claude Opus 4.7' },
       { id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
       { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
       { id: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
