@@ -27,6 +27,12 @@ export interface CachedSidecarStatus {
     model?: string | null;
     exists?: boolean;
     loadedModels?: Array<{ name: string; size: string; sizeBytes?: number; sizeVram?: number; gpuPercent?: number; processor: string; until: string }>;
+    // From sideCar/src/lib/state.ts ContainerDef.gpuOnly — true means routing
+    // must reject CPU-offloaded fallbacks for this role.
+    config?: { image?: string; model?: string | null; port?: number; vram?: number; type?: string; gpuOnly?: boolean };
+    // Set by the sidecar watchdog: false when a gpuOnly role has a partially
+    // CPU-offloaded model and remediation has not (yet) restored full GPU.
+    gpuReady?: boolean;
   }>;
   activeRequests: number;
   idleTimeouts: Record<string, number>;

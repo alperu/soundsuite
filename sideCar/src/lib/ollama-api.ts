@@ -282,29 +282,34 @@ async function ollamaPost(
 export async function ollamaLoad(
   port: number,
   model: string,
-  opts?: { onProgress?: (detail: string) => void; timeoutMs?: number },
+  opts?: { onProgress?: (detail: string) => void; timeoutMs?: number; forceFullGpu?: boolean },
 ): Promise<boolean> {
   const timeoutMs = opts?.timeoutMs ?? 120_000;
+  // num_gpu: 999 asks Ollama to put all layers on GPU; if VRAM is tight Ollama
+  // will reject the load instead of silently splitting layers to CPU.
+  const gpuOptions = opts?.forceFullGpu ? { num_gpu: 999 } : undefined;
   try {
-    log.info(`ollamaLoad: loading ${model} on port ${port}...`);
+    log.info(`ollamaLoad: loading ${model} on port ${port}${opts?.forceFullGpu ? ' (forceFullGpu)' : ''}...`);
 
     // Try endpoints in order until one succeeds at loading the model into VRAM.
     // Different model types (chat, embedding, vision) support different endpoints.
     const endpoints: Array<{ path: string; body: Record<string, unknown> }> = [
-      { path: '/api/generate', body: { model, prompt: '', keep_alive: '24h', stream: false } },
-      { path: '/api/embed', body: { model, input: 'warmup', keep_alive: '24h' } },
-      { path: '/api/embeddings', body: { model, prompt: 'warmup', keep_alive: '24h' } },
-      { path: '/api/chat', body: { model, messages: [], keep_alive: '24h', stream: false } },
+      { path: '/api/generate', body: { model, prompt: '', keep_alive: '24h', stream: false, ...(gpuOptions ? { options: gpuOptions } : {}) } },
+      { path: '/api/embed', body: { model, input: 'warmup', keep_alive: '24h', ...(gpuOptions ? { options: gpuOptions } : {}) } },
+      { path: '/api/embeddings', body: { model, prompt: 'warmup', keep_alive: '24h', ...(gpuOptions ? { options: gpuOptions } : {}) } },
+      { path: '/api/chat', body: { model, messages: [], keep_alive: '24h', stream: false, ...(gpuOptions ? { options: gpuOptions } : {}) } },
     ];
 
     const results: string[] = [];
+    let loaded = false;
     for (const ep of endpoints) {
       try {
         const result = await ollamaPost(port, ep.path, ep.body, timeoutMs, opts?.onProgress);
         results.push(`${ep.path}=${result.status}`);
         if (result.status === 200) {
           log.info(`ollamaLoad: ${model} loaded via ${ep.path} on port ${port}`);
-          return true;
+          loaded = true;
+          break;
         }
         log.info(`ollamaLoad: ${ep.path} returned ${result.status} for ${model}: ${result.body.slice(0, 150)}`);
       } catch (err) {
@@ -313,10 +318,66 @@ export async function ollamaLoad(
       }
     }
 
-    log.warn(`ollamaLoad: all endpoints failed for ${model} on port ${port}: ${results.join(', ')}`);
-    return false;
+    if (!loaded) {
+      log.warn(`ollamaLoad: all endpoints failed for ${model} on port ${port}: ${results.join(', ')}`);
+      return false;
+    }
+
+    if (opts?.forceFullGpu) {
+      // Verify the load actually landed fully on GPU. Ollama can still split
+      // layers under memory pressure even when num_gpu is requested high.
+      try {
+        const ps = await ollamaPs(port);
+        const me = ps.find((m) => m.name === model || m.name.startsWith(`${model}:`));
+        if (!me) {
+          log.warn(`ollamaLoad: forceFullGpu — ${model} not in /api/ps after load on port ${port}`);
+          await ollamaUnload(port, model).catch(() => undefined);
+          return false;
+        }
+        if (!me.size || me.size === 0) {
+          log.warn(`ollamaLoad: forceFullGpu — ${model} reports size=0 on port ${port}, cannot verify GPU residency`);
+          return true;
+        }
+        const gpuPct = Math.round((me.sizeVram / me.size) * 100);
+        if (gpuPct < 99) {
+          log.warn(`ollamaLoad: forceFullGpu — ${model} loaded only ${gpuPct}% on GPU (processor=${me.processor}); unloading`);
+          await ollamaUnload(port, model).catch(() => undefined);
+          return false;
+        }
+        log.info(`ollamaLoad: forceFullGpu — ${model} verified at ${gpuPct}% GPU on port ${port}`);
+      } catch (err) {
+        log.warn(`ollamaLoad: forceFullGpu — verification failed for ${model} on port ${port}: ${(err as Error).message}`);
+        // Conservative: leave model loaded; the watchdog will catch it next tick.
+      }
+    }
+
+    return true;
   } catch (err) {
     log.error(`ollamaLoad: failed to load ${model} on port ${port}: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/**
+ * Evict a model from VRAM. POST /api/generate with keep_alive: 0 — Ollama
+ * unloads immediately. Best-effort: returns false on error but does not throw.
+ */
+export async function ollamaUnload(port: number, model: string): Promise<boolean> {
+  try {
+    const result = await ollamaPost(
+      port,
+      '/api/generate',
+      { model, prompt: '', keep_alive: 0, stream: false },
+      15_000,
+    );
+    if (result.status === 200) {
+      log.info(`ollamaUnload: ${model} unloaded on port ${port}`);
+      return true;
+    }
+    log.warn(`ollamaUnload: ${model} on port ${port} returned ${result.status}: ${result.body.slice(0, 150)}`);
+    return false;
+  } catch (err) {
+    log.warn(`ollamaUnload: ${model} on port ${port} error: ${(err as Error).message}`);
     return false;
   }
 }

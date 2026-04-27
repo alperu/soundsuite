@@ -265,9 +265,12 @@ export interface ContainerState {
   cmd?: string[];
   env?: string[];
   role?: string;
-  config?: { image: string; model: string | null; port: number; vram: number; type: string };
+  config?: { image: string; model: string | null; port: number; vram: number; type: string; gpuOnly?: boolean };
   loadedModels?: Array<{ name: string; size: string; sizeBytes?: number; sizeVram?: number; gpuPercent?: number; processor: string; until: string }>;
   modelOnDisk?: boolean;
+  // For gpuOnly roles: false when the loaded model is partially on CPU and
+  // the sidecar could not remediate. The master uses this to refuse routing.
+  gpuReady?: boolean;
   error?: string;
 }
 

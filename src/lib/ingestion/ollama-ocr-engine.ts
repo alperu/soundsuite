@@ -8,6 +8,8 @@
 
 import { IOCREngine, OCRResult } from './ocr-engine';
 import { createLogger } from '../logger';
+import { OcrNotReadyError } from './errors';
+import { NoGpuReadyEndpointError } from '@/lib/gpu/errors';
 
 const logger = createLogger('OllamaOCR');
 
@@ -36,7 +38,12 @@ export class OllamaOCREngine implements IOCREngine {
     logger.info('OllamaOCREngine initialized', { host: this.host, model: this.model, orchestrator: this.useOrchestrator });
   }
 
-  /** Resolve the OCR host — fleet-router per-request if orchestrator enabled, otherwise static config. */
+  /**
+   * Resolve the OCR host — fleet-router per-request if orchestrator enabled,
+   * otherwise static config. When orchestrator mode is on, a routing failure
+   * (typically NoGpuReadyEndpointError) is propagated as OcrNotReadyError so
+   * the worker pauses instead of degrading silently to the static host.
+   */
   private async resolveHost(): Promise<string> {
     if (!this.useOrchestrator) return this.host;
     try {
@@ -48,8 +55,15 @@ export class OllamaOCREngine implements IOCREngine {
       }
       return ep.host;
     } catch (err) {
-      logger.warn('Fleet router OCR resolve failed, using fallback host', { error: (err as Error).message, fallback: this.host });
-      return this.host;
+      if (err instanceof NoGpuReadyEndpointError) {
+        logger.warn('OCR not GPU-ready — pausing', { reason: err.reason });
+        throw new OcrNotReadyError(err.message, err);
+      }
+      // Other routing errors (no sidecar reachable at all) are also pause-worthy
+      // when orchestrator mode is enabled — silently falling back to a static
+      // host would just put OCR onto the local CPU, which is the bug we're fixing.
+      logger.warn('Fleet router OCR resolve failed', { error: (err as Error).message });
+      throw new OcrNotReadyError(`Fleet router resolve failed: ${(err as Error).message}`, err as Error);
     }
   }
 

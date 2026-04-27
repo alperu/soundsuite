@@ -14,6 +14,12 @@ export interface AIMessage {
   content: string;
 }
 
+/** Anthropic adaptive-thinking effort level — controls how much of `max_tokens`
+ * Claude is allowed to spend on internal reasoning. Lower = more visible output.
+ * Opus 4.7 adds `xhigh` between high and max. The installed SDK (0.74.0) types
+ * only the four base values; `xhigh` is passed through and accepted by the API. */
+export type AnthropicEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export interface AICompletionRequest {
   provider: AIProviderKey;
   model: string;
@@ -24,6 +30,8 @@ export interface AICompletionRequest {
   jsonMode?: boolean;
   /** Control thinking/reasoning mode for models that support it (e.g. Qwen3). Default true. */
   thinking?: boolean;
+  /** Effort level for Anthropic Opus 4.7 adaptive thinking. Default 'medium'. */
+  effort?: AnthropicEffort;
 }
 
 export interface AICompletionResponse {
@@ -86,84 +94,34 @@ async function completeWithAnthropic(
   temperature: number,
   jsonMode?: boolean,
   thinking?: boolean,
+  effort?: AnthropicEffort,
 ): Promise<AICompletionResponse> {
-  const Anthropic = (await import('@anthropic-ai/sdk')).default;
-  const client = new Anthropic({ apiKey });
-
-  // Extract system message — Anthropic uses a separate `system` param
-  const systemMsg = messages.find(m => m.role === 'system');
-  const nonSystem = messages.filter(m => m.role !== 'system');
-
-  const outgoingMessages: Array<{ role: 'user' | 'assistant'; content: string }> = nonSystem.map(m => ({
-    role: m.role as 'user' | 'assistant',
-    content: m.content,
-  }));
-
-  // Adaptive thinking is Opus-4.7-only; any other model gets no `thinking`
-  // key in the request body, so 4.6 behaviour is unchanged. When adaptive
-  // thinking IS attached, Anthropic requires temperature=1.
-  const { thinkingExtras, temperatureOverride } = anthropicThinkingParam(model, thinking);
-  const effectiveTemperature = temperatureOverride ?? temperature;
-  if (temperatureOverride !== null && temperatureOverride !== temperature) {
-    console.log(`[completeWithAnthropic] adaptive thinking forces temperature=${temperatureOverride} (caller asked ${temperature})`);
-  }
-
-  // jsonMode: forced tool use (canonical approach for Claude 4+).
-  if (jsonMode) {
-    const response = await client.messages.create({
-      model,
-      max_tokens: maxTokens,
-      temperature: effectiveTemperature,
-      ...(systemMsg ? { system: systemMsg.content } : {}),
-      messages: outgoingMessages,
-      tools: [
-        {
-          name: 'emit_json_result',
-          description:
-            'Emit the structured JSON result that matches the schema described in the system prompt. Call this tool exactly once with your output as the tool input.',
-          input_schema: { type: 'object' as const },
-        },
-      ],
-      tool_choice: { type: 'tool' as const, name: 'emit_json_result' },
-      ...thinkingExtras,
-    });
-
-    // Extract the tool_use block and serialize its input to JSON.
-    const toolBlock = response.content.find(
-      (b: { type: string }) => b.type === 'tool_use'
-    ) as { type: 'tool_use'; input: unknown } | undefined;
-    const content = toolBlock ? JSON.stringify(toolBlock.input) : '';
-
-    return {
-      content,
-      model: response.model,
-      provider: 'anthropic',
-      usage: {
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens,
-      },
-    };
-  }
-
-  const response = await client.messages.create({
+  // Anthropic's SDK rejects non-streaming requests it estimates may exceed
+  // 10 minutes — common for large max_tokens + adaptive thinking (e.g. the
+  // deep-search final-report generation). Route through the streaming
+  // implementation and collect the final 'done' event. Thinking deltas are
+  // discarded for non-streaming callers; jsonMode, tool-use, and temperature
+  // handling are all already correct inside streamWithAnthropic.
+  for await (const event of streamWithAnthropic(
+    apiKey,
     model,
-    max_tokens: maxTokens,
-    temperature: effectiveTemperature,
-    ...(systemMsg ? { system: systemMsg.content } : {}),
-    messages: outgoingMessages,
-    ...thinkingExtras,
-  });
-
-  const textBlock = response.content.find(b => b.type === 'text');
-  return {
-    content: textBlock?.text ?? '',
-    model: response.model,
-    provider: 'anthropic',
-    usage: {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-    },
-  };
+    messages,
+    maxTokens,
+    temperature,
+    jsonMode,
+    thinking,
+    effort,
+  )) {
+    if (event.type === 'done') {
+      return {
+        content: event.content,
+        model: event.model,
+        provider: 'anthropic',
+        usage: event.usage,
+      };
+    }
+  }
+  throw new Error('Anthropic stream ended without a done event');
 }
 
 /**
@@ -313,22 +271,53 @@ export type StreamEvent =
  * model so 4.6 and earlier get byte-identical requests to before this feature
  * existed.
  *
- * Anthropic enforces `temperature === 1` whenever `thinking: { type: 'adaptive' }`
- * (or `{ type: 'enabled' }`) is sent — any other value returns HTTP 400 with
- * `invalid_request_error: temperature may only be set to 1 when thinking is
- * enabled or in adaptive mode`. So we override the caller's temperature only
- * when we actually attach a thinking block; otherwise the caller's value is
- * respected.
+ * Opus 4.7 has deprecated the `temperature` parameter — any non-1 value is
+ * rejected with HTTP 400 `temperature is deprecated for this model`. We
+ * force temperatureOverride=1 for every 4.7 request (with or without
+ * adaptive thinking, with or without jsonMode). Older Anthropic models are
+ * unaffected and keep the caller's temperature.
  */
-function anthropicThinkingParam(model: string, thinking: boolean | undefined): {
-  thinkingExtras: { thinking: { type: 'adaptive' } } | Record<string, never>;
+function anthropicThinkingParam(model: string, thinking: boolean | undefined, effort: AnthropicEffort | undefined, jsonMode: boolean | undefined): {
+  thinkingExtras:
+    | {
+        thinking: { type: 'adaptive' };
+        output_config: { effort: 'low' | 'medium' | 'high' | 'max' };
+      }
+    | Record<string, never>;
   temperatureOverride: number | null;
 } {
-  if (thinking === true && model.startsWith('claude-opus-4-7')) {
+  // Opus 4.7 only supports `thinking: { type: 'adaptive' }` — `enabled` is
+  // rejected with HTTP 400. Adaptive thinking consumes part of `max_tokens`
+  // for internal reasoning; without `output_config.effort` it defaults to
+  // max effort and can burn most of the budget on thinking, leaving the
+  // visible response tiny (raising the UI Tokens dropdown then produced a
+  // SHORTER answer). The caller-supplied `effort` (UI dropdown, default
+  // 'medium') controls the share thinking can take.
+  //
+  // jsonMode is implemented via forced tool use (tool_choice). Anthropic
+  // rejects `thinking + tool_choice` with HTTP 400
+  // ("Thinking may not be enabled when tool_choice forces tool use."), so
+  // we drop thinking entirely for jsonMode requests — the structured-output
+  // call gets the caller's original temperature (e.g. 0.1 for auto-suggest).
+  // Opus 4.7 deprecates the `temperature` parameter — any value other than 1
+  // (including omitted/default) returns HTTP 400 "temperature is deprecated
+  // for this model". Force temperatureOverride=1 for every 4.7 request,
+  // regardless of thinking/jsonMode.
+  const isOpus47 = model.startsWith('claude-opus-4-7');
+  if (thinking === true && !jsonMode && isOpus47) {
+    // Cast effort to the SDK's narrower union — 'xhigh' is accepted by the
+    // API but not yet in the SDK 0.74.0 type. Runtime-safe.
+    const effortValue = (effort ?? 'medium') as 'low' | 'medium' | 'high' | 'max';
     return {
-      thinkingExtras: { thinking: { type: 'adaptive' as const } },
+      thinkingExtras: {
+        thinking: { type: 'adaptive' as const },
+        output_config: { effort: effortValue },
+      },
       temperatureOverride: 1,
     };
+  }
+  if (isOpus47) {
+    return { thinkingExtras: {}, temperatureOverride: 1 };
   }
   return { thinkingExtras: {}, temperatureOverride: null };
 }
@@ -360,7 +349,7 @@ export async function* streamAI(req: AICompletionRequest): AsyncGenerator<Stream
 
     if (req.provider === 'anthropic') {
       const apiKey = getApiKey(config, 'anthropic');
-      yield* streamWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking);
+      yield* streamWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.effort);
       return;
     }
 
@@ -615,6 +604,7 @@ async function* streamWithAnthropic(
   temperature: number,
   jsonMode?: boolean,
   thinking?: boolean,
+  effort?: AnthropicEffort,
 ): AsyncGenerator<StreamEvent> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey });
@@ -630,7 +620,7 @@ async function* streamWithAnthropic(
   // Adaptive thinking is Opus-4.7-only; otherwise empty so 4.6 requests
   // are byte-identical to pre-feature behaviour. When adaptive thinking is
   // attached, Anthropic requires temperature=1.
-  const { thinkingExtras, temperatureOverride } = anthropicThinkingParam(model, thinking);
+  const { thinkingExtras, temperatureOverride } = anthropicThinkingParam(model, thinking, effort, jsonMode);
   const effectiveTemperature = temperatureOverride ?? temperature;
   if (temperatureOverride !== null && temperatureOverride !== temperature) {
     console.log(`[streamWithAnthropic] adaptive thinking forces temperature=${temperatureOverride} (caller asked ${temperature})`);
@@ -820,7 +810,7 @@ export async function completeAI(req: AICompletionRequest): Promise<AICompletion
   const apiKey = getApiKey(config, req.provider);
 
   if (req.provider === 'anthropic') {
-    return completeWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking);
+    return completeWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.effort);
   }
 
   const baseURL = OPENAI_COMPATIBLE_BASE_URLS[req.provider];

@@ -1,8 +1,13 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+
+// Module-scope plugin array so ReactMarkdown's internal memoization sees a
+// stable reference across renders. Passing `[remarkGfm]` as an inline literal
+// defeats it and forces a full parse on every parent re-render.
+const REMARK_PLUGINS = [remarkGfm];
 import { useDraftStream } from '@/hooks/use-draft-stream';
 import { useDraftSuggestions } from '@/hooks/use-draft-suggestions';
 import { AI_PROVIDERS, AI_PROVIDER_KEYS, type AIProviderKey, type AIModelDef } from '@/lib/ai/models';
@@ -70,6 +75,82 @@ interface DraftChatPanelProps {
   /** Linked cases attached to the draft (used by Brief Mode prompt + UI chips). */
   linkedCases?: Array<{ id: string; name: string; caseNumber?: string | null }>;
 }
+
+// ---------------------------------------------------------------------------
+// Memoized chat message bubble — keeps ReactMarkdown out of the per-keystroke
+// render path. Without this, every character typed in the chat textarea
+// re-parses the full assistant-message markdown history (hundreds of ms for a
+// long conversation) and the input appears to lag.
+// ---------------------------------------------------------------------------
+
+interface ChatMessageBubbleProps {
+  message: ChatMessage;
+  hasSelection: boolean;
+  onInsertText?: (text: string) => void;
+  onInsertWithFootnotes?: (text: string) => void;
+  onReplaceSelection?: (text: string) => void;
+}
+
+const ChatMessageBubble = React.memo(function ChatMessageBubble({
+  message: m,
+  hasSelection,
+  onInsertText,
+  onInsertWithFootnotes,
+  onReplaceSelection,
+}: ChatMessageBubbleProps) {
+  return (
+    <div className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+      <div
+        className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
+          m.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-800'
+        }`}
+      >
+        {m.role === 'assistant' ? (
+          <div className="prose prose-sm max-w-none">
+            {m.mode === 'deep' && (
+              <div className="text-[10px] text-indigo-500 font-medium mb-1 not-prose">Deep Search Result</div>
+            )}
+            <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{m.content}</ReactMarkdown>
+            <div className="flex gap-1.5 mt-2 pt-2 border-t border-gray-200 not-prose">
+              {onInsertText && (
+                <button
+                  onClick={() => onInsertText(m.content)}
+                  className="text-[11px] px-2 py-0.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700"
+                >
+                  Insert
+                </button>
+              )}
+              {onInsertWithFootnotes && m.content.includes('[^') && (
+                <button
+                  onClick={() => onInsertWithFootnotes(m.content)}
+                  className="text-[11px] px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-800"
+                >
+                  Insert with Footnotes
+                </button>
+              )}
+              {onReplaceSelection && hasSelection && (
+                <button
+                  onClick={() => onReplaceSelection(m.content)}
+                  className="text-[11px] px-2 py-0.5 rounded bg-blue-100 hover:bg-blue-200 text-blue-700"
+                >
+                  Replace Selection
+                </button>
+              )}
+              <button
+                onClick={() => navigator.clipboard.writeText(m.content)}
+                className="text-[11px] px-2 py-0.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+        ) : (
+          m.content
+        )}
+      </div>
+    </div>
+  );
+});
 
 // ---------------------------------------------------------------------------
 // Chat input height persistence (localStorage, same pattern as panel widths)
@@ -153,6 +234,7 @@ export default function DraftChatPanel({
   // Toggles
   const [deepSearch, setDeepSearch] = usePersistedState<boolean>('draft.chat.deepSearch', false);
   const [thinkingMode, setThinkingMode] = usePersistedState<boolean>('draft.chat.thinking', true);
+  const [effort, setEffort] = usePersistedState<'low' | 'medium' | 'high' | 'xhigh' | 'max'>('draft.chat.effort', 'medium');
   const [speedSettings, setSpeedSettings] = usePersistedState<SpeedSettings>('draft.chat.speedSettings', {
     preset: 'medium',
     docWindow: SPEED_PRESETS.medium.docWindow,
@@ -606,6 +688,7 @@ export default function DraftChatPanel({
         model: effectiveModel,
         thinking: thinkingMode,
         maxTokens,
+        effort,
         briefMode,
         vectorSearch,
         draftId: draftId || undefined,
@@ -964,7 +1047,25 @@ export default function DraftChatPanel({
               {/* Auto-Suggest toggle (mutually exclusive with Deep Search) */}
               <div className="flex items-center gap-1.5">
                 <label className="text-[10px] font-medium text-gray-500" title="Ask AI for structured accept/deny/ignore suggestions">Suggest</label>
-                <span className="text-[9px] text-gray-400 font-medium">{speedSettings.preset}</span>
+                <select
+                  value={speedSettings.preset}
+                  onChange={(e) => {
+                    const p = e.target.value as SpeedPreset;
+                    setSpeedSettings({
+                      preset: p,
+                      docWindow: SPEED_PRESETS[p].docWindow,
+                      maxSuggestions: SPEED_PRESETS[p].maxSuggestions,
+                      maxTokens: SPEED_PRESETS[p].maxTokens,
+                    });
+                  }}
+                  className="text-[10px] text-gray-600 font-medium bg-transparent hover:bg-gray-100 rounded px-1 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-400"
+                  title="Suggest speed preset"
+                >
+                  <option value="simple">simple</option>
+                  <option value="medium">medium</option>
+                  <option value="ultra">ultra</option>
+                  {speedSettings.preset === 'custom' && <option value="custom">custom</option>}
+                </select>
                 <button
                   type="button"
                   onClick={handleToggleAutoSuggest}
@@ -1029,6 +1130,23 @@ export default function DraftChatPanel({
                 >
                   <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${vectorSearch ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
                 </button>
+                {/* Opus 4.7 adaptive-thinking effort — shown whenever 4.7 is the selected model. */}
+                {provider === 'anthropic' && effectiveModel.startsWith('claude-opus-4-7') && (
+                  <div className="flex items-center gap-1 ml-1" title="Claude Opus 4.7 adaptive-thinking effort. Lower = more visible response, higher = deeper reasoning.">
+                    <label className="text-[10px] font-medium text-gray-500">4.7 Adaptive</label>
+                    <select
+                      value={effort}
+                      onChange={(e) => setEffort(e.target.value as 'low' | 'medium' | 'high' | 'xhigh' | 'max')}
+                      className="text-[10px] text-gray-600 font-medium bg-transparent hover:bg-gray-100 rounded px-1 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-400"
+                    >
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                      <option value="xhigh">xhigh</option>
+                      <option value="max">max</option>
+                    </select>
+                  </div>
+                )}
                 {/* Speed settings gear */}
                 <button
                   type="button"
@@ -1133,59 +1251,14 @@ export default function DraftChatPanel({
             )}
 
             {messages.map((m, i) => (
-              <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div
-                  className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
-                    m.role === 'user'
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 text-gray-800'
-                  }`}
-                >
-                  {m.role === 'assistant' ? (
-                    <div className="prose prose-sm max-w-none">
-                      {m.mode === 'deep' && (
-                        <div className="text-[10px] text-indigo-500 font-medium mb-1 not-prose">Deep Search Result</div>
-                      )}
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-                      {/* Action buttons */}
-                      <div className="flex gap-1.5 mt-2 pt-2 border-t border-gray-200 not-prose">
-                        {onInsertText && (
-                          <button
-                            onClick={() => onInsertText(m.content)}
-                            className="text-[11px] px-2 py-0.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700"
-                          >
-                            Insert
-                          </button>
-                        )}
-                        {onInsertWithFootnotes && m.content.includes('[^') && (
-                          <button
-                            onClick={() => onInsertWithFootnotes(m.content)}
-                            className="text-[11px] px-2 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-800"
-                          >
-                            Insert with Footnotes
-                          </button>
-                        )}
-                        {onReplaceSelection && hasSelection && (
-                          <button
-                            onClick={() => onReplaceSelection(m.content)}
-                            className="text-[11px] px-2 py-0.5 rounded bg-blue-100 hover:bg-blue-200 text-blue-700"
-                          >
-                            Replace Selection
-                          </button>
-                        )}
-                        <button
-                          onClick={() => navigator.clipboard.writeText(m.content)}
-                          className="text-[11px] px-2 py-0.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700"
-                        >
-                          Copy
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    m.content
-                  )}
-                </div>
-              </div>
+              <ChatMessageBubble
+                key={i}
+                message={m}
+                hasSelection={hasSelection}
+                onInsertText={onInsertText}
+                onInsertWithFootnotes={onInsertWithFootnotes}
+                onReplaceSelection={onReplaceSelection}
+              />
             ))}
 
             {/* Thinking log (during streaming) */}
@@ -1204,7 +1277,7 @@ export default function DraftChatPanel({
               <div className="flex justify-start">
                 <div className="max-w-[85%] rounded-lg px-3 py-2 text-sm bg-gray-100 text-gray-800">
                   <div className="prose prose-sm max-w-none">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText || '...'}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{streamingText || '...'}</ReactMarkdown>
                   </div>
                 </div>
               </div>

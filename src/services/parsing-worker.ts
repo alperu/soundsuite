@@ -15,8 +15,35 @@ import { PrismaClient } from '@prisma/client';
 import { createLogger, Logger } from '../lib/logger';
 import { getRedis, isRedisAvailable } from '../lib/redis';
 import { FilingsCacheService } from './filings-cache';
+import { isOcrNotReady } from '../lib/ingestion/errors';
 
 const DOC_STATUS_CHANNEL = 'soundsuite:doc_status';
+
+// Module-level back-off shared by all parsing workers in this process.
+// When OCR reports it can't run on GPU (NoGpuReadyEndpointError → OcrNotReadyError),
+// every worker pauses claims until pausedUntil. The sidecar's gpuOnly watchdog
+// remediates VRAM in the background; on the next poll we'll see gpuReady=true
+// and resume.
+const OCR_PAUSE_MS = 30_000;
+let ocrPausedUntil = 0;
+let lastOcrPauseLog = 0;
+
+export function getOcrPausedUntil(): number {
+  return ocrPausedUntil;
+}
+
+export function isOcrPaused(): boolean {
+  return Date.now() < ocrPausedUntil;
+}
+
+function noteOcrPause(reason: string, logger: Logger): void {
+  ocrPausedUntil = Date.now() + OCR_PAUSE_MS;
+  // Log once per back-off window so we don't spam per-document.
+  if (Date.now() - lastOcrPauseLog > OCR_PAUSE_MS) {
+    lastOcrPauseLog = Date.now();
+    logger.warn(`OCR not ready, pausing parsing claims for ${OCR_PAUSE_MS / 1000}s`, { reason });
+  }
+}
 
 export interface ParsingWorkerConfig {
   /** Unique worker ID (e.g. "worker-1") */
@@ -90,6 +117,15 @@ export class ParsingWorker {
   /** Main poll loop */
   private async poll(): Promise<void> {
     if (!this.running) return;
+
+    // OCR back-off: if OCR is reported not GPU-ready, hold off claiming new
+    // documents so we don't keep flipping QUEUED→PROCESSING→QUEUED while the
+    // sidecar's watchdog is still trying to remediate.
+    if (isOcrPaused()) {
+      const wait = Math.max(1000, ocrPausedUntil - Date.now());
+      this.pollTimer = setTimeout(() => this.poll(), wait);
+      return;
+    }
 
     try {
       const claimed = await this.claimNextDocument();
@@ -207,6 +243,23 @@ export class ParsingWorker {
       // Invalidate cache so files endpoint reflects new status
       await this.invalidateCacheForDocument(documentId);
     } catch (err) {
+      // Soft pause: OCR can't run on GPU right now. Don't burn an attempt;
+      // requeue the document and back off so the sidecar's gpuOnly watchdog
+      // has time to evict competing models and reload OCR fully on GPU.
+      if (isOcrNotReady(err)) {
+        noteOcrPause(err instanceof Error ? err.message : String(err), this.logger);
+        try {
+          await this.prisma.document.update({
+            where: { id: documentId },
+            data: { status: 'QUEUED' },
+          });
+          await this.publishStatusChange(documentId, filePath, 'QUEUED');
+        } catch (dbErr) {
+          this.logger.error('Failed to requeue document after OCR pause', dbErr, { documentId });
+        }
+        return;
+      }
+
       const errorMessage = err instanceof Error ? err.message : String(err);
       this.logger.error('Document processing failed', err, { documentId });
 

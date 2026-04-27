@@ -66,6 +66,7 @@ export async function POST(request: NextRequest) {
       model,
       thinking,
       maxTokens: reqMaxTokens,
+      effort,
       briefMode,
       sectionType,
       vectorSearch,
@@ -87,6 +88,7 @@ export async function POST(request: NextRequest) {
       model: string;
       thinking?: boolean;
       maxTokens?: number;
+      effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
       briefMode?: boolean;
       sectionType?: 'issues' | 'facts' | 'summary' | 'argument' | 'conclusion' | 'general';
       vectorSearch?: boolean;
@@ -165,33 +167,47 @@ export async function POST(request: NextRequest) {
             sendProgress('deep_start', `Deep research across ${effectiveCaseIds.length} case(s)...`);
             try {
               const registry = await getToolRegistry();
-              // Deep search only accepts one caseId per invocation; run per case.
+              // Deep search only accepts one caseId per invocation; fan out
+              // per-case in parallel — sequential `await` over N cases used to
+              // multiply latency by N (3 cases × ~65s = 3 minutes wall time
+              // before the final suggest call could even start). Per-case
+              // failures are isolated so one slow/failing case doesn't block
+              // the rest.
               const deepReports: string[] = [];
               const deepSources: Array<{ text: string; document: string; page: number; citation?: string; citationShort?: string }> = [];
-              for (const cid of effectiveCaseIds) {
-                const result = await deepSearch(query.trim(), registry, {
-                  provider: provider as AIProviderKey,
-                  model: effectiveModel,
-                  caseId: cid,
-                  thinking,
-                  onProgress: (p) => {
-                    // Forward the full DeepSearchProgress payload — sub-queries,
-                    // intent, stats — so the client thinking-log can render it.
-                    const detail: Record<string, unknown> = {};
-                    if (p.subQueries && p.subQueries.length > 0) detail.keywords = p.subQueries;
-                    if (p.searchStats?.totalRetrieved !== undefined) detail.totalSources = p.searchStats.totalRetrieved;
-                    if (p.searchStats?.finalAfterRerank !== undefined) detail.usedSources = p.searchStats.finalAfterRerank;
-                    if (p.subQueryIndex !== undefined && p.subQueryTotal !== undefined) {
-                      detail.patternHits = p.subQueryIndex + 1; // repurpose for "sub-query M of N"
-                      detail.vectorHits = p.subQueryTotal;
-                    }
-                    sendProgress(
-                      p.step,
-                      p.message || p.step,
-                      Object.keys(detail).length > 0 ? detail : undefined
-                    );
-                  },
-                });
+              const perCaseResults = await Promise.all(
+                effectiveCaseIds.map((cid) =>
+                  deepSearch(query.trim(), registry, {
+                    provider: provider as AIProviderKey,
+                    model: effectiveModel,
+                    caseId: cid,
+                    thinking,
+                    onProgress: (p) => {
+                      // Forward the full DeepSearchProgress payload — sub-queries,
+                      // intent, stats — so the client thinking-log can render it.
+                      // With parallel cases these events interleave in the log.
+                      const detail: Record<string, unknown> = {};
+                      if (p.subQueries && p.subQueries.length > 0) detail.keywords = p.subQueries;
+                      if (p.searchStats?.totalRetrieved !== undefined) detail.totalSources = p.searchStats.totalRetrieved;
+                      if (p.searchStats?.finalAfterRerank !== undefined) detail.usedSources = p.searchStats.finalAfterRerank;
+                      if (p.subQueryIndex !== undefined && p.subQueryTotal !== undefined) {
+                        detail.patternHits = p.subQueryIndex + 1; // repurpose for "sub-query M of N"
+                        detail.vectorHits = p.subQueryTotal;
+                      }
+                      sendProgress(
+                        p.step,
+                        p.message || p.step,
+                        Object.keys(detail).length > 0 ? detail : undefined
+                      );
+                    },
+                  }).catch((err) => {
+                    console.warn(`[Draft Chat] Deep search failed for case ${cid}:`, err);
+                    return null;
+                  }),
+                ),
+              );
+              for (const result of perCaseResults) {
+                if (!result) continue;
                 if (result.report) deepReports.push(result.report);
                 for (const s of result.sources) {
                   deepSources.push({
@@ -415,6 +431,7 @@ export async function POST(request: NextRequest) {
               maxTokens: reqMaxTokens || 1024,
               temperature: 0.8, // higher temp → more diverse alternative
               jsonMode: true,
+              effort,
             })) {
               if (event.type === 'token') {
                 fullContent += event.text;
@@ -538,6 +555,7 @@ export async function POST(request: NextRequest) {
                 temperature: 0.1,
                 jsonMode: true,
                 thinking,
+                effort,
               })) {
                 if (event.type === 'token') {
                   fullContent += event.text;
@@ -771,6 +789,7 @@ export async function POST(request: NextRequest) {
             maxTokens: reqMaxTokens || 4096,
             temperature: 0.7,
             thinking,
+            effort,
           })) {
             if (event.type === 'token') {
               fullContent += event.text;

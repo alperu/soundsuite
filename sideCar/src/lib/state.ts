@@ -10,6 +10,10 @@ export interface ContainerDef {
   type: 'ollama' | 'vllm' | 'utility';
   modes: ('indexing' | 'searching')[];
   containerName: string;
+  // When true, the role MUST be fully resident in GPU VRAM. The sidecar will
+  // evict competing Ollama models before loading, force num_gpu at warmup, and
+  // mark gpuReady=false (and refuse routing) on partial offload.
+  gpuOnly?: boolean;
 }
 
 export interface PerRoleState {
@@ -46,6 +50,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     type: 'ollama',
     modes: ['indexing'],
     containerName: `${CONTAINER_PREFIX}ocr`,
+    gpuOnly: true,
   },
   reranker: {
     image: 'vllm/vllm-openai',

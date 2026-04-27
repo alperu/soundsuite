@@ -7,6 +7,10 @@ import { getPreference, setPreference } from '@/lib/indexed-db';
 import { SearchableCombo } from './searchable-combo';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+
+// Module-scope plugin array — a fresh `[remarkGfm]` literal on every render
+// defeats ReactMarkdown's internal memoization and forces a full re-parse.
+const REMARK_PLUGINS = [remarkGfm];
 import { CopyButton } from './copy-button';
 import { MCPParamForm } from './mcp/mcp-param-form';
 import { MCPResultRenderer } from './mcp/mcp-result-renderer';
@@ -290,12 +294,14 @@ export default function SearchInterface({
   const [aiModel, setAiModel] = usePersistedState<string>('search.aiModel', '');
   const [aiResults, setAiResults] = useState<AISearchResult[]>([]);
   const [aiLoading, setAiLoading] = useState(false);
+  const aiAbortRef = useRef<AbortController | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiSearchTime, setAiSearchTime] = useState<number | null>(null);
   const [compareMode, setCompareMode] = usePersistedState<boolean>('search.compareMode', hasExplicitPath ? initialCompareMode : false);
   const [deepSearchMode, setDeepSearchMode] = usePersistedState<boolean>('search.deepSearchMode', hasExplicitPath ? initialDeepMode : false);
   const [thinkingMode, setThinkingMode] = usePersistedState<boolean>('search.thinkingMode', true);
   const [maxTokens, setMaxTokens] = usePersistedState<number>('search.maxTokens', 2048);
+  const [effort, setEffort] = usePersistedState<'low' | 'medium' | 'high' | 'xhigh' | 'max'>('search.effort', 'medium');
   const [inputHeight, setInputHeight] = usePersistedState<number>('search.inputHeight', 72);
   const [aiTurns, setAiTurns] = useState<AIConversationTurn[]>([]);
   const [deepTurns, setDeepTurns] = useState<DeepSearchTurn[]>([]);
@@ -532,9 +538,11 @@ export default function SearchInterface({
         caseId: aiCaseId || undefined,
         thinking: thinkingMode,
         maxTokens,
+        effort,
         ...(history && history.length > 0 ? { history } : {}),
         ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
       }),
+      signal: aiAbortRef.current?.signal,
     });
 
     if (!res.ok) {
@@ -615,9 +623,11 @@ export default function SearchInterface({
         caseId: aiCaseId || undefined,
         thinking: thinkingMode,
         maxTokens,
+        effort,
         ...(history && history.length > 0 ? { history } : {}),
         ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
       }),
+      signal: aiAbortRef.current?.signal,
     });
 
     if (!res.ok) {
@@ -756,6 +766,7 @@ export default function SearchInterface({
     // Determine if this is a new conversation or follow-up
     const isFollowUp = aiTurns.length > 0 || deepTurns.length > 0;
 
+    aiAbortRef.current = new AbortController();
     setAiLoading(true);
     setAiError(null);
 
@@ -838,13 +849,26 @@ export default function SearchInterface({
         });
       }, 500);
     } catch (err) {
-      setAiError(err instanceof Error ? err.message : 'An error occurred');
+      const aborted = (err instanceof DOMException && err.name === 'AbortError')
+        || (err instanceof Error && /aborted/i.test(err.message));
+      if (aborted) {
+        setAiError('Search stopped');
+      } else {
+        setAiError(err instanceof Error ? err.message : 'An error occurred');
+      }
       // Restore query on error so user can retry
       setAiQuery(currentQuery);
+      setDeepProgress(null);
+      setStreamingAnswer(null);
     } finally {
+      aiAbortRef.current = null;
       setAiLoading(false);
     }
   };
+
+  const handleStopAI = useCallback(() => {
+    aiAbortRef.current?.abort();
+  }, []);
 
   // Start new chat — clear conversation
   const handleNewChat = useCallback(() => {
@@ -1259,6 +1283,22 @@ export default function SearchInterface({
                       <option value={32768}>32k</option>
                     </select>
                   </div>
+                  {aiProvider === 'anthropic' && aiModel === 'claude-opus-4-7' && thinkingMode && (
+                    <div className="flex items-center gap-2" title="Adaptive-thinking effort. Lower = more visible response, higher = deeper reasoning.">
+                      <label className="text-xs font-medium text-gray-500">Effort</label>
+                      <select
+                        value={effort}
+                        onChange={(e) => setEffort(e.target.value as 'low' | 'medium' | 'high' | 'xhigh' | 'max')}
+                        className="text-xs border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-purple-400"
+                      >
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                        <option value="xhigh">xHigh</option>
+                        <option value="max">Max</option>
+                      </select>
+                    </div>
+                  )}
                 </div>
               )}
               {embeddingInfo && (
@@ -1441,7 +1481,7 @@ export default function SearchInterface({
                   {streamingAnswer !== null && aiLoading && !deepSearchMode && (
                     <div className="bg-white rounded-lg shadow-sm border border-purple-200 p-4">
                       <div className="prose prose-sm max-w-none text-gray-800">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingAnswer}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{streamingAnswer}</ReactMarkdown>
                       </div>
                       <span className="inline-block w-1.5 h-4 bg-purple-400 animate-pulse ml-0.5 rounded-sm" />
                     </div>
@@ -1502,13 +1542,24 @@ export default function SearchInterface({
                       className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent resize-none overflow-y-auto"
                       style={{ height: inputHeight }}
                     />
-                    <button
-                      type="submit"
-                      disabled={aiLoading || !aiQuery.trim()}
-                      className="px-5 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
-                    >
-                      {aiLoading ? (deepSearchMode ? 'Searching...' : 'Thinking...') : compareMode ? 'Compare' : deepSearchMode ? 'Deep Search' : 'Ask AI'}
-                    </button>
+                    {aiLoading ? (
+                      <button
+                        type="button"
+                        onClick={handleStopAI}
+                        className="px-5 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition-colors whitespace-nowrap inline-flex items-center gap-2"
+                      >
+                        <span className="inline-block w-2.5 h-2.5 bg-white rounded-sm" />
+                        Stop
+                      </button>
+                    ) : (
+                      <button
+                        type="submit"
+                        disabled={!aiQuery.trim()}
+                        className="px-5 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+                      >
+                        {compareMode ? 'Compare' : deepSearchMode ? 'Deep Search' : 'Ask AI'}
+                      </button>
+                    )}
                   </form>
                   <p className="text-[10px] text-gray-400 mt-1.5 text-center">
                     Enter to send, Shift+Enter for new line
@@ -2055,7 +2106,7 @@ const AIResultCard = React.memo(function AIResultCard({ result, compact = false,
       </div>
       <div className={`px-4 py-4 ${compact ? 'max-h-80 overflow-y-auto' : ''}`}>
         <div className="prose prose-sm max-w-none text-gray-800">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.answer}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{result.answer}</ReactMarkdown>
           </div>
       </div>
       {result.sources.length > 0 && (
@@ -2349,7 +2400,7 @@ const DeepSearchResultCard = React.memo(function DeepSearchResultCard({ result, 
         </div>
         <div className="px-6 py-5">
           <div className="prose prose-sm max-w-none text-gray-800">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.report}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{result.report}</ReactMarkdown>
           </div>
         </div>
       </div>

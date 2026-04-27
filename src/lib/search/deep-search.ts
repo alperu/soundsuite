@@ -64,6 +64,10 @@ export interface DeepSearchOptions {
   workflowContext?: string;
   /** Control thinking/reasoning mode for models that support it (e.g. Qwen3). */
   thinking?: boolean;
+  /** Output token budget for the final report LLM call. Falls back to 16384. */
+  maxTokens?: number;
+  /** Anthropic Opus 4.7 adaptive-thinking effort. Default 'medium'. */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
 export interface DeepSearchResult {
@@ -107,7 +111,7 @@ Respond with JSON: { "subQueries": ["query1", "query2", ...], "intent": "brief i
 
 export async function decomposeQuery(
   query: string,
-  options?: { provider?: string; model?: string; history?: ConversationTurn[]; thinking?: boolean },
+  options?: { provider?: string; model?: string; history?: ConversationTurn[]; thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' },
 ): Promise<DecompositionResult> {
   try {
     // For follow-ups, include conversation context so decomposition is aware of prior discussion
@@ -128,6 +132,7 @@ export async function decomposeQuery(
         provider: options?.provider,
         model: options?.model,
         thinking: options?.thinking,
+        effort: options?.effort,
       },
     );
 
@@ -410,7 +415,7 @@ export async function generateReport(
   query: string,
   decomposition: DecompositionResult,
   sources: DeepSearchSource[],
-  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean },
+  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' },
 ): Promise<string> {
   if (sources.length === 0) {
     return '## No Results Found\n\nThe deep search did not find any relevant document excerpts for your query. Try rephrasing your question or broadening the search scope.';
@@ -474,11 +479,12 @@ ${contextBlock}`;
 
   try {
     return await callLLM(REPORT_SYSTEM_PROMPT, userContent, {
-      maxTokens: 16384,
+      maxTokens: options?.maxTokens ?? 16384,
       temperature: 0.3,
       provider: options?.provider,
       model: options?.model,
       thinking: options?.thinking,
+      effort: options?.effort,
     });
   } catch (err) {
     // Surface the real error — the old bare catch hid it and only returned
@@ -508,7 +514,7 @@ export async function deepSearch(
   registry: ToolRegistry,
   options: DeepSearchOptions = {},
 ): Promise<DeepSearchResult> {
-  const { provider, model, caseId, onProgress, history, workflowContext, thinking } = options;
+  const { provider, model, caseId, onProgress, history, workflowContext, thinking, maxTokens, effort } = options;
   const emit = onProgress || (() => {});
 
   console.log(`[Deep Search] Starting for query: "${query.slice(0, 100)}"`);
@@ -516,7 +522,7 @@ export async function deepSearch(
 
   // Step 1: Decompose
   emit({ step: 'decomposing', message: history?.length ? 'Analyzing follow-up in context...' : 'Breaking question into targeted sub-queries...' });
-  const decomposition = await decomposeQuery(query, { provider, model, history });
+  const decomposition = await decomposeQuery(query, { provider, model, history, thinking, effort });
   console.log(`[Deep Search] Decomposed into ${decomposition.subQueries.length} sub-queries:`, decomposition.subQueries);
 
   // Step 2: Parallel searches
@@ -576,6 +582,8 @@ export async function deepSearch(
     history,
     workflowContext,
     thinking,
+    maxTokens,
+    effort,
   });
 
   console.log(`[Deep Search] Completed in ${Date.now() - t0}ms`);

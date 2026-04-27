@@ -22,8 +22,9 @@ interface ContainerState {
   vram?: number;
   type?: string;
   model?: string | null;
-  config?: { image: string; model: string; port: number; vram: number; type: string };
+  config?: { image: string; model: string; port: number; vram: number; type: string; gpuOnly?: boolean };
   loadedModels?: Array<{ name: string; size: string; sizeBytes?: number; sizeVram?: number; gpuPercent?: number; processor: string; until: string }>;
+  gpuReady?: boolean;
 }
 
 interface RoleInfo {
@@ -660,22 +661,25 @@ export default function GpuFleetPanel() {
                                       const gpuPct = m0.gpuPercent ?? (m0.processor === 'GPU' ? 100 : 0);
                                       const isFullGpu = gpuPct >= 99;
                                       const isPartial = gpuPct > 0 && gpuPct < 99;
-                                      const colorClass = isFullGpu ? 'text-green-700' : isPartial ? 'text-orange-600' : 'text-red-600';
-                                      const dotClass = isFullGpu ? 'bg-green-500' : isPartial ? 'bg-orange-400' : 'bg-red-500';
+                                      const gpuOnly = c.config?.gpuOnly === true;
+                                      // For gpuOnly roles, partial offload is a hard error — treat as red.
+                                      const isBlocked = gpuOnly && !isFullGpu;
+                                      const colorClass = isBlocked ? 'text-red-700' : isFullGpu ? 'text-green-700' : isPartial ? 'text-orange-600' : 'text-red-600';
+                                      const dotClass = isBlocked ? 'bg-red-600' : isFullGpu ? 'bg-green-500' : isPartial ? 'bg-orange-400' : 'bg-red-500';
                                       return (
                                         <div className="flex items-center gap-1">
                                           <span className={`inline-block w-1.5 h-1.5 rounded-full ${dotClass}`} />
                                           <span className={colorClass}>{c.loadedModels!.map(m => m.name).join(', ')}</span>
-                                          <span className={`ml-1 ${isFullGpu ? 'text-gray-400' : colorClass + ' font-semibold'}`}>
-                                            ({m0.processor} {gpuPct}% {m0.size})
+                                          <span className={`ml-1 ${isFullGpu && !gpuOnly ? 'text-gray-400' : colorClass + ' font-semibold'}`}>
+                                            ({m0.processor} {gpuPct}% {m0.size}{isBlocked ? ' — GPU not ready (CPU offload blocked)' : ''})
                                           </span>
                                         </div>
                                       );
                                     })()
                                   ) : (
-                                    <div className="flex items-center gap-1 text-orange-600">
-                                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-orange-400" />
-                                      not loaded
+                                    <div className={`flex items-center gap-1 ${c.config?.gpuOnly ? 'text-red-700' : 'text-orange-600'}`}>
+                                      <span className={`inline-block w-1.5 h-1.5 rounded-full ${c.config?.gpuOnly ? 'bg-red-600' : 'bg-orange-400'}`} />
+                                      {c.config?.gpuOnly ? 'not loaded (GPU required)' : 'not loaded'}
                                     </div>
                                   )
                                 ) : (

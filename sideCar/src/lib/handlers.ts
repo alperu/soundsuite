@@ -1,6 +1,7 @@
 import { state } from './state';
 import { getContainerState, startContainer, stopContainer, removeContainer, createContainer, pullImage, getDockerMode, buildExpectedConfig, detectConfigDrift, isPortConflict, findContainerOnPort } from './docker';
 import { ollamaList, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
+import { loadGpuOnly } from './containers';
 import { clearIdleTimerForRole, clearAllIdleTimers, startIdleTimerForRole, startIdleTimer } from './idle-timers';
 import { getAllContainerStates } from './containers';
 import { createLogger } from './logger';
@@ -175,17 +176,20 @@ function fireAndForgetLoad(role: string, port: number, model: string, attempt = 
     }
   }
 
-  log.info(`fireAndForgetLoad: loading ${model} for ${role} on port ${port} (attempt ${attempt}/${MAX_ATTEMPTS})`);
+  log.info(`fireAndForgetLoad: loading ${model} for ${role} on port ${port} (attempt ${attempt}/${MAX_ATTEMPTS})${def?.gpuOnly ? ' [gpuOnly: evict + force GPU]' : ''}`);
   state.modelLoading.add(role);
   const loadTaskId = tasks.start('model-load', `Load ${model} into VRAM`, role);
-  ollamaLoad(port, model, {
-    onProgress: (detail) => {
-      if (detail) {
-        log.info(`fireAndForgetLoad: ${role} progress: "${detail.slice(0, 120)}"`);
-        tasks.update(loadTaskId, { detail: detail.slice(0, 100) });
-      }
-    },
-  }).then((ok) => {
+  const loadPromise = def?.gpuOnly
+    ? loadGpuOnly(role)
+    : ollamaLoad(port, model, {
+        onProgress: (detail) => {
+          if (detail) {
+            log.info(`fireAndForgetLoad: ${role} progress: "${detail.slice(0, 120)}"`);
+            tasks.update(loadTaskId, { detail: detail.slice(0, 100) });
+          }
+        },
+      });
+  loadPromise.then((ok) => {
     if (ok) {
       tasks.complete(loadTaskId);
       log.info(`fireAndForgetLoad: ${role} loaded successfully`);

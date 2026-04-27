@@ -133,7 +133,11 @@ function fromMarkdown(content: string, fileName: string): ChatSession {
   const { meta, body } = parseFrontmatter(content);
 
   const turns: ChatTurn[] = [];
-  const sections = body.split(/\n---\n/).map(s => s.trim()).filter(Boolean);
+  // Only split at real turn boundaries. toMarkdown joins turns with "\n\n---\n\n"
+  // followed by "## User" or "## Assistant". A plain "---" horizontal rule inside
+  // a response body would previously fragment the turn and drop everything after
+  // the first rule (loads only kept sections starting with the two headings).
+  const sections = body.split(/\n\n---\n\n(?=## (?:User|Assistant)\n)/).map(s => s.trim()).filter(Boolean);
 
   for (const section of sections) {
     const isUser = section.startsWith('## User');

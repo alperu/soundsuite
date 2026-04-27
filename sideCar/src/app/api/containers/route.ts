@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAllContainerStates } from '@/lib/containers';
+import { getAllContainerStates, loadGpuOnly } from '@/lib/containers';
 import { handleStart, handleStop, pullOllamaModelAsync } from '@/lib/handlers';
 import { ollamaLoad } from '@/lib/ollama-api';
 import { state } from '@/lib/state';
@@ -39,9 +39,16 @@ export async function POST(request: NextRequest) {
       const def = state.registry[role];
       if (!def) return NextResponse.json({ error: `Unknown role: ${role}` }, { status: 400, headers: cors });
       if (def.type !== 'ollama' || !def.model) return NextResponse.json({ error: `${role} is not an Ollama container with a model` }, { status: 400, headers: cors });
-      const loaded = await ollamaLoad(def.port, def.model);
-      if (!loaded) return NextResponse.json({ error: `Failed to load ${def.model} into VRAM` }, { status: 500, headers: cors });
-      return NextResponse.json({ ok: true, message: `${def.model} loaded into VRAM` }, { headers: cors });
+      const loaded = def.gpuOnly
+        ? await loadGpuOnly(role)
+        : await ollamaLoad(def.port, def.model);
+      if (!loaded) {
+        const reason = def.gpuOnly
+          ? `Failed to load ${def.model} fully on GPU (insufficient VRAM after eviction)`
+          : `Failed to load ${def.model} into VRAM`;
+        return NextResponse.json({ error: reason }, { status: 500, headers: cors });
+      }
+      return NextResponse.json({ ok: true, message: `${def.model} loaded into VRAM${def.gpuOnly ? ' (full GPU)' : ''}` }, { headers: cors });
     }
 
     if (action === 'pullModel' || action === 'pullAndLoad') {

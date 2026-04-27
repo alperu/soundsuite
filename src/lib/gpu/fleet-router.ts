@@ -411,6 +411,24 @@ export async function resolveEndpoint(role: GpuRole): Promise<ResolvedEndpoint> 
   // Try sidecars that are connected/reachable
   const reachable = fleet.sidecars.filter(s => s.status === 'connected');
 
+  // gpuOnly is enforced at the role level. The sidecar registry is the source
+  // of truth (sideCar/src/lib/state.ts); we mirror the well-known set here as
+  // a cold-path guard so that on first boot / cache miss / stale cache the
+  // master still refuses CPU offload for OCR. If any sidecar additionally
+  // advertises gpuOnly for this role at runtime, that also flips the flag.
+  const GPU_ONLY_ROLES: ReadonlySet<string> = new Set(['ocr']);
+  let roleIsGpuOnly = GPU_ONLY_ROLES.has(role);
+  if (!roleIsGpuOnly) {
+    for (const sidecar of reachable) {
+      const cached = statusCache.getSidecarStatus(sidecar.url);
+      const c = cached?.containers?.[role];
+      if (c?.config?.gpuOnly === true) {
+        roleIsGpuOnly = true;
+        break;
+      }
+    }
+  }
+
   // Phase 1: Find sidecar already running this role's container (from cache — no push)
   // Prefer fully GPU-loaded models over CPU-offloaded ones
   let bestSidecar: FleetSidecar | null = null;
@@ -426,6 +444,11 @@ export async function resolveEndpoint(role: GpuRole): Promise<ResolvedEndpoint> 
     const container = cached.containers?.[role];
     if (container?.status !== 'running') continue;
 
+    // Belt-and-suspenders for gpuOnly: the sidecar may have already flagged
+    // gpuReady=false for this container (e.g. partial offload it couldn't fix).
+    // Skip such sidecars entirely so we never route to them.
+    if (roleIsGpuOnly && container.gpuReady === false) continue;
+
     const load = cached.roles?.[role]?.activeRequests ?? cached.activeRequests ?? 0;
 
     // Check GPU offload status from loaded models
@@ -440,8 +463,8 @@ export async function resolveEndpoint(role: GpuRole): Promise<ResolvedEndpoint> 
         bestSidecar = sidecar;
       }
     } else if (gpuPct >= 0) {
-      // CPU-offloaded — track as fallback only
-      if (load < cpuOffloadedLoad) {
+      // CPU-offloaded — track as fallback only (and never accept for gpuOnly roles)
+      if (!roleIsGpuOnly && load < cpuOffloadedLoad) {
         cpuOffloadedLoad = load;
         cpuOffloadedGpuPct = gpuPct;
         cpuOffloadedFallback = sidecar;
@@ -457,7 +480,8 @@ export async function resolveEndpoint(role: GpuRole): Promise<ResolvedEndpoint> 
   }
 
   // Use CPU-offloaded fallback only if no fully GPU-loaded sidecar available
-  if (!bestSidecar && cpuOffloadedFallback) {
+  // AND the role does not require GPU-only execution.
+  if (!bestSidecar && cpuOffloadedFallback && !roleIsGpuOnly) {
     bestSidecar = cpuOffloadedFallback;
     bestLoad = cpuOffloadedLoad;
     bestGpuPct = cpuOffloadedGpuPct;
@@ -466,6 +490,26 @@ export async function resolveEndpoint(role: GpuRole): Promise<ResolvedEndpoint> 
       sidecar: cpuOffloadedFallback.hostname,
       gpuPercent: cpuOffloadedGpuPct,
     });
+  }
+
+  // gpuOnly + no fully-GPU candidate AND no fallback we can take. Do not
+  // attempt phase 2/3 acquire either — those would just spin up the container
+  // somewhere with no guarantee of full GPU. Throw so the caller (worker or
+  // OCR engine) can pause and retry once the sidecar watchdog frees VRAM.
+  if (!bestSidecar && roleIsGpuOnly) {
+    const summary = reachable.map(s => {
+      const cached = statusCache.getSidecarStatus(s.url);
+      const c = cached?.containers?.[role];
+      const status = c?.status ?? 'no-container';
+      const gpuReady = c?.gpuReady;
+      const lm = c?.loadedModels?.[0];
+      const pct = lm?.gpuPercent ?? (lm?.processor === 'GPU' ? 100 : lm ? 0 : -1);
+      return `${s.hostname}(status=${status},gpuReady=${gpuReady},gpu%=${pct})`;
+    }).join(', ');
+    const reason = `no GPU-ready sidecar for ${role}; candidates: [${summary}]`;
+    logger.warn(`Route: ${role} — refusing CPU-offload (gpuOnly). ${reason}`);
+    const { NoGpuReadyEndpointError } = await import('@/lib/gpu/errors');
+    throw new NoGpuReadyEndpointError(role, reason);
   }
 
   if (bestSidecar) {

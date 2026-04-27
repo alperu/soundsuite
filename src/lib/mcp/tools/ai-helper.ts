@@ -75,7 +75,7 @@ export async function getAvailableProvider(): Promise<{ provider: AIProviderKey;
 export async function callLLM(
   systemPrompt: string,
   userContent: string,
-  options?: { maxTokens?: number; temperature?: number; provider?: string; model?: string; jsonMode?: boolean; thinking?: boolean; context?: ToolExecutionContext },
+  options?: { maxTokens?: number; temperature?: number; provider?: string; model?: string; jsonMode?: boolean; thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; context?: ToolExecutionContext },
 ): Promise<string> {
   let source: string;
   const { provider, model } = (options?.provider && options?.model)
@@ -99,6 +99,7 @@ export async function callLLM(
     temperature: options?.temperature ?? 0.2,
     jsonMode: options?.jsonMode,
     thinking: options?.thinking,
+    effort: options?.effort,
   });
 
   return response.content;
@@ -150,7 +151,7 @@ const JSON_REINFORCEMENT = '\n\nCRITICAL: You MUST respond with ONLY a valid JSO
 export async function callLLMJson<T>(
   systemPrompt: string,
   userContent: string,
-  options?: { maxTokens?: number; temperature?: number; provider?: string; model?: string; thinking?: boolean; context?: ToolExecutionContext },
+  options?: { maxTokens?: number; temperature?: number; provider?: string; model?: string; thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; context?: ToolExecutionContext },
 ): Promise<T> {
   const reinforcedPrompt = systemPrompt + JSON_REINFORCEMENT;
   const raw = await callLLM(reinforcedPrompt, userContent, { ...options, jsonMode: true });

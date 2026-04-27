@@ -6,6 +6,7 @@ interface ContainerConfig {
   port: number;
   vram: number;
   type: string;
+  gpuOnly?: boolean;
 }
 
 interface LoadedModel {
@@ -107,16 +108,18 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
                             const gpuPct = m.gpuPercent ?? (m.processor === 'GPU' ? 100 : 0);
                             const isFullGpu = gpuPct >= 99;
                             const isPartial = gpuPct > 0 && gpuPct < 99;
-                            const colorClass = isFullGpu ? 'text-green-700' : isPartial ? 'text-orange-600' : 'text-red-600';
-                            const dotClass = isFullGpu ? 'bg-green-500' : isPartial ? 'bg-orange-400' : 'bg-red-500';
+                            const gpuOnly = container.config?.gpuOnly === true;
+                            const isBlocked = gpuOnly && !isFullGpu;
+                            const colorClass = isBlocked ? 'text-red-700' : isFullGpu ? 'text-green-700' : isPartial ? 'text-orange-600' : 'text-red-600';
+                            const dotClass = isBlocked ? 'bg-red-600' : isFullGpu ? 'bg-green-500' : isPartial ? 'bg-orange-400' : 'bg-red-500';
                             return (
                               <>
                                 <span className={`inline-block w-1.5 h-1.5 rounded-full ${dotClass}`} />
                                 <span className={colorClass}>
                                   {container.loadedModels!.map(m => m.name).join(', ')}
                                 </span>
-                                <span className={`ml-1 ${isFullGpu ? 'text-slate-400' : colorClass + ' font-semibold'}`}>
-                                  ({m.processor} {gpuPct}% {m.size})
+                                <span className={`ml-1 ${isFullGpu && !gpuOnly ? 'text-slate-400' : colorClass + ' font-semibold'}`}>
+                                  ({m.processor} {gpuPct}% {m.size}{isBlocked ? ' — GPU not ready' : ''})
                                 </span>
                               </>
                             );

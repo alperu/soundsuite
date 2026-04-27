@@ -1,6 +1,6 @@
 import { state } from './state';
 import { getContainerState, startContainer, stopContainer, removeContainer, pullImage, createContainer, dockerRequest, buildExpectedConfig, detectConfigDrift, type ContainerState } from './docker';
-import { ollamaPs, ollamaList, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
+import { ollamaPs, ollamaList, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama } from './ollama-api';
 import { clearIdleTimerForRole } from './idle-timers';
 import { saveConfig } from './config';
 import { createLogger } from './logger';
@@ -40,12 +40,81 @@ async function ensureContainerForRole(role: string): Promise<void> {
 
 const log = createLogger('containers');
 
+// Tracks the last remediation attempt for a gpuOnly role so the watchdog
+// doesn't hammer Ollama when we're already in a known-bad state.
+const REMEDIATE_COOLDOWN_MS = 60_000;
+const lastRemediateAttempt: Record<string, number> = {};
+
+/**
+ * Free GPU VRAM in preparation for loading a gpuOnly role.
+ *
+ * Strategy: unload any Ollama model that is (1) not gpuOnly itself and (2) not
+ * needed in the current mode. The mode filter is critical — if we evicted
+ * `embedding` (modes=['indexing','searching']) while we're indexing, the
+ * ingestion pipeline that just ran OCR would immediately reload embedding,
+ * which would squeeze OCR back into partial offload, which would trigger the
+ * watchdog to evict again → thrash. Roles whose modes include the active
+ * mode are considered in-use and skipped.
+ */
+export async function evictForRole(role: string): Promise<string[]> {
+  const def = state.registry[role];
+  if (!def?.gpuOnly) return [];
+  const activeMode = state.currentMode;
+  const evicted: string[] = [];
+  for (const [otherRole, otherDef] of Object.entries(state.registry)) {
+    if (otherRole === role) continue;
+    if (otherDef.type !== 'ollama') continue;
+    if (otherDef.gpuOnly) continue; // don't evict another gpuOnly role
+    if (!otherDef.model) continue;
+    if (otherDef.modes.includes(activeMode)) {
+      // Role is in use in the current mode — leave it alone.
+      continue;
+    }
+    try {
+      const ps = await ollamaPs(otherDef.port).catch(() => []);
+      if (ps.length === 0) continue; // nothing loaded on that endpoint
+      for (const m of ps) {
+        const ok = await ollamaUnload(otherDef.port, m.name);
+        if (ok) {
+          evicted.push(`${otherRole}:${m.name}`);
+          log.info(`evict-for-${role}: unloaded ${m.name} on ${otherRole} (port ${otherDef.port}, mode=${activeMode})`);
+        }
+      }
+    } catch (err) {
+      log.warn(`evict-for-${role}: failed on ${otherRole}: ${(err as Error).message}`);
+    }
+  }
+  return evicted;
+}
+
+/**
+ * Load (or remediate) a gpuOnly model. Evicts other Ollama models first, then
+ * forces full GPU residency. Returns true on verified GPU load. Sets gpuReady
+ * on the per-role state via the caller's containerState.
+ */
+export async function loadGpuOnly(role: string): Promise<boolean> {
+  const def = state.registry[role];
+  if (!def || def.type !== 'ollama' || !def.model) return false;
+  const evicted = await evictForRole(role);
+  if (evicted.length > 0) {
+    // Give Ollama a beat to actually release VRAM before we ask for it back.
+    await new Promise((r) => setTimeout(r, 1_500));
+  }
+  const ok = await ollamaLoad(def.port, def.model, { forceFullGpu: true });
+  if (ok) return true;
+  // One retry: maybe a competing model loaded in between. Sweep again.
+  log.info(`loadGpuOnly: ${role} first attempt failed, sweeping again`);
+  const evicted2 = await evictForRole(role);
+  if (evicted2.length > 0) await new Promise((r) => setTimeout(r, 1_500));
+  return ollamaLoad(def.port, def.model, { forceFullGpu: true });
+}
+
 export async function getAllContainerStates(): Promise<Record<string, ContainerState>> {
   const states: Record<string, ContainerState> = {};
   for (const [role, def] of Object.entries(state.registry)) {
     states[role] = await getContainerState(def.containerName);
     states[role].role = role;
-    states[role].config = { image: def.image, model: def.model, port: def.port, vram: def.vram, type: def.type };
+    states[role].config = { image: def.image, model: def.model, port: def.port, vram: def.vram, type: def.type, gpuOnly: def.gpuOnly };
 
     // Fetch loaded models for running Ollama containers via HTTP API
     if (def.type === 'ollama' && states[role].status === 'running') {
@@ -62,12 +131,46 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
         }));
         states[role].loadedModels = models;
 
-        // Warn about CPU-offloaded models
+        // Compute gpuReady for gpuOnly roles. Default true; flipped false if
+        // any loaded model on this endpoint is partially on CPU.
+        if (def.gpuOnly) {
+          const offload = models.find(m => m.gpuPercent !== undefined && m.gpuPercent < 99);
+          if (models.length === 0) {
+            // Not loaded yet — heartbeat below will load it. Don't claim ready.
+            states[role].gpuReady = false;
+          } else if (offload) {
+            states[role].gpuReady = false;
+          } else {
+            states[role].gpuReady = true;
+          }
+        }
+
+        // Warn about CPU-offloaded models. For gpuOnly roles, also trigger
+        // remediation: evict competitors + force-reload on GPU.
         for (const m of models) {
-          if (m.gpuPercent !== undefined && m.gpuPercent < 99 && m.gpuPercent > 0) {
+          const partial = m.gpuPercent !== undefined && m.gpuPercent < 99 && m.gpuPercent > 0;
+          const allCpu = m.sizeBytes && m.sizeBytes > 0 && (!m.sizeVram || m.sizeVram === 0);
+          if (partial) {
             log.warn(`CPU OFFLOAD: ${role} model ${m.name} is only ${m.gpuPercent}% in GPU VRAM (${m.processor}) — inference will be slow`);
-          } else if (m.sizeBytes && m.sizeBytes > 0 && (!m.sizeVram || m.sizeVram === 0)) {
+          } else if (allCpu) {
             log.warn(`CPU OFFLOAD: ${role} model ${m.name} is running entirely on CPU — inference will be very slow`);
+          }
+          if (def.gpuOnly && (partial || allCpu) && !state.modelLoading.has(role)) {
+            const last = lastRemediateAttempt[role] || 0;
+            if (Date.now() - last >= REMEDIATE_COOLDOWN_MS) {
+              lastRemediateAttempt[role] = Date.now();
+              log.warn(`gpuOnly watchdog: ${role}/${m.name} on CPU — unloading and reloading with full GPU`);
+              state.modelLoading.add(role);
+              const remediateTaskId = tasks.start('model-load', `Remediate ${m.name} (force GPU)`, role);
+              ollamaUnload(def.port, m.name)
+                .then(() => loadGpuOnly(role))
+                .then((ok) => {
+                  if (ok) tasks.complete(remediateTaskId);
+                  else tasks.fail(remediateTaskId, 'Force-GPU reload failed (insufficient VRAM?)');
+                })
+                .catch((err) => tasks.fail(remediateTaskId, (err as Error).message))
+                .finally(() => state.modelLoading.delete(role));
+            }
           }
         }
 
@@ -98,15 +201,18 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
             const onDisk = diskModels.some(m => m.includes(modelBase));
             if (onDisk) {
               // Model on disk but not in VRAM — load it
-              log.info(`heartbeat: ${model} on disk but not in VRAM — loading...`);
+              log.info(`heartbeat: ${model} on disk but not in VRAM — loading${def.gpuOnly ? ' (gpuOnly: evict + force GPU)' : ''}...`);
               state.pullFailCount[role] = 0; // on disk = pull succeeded at some point
               state.modelLoading.add(role);
               const loadTaskId = tasks.start('model-load', `Load ${model} into VRAM`, role);
-              ollamaLoad(def.port, model, {
-                onProgress: (detail) => tasks.update(loadTaskId, { detail: detail.slice(0, 100) }),
-              }).then((ok) => {
+              const loadPromise = def.gpuOnly
+                ? loadGpuOnly(role)
+                : ollamaLoad(def.port, model, {
+                    onProgress: (detail) => tasks.update(loadTaskId, { detail: detail.slice(0, 100) }),
+                  });
+              loadPromise.then((ok) => {
                 if (ok) tasks.complete(loadTaskId);
-                else tasks.fail(loadTaskId, 'Load returned false');
+                else tasks.fail(loadTaskId, def.gpuOnly ? 'GPU-only load failed (insufficient VRAM?)' : 'Load returned false');
               }).catch((err) => {
                 tasks.fail(loadTaskId, (err as Error).message);
               }).finally(() => {
@@ -139,13 +245,16 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
                   }
                   state.pullFailCount[role] = 0;
                   tasks.complete(pullTaskId);
-                  log.info(`heartbeat: ${model} pulled and verified, loading into VRAM...`);
+                  log.info(`heartbeat: ${model} pulled and verified, loading into VRAM${def.gpuOnly ? ' (gpuOnly)' : ''}...`);
                   const loadTaskId = tasks.start('model-load', `Load ${model} into VRAM`, role);
-                  return ollamaLoad(def.port, model, {
-                    onProgress: (detail) => tasks.update(loadTaskId, { detail: detail.slice(0, 100) }),
-                  }).then((ok) => {
+                  const loadPromise = def.gpuOnly
+                    ? loadGpuOnly(role)
+                    : ollamaLoad(def.port, model, {
+                        onProgress: (detail) => tasks.update(loadTaskId, { detail: detail.slice(0, 100) }),
+                      });
+                  return loadPromise.then((ok) => {
                     if (ok) tasks.complete(loadTaskId);
-                    else tasks.fail(loadTaskId, 'Load returned false');
+                    else tasks.fail(loadTaskId, def.gpuOnly ? 'GPU-only load failed (insufficient VRAM?)' : 'Load returned false');
                   }).catch((err) => {
                     tasks.fail(loadTaskId, (err as Error).message);
                     throw err;

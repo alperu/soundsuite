@@ -30,6 +30,7 @@ export async function POST(request: NextRequest) {
       history,
       thinking,
       maxTokens: reqMaxTokens,
+      effort,
     } = body as {
       query: string;
       provider: string;
@@ -42,6 +43,7 @@ export async function POST(request: NextRequest) {
       history?: Array<{ role: 'user' | 'assistant'; content: string }>;
       thinking?: boolean;
       maxTokens?: number;
+      effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
     };
 
     if (!query?.trim()) {
@@ -243,6 +245,7 @@ ${contextChunks || '(No relevant documents found)'}`;
             maxTokens: reqMaxTokens ?? 2048,
             temperature: 0.3,
             thinking,
+            effort,
           })) {
             if (event.type === 'token') {
               fullContent += event.text;
