@@ -408,6 +408,16 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
     };
   }
 
+  // VRAM accounting — best-effort. If nvidia-smi or any endpoint hiccups, we
+  // still return the rest of the status with vram=null so the UI can render.
+  let vram: unknown = null;
+  try {
+    const { snapshotVram } = await import('./vram-accountant');
+    vram = await snapshotVram();
+  } catch (err) {
+    log.warn(`handleStatus: vram snapshot failed: ${(err as Error).message}`);
+  }
+
   return {
     hostname: os.hostname(),
     ip: getPrimaryIp(),
@@ -430,5 +440,6 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
     dockerMode: getDockerMode(),
     tasks: tasks.getAll(),
     connectionStatus: state.connectionStatus,
+    vram,
   };
 }

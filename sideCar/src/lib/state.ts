@@ -2,6 +2,8 @@ import type { WebSocket } from 'ws';
 
 export const CONTAINER_PREFIX = 'ss-';
 
+export type RolePriority = 'critical' | 'high' | 'normal';
+
 export interface ContainerDef {
   image: string;
   model: string | null;
@@ -11,9 +13,13 @@ export interface ContainerDef {
   modes: ('indexing' | 'searching')[];
   containerName: string;
   // When true, the role MUST be fully resident in GPU VRAM. The sidecar will
-  // evict competing Ollama models before loading, force num_gpu at warmup, and
-  // mark gpuReady=false (and refuse routing) on partial offload.
+  // evict competing models before loading, force num_gpu at warmup, and mark
+  // gpuReady=false (and refuse routing) on partial offload.
   gpuOnly?: boolean;
+  // Eviction order. The planner sorts evictees ascending by priority — 'normal'
+  // gets evicted before 'high'; 'critical' is never evicted. Defaults to
+  // 'normal' when omitted to preserve back-compat.
+  priority?: RolePriority;
 }
 
 export interface PerRoleState {
@@ -32,6 +38,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     type: 'ollama',
     modes: ['indexing', 'searching'],
     containerName: `${CONTAINER_PREFIX}embedding`,
+    priority: 'high', // used in both modes; small footprint; cheap to keep loaded
   },
   completion: {
     image: 'ollama/ollama',
@@ -41,6 +48,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     type: 'ollama',
     modes: ['searching'],
     containerName: `${CONTAINER_PREFIX}completion`,
+    priority: 'normal',
   },
   ocr: {
     image: 'ollama/ollama',
@@ -51,6 +59,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     modes: ['indexing'],
     containerName: `${CONTAINER_PREFIX}ocr`,
     gpuOnly: true,
+    priority: 'critical',
   },
   reranker: {
     image: 'vllm/vllm-openai',
@@ -60,6 +69,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     type: 'vllm',
     modes: ['searching'],
     containerName: `${CONTAINER_PREFIX}reranker`,
+    priority: 'normal',
   },
   cuda: {
     image: 'nvidia/cuda:12.4.1-base-ubuntu22.04',

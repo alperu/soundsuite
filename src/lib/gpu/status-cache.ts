@@ -34,6 +34,27 @@ export interface CachedSidecarStatus {
     // CPU-offloaded model and remediation has not (yet) restored full GPU.
     gpuReady?: boolean;
   }>;
+  // Sidecar's authoritative VRAM accounting — total/free/used + per-role
+  // estimated VRAM usage. Drives the master UI's contention banner and the
+  // operator-facing "what's loaded" panel. See sideCar/src/lib/vram-accountant.ts
+  vram?: {
+    totalMb: number;
+    freeMb: number;
+    usedMb: number;
+    unattributedMb: number;
+    perRole: Record<string, {
+      role: string;
+      runtime: 'ollama' | 'vllm' | 'utility';
+      containerStatus: string;
+      loaded: boolean;
+      actualMb: number;
+      budgetMb: number;
+      priority: 'critical' | 'high' | 'normal';
+      gpuOnly: boolean;
+      modes: string[];
+    }>;
+    ts: number;
+  };
   activeRequests: number;
   idleTimeouts: Record<string, number>;
   roles: Record<string, {
@@ -118,6 +139,7 @@ export function updateSidecarStatus(agentUrl: string, status: Partial<CachedSide
     totalVram: status.totalVram ?? existing?.totalVram,
     wsConnected: status.wsConnected ?? existing?.wsConnected ?? false,
     tasks: status.tasks || existing?.tasks || [],
+    vram: status.vram ?? existing?.vram,
     lastSeen: Date.now(),
   });
 }

@@ -47,6 +47,26 @@ interface CachedStatus {
   roles: Record<string, RoleInfo>;
   peakDemand: Record<string, number>;
   gpus: GpuInfo[];
+  // VRAM accounting from sideCar/src/lib/vram-accountant.ts; absent if the
+  // sidecar couldn't reach nvidia-smi or is on an old build.
+  vram?: {
+    totalMb: number;
+    freeMb: number;
+    usedMb: number;
+    unattributedMb: number;
+    perRole: Record<string, {
+      role: string;
+      runtime: 'ollama' | 'vllm' | 'utility';
+      containerStatus: string;
+      loaded: boolean;
+      actualMb: number;
+      budgetMb: number;
+      priority: 'critical' | 'high' | 'normal';
+      gpuOnly: boolean;
+      modes: string[];
+    }>;
+    ts: number;
+  };
   wsConnected: boolean;
   tasks?: Array<{
     id: string;
@@ -612,6 +632,47 @@ export default function GpuFleetPanel() {
                   </div>
                 </div>
               )}
+
+              {/* VRAM accountant — what's actually loaded right now */}
+              {cachedStatus.vram && cachedStatus.vram.totalMb > 0 && (() => {
+                const v = cachedStatus.vram;
+                const usedGb = (v.usedMb / 1024).toFixed(1);
+                const totalGb = (v.totalMb / 1024).toFixed(1);
+                const pct = Math.round((v.usedMb / v.totalMb) * 100);
+                const tight = pct >= 85;
+                const barColor = tight ? 'bg-red-500' : pct >= 65 ? 'bg-orange-400' : 'bg-emerald-500';
+                const loadedRoles = Object.values(v.perRole).filter(r => r.loaded);
+                return (
+                  <div className="mb-4 rounded border border-gray-200 bg-gray-50 p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-sm font-medium text-gray-700">GPU VRAM</h3>
+                      <span className={`text-xs font-mono ${tight ? 'text-red-700 font-semibold' : 'text-gray-600'}`}>
+                        {usedGb} / {totalGb} GB ({pct}%)
+                        {v.unattributedMb > 200 && ` · ${(v.unattributedMb / 1024).toFixed(1)} GB unattributed`}
+                      </span>
+                    </div>
+                    <div className="h-2 w-full rounded bg-gray-200 overflow-hidden">
+                      <div className={`h-full ${barColor}`} style={{ width: `${Math.min(100, pct)}%` }} />
+                    </div>
+                    {loadedRoles.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]">
+                        {loadedRoles.map(r => {
+                          const tag = r.priority === 'critical' ? 'border-red-300 bg-red-50 text-red-700'
+                            : r.priority === 'high' ? 'border-blue-300 bg-blue-50 text-blue-700'
+                            : 'border-gray-300 bg-white text-gray-600';
+                          return (
+                            <span key={r.role} className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono ${tag}`}>
+                              <span className="capitalize">{r.role}</span>
+                              <span className="text-gray-400">{(r.actualMb / 1024).toFixed(1)}GB</span>
+                              {r.gpuOnly && <span title="GPU-only" className="text-red-600 font-bold">GPU</span>}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Container Grid */}
               {cachedStatus.containers && Object.keys(cachedStatus.containers).length > 0 && (

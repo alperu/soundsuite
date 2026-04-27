@@ -58,6 +58,7 @@ export async function POST(request: NextRequest) {
       peakDemand: body.peakDemand,
       gpus: body.gpus,
       wsConnected: body.wsConnected,
+      vram: body.vram,
     });
 
     // Update legacy sidecar registry in Config DB

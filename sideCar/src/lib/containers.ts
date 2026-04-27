@@ -1,6 +1,8 @@
 import { state } from './state';
 import { getContainerState, startContainer, stopContainer, removeContainer, pullImage, createContainer, dockerRequest, buildExpectedConfig, detectConfigDrift, type ContainerState } from './docker';
 import { ollamaPs, ollamaList, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama } from './ollama-api';
+import { snapshotVram } from './vram-accountant';
+import { planEviction, type EvictionStep } from './eviction-planner';
 import { clearIdleTimerForRole } from './idle-timers';
 import { saveConfig } from './config';
 import { createLogger } from './logger';
@@ -46,45 +48,69 @@ const REMEDIATE_COOLDOWN_MS = 60_000;
 const lastRemediateAttempt: Record<string, number> = {};
 
 /**
- * Free GPU VRAM in preparation for loading a gpuOnly role.
+ * Free GPU VRAM in preparation for loading `role`.
  *
- * Strategy: unload any Ollama model that is (1) not gpuOnly itself and (2) not
- * needed in the current mode. The mode filter is critical — if we evicted
- * `embedding` (modes=['indexing','searching']) while we're indexing, the
- * ingestion pipeline that just ran OCR would immediately reload embedding,
- * which would squeeze OCR back into partial offload, which would trigger the
- * watchdog to evict again → thrash. Roles whose modes include the active
- * mode are considered in-use and skipped.
+ * Delegates the policy decision to the eviction planner (which knows about
+ * priorities, modes, runtimes, and per-role VRAM usage from the accountant)
+ * and just executes the resulting plan.
+ *
+ * Returns the executed steps. Empty array means either (a) we already had
+ * enough free VRAM, or (b) no eviction is permitted for this role.
  */
-export async function evictForRole(role: string): Promise<string[]> {
+export async function evictForRole(role: string): Promise<EvictionStep[]> {
   const def = state.registry[role];
-  if (!def?.gpuOnly) return [];
-  const activeMode = state.currentMode;
-  const evicted: string[] = [];
-  for (const [otherRole, otherDef] of Object.entries(state.registry)) {
-    if (otherRole === role) continue;
-    if (otherDef.type !== 'ollama') continue;
-    if (otherDef.gpuOnly) continue; // don't evict another gpuOnly role
-    if (!otherDef.model) continue;
-    if (otherDef.modes.includes(activeMode)) {
-      // Role is in use in the current mode — leave it alone.
-      continue;
+  if (!def) return [];
+  // Only critical / gpuOnly roles get to evict. Other roles take whatever
+  // VRAM is available; if not enough, Ollama will refuse the load and the
+  // normal retry/back-off path handles it.
+  const isCritical = def.priority === 'critical' || def.gpuOnly === true;
+  if (!isCritical) return [];
+
+  let snap;
+  try {
+    snap = await snapshotVram();
+  } catch (err) {
+    log.warn(`evictForRole(${role}): snapshot failed: ${(err as Error).message}`);
+    return [];
+  }
+  const plan = planEviction(snap, role);
+  if (plan.steps.length === 0) {
+    if (plan.needMb === 0) {
+      log.info(`evictForRole(${role}): no eviction needed (free=${snap.freeMb}MB, want=${def.vram + 1024}MB)`);
+    } else {
+      log.warn(`evictForRole(${role}): need ${plan.needMb}MB free but no legal eviction candidates`);
     }
+    return [];
+  }
+  if (!plan.sufficient) {
+    log.error(`evictForRole(${role}): plan can free only ${plan.totalFreedMb}MB of ${plan.needMb}MB needed; executing anyway`);
+  } else {
+    log.info(`evictForRole(${role}): plan freeing ${plan.totalFreedMb}MB via ${plan.steps.length} step(s) for ${plan.needMb}MB need`);
+  }
+
+  const executed: EvictionStep[] = [];
+  for (const step of plan.steps) {
+    const otherDef = state.registry[step.role];
+    if (!otherDef) continue;
     try {
-      const ps = await ollamaPs(otherDef.port).catch(() => []);
-      if (ps.length === 0) continue; // nothing loaded on that endpoint
-      for (const m of ps) {
-        const ok = await ollamaUnload(otherDef.port, m.name);
-        if (ok) {
-          evicted.push(`${otherRole}:${m.name}`);
-          log.info(`evict-for-${role}: unloaded ${m.name} on ${otherRole} (port ${otherDef.port}, mode=${activeMode})`);
+      if (step.action === 'unloadModel') {
+        // Ollama: unload all models on this endpoint. Faster than docker stop.
+        const ps = await ollamaPs(otherDef.port).catch(() => []);
+        for (const m of ps) {
+          await ollamaUnload(otherDef.port, m.name);
+          log.info(`evict-for-${role}: unloaded ${m.name} on ${step.role} (~${step.expectedFreeMb}MB; ${step.reason})`);
         }
+      } else if (step.action === 'stopContainer') {
+        // vLLM and other runtimes: only docker stop releases VRAM.
+        await stopContainer(otherDef.containerName);
+        log.info(`evict-for-${role}: stopped ${otherDef.containerName} (~${step.expectedFreeMb}MB; ${step.reason})`);
       }
+      executed.push(step);
     } catch (err) {
-      log.warn(`evict-for-${role}: failed on ${otherRole}: ${(err as Error).message}`);
+      log.warn(`evict-for-${role}: step ${step.action}/${step.role} failed: ${(err as Error).message}`);
     }
   }
-  return evicted;
+  return executed;
 }
 
 /**
@@ -97,15 +123,21 @@ export async function loadGpuOnly(role: string): Promise<boolean> {
   if (!def || def.type !== 'ollama' || !def.model) return false;
   const evicted = await evictForRole(role);
   if (evicted.length > 0) {
-    // Give Ollama a beat to actually release VRAM before we ask for it back.
-    await new Promise((r) => setTimeout(r, 1_500));
+    // VRAM doesn't release instantly. unloadModel (Ollama keep_alive=0) frees
+    // in ~1s; stopContainer (vLLM) needs longer for the kernel to reap the
+    // CUDA context.
+    const stoppedAny = evicted.some((s) => s.action === 'stopContainer');
+    await new Promise((r) => setTimeout(r, stoppedAny ? 4_000 : 1_500));
   }
   const ok = await ollamaLoad(def.port, def.model, { forceFullGpu: true });
   if (ok) return true;
   // One retry: maybe a competing model loaded in between. Sweep again.
   log.info(`loadGpuOnly: ${role} first attempt failed, sweeping again`);
   const evicted2 = await evictForRole(role);
-  if (evicted2.length > 0) await new Promise((r) => setTimeout(r, 1_500));
+  if (evicted2.length > 0) {
+    const stoppedAny2 = evicted2.some((s) => s.action === 'stopContainer');
+    await new Promise((r) => setTimeout(r, stoppedAny2 ? 4_000 : 1_500));
+  }
   return ollamaLoad(def.port, def.model, { forceFullGpu: true });
 }
 
@@ -163,6 +195,10 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
               state.modelLoading.add(role);
               const remediateTaskId = tasks.start('model-load', `Remediate ${m.name} (force GPU)`, role);
               ollamaUnload(def.port, m.name)
+                // Wait ~1.5s for VRAM to actually free; otherwise the planner's
+                // snapshot inside loadGpuOnly still sees the old model in VRAM
+                // and may over-evict.
+                .then(() => new Promise((r) => setTimeout(r, 1_500)))
                 .then(() => loadGpuOnly(role))
                 .then((ok) => {
                   if (ok) tasks.complete(remediateTaskId);
