@@ -6,6 +6,7 @@ import ModeSelector from '@/components/mode-selector';
 import ContainerTable from '@/components/container-table';
 import StatsGrid from '@/components/stats-grid';
 import ActivityLog from '@/components/activity-log';
+import VramPanel, { type VramSnapshot } from '@/components/vram-panel';
 
 interface ContainerInfo {
   name: string;
@@ -47,6 +48,7 @@ interface StatusData {
   ip?: string;
   tasks?: TaskInfo[];
   connectionStatus?: string;
+  vram?: VramSnapshot | null;
 }
 
 interface LogEntry {
@@ -410,6 +412,8 @@ export default function Home() {
         currentMode={status?.mode ?? 'indexing'}
         onModeChange={handleModeChange}
       />
+
+      <VramPanel vram={status?.vram} />
 
       <ContainerTable
         containers={status?.containers ?? {}}
