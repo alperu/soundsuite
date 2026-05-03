@@ -165,7 +165,7 @@ export default function DocsViewer() {
 
       {/* Main content */}
       <main className="flex-1 overflow-y-auto bg-white">
-        <div className="max-w-3xl mx-auto px-8 py-8">
+        <div className="max-w-5xl mx-auto px-8 py-8">
           {loading && (
             <div className="text-sm text-gray-500">Loading…</div>
           )}
@@ -222,6 +222,27 @@ export default function DocsViewer() {
                     ) : (
                       <code className={className}>{children}</code>
                     ),
+                  // Force-download links to script files instead of navigating (.bat tries to render as text in some browsers)
+                  a: ({ href, children, ...props }: any) => {
+                    const isScript = typeof href === 'string' && /\.(sh|bat|ps1|tar\.gz|zip)(\?|$)/.test(href);
+                    if (isScript) {
+                      const filename = href.split('/').pop()?.split('?')[0];
+                      return (
+                        <a
+                          href={href}
+                          download={filename}
+                          {...props}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 mr-2 my-1 rounded-md border border-blue-200 bg-blue-50 text-blue-700 text-xs font-medium hover:bg-blue-100 hover:border-blue-300 transition-colors no-underline"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                          </svg>
+                          {children}
+                        </a>
+                      );
+                    }
+                    return <a href={href} {...props}>{children}</a>;
+                  },
                   table: ({ children }) => (
                     <div className="my-4 overflow-x-auto">
                       <table className="min-w-full text-sm border border-gray-200 rounded-lg">{children}</table>

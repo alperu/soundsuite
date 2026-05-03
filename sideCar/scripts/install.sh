@@ -7,7 +7,9 @@
 set -euo pipefail
 
 SERVER="${1:-http://172.16.16.9:3000}"
-INSTALL_DIR="${INSTALL_DIR:-$HOME/sidecar}"
+# Default install dir: <cwd>/sidecar — keeps the user on the drive/folder they
+# invoked the installer from. Override with: INSTALL_DIR=/opt/sidecar ./install.sh
+INSTALL_DIR="${INSTALL_DIR:-$PWD/sidecar}"
 TMP_DIR=$(mktemp -d)
 trap "rm -rf $TMP_DIR" EXIT
 

@@ -8,7 +8,9 @@ setlocal enabledelayedexpansion
 
 set "SERVER=%~1"
 if "!SERVER!"=="" set "SERVER=http://172.16.16.9:3000"
-if "!INSTALL_DIR!"=="" set "INSTALL_DIR=%USERPROFILE%\sidecar"
+REM Default install dir: <current dir>\sidecar — keeps the user on the drive
+REM they invoked the installer from. Override with: set INSTALL_DIR=D:\path
+if "!INSTALL_DIR!"=="" set "INSTALL_DIR=%CD%\sidecar"
 
 echo ================================
 echo  Sound Suite Sidecar Installer
@@ -80,15 +82,32 @@ if exist "!INSTALL_DIR!\config\config.json" (
     copy "!INSTALL_DIR!\config\config.json" "!TMP!\config.json.bak" >nul 2>&1
 )
 
-REM Extract tarball
-cd "!TMP!"
+REM Extract tarball — pushd handles drive switching (cd alone won't cross drives,
+REM which silently leaves CWD on D: while pointing tar at C:\Users\...\Temp).
+pushd "!TMP!"
 tar xzf sidecar-latest.tar.gz
+if errorlevel 1 (
+    echo [ERROR] tar extraction failed. Is GNU tar / bsdtar installed? Windows 10+ ships it by default.
+    popd
+    goto :cleanup
+)
+popd
+
+REM Verify the extracted layout exists before we wipe the destination
+if not exist "!TMP!\sidecar\server.js" (
+    echo [ERROR] Extracted archive is missing sidecar\server.js — tarball may be corrupt or empty.
+    goto :cleanup
+)
 
 REM Replace install directory
 if exist "!INSTALL_DIR!.old" rmdir /s /q "!INSTALL_DIR!.old"
 if exist "!INSTALL_DIR!" ren "!INSTALL_DIR!" sidecar.old 2>nul
 mkdir "!INSTALL_DIR!" 2>nul
-xcopy /s /e /q /y "!TMP!\sidecar\*" "!INSTALL_DIR!\" >nul
+xcopy /s /e /q /y /i "!TMP!\sidecar" "!INSTALL_DIR!" >nul
+if errorlevel 1 (
+    echo [ERROR] xcopy failed copying from "!TMP!\sidecar" to "!INSTALL_DIR!".
+    goto :cleanup
+)
 
 REM Restore config
 if exist "!TMP!\config.json.bak" (

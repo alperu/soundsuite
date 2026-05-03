@@ -86,9 +86,17 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 PORT="${PORT:-8098}"
 VER=$(cat "$DIR/VERSION")
 
-# Accept server URL as first argument or env var
+# Master URL: positional arg > SOUND_SUITE_MASTER_URL > legacy SERVER_URL
 if [ -n "${1:-}" ]; then
+  export SOUND_SUITE_MASTER_URL="$1"
   export SERVER_URL="$1"
+fi
+# Cross-fill so either env var alone is enough
+if [ -z "${SOUND_SUITE_MASTER_URL:-}" ] && [ -n "${SERVER_URL:-}" ]; then
+  export SOUND_SUITE_MASTER_URL="$SERVER_URL"
+fi
+if [ -z "${SERVER_URL:-}" ] && [ -n "${SOUND_SUITE_MASTER_URL:-}" ]; then
+  export SERVER_URL="$SOUND_SUITE_MASTER_URL"
 fi
 
 # --- Dependency checks ---
@@ -151,6 +159,7 @@ if [ "${USE_DOCKER:-}" = "1" ]; then
   DOCKER_ARGS="$DOCKER_ARGS -v ss-sidecar-config:/app/config"
   DOCKER_ARGS="$DOCKER_ARGS -e NODE_ENV=production"
   DOCKER_ARGS="$DOCKER_ARGS -e CONFIG_PATH=/app/config/config.json"
+  [ -n "${SOUND_SUITE_MASTER_URL:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SOUND_SUITE_MASTER_URL=$SOUND_SUITE_MASTER_URL"
   [ -n "${SERVER_URL:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SERVER_URL=$SERVER_URL"
 
   # Detect host's LAN IP so the sidecar registers with a reachable address
@@ -195,9 +204,9 @@ chmod +x "$STAGE_DIR/sidecar/start.sh"
 cat > "$STAGE_DIR/sidecar/start.bat" << 'LAUNCHER_BAT'
 @echo off
 REM Sound Suite Sidecar Launcher (Windows)
-REM Usage: start.bat [SERVER_URL]
+REM Usage: start.bat [MASTER_URL]
 REM   start.bat http://172.16.16.9:3000
-REM   set SERVER_URL=http://172.16.16.9:3000 && start.bat
+REM   set SOUND_SUITE_MASTER_URL=http://172.16.16.9:3000 && start.bat
 setlocal enabledelayedexpansion
 
 REM Resolve DIR without trailing backslash (avoids \" escaping issues in paths)
@@ -205,7 +214,15 @@ set "DIR=%~dp0"
 if "!DIR:~-1!"=="\" set "DIR=!DIR:~0,-1!"
 
 if "%PORT%"=="" set PORT=8098
-if not "%~1"=="" set SERVER_URL=%~1
+
+REM Master URL: positional arg > SOUND_SUITE_MASTER_URL > legacy SERVER_URL
+if not "%~1"=="" (
+    set "SOUND_SUITE_MASTER_URL=%~1"
+    set "SERVER_URL=%~1"
+)
+if "!SOUND_SUITE_MASTER_URL!"=="" if not "!SERVER_URL!"=="" set "SOUND_SUITE_MASTER_URL=!SERVER_URL!"
+if "!SERVER_URL!"=="" if not "!SOUND_SUITE_MASTER_URL!"=="" set "SERVER_URL=!SOUND_SUITE_MASTER_URL!"
+
 set /p VER=<"!DIR!\VERSION"
 
 echo Sound Suite Sidecar v!VER!
@@ -258,14 +275,14 @@ echo ========================
 
 REM --- Launch ---
 if !USE_DOCKER!==1 (
-    echo Starting in Docker mode on port %PORT%...
-    if defined SERVER_URL echo Connecting to server: %SERVER_URL%
+    echo Starting in Docker mode on port !PORT!...
+    if defined SOUND_SUITE_MASTER_URL echo Connecting to master: !SOUND_SUITE_MASTER_URL!
 
     docker rm -f ss-sidecar >nul 2>&1
 
     REM Build image from extracted files
-    echo Building Docker image ss-sidecar:v%VER% ...
-    docker build -t ss-sidecar:v%VER% -f "!DIR!\Dockerfile.run" "!DIR!"
+    echo Building Docker image ss-sidecar:v!VER! ...
+    docker build -t ss-sidecar:v!VER! -f "!DIR!\Dockerfile.run" "!DIR!"
     if errorlevel 1 (
         echo [ERROR] Docker build failed.
         pause
@@ -273,14 +290,17 @@ if !USE_DOCKER!==1 (
     )
 
     set "DOCKER_CMD=docker run -d --name ss-sidecar --restart unless-stopped"
-    set "DOCKER_CMD=!DOCKER_CMD! -p %PORT%:8098"
+    set "DOCKER_CMD=!DOCKER_CMD! -p !PORT!:8098"
     set "DOCKER_CMD=!DOCKER_CMD! --add-host=host.docker.internal:host-gateway"
     REM Mount Docker socket - works on Docker Desktop WSL2 backend, translates to VM socket
     set "DOCKER_CMD=!DOCKER_CMD! -v /var/run/docker.sock:/var/run/docker.sock"
     set "DOCKER_CMD=!DOCKER_CMD! -v ss-sidecar-config:/app/config"
     set "DOCKER_CMD=!DOCKER_CMD! -e NODE_ENV=production"
     set "DOCKER_CMD=!DOCKER_CMD! -e CONFIG_PATH=/app/config/config.json"
-    if defined SERVER_URL set "DOCKER_CMD=!DOCKER_CMD! -e SERVER_URL=%SERVER_URL%"
+    REM CRITICAL: use !VAR! (delayed expansion). %VAR% inside this if-block
+    REM is expanded at block-entry time and may be stale.
+    if defined SOUND_SUITE_MASTER_URL set "DOCKER_CMD=!DOCKER_CMD! -e SOUND_SUITE_MASTER_URL=!SOUND_SUITE_MASTER_URL!"
+    if defined SERVER_URL set "DOCKER_CMD=!DOCKER_CMD! -e SERVER_URL=!SERVER_URL!"
 
     REM Detect host LAN IP so sidecar registers with a reachable address
     REM Inside Docker, interfaces show 172.17.x.x which the server cannot reach
@@ -298,7 +318,7 @@ if !USE_DOCKER!==1 (
     REM Pass Windows computer name into container for display
     if defined COMPUTERNAME set "DOCKER_CMD=!DOCKER_CMD! -e SIDECAR_HOSTNAME=!COMPUTERNAME!"
 
-    !DOCKER_CMD! ss-sidecar:v%VER%
+    !DOCKER_CMD! ss-sidecar:v!VER!
     if errorlevel 1 (
         echo [ERROR] Docker run failed.
         pause
@@ -307,18 +327,19 @@ if !USE_DOCKER!==1 (
 
     echo.
     echo Sidecar running as Docker container 'ss-sidecar'.
-    echo   Dashboard: http://localhost:%PORT%
+    echo   Dashboard: http://localhost:!PORT!
     echo   Logs:      docker logs -f ss-sidecar
     echo   Stop:      docker stop ss-sidecar
     echo.
     echo NOTE: Docker socket is mounted from the host. If Docker operations fail,
     echo   the sidecar will auto-detect and try TCP fallback automatically.
 ) else (
-    echo Starting on port %PORT%...
-    if defined SERVER_URL echo Connecting to server: %SERVER_URL%
+    echo Starting on port !PORT!...
+    if defined SOUND_SUITE_MASTER_URL echo Connecting to master: !SOUND_SUITE_MASTER_URL!
     set NODE_ENV=production
-    set PORT=%PORT%
-    set HOSTNAME=0.0.0.0
+    set "HOSTNAME=0.0.0.0"
+    REM Belt-and-suspenders: PORT/SERVER_URL/SOUND_SUITE_MASTER_URL are already in
+    REM the cmd env from the script header; node inherits them. No %VAR% needed.
     node "!DIR!\server.js"
 )
 endlocal

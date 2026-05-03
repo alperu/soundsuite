@@ -318,6 +318,12 @@ export default function SearchInterface({
   const [streamingAnswer, setStreamingAnswer] = useState<string | null>(null);
   const [compareSelections, setCompareSelections] = useState<Map<string, string>>(new Map());
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  // Stick-to-bottom: auto-scrolls only when the user is already near the bottom.
+  // Reading older content scrolls them up → flag flips off → no autoscroll yank.
+  // Default true so the first stream auto-follows.
+  const stickToBottomRef = useRef(true);
+  // Reveal a "Jump to latest" affordance when sticky is off and new content lands.
+  const [hasNewContentBelow, setHasNewContentBelow] = useState(false);
 
   // Persist compareSelections as array of entries
   const compareInitialized = useRef(false);
@@ -726,12 +732,43 @@ export default function SearchInterface({
     return finalResult;
   };
 
-  // Auto-scroll chat to bottom
-  const scrollChatToBottom = useCallback(() => {
+  // Auto-scroll chat to bottom (force = always, even if user scrolled up)
+  const scrollChatToBottom = useCallback((opts?: { force?: boolean; behavior?: ScrollBehavior }) => {
+    const force = opts?.force ?? false;
+    const behavior = opts?.behavior ?? 'smooth';
     setTimeout(() => {
-      chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: 'smooth' });
+      const el = chatScrollRef.current;
+      if (!el) return;
+      if (!force && !stickToBottomRef.current) return;
+      el.scrollTo({ top: el.scrollHeight, behavior });
+      stickToBottomRef.current = true;
+      setHasNewContentBelow(false);
     }, 50);
   }, []);
+
+  // Track whether the user is near the bottom; only auto-scroll when they are.
+  const handleChatScroll = useCallback(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const wasSticky = stickToBottomRef.current;
+    stickToBottomRef.current = distFromBottom < 80;
+    if (stickToBottomRef.current && !wasSticky) setHasNewContentBelow(false);
+  }, []);
+
+  // Auto-follow streaming output: when streamingAnswer or deep progress updates,
+  // scroll if user is sticky; otherwise surface a "new content" pill.
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    if (!aiLoading) return;
+    if (stickToBottomRef.current) {
+      // No timeout — chase the stream tightly. instant for snappy feel.
+      el.scrollTo({ top: el.scrollHeight, behavior: 'instant' as ScrollBehavior });
+    } else {
+      setHasNewContentBelow(true);
+    }
+  }, [streamingAnswer, deepProgress, aiLoading]);
 
   // Persist chat session to server
   const persistSession = useCallback((
@@ -817,6 +854,11 @@ export default function SearchInterface({
     setAiLoading(true);
     setAiError(null);
     setSearchWarnings([]);
+
+    // User just submitted — they want to see what happens next. Force-snap to
+    // bottom and arm the sticky flag so the upcoming stream auto-follows.
+    stickToBottomRef.current = true;
+    scrollChatToBottom({ force: true });
 
     if (!isFollowUp) {
       // New conversation — clear everything
@@ -1376,7 +1418,7 @@ export default function SearchInterface({
         </div>
 
         {/* Main Content */}
-        <main className={`flex-1 bg-gray-50 ${mode === 'analysis' ? 'flex overflow-hidden' : ''} ${mode === 'ai' ? 'flex flex-col overflow-hidden' : ''} ${mode === 'direct' ? 'overflow-auto' : ''}`}>
+        <main className={`flex-1 bg-gray-50 ${mode === 'analysis' ? 'flex overflow-hidden' : ''} ${mode === 'ai' ? 'relative flex flex-col overflow-hidden' : ''} ${mode === 'direct' ? 'overflow-auto' : ''}`}>
 
           {/* ---- AI Search Mode — Chat Layout ---- */}
           {mode === 'ai' && (
@@ -1416,7 +1458,7 @@ export default function SearchInterface({
               )}
 
               {/* Scrollable conversation area */}
-              <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-6 py-6">
+              <div ref={chatScrollRef} onScroll={handleChatScroll} className="flex-1 overflow-y-auto px-6 py-6 relative">
                 <div className="max-w-3xl mx-auto space-y-4">
                   {/* Empty state — shown when no conversation */}
                   {!hasConversation && !aiLoading && !aiError && (
@@ -1579,6 +1621,22 @@ export default function SearchInterface({
                   )}
                 </div>
               </div>
+
+              {/* Jump-to-latest pill — appears when user is scrolled up while new content arrives below */}
+              {hasNewContentBelow && aiLoading && (
+                <button
+                  type="button"
+                  onClick={() => scrollChatToBottom({ force: true })}
+                  className="absolute left-1/2 -translate-x-1/2 bottom-[calc(var(--input-h,80px)+12px)] z-20 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-600 text-white text-xs font-medium shadow-lg hover:bg-indigo-700 transition-colors"
+                  style={{ bottom: `calc(${inputHeight}px + 24px)` }}
+                  title="Jump to latest"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 13.5L12 21m0 0l-7.5-7.5M12 21V3" />
+                  </svg>
+                  New content
+                </button>
+              )}
 
               {/* Fixed bottom input with drag-resizable top edge */}
               <div className="flex-shrink-0 bg-white">

@@ -9,6 +9,10 @@ There are two ways to install it:
 
 The native install is the same script the auto-updater uses; the published version is **v{{SIDECAR_VERSION}}**.
 
+### Download scripts directly
+
+[install.sh]({{MASTER_URL}}/sideCar/scripts/install.sh) [install.bat]({{MASTER_URL}}/sideCar/scripts/install.bat) [start.sh]({{MASTER_URL}}/sideCar/scripts/start.sh) [start.bat]({{MASTER_URL}}/sideCar/scripts/start.bat) [start-docker-agent.sh]({{MASTER_URL}}/sideCar/scripts/start-docker-agent.sh) [start-docker-agent.bat]({{MASTER_URL}}/sideCar/scripts/start-docker-agent.bat)
+
 ---
 
 ## Native install
@@ -21,10 +25,10 @@ curl -fsSL {{MASTER_URL}}/sideCar/scripts/install.sh -o install.sh && chmod +x i
 
 This downloads `install.sh`, fetches the tarball at `{{SIDECAR_TARBALL_URL}}`, verifies its SHA-256 against the manifest, and installs to `~/sidecar`.
 
-After install, start the sidecar:
+After install, start the sidecar (it installs to `./sidecar` relative to where you ran the installer):
 
 ```bash
-cd ~/sidecar
+cd ./sidecar
 ./start.sh {{MASTER_URL}}
 ```
 
@@ -36,24 +40,50 @@ The sidecar opens its admin UI on **`http://localhost:{{SIDECAR_PORT}}`** and co
 Invoke-WebRequest -Uri {{MASTER_URL}}/sideCar/scripts/install.bat -OutFile install.bat; .\install.bat {{MASTER_URL}}
 ```
 
-After install:
+After install (the installer drops `sidecar\` into your current directory):
 
 ```powershell
-cd $env:USERPROFILE\sidecar
+cd .\sidecar
 .\start.bat {{MASTER_URL}}
 ```
 
 ### What the installer does
 
 1. Fetches `{{MASTER_URL}}/sideCar/builds/manifest.json` to learn the latest version + SHA-256.
-2. If `~/sidecar/VERSION` already matches, nothing to do.
-3. Otherwise downloads `sidecar-v{{SIDECAR_VERSION}}.tar.gz`, verifies the checksum, stops any running sidecar container, extracts to `~/sidecar` (or `$INSTALL_DIR`), preserves `~/sidecar/config/` across upgrades.
+2. If `./sidecar/VERSION` already matches, nothing to do.
+3. Otherwise downloads `sidecar-v{{SIDECAR_VERSION}}.tar.gz`, verifies the checksum, stops any running sidecar container, extracts to `./sidecar` (or `$INSTALL_DIR`), preserves `./sidecar/config/` across upgrades.
 
-Custom install path:
+Default install dir is `<current dir>/sidecar` so you stay on the drive you ran the installer from. Custom install path:
 
 ```bash
+# Linux / macOS
 INSTALL_DIR=/opt/sidecar ./install.sh {{MASTER_URL}}
 ```
+
+```powershell
+# Windows
+$env:INSTALL_DIR="D:\sidecar"; .\install.bat {{MASTER_URL}}
+```
+
+### Refresh just the launcher (start.bat / start.sh)
+
+If you've already installed the sidecar but the launcher is broken or out of date, you can pull just the latest launcher without re-running the full installer:
+
+```powershell
+# Windows — drop the new start.bat into your existing install
+cd .\sidecar
+Invoke-WebRequest -Uri {{MASTER_URL}}/sideCar/scripts/start.bat -OutFile start.bat
+.\start.bat {{MASTER_URL}}
+```
+
+```bash
+# Linux / macOS
+cd ./sidecar
+curl -fsSL {{MASTER_URL}}/sideCar/scripts/start.sh -o start.sh && chmod +x start.sh
+./start.sh {{MASTER_URL}}
+```
+
+The launcher reads `SOUND_SUITE_MASTER_URL` from its first argument or env var and passes it to the sidecar process.
 
 ---
 
@@ -144,12 +174,12 @@ The sidecar's own admin UI is also at **`http://<gpu-host>:{{SIDECAR_PORT}}`** f
 
 Updates are pushed from the master. When a new sidecar version is published at **{{SIDECAR_TARBALL_URL}}**, every connected sidecar pulls and applies it on the next heartbeat — no operator action required.
 
-The container's `/app/config/` directory (or `~/sidecar/config/` for native installs) is preserved across updates. Even if the volume is wiped completely, the `SOUND_SUITE_MASTER_URL` env var or the saved `serverUrl` in `sidecar.config.json` lets the sidecar reconnect on next boot.
+The container's `/app/config/` directory (or `./sidecar/config/` for native installs) is preserved across updates. Even if the volume is wiped completely, the `SOUND_SUITE_MASTER_URL` env var or the saved `serverUrl` in `sidecar.config.json` lets the sidecar reconnect on next boot.
 
 To re-run the installer manually (e.g. for a major version bump):
 
 ```bash
-~/sidecar/install.sh {{MASTER_URL}}
+./sidecar/install.sh {{MASTER_URL}}
 ```
 
 ---
@@ -160,8 +190,10 @@ To re-run the installer manually (e.g. for a major version bump):
 
 ```bash
 docker stop ss-sidecar && docker rm ss-sidecar 2>/dev/null
-rm -rf ~/sidecar
+rm -rf ./sidecar
 ```
+
+(Or whatever path you set `INSTALL_DIR` to.)
 
 ### Docker install
 
