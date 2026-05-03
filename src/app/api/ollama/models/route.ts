@@ -27,8 +27,10 @@ export async function GET() {
     // falling back to the shared embedding host for backward compatibility.
     let host = config.ollamaCompletionHost || config.ollamaHost || 'http://localhost:11434';
 
-    // When orchestrator is enabled, resolve the actual host from fleet-router
-    if (config.completionUseOrchestrator) {
+    // When orchestrator is enabled, resolve the actual host from fleet-router.
+    // Skip when completion minOnline=0 — listing models shouldn't trigger an
+    // /acquire that auto-starts the completion container against operator policy.
+    if (config.completionUseOrchestrator && (config.gpuMinCompletion ?? 0) > 0) {
       try {
         const { resolveEndpoint } = await import('@/lib/gpu/fleet-router');
         const ep = await resolveEndpoint('completion');

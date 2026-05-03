@@ -318,6 +318,17 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
   if (role && state.registry[role]) {
     const def = state.registry[role];
     const r = state.perRole[role];
+
+    // minOnline=0 is a hard "never auto-start" policy. Reject /acquire so the
+    // master can't backdoor a load via resolveEndpoint() side-effects (e.g.
+    // /api/ollama/models calling resolveEndpoint('completion') just to list).
+    // The master's caller should fall back to the static-host path or surface
+    // the error to the user.
+    if ((state.minOnline[role] ?? 1) === 0) {
+      log.info(`Acquire ${role} REJECTED — minOnline=0 (operator opted this role out)`);
+      return { error: `Role "${role}" is disabled (minOnline=0). Set Minimum Online > 0 in admin to allow auto-start.` };
+    }
+
     r.activeRequests++;
     clearIdleTimerForRole(role);
     r.lastAcquire = new Date().toISOString();

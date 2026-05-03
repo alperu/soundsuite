@@ -11,7 +11,7 @@ import { tasks } from './task-tracker';
 /**
  * Ensure a container exists for a role: pull image + create if needed.
  */
-async function ensureContainerForRole(role: string): Promise<void> {
+export async function ensureContainerForRole(role: string): Promise<void> {
   const def = state.registry[role];
   if (!def) return;
   // Utility containers (e.g. cuda) are managed by their own modules (gpu.ts)

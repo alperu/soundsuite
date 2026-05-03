@@ -16,7 +16,7 @@ import https from 'https';
 import WebSocket from 'ws';
 import { state } from './state';
 import { handleAcquire, handleRelease, handleStart, handleStop, handleStatus, getTotalActiveRequests } from './handlers';
-import { switchMode, provisionContainers, getAllContainerStates, containersForMode } from './containers';
+import { switchMode, provisionContainers, getAllContainerStates, containersForMode, ensureContainerForRole } from './containers';
 import { discoverGpus } from './gpu';
 import { getContainerState, pullImage, createContainer, startContainer, dockerRequest, getDockerHostName } from './docker';
 import { ollamaList, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
@@ -182,13 +182,35 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
     }
     case 'config': {
       if (payload.idleTimeouts) Object.assign(state.idleTimeouts, payload.idleTimeouts);
+      const rolesNowOptOut: string[] = [];
       if (payload.minOnline && typeof payload.minOnline === 'object') {
         for (const [k, v] of Object.entries(payload.minOnline as Record<string, unknown>)) {
-          if (typeof v === 'number' && v >= 0) state.minOnline[k] = v;
+          if (typeof v === 'number' && v >= 0) {
+            const prev = state.minOnline[k];
+            state.minOnline[k] = v;
+            if (v === 0 && prev !== 0) rolesNowOptOut.push(k);
+          }
         }
       }
       if (payload.containerName) state.CONTAINER_NAME = payload.containerName as string;
       state.lastConfigPushAt = Date.now();
+      // Auto-stop roles that just opted out (min transitioned to 0)
+      if (rolesNowOptOut.length > 0) {
+        const { stopContainer } = await import('./docker');
+        for (const role of rolesNowOptOut) {
+          const def = state.registry[role];
+          if (!def) continue;
+          const active = state.perRole[role]?.activeRequests ?? 0;
+          if (active > 0) continue;
+          try {
+            const cs = await getContainerState(def.containerName);
+            if (cs.status === 'running') {
+              await stopContainer(def.containerName);
+              log.info(`Auto-stopped ${def.containerName} — minOnline transitioned to 0`);
+            }
+          } catch { /* best-effort */ }
+        }
+      }
       const modelChangedRoles: string[] = [];
       if (payload.registry) {
         for (const [r, overrides] of Object.entries(payload.registry as Record<string, unknown>)) {
@@ -217,8 +239,28 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
       const pullRole = payload.role as string;
       const def = state.registry[pullRole];
       if (!def) return { error: `Unknown role: ${pullRole}` };
-      if (def.type !== 'ollama') return { error: `${pullRole} is not an Ollama container` };
       if (!def.model) return { error: `No model configured for ${pullRole}` };
+
+      // vLLM: pull the docker image, ensure container exists, start it.
+      // vLLM downloads the HF model on first start (cached to huggingface-cache
+      // volume so subsequent starts are instant). There's no separate model-pull
+      // API like Ollama's /api/pull — image pull + container start is the pull.
+      if (def.type === 'vllm') {
+        try {
+          await pullImage(def.image);
+        } catch (err) {
+          return { error: `Image pull failed: ${(err as Error).message}` };
+        }
+        await ensureContainerForRole(pullRole);
+        const csv = await getContainerState(def.containerName);
+        if (csv.status !== 'running') {
+          await startContainer(def.containerName);
+        }
+        return { ok: true, model: def.model, container: def.containerName, message: `${def.model} image pulled and container started — vLLM will download model from HuggingFace on first request (cached afterwards)` };
+      }
+
+      // Ollama path
+      if (def.type !== 'ollama') return { error: `${pullRole} is not an Ollama or vLLM container` };
       const cs = await getContainerState(def.containerName);
       if (cs.status !== 'running') return { error: `Container ${def.containerName} is not running` };
       await ollamaPull(def.port, def.model);
@@ -235,8 +277,20 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
       const loadRole = payload.role as string;
       const def = state.registry[loadRole];
       if (!def) return { error: `Unknown role: ${loadRole}` };
-      if (def.type !== 'ollama') return { error: `${loadRole} is not an Ollama container` };
       if (!def.model) return { error: `No model configured for ${loadRole}` };
+
+      // vLLM loads its single configured model at container startup.
+      // "Load" for vLLM = ensure container is running.
+      if (def.type === 'vllm') {
+        const csv = await getContainerState(def.containerName);
+        if (csv.status !== 'running') {
+          await startContainer(def.containerName);
+          return { ok: true, model: def.model, container: def.containerName, message: `${def.containerName} started — vLLM is loading ${def.model}` };
+        }
+        return { ok: true, model: def.model, container: def.containerName, message: `${def.containerName} already running` };
+      }
+
+      if (def.type !== 'ollama') return { error: `${loadRole} is not an Ollama or vLLM container` };
       const cs = await getContainerState(def.containerName);
       if (cs.status !== 'running') return { error: `Container ${def.containerName} is not running` };
       const loaded = await ollamaLoad(def.port, def.model);

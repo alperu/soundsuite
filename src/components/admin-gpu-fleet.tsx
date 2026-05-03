@@ -772,6 +772,24 @@ export default function GpuFleetPanel() {
                                     )}
                                   </>
                                 )}
+                                {(c.type === 'vllm' || c.config?.type === 'vllm') && (
+                                  <>
+                                    <button onClick={() => handleControlRole(selectedSidecar.url, 'pullModel', role)}
+                                      disabled={actionLoading !== null || pendingAction !== null}
+                                      title="Pull docker image + start container. vLLM downloads the HuggingFace model on first request (cached in huggingface-cache volume afterwards)."
+                                      className="text-xs px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 disabled:opacity-50">
+                                      {pendingAction === `pullModel-${role}` ? 'Pulling...' : 'Pull & Start'}
+                                    </button>
+                                    {c.status !== 'running' && (
+                                      <button onClick={() => handleControlRole(selectedSidecar.url, 'loadModel', role)}
+                                        disabled={actionLoading !== null || pendingAction !== null}
+                                        title="Start the container. vLLM will load the model into VRAM at startup."
+                                        className="text-xs px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-700 disabled:opacity-50">
+                                        {pendingAction === `loadModel-${role}` ? 'Loading...' : 'Load'}
+                                      </button>
+                                    )}
+                                  </>
+                                )}
                               </td>
                             </tr>
                           );

@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { state } from './state';
 import { createLogger } from './logger';
-import { loadSidecarConfig } from './sidecar-config';
+import { loadSidecarConfig, saveSidecarConfig } from './sidecar-config';
 
 const log = createLogger('config');
 
@@ -104,8 +104,6 @@ export function saveConfig(): void {
     // other still has the URL. Avoids "had to re-enter IP after update".
     if (state.serverUrl) {
       try {
-        // Lazy import to avoid circular dep at module load
-        const { saveSidecarConfig } = require('./sidecar-config') as typeof import('./sidecar-config');
         saveSidecarConfig({ serverUrl: state.serverUrl });
       } catch (err) {
         log.warn(`Could not mirror to sidecar.config.json: ${(err as Error).message}`);
