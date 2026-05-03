@@ -316,6 +316,7 @@ export default function SearchInterface({
   const [thinkingExpanded, setThinkingExpanded] = useState(true);
   const [searchStartTime, setSearchStartTime] = useState(0);
   const [streamingAnswer, setStreamingAnswer] = useState<string | null>(null);
+  const [streamTokenCount, setStreamTokenCount] = useState(0);
   const [compareSelections, setCompareSelections] = useState<Map<string, string>>(new Map());
   const chatScrollRef = useRef<HTMLDivElement>(null);
   // Stick-to-bottom: auto-scrolls only when the user is already near the bottom.
@@ -598,6 +599,7 @@ export default function SearchInterface({
             setAiProgressLog(prev => [...prev, { ...event, timestamp: Date.now() }]);
           } else if (event.type === 'token') {
             setStreamingAnswer(prev => (prev ?? '') + event.text);
+            setStreamTokenCount(c => c + Math.max(1, Math.round((event.text as string).length / 4)));
           } else if (event.type === 'result') {
             finalResult = event.data as AISearchResult;
           } else if (event.type === 'error') {
@@ -704,6 +706,9 @@ export default function SearchInterface({
             if (p.step !== 'warning') setDeepProgress(p);
           } else if (event.type === 'token') {
             setStreamingAnswer(prev => (prev ?? '') + event.text);
+            // Heuristic: ~4 chars per token. Cheaper than running a tokenizer
+            // and accurate enough for a progress indicator.
+            setStreamTokenCount(c => c + Math.max(1, Math.round((event.text as string).length / 4)));
           } else if (event.type === 'thinking') {
             // Surface thinking deltas as a progress entry — distinct from tokens.
             setAiProgressLog(prev => [...prev, { step: 'thinking', message: event.text, timestamp: Date.now() } as AIProgressEntry]);
@@ -859,6 +864,8 @@ export default function SearchInterface({
     // bottom and arm the sticky flag so the upcoming stream auto-follows.
     stickToBottomRef.current = true;
     scrollChatToBottom({ force: true });
+    setStreamTokenCount(0);
+    setSearchStartTime(Date.now());
 
     if (!isFollowUp) {
       // New conversation — clear everything
@@ -1569,7 +1576,7 @@ export default function SearchInterface({
 
                   {/* Deep Search Progress */}
                   {aiLoading && !aiStopping && deepSearchMode && deepProgress && (
-                    <DeepSearchProgressCard progress={deepProgress} />
+                    <DeepSearchProgressCard progress={deepProgress} startTime={searchStartTime || Date.now()} tokenCount={streamTokenCount} />
                   )}
                   {!aiStopping && searchWarnings.length > 0 && (
                     <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1">
@@ -2411,8 +2418,14 @@ const STEP_LABELS: Record<string, string> = {
 
 const STEP_ORDER = ['decomposing', 'searching', 'pattern_searching', 'merging', 'generating', 'done'] as const;
 
-function DeepSearchProgressCard({ progress }: { progress: DeepSearchProgress }) {
+function DeepSearchProgressCard({ progress, startTime, tokenCount }: { progress: DeepSearchProgress; startTime: number; tokenCount: number }) {
   const currentIdx = STEP_ORDER.indexOf(progress.step as typeof STEP_ORDER[number]);
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - startTime) / 1000)), 250);
+    return () => clearInterval(id);
+  }, [startTime]);
+  const fmt = (s: number) => s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
 
   return (
     <div className="bg-white rounded-lg shadow-sm border border-indigo-200 overflow-hidden">
@@ -2422,6 +2435,10 @@ function DeepSearchProgressCard({ progress }: { progress: DeepSearchProgress }) 
           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
         </svg>
         <span className="text-sm font-medium text-indigo-700">Deep Search in Progress</span>
+        <span className="ml-auto flex items-center gap-3 text-xs text-indigo-600 font-mono tabular-nums">
+          <span title="Elapsed time">⏱ {fmt(elapsed)}</span>
+          {tokenCount > 0 && <span title="Tokens received">{tokenCount.toLocaleString()} tok</span>}
+        </span>
       </div>
 
       <div className="px-4 py-4 space-y-3">

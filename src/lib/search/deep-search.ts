@@ -465,7 +465,7 @@ export async function generateReport(
   query: string,
   decomposition: DecompositionResult,
   sources: DeepSearchSource[],
-  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal; onToken?: (text: string) => void; onThinking?: (text: string) => void },
+  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal; onToken?: (text: string) => void; onThinking?: (text: string) => void; onProgress?: (p: DeepSearchProgress) => void },
 ): Promise<string> {
   if (sources.length === 0) {
     return '## No Results Found\n\nThe deep search did not find any relevant document excerpts for your query. Try rephrasing your question or broadening the search scope.';
@@ -666,8 +666,9 @@ export async function generateReportMultiPass(
   query: string,
   decomposition: DecompositionResult,
   sources: DeepSearchSource[],
-  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal; onToken?: (text: string) => void; onThinking?: (text: string) => void },
+  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal; onToken?: (text: string) => void; onThinking?: (text: string) => void; onProgress?: (p: DeepSearchProgress) => void },
 ): Promise<string> {
+  const progress = options?.onProgress || (() => {});
   if (sources.length === 0) {
     return '## No Results Found\n\nThe deep search did not find any relevant document excerpts for your query. Try rephrasing your question or broadening the search scope.';
   }
@@ -700,6 +701,7 @@ ${decomposition.intent}
 ${contextBlock}`;
 
   // Stage 1: outline + short sections
+  progress({ step: 'generating', message: 'Stage 1/2: drafting outline + summary + gaps + significance...' });
   let outline: ReportOutline;
   try {
     outline = await callLLMJson<ReportOutline>(
@@ -776,6 +778,10 @@ ${contextBlock}`;
     }
 
     const section = outline.findingsSections[i];
+    progress({
+      step: 'generating',
+      message: `Stage 2/2: writing section ${i + 1}/${outline.findingsSections.length} — "${section.heading}"`,
+    });
     append(`### ${section.heading}\n\n`);
 
     const sectionUserContent = `${baseUserContent}
@@ -951,6 +957,7 @@ export async function deepSearch(
     signal,
     onToken,
     onThinking,
+    onProgress: emit,
   });
 
   console.log(`[Deep Search] Completed in ${Date.now() - t0}ms`);
