@@ -72,7 +72,7 @@ interface DeepSearchProgress {
     finalAfterRerank: number;
     subQueryCount: number;
   }>;
-  warnings?: Array<{ source: string; host?: string; message: string }>;
+  warnings?: Array<{ source: string; host?: string; message: string; count?: number }>;
 }
 
 interface AIConversationTurn {
@@ -310,7 +310,7 @@ export default function SearchInterface({
   const [deepTurns, setDeepTurns] = useState<DeepSearchTurn[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>(() => `session-${Date.now()}`);
   const [deepProgress, setDeepProgress] = useState<DeepSearchProgress | null>(null);
-  const [searchWarnings, setSearchWarnings] = useState<Array<{ source: string; host?: string; message: string }>>([]);
+  const [searchWarnings, setSearchWarnings] = useState<Array<{ source: string; host?: string; message: string; count?: number }>>([]);
   const [aiProgressLog, setAiProgressLog] = useState<AIProgressEntry[]>([]);
   const [thinkingExpanded, setThinkingExpanded] = useState(true);
   const [searchStartTime, setSearchStartTime] = useState(0);
@@ -677,7 +677,19 @@ export default function SearchInterface({
           if (event.type === 'progress') {
             const p = event as DeepSearchProgress;
             if (p.warnings && p.warnings.length > 0) {
-              setSearchWarnings(prev => [...prev, ...p.warnings!]);
+              setSearchWarnings(prev => {
+                const next = [...prev];
+                for (const w of p.warnings!) {
+                  const idx = next.findIndex(x => x.source === w.source && x.host === w.host && x.message === w.message);
+                  if (idx >= 0) {
+                    // Server already increments .count and re-emits — overwrite locally.
+                    next[idx] = w;
+                  } else {
+                    next.push(w);
+                  }
+                }
+                return next;
+              });
             }
             // Don't replace deepProgress with a 'warning' step — leave the
             // last real progress step visible so the pipeline keeps moving.
@@ -1517,8 +1529,15 @@ export default function SearchInterface({
                     <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1">
                       <p className="text-xs font-medium text-amber-900">Warnings</p>
                       {searchWarnings.map((w, i) => (
-                        <p key={i} className="text-xs text-amber-800">
-                          <span className="font-medium">{w.source}{w.host ? ` (${w.host})` : ''}:</span> {w.message}
+                        <p key={i} className="text-xs text-amber-800 flex items-start gap-2">
+                          {w.count && w.count > 1 && (
+                            <span className="inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-amber-200 text-amber-900 text-[10px] font-semibold shrink-0">
+                              ×{w.count}
+                            </span>
+                          )}
+                          <span>
+                            <span className="font-medium">{w.source}{w.host ? ` (${w.host})` : ''}:</span> {w.message}
+                          </span>
                         </p>
                       ))}
                     </div>

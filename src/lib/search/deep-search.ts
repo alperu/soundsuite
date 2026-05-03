@@ -48,7 +48,7 @@ export interface DeepSearchProgress {
   intent?: string;
   searchStats?: Partial<DeepSearchResult['searchStats']>;
   /** Non-fatal warnings collected during the run (e.g. reranker fallback). */
-  warnings?: Array<{ source: string; host?: string; message: string }>;
+  warnings?: Array<{ source: string; host?: string; message: string; count?: number }>;
 }
 
 export interface ConversationTurn {
@@ -620,10 +620,23 @@ export async function deepSearch(
     subQueries: decomposition.subQueries,
     intent: decomposition.intent,
   });
-  const warnings: Array<{ source: string; host?: string; message: string }> = [];
+  // Per-run warning collector with dedupe + counting. Identical (source, host,
+  // message) warnings collapse so the UI doesn't show 16 copies of the same
+  // "container not found" line when 8 parallel sub-queries each tried 2 hosts.
+  const warnings: Array<{ source: string; host?: string; message: string; count: number }> = [];
+  const warningIndex = new Map<string, number>();
   const pushWarning = (w: { source: string; host?: string; reason?: string; message: string }) => {
     const msg = w.reason ? `${w.reason}: ${w.message}` : w.message;
-    const out = { source: w.source, host: w.host, message: msg };
+    const key = `${w.source}|${w.host ?? ''}|${msg}`;
+    const existingIdx = warningIndex.get(key);
+    if (existingIdx !== undefined) {
+      warnings[existingIdx].count += 1;
+      // Re-emit the updated warning so the UI can refresh the count.
+      emit({ step: 'warning', message: `${w.source}${w.host ? ` (${w.host})` : ''}: ${msg}`, warnings: [warnings[existingIdx]] });
+      return;
+    }
+    const out = { source: w.source, host: w.host, message: msg, count: 1 };
+    warningIndex.set(key, warnings.length);
     warnings.push(out);
     emit({ step: 'warning', message: `${w.source}${w.host ? ` (${w.host})` : ''}: ${msg}`, warnings: [out] });
   };
