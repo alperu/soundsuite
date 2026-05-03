@@ -27,6 +27,13 @@ const DOCS: DocFile[] = [
   },
 ];
 
+interface CandidateAddress {
+  url: string;
+  host: string;
+  source: string;
+  recommended?: boolean;
+}
+
 interface SystemInfo {
   masterUrl: string;
   masterHost: string;
@@ -37,18 +44,24 @@ interface SystemInfo {
   sidecarTarballUrl: string;
   sidecarPort: number;
   serverPort: number;
+  hostname: string;
+  candidates: CandidateAddress[];
 }
 
-function substitute(template: string, info: SystemInfo | null): string {
+function substitute(template: string, info: SystemInfo | null, masterUrlOverride?: string): string {
   if (!info) return template;
+  const masterUrl = masterUrlOverride || info.masterUrl;
+  const masterHost = (() => {
+    try { return new URL(masterUrl).host; } catch { return info.masterHost; }
+  })();
   const map: Record<string, string> = {
-    MASTER_URL: info.masterUrl,
-    MASTER_HOST: info.masterHost,
-    MCP_HTTP_URL: info.mcpHttpUrl,
-    MCP_RPC_URL: info.mcpRpcUrl,
+    MASTER_URL: masterUrl,
+    MASTER_HOST: masterHost,
+    MCP_HTTP_URL: `${masterUrl}/api/mcp`,
+    MCP_RPC_URL: `${masterUrl}/api/mcp/rpc`,
     MCP_AUTH_MODE: info.mcpAuthMode,
     SIDECAR_VERSION: info.sidecarVersion,
-    SIDECAR_TARBALL_URL: info.sidecarTarballUrl,
+    SIDECAR_TARBALL_URL: info.sidecarTarballUrl.replace(info.masterUrl, masterUrl),
     SIDECAR_PORT: String(info.sidecarPort),
     SERVER_PORT: String(info.serverPort),
   };
@@ -64,12 +77,18 @@ export default function DocsViewer() {
   const [content, setContent] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [info, setInfo] = useState<SystemInfo | null>(null);
+  const [selectedMasterUrl, setSelectedMasterUrl] = useState<string>('');
 
   // Fetch runtime values once
   useEffect(() => {
     fetch('/api/docs/info')
       .then(r => r.json())
-      .then(setInfo)
+      .then((data: SystemInfo) => {
+        setInfo(data);
+        // Default the selector to the recommended candidate, falling back to masterUrl
+        const recommended = data.candidates?.find(c => c.recommended);
+        setSelectedMasterUrl(recommended?.url || data.masterUrl);
+      })
       .catch(() => { /* offline-friendly */ });
   }, []);
 
@@ -88,8 +107,11 @@ export default function DocsViewer() {
     }
   }, [activeSlug]);
 
-  const rendered = useMemo(() => substitute(content, info), [content, info]);
+  const rendered = useMemo(() => substitute(content, info, selectedMasterUrl), [content, info, selectedMasterUrl]);
   const activeDoc = DOCS.find(d => d.slug === activeSlug);
+  const effectiveHost = (() => {
+    try { return selectedMasterUrl ? new URL(selectedMasterUrl).host : info?.masterHost ?? ''; } catch { return info?.masterHost ?? ''; }
+  })();
 
   return (
     <div className="flex h-full">
@@ -113,11 +135,30 @@ export default function DocsViewer() {
           ))}
         </nav>
         {info && (
-          <div className="mx-3 mt-6 p-3 rounded-lg bg-white border border-gray-200 text-[11px] text-gray-600 space-y-1">
-            <div className="font-semibold text-gray-700 mb-1">Live values</div>
-            <div><span className="text-gray-400">master</span>: <span className="font-mono break-all">{info.masterHost}</span></div>
-            <div><span className="text-gray-400">sidecar</span>: <span className="font-mono">v{info.sidecarVersion}</span></div>
-            <div><span className="text-gray-400">auth</span>: <span className="font-mono">{info.mcpAuthMode}</span></div>
+          <div className="mx-3 mt-6 p-3 rounded-lg bg-white border border-gray-200 text-[11px] text-gray-600 space-y-2">
+            <div>
+              <div className="font-semibold text-gray-700 mb-1">Master URL</div>
+              <select
+                value={selectedMasterUrl}
+                onChange={(e) => setSelectedMasterUrl(e.target.value)}
+                className="w-full text-[11px] font-mono px-2 py-1.5 border border-gray-300 rounded bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                title="Pick which IP/URL to use in copy-paste snippets"
+              >
+                {info.candidates.map((c) => (
+                  <option key={c.url} value={c.url}>
+                    {c.host}{c.recommended ? '  (recommended)' : ''}
+                  </option>
+                ))}
+              </select>
+              <div className="text-[10px] text-gray-400 mt-1 leading-snug">
+                Source: <span className="font-mono">{info.candidates.find(c => c.url === selectedMasterUrl)?.source ?? '—'}</span>
+              </div>
+            </div>
+            <div className="border-t border-gray-100 pt-2">
+              <div><span className="text-gray-400">host</span>: <span className="font-mono">{info.hostname}</span></div>
+              <div><span className="text-gray-400">sidecar</span>: <span className="font-mono">v{info.sidecarVersion}</span></div>
+              <div><span className="text-gray-400">auth</span>: <span className="font-mono">{info.mcpAuthMode}</span></div>
+            </div>
           </div>
         )}
       </aside>
@@ -139,7 +180,7 @@ export default function DocsViewer() {
                 prose-li:text-gray-700
                 prose-strong:text-gray-900
                 prose-a:text-blue-600 prose-a:no-underline hover:prose-a:underline
-                prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:bg-gray-100 prose-code:text-pink-700 prose-code:font-mono prose-code:text-[0.9em] prose-code:before:content-none prose-code:after:content-none
+                prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:bg-slate-100 prose-code:text-slate-800 prose-code:font-mono prose-code:text-[0.88em] prose-code:font-medium prose-code:before:content-none prose-code:after:content-none
                 prose-pre:bg-transparent prose-pre:p-0 prose-pre:my-0
               "
             >
@@ -154,14 +195,21 @@ export default function DocsViewer() {
                       : Array.isArray(codeNode)
                         ? codeNode.join('').replace(/\n$/, '')
                         : String(codeNode);
-                    const language = (children as any)?.props?.className?.match(/language-(\w+)/)?.[1] ?? '';
+                    const rawLang = (children as any)?.props?.className?.match(/language-(\w+)/)?.[1] ?? '';
+                    const language = rawLang || 'text';
+                    const langLabel: Record<string, string> = {
+                      bash: 'shell', sh: 'shell', zsh: 'shell', powershell: 'PowerShell',
+                      json: 'JSON', yaml: 'YAML', ts: 'TypeScript', tsx: 'TSX', js: 'JavaScript',
+                    };
                     return (
-                      <div className="relative group my-4 rounded-lg overflow-hidden border border-gray-200 bg-gray-900">
-                        <div className="flex items-center justify-between px-3 py-1.5 bg-gray-800 border-b border-gray-700">
-                          <span className="text-[11px] font-mono text-gray-400 uppercase tracking-wide">{language || 'text'}</span>
-                          <CopyButton text={codeText} className="!text-gray-400 hover:!text-gray-100 hover:!bg-gray-700" />
+                      <div className="relative my-4 rounded-lg overflow-hidden border border-slate-200 bg-slate-50 shadow-sm">
+                        <div className="flex items-center justify-between px-3 py-1.5 bg-white border-b border-slate-200">
+                          <span className="text-[11px] font-medium text-slate-500 tracking-wide">
+                            {langLabel[language] || language}
+                          </span>
+                          <CopyButton text={codeText} />
                         </div>
-                        <pre className="p-4 overflow-x-auto text-[13px] leading-relaxed text-gray-100 font-mono">
+                        <pre className="p-4 overflow-x-auto text-[13px] leading-relaxed text-slate-800 font-mono whitespace-pre">
                           <code>{codeText}</code>
                         </pre>
                       </div>
@@ -192,11 +240,10 @@ export default function DocsViewer() {
             </article>
           )}
           {!loading && activeDoc && info && (
-            <div className="mt-12 pt-4 border-t border-gray-200 text-[11px] text-gray-400">
-              Substituted live values: {Object.entries({
-                MASTER_URL: info.masterUrl,
-                SIDECAR_VERSION: info.sidecarVersion,
-              }).map(([k, v]) => `${k}=${v}`).join(' · ')}
+            <div className="mt-12 pt-4 border-t border-gray-200 text-[11px] text-gray-400 leading-relaxed">
+              Snippets above are substituted with the URL you picked in the left panel:&nbsp;
+              <span className="font-mono text-gray-500">{effectiveHost}</span>.
+              Switch the dropdown to regenerate snippets for a different IP / hostname.
             </div>
           )}
         </div>
