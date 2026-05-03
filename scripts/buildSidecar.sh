@@ -350,6 +350,14 @@ cp "$SIDECAR_DIR/scripts/install.sh" "$STAGE_DIR/sidecar/install.sh"
 cp "$SIDECAR_DIR/scripts/install.bat" "$STAGE_DIR/sidecar/install.bat"
 chmod +x "$STAGE_DIR/sidecar/install.sh"
 
+# Also publish scripts directly so the docs page can curl them with one line
+mkdir -p "$OUTPUT_DIR/../scripts"
+cp "$SIDECAR_DIR/scripts/install.sh" "$OUTPUT_DIR/../scripts/install.sh"
+cp "$SIDECAR_DIR/scripts/install.bat" "$OUTPUT_DIR/../scripts/install.bat"
+cp "$SIDECAR_DIR/scripts/start-docker-agent.sh" "$OUTPUT_DIR/../scripts/start-docker-agent.sh"
+cp "$SIDECAR_DIR/scripts/start-docker-agent.bat" "$OUTPUT_DIR/../scripts/start-docker-agent.bat"
+chmod +x "$OUTPUT_DIR/../scripts/install.sh" "$OUTPUT_DIR/../scripts/start-docker-agent.sh"
+
 # Build the tarball
 cd "$STAGE_DIR"
 tar czf "$TARBALL" --exclude='sidecar/config' sidecar/
