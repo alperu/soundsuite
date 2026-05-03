@@ -86,6 +86,7 @@ export async function POST(
         embeddingProvider = new OllamaEmbeddingProvider({
           host: config.ollamaHost || 'http://localhost:11434',
           model: config.ollamaModel || config.embeddingModel || 'all-minilm',
+          useOrchestrator: !!config.embeddingUseOrchestrator,
         });
         break;
       }

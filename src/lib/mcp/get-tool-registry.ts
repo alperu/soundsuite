@@ -67,6 +67,7 @@ async function initRegistry(): Promise<ToolRegistry> {
       embeddingProvider = new OllamaEmbeddingProvider({
         host: config.ollamaHost,
         model: config.ollamaModel || 'all-minilm',
+        useOrchestrator: !!config.embeddingUseOrchestrator,
       });
     } else {
       // Default: local transformers provider
@@ -129,6 +130,7 @@ async function ensureEmbeddingProvider(registry: ToolRegistry): Promise<void> {
       provider = new OllamaEmbeddingProvider({
         host: config.ollamaHost,
         model: config.ollamaModel || 'all-minilm',
+        useOrchestrator: !!config.embeddingUseOrchestrator,
       });
     } else {
       const { TransformersEmbeddingProvider } = await import('../ingestion/transformers-embedding-provider');
