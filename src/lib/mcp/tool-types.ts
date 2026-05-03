@@ -84,6 +84,17 @@ export interface ToolConfigEntry {
 // Execution context (injected at runtime)
 // ---------------------------------------------------------------------------
 
+export interface BackendWarning {
+  /** e.g. 'reranker', 'embedding', 'ocr', 'llm' */
+  source: string;
+  /** Optional host that produced the warning, e.g. 'http://10.10.20.5:11434' */
+  host?: string;
+  /** Short categorisation, e.g. 'preflight', 'lifecycle', 'fetch', 'timeout' */
+  reason?: string;
+  /** Human-readable message — surfaced to the UI. */
+  message: string;
+}
+
 export interface ToolExecutionContext {
   vectorStore: VectorStore;
   embeddingProvider: EmbeddingProvider;
@@ -92,6 +103,9 @@ export interface ToolExecutionContext {
   /** Provider/model override from the UI toolbar (passed per-request). */
   aiProvider?: string;
   aiModel?: string;
+  /** Per-request warning channel. Tools push non-fatal degradation warnings
+   *  here; the deep-search / AI-search routes forward them to the UI. */
+  pushWarning?: (w: BackendWarning) => void;
 }
 
 // ---------------------------------------------------------------------------

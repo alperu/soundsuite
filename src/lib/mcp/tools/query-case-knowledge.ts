@@ -109,8 +109,25 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     // Generate embedding for query (needed for vector and hybrid modes)
     let queryEmbedding: number[] | undefined;
     if (searchMode !== 'keyword') {
-      const embeddings = await context.embeddingProvider.embed([query]);
-      queryEmbedding = embeddings[0];
+      try {
+        const embeddings = await context.embeddingProvider.embed([query]);
+        queryEmbedding = embeddings[0];
+      } catch (err) {
+        // Surface to UI; keyword/FTS path may still succeed below.
+        const msg = (err as Error).message;
+        // Try to extract host from common Ollama error shape
+        const hostMatch = msg.match(/\(http:\/\/[^,)\s]+/);
+        const host = hostMatch ? hostMatch[0].slice(1) : undefined;
+        context.pushWarning?.({
+          source: 'embedding',
+          host,
+          reason: 'embed-failed',
+          message: msg,
+        });
+        // Re-throw if no fallback path possible (pure vector search would have nothing to do)
+        if (searchMode === 'vector') throw err;
+        // Otherwise fall through — keyword search can still produce results.
+      }
     }
 
     // Build FTS query from extracted keywords using BooleanQuery
@@ -196,7 +213,9 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
 
     // Rerank results using cross-encoder if enabled.
     // Pass explicit topN = limit so the reranker trims from the expanded pool.
-    searchResults = await rerank(query, searchResults, limit);
+    searchResults = await rerank(query, searchResults, limit, context.pushWarning ? (w) => {
+      context.pushWarning!({ source: w.source, host: w.host, reason: w.reason, message: w.message });
+    } : undefined);
 
     // Safety trim: if reranking was disabled, ensure we return at most `limit` results
     if (searchResults.length > limit) {

@@ -8,7 +8,8 @@
  */
 
 import { callLLM, callLLMJson, buildContext, getAvailableProvider } from '../mcp/tools/ai-helper';
-import { streamAI, AIProviderKey } from '../ai/ai-provider';
+import { streamAI } from '../ai/ai-provider';
+import type { AIProviderKey } from '../ai/models';
 import { rerank, RerankableResult } from './reranker';
 import type { ToolRegistry } from '../mcp/tool-registry';
 
@@ -208,6 +209,7 @@ export async function executeParallelSearches(
   subQueries: string[],
   caseId: string | undefined,
   registry: ToolRegistry,
+  pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
 ): Promise<SubQueryResult[]> {
   const promises = subQueries.map(async (subQuery): Promise<SubQueryResult> => {
     try {
@@ -216,9 +218,15 @@ export async function executeParallelSearches(
         ...(caseId ? { caseId } : {}),
         limit: 50,
         searchMode: 'hybrid',
-      });
+      }, pushWarning ? { pushWarning } : undefined);
 
-      if (!searchResult.success || !searchResult.data?.results) {
+      if (!searchResult.success) {
+        if (searchResult.error && pushWarning) {
+          pushWarning({ source: 'query_case_knowledge', reason: 'tool-error', message: searchResult.error });
+        }
+        return { subQuery, sources: [] };
+      }
+      if (!searchResult.data?.results) {
         return { subQuery, sources: [] };
       }
 
@@ -301,6 +309,7 @@ export async function executePatternSearch(
   query: string,
   caseId: string | undefined,
   registry: ToolRegistry,
+  pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
 ): Promise<SubQueryResult> {
   const keywords = extractPatternKeywords(query);
 
@@ -317,7 +326,7 @@ export async function executePatternSearch(
       pattern,
       ...(caseId ? { caseId } : {}),
       limit: 50,
-    });
+    }, pushWarning ? { pushWarning } : undefined);
 
     if (!result.success || !result.data?.results) {
       return { subQuery: '[pattern search]', sources: [] };
@@ -355,7 +364,7 @@ function makeDeduplicationKey(source: DeepSearchSource): string {
 export async function deduplicateAndMerge(
   subQueryResults: SubQueryResult[],
   originalQuery: string,
-  onWarning?: (w: { source: string; host?: string; message: string }) => void,
+  onWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
 ): Promise<{ sources: DeepSearchSource[]; stats: { totalRetrieved: number; uniqueAfterDedup: number; finalAfterRerank: number } }> {
   const seen = new Map<string, DeepSearchSource>();
   let totalRetrieved = 0;
@@ -399,7 +408,8 @@ export async function deduplicateAndMerge(
     merged = await rerank(originalQuery, rerankable, 150, onWarning ? (w) => onWarning({
       source: w.source,
       host: w.host,
-      message: `${w.reason}: ${w.message}`,
+      reason: w.reason,
+      message: w.message,
     }) : undefined);
   }
 
@@ -610,10 +620,19 @@ export async function deepSearch(
     subQueries: decomposition.subQueries,
     intent: decomposition.intent,
   });
+  const warnings: Array<{ source: string; host?: string; message: string }> = [];
+  const pushWarning = (w: { source: string; host?: string; reason?: string; message: string }) => {
+    const msg = w.reason ? `${w.reason}: ${w.message}` : w.message;
+    const out = { source: w.source, host: w.host, message: msg };
+    warnings.push(out);
+    emit({ step: 'warning', message: `${w.source}${w.host ? ` (${w.host})` : ''}: ${msg}`, warnings: [out] });
+  };
+
   const subQueryResults = await executeParallelSearches(
     decomposition.subQueries,
     caseId,
     registry,
+    pushWarning,
   );
 
   // Step 2b: Supplementary pattern search (regex fallback for vocabulary mismatch)
@@ -624,7 +643,7 @@ export async function deepSearch(
     subQueries: decomposition.subQueries,
     intent: decomposition.intent,
   });
-  const patternResult = await executePatternSearch(query, caseId, registry);
+  const patternResult = await executePatternSearch(query, caseId, registry, pushWarning);
   if (patternResult.sources.length > 0) {
     subQueryResults.push(patternResult);
     console.log(`[Deep Search] Pattern search found ${patternResult.sources.length} additional chunks`);
@@ -643,11 +662,7 @@ export async function deepSearch(
     intent: decomposition.intent,
     searchStats: { totalRetrieved, subQueryCount: decomposition.subQueries.length },
   });
-  const warnings: Array<{ source: string; host?: string; message: string }> = [];
-  const { sources, stats } = await deduplicateAndMerge(subQueryResults, query, (w) => {
-    warnings.push(w);
-    emit({ step: 'warning', message: `${w.source}${w.host ? ` (${w.host})` : ''}: ${w.message}`, warnings: [w] });
-  });
+  const { sources, stats } = await deduplicateAndMerge(subQueryResults, query, pushWarning);
   console.log(`[Deep Search] Merged: ${stats.totalRetrieved} total -> ${stats.uniqueAfterDedup} unique -> ${stats.finalAfterRerank} after rerank`);
 
   // Step 4: Generate report

@@ -404,12 +404,20 @@ const ROLE_PORTS: Record<GpuRole, number> = {
  * 2. If none running, pick any reachable sidecar → send /acquire {role}
  * 3. Return host:port derived from sidecar IP + role port mapping
  */
-export async function resolveEndpoint(role: GpuRole): Promise<ResolvedEndpoint> {
+export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: string[] }): Promise<ResolvedEndpoint> {
   const fleet = await getFleetStatus();
   const port = ROLE_PORTS[role];
+  const exclude = new Set(options?.excludeHosts ?? []);
+  const isExcluded = (sidecarUrl: string): boolean => {
+    if (exclude.size === 0) return false;
+    try {
+      const h = new URL(sidecarUrl).hostname;
+      return exclude.has(h) || exclude.has(`http://${h}:${port}`) || exclude.has(sidecarUrl);
+    } catch { return false; }
+  };
 
   // Try sidecars that are connected/reachable
-  const reachable = fleet.sidecars.filter(s => s.status === 'connected');
+  const reachable = fleet.sidecars.filter(s => s.status === 'connected' && !isExcluded(s.url));
 
   // gpuOnly is enforced at the role level. The sidecar registry is the source
   // of truth (sideCar/src/lib/state.ts); we mirror the well-known set here as
@@ -561,6 +569,7 @@ export async function resolveEndpoint(role: GpuRole): Promise<ResolvedEndpoint> 
   // Phase 3: Try all sidecars (including disconnected — they might respond to direct HTTP)
   for (const sidecar of fleet.sidecars) {
     if (reachable.includes(sidecar)) continue;
+    if (isExcluded(sidecar.url)) continue;
     try {
       const result = await sendToSidecar(sidecar.url, '/acquire', { role });
       if (!result.error) {

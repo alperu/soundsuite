@@ -163,82 +163,97 @@ export async function rerank<T extends RerankableResult>(
   }
 
   const effectiveTopN = topN ?? config.rerankTopN ?? 10;
+  const timeoutMs = config.rerankTimeoutMs ?? 90_000;
 
-  // Configure and ensure the reranker container is running. ensureRunning()
-  // now throws on /acquire failure so we degrade gracefully instead of blasting
-  // 30s timeouts at a non-existent container.
+  // Configure lifecycle (idle timeout config)
   rerankerLifecycle.setEnabled(config.rerankAutoManage);
   rerankerLifecycle.setIdleTimeout(config.rerankIdleTimeoutMin * 60 * 1000);
-  try {
-    await rerankerLifecycle.ensureRunning(config.rerankHost);
-  } catch (err) {
-    const message = (err as Error).message;
-    logger.warn('Reranker lifecycle ensureRunning failed — using original order', {
-      host: config.rerankHost,
-      error: message,
-    });
-    warn('lifecycle', config.rerankHost, message);
-    return results.slice(0, effectiveTopN);
-  }
 
-  logger.info('Reranker route', {
-    host: config.rerankHost,
-    model: config.rerankModel,
-    useOrchestrator: config.rerankUseOrchestrator,
-    autoManage: config.rerankAutoManage,
-    query: query.slice(0, 60),
-    documentCount: results.length,
-  });
+  // Build candidate host list: configured host first, then other reachable
+  // sidecars from fleet-router. Cap at 2 attempts to avoid 90s × N stalls.
+  const candidates: string[] = [config.rerankHost];
+  try {
+    const { getFleetStatus } = await import('@/lib/gpu/fleet-router');
+    const fleet = await getFleetStatus();
+    const configHostname = (() => { try { return new URL(config.rerankHost).hostname; } catch { return ''; } })();
+    for (const s of fleet.sidecars) {
+      if (s.status !== 'connected') continue;
+      try {
+        const h = new URL(s.url).hostname;
+        if (h === configHostname) continue;
+        candidates.push(`http://${h}:8099`);
+      } catch { /* skip */ }
+    }
+  } catch { /* fleet-router unavailable, single-host only */ }
+
+  const tryHost = async (host: string): Promise<{ items: T[]; tokens: number; model: string } | { error: RerankWarning }> => {
+    try {
+      await rerankerLifecycle.ensureRunning(host);
+    } catch (err) {
+      return { error: { source: 'reranker', host, reason: 'lifecycle', message: (err as Error).message } };
+    }
+    const pf = await rerankerPreflight(host, config.rerankModel);
+    if (!pf.ok) {
+      return { error: { source: 'reranker', host, reason: 'preflight', message: pf.error || 'preflight failed' } };
+    }
+    try {
+      const out = await serializeRerank(() =>
+        rerankViaVllmWithRetry(query, results, config.rerankModel, host, effectiveTopN, timeoutMs),
+      );
+      return { items: out.items, tokens: out.totalTokens, model: config.rerankModel };
+    } catch (primaryErr) {
+      if (config.rerankFallbackModel) {
+        try {
+          const fb = await serializeRerank(() =>
+            rerankViaVllmWithRetry(query, results, config.rerankFallbackModel, host, effectiveTopN, timeoutMs),
+          );
+          return { items: fb.items, tokens: fb.totalTokens, model: config.rerankFallbackModel };
+        } catch (fbErr) {
+          return { error: { source: 'reranker', host, reason: 'fetch', message: (fbErr as Error).message } };
+        }
+      }
+      return { error: { source: 'reranker', host, reason: 'fetch', message: (primaryErr as Error).message } };
+    }
+  };
 
   const startMs = Date.now();
   try {
-    const pf = await rerankerPreflight(config.rerankHost, config.rerankModel);
-    if (!pf.ok) {
-      logger.warn('Reranker preflight failed — using original order', {
-        host: config.rerankHost,
+    const MAX_HOSTS_TO_TRY = 2;
+    let reranked: T[] | null = null;
+    let totalTokens = 0;
+    let usedModel = config.rerankModel;
+    let lastWarning: RerankWarning | null = null;
+
+    for (const host of candidates.slice(0, MAX_HOSTS_TO_TRY)) {
+      logger.info('Reranker attempt', {
+        host,
         model: config.rerankModel,
-        error: pf.error,
+        candidates: candidates.length,
+        documentCount: results.length,
       });
-      warn('preflight', config.rerankHost, pf.error || 'preflight failed');
-      return results.slice(0, effectiveTopN);
+      const result = await tryHost(host);
+      if ('items' in result) {
+        reranked = result.items;
+        totalTokens = result.tokens;
+        usedModel = result.model;
+        if (lastWarning) {
+          // Surface that we recovered on a fallback host
+          warn('fetch', host, `recovered after ${candidates.indexOf(host)} prior host failures`);
+        }
+        break;
+      }
+      lastWarning = result.error;
+      logger.warn('Reranker host failed, trying next', {
+        host,
+        reason: result.error.reason,
+        message: result.error.message,
+      });
+      warn(result.error.reason, result.error.host, result.error.message);
     }
 
-    logger.info('Reranking via vLLM', {
-      host: config.rerankHost,
-      model: config.rerankModel,
-      documents: results.length,
-      topN: effectiveTopN,
-      queryPreview: query.slice(0, 80),
-    });
-
-    let reranked: T[];
-    let totalTokens: number;
-    let usedModel = config.rerankModel;
-    const timeoutMs = config.rerankTimeoutMs ?? 90_000;
-
-    try {
-      const primary = await serializeRerank(() =>
-        rerankViaVllmWithRetry(query, results, config.rerankModel, config.rerankHost, effectiveTopN, timeoutMs),
-      );
-      reranked = primary.items;
-      totalTokens = primary.totalTokens;
-    } catch (primaryErr) {
-      // If a fallback model is configured, try it before giving up
-      if (config.rerankFallbackModel) {
-        logger.warn('Primary rerank model failed, trying fallback', {
-          primaryModel: config.rerankModel,
-          fallbackModel: config.rerankFallbackModel,
-          error: primaryErr instanceof Error ? primaryErr.message : String(primaryErr),
-        });
-        const fallback = await serializeRerank(() =>
-          rerankViaVllmWithRetry(query, results, config.rerankFallbackModel, config.rerankHost, effectiveTopN, timeoutMs),
-        );
-        reranked = fallback.items;
-        totalTokens = fallback.totalTokens;
-        usedModel = config.rerankFallbackModel;
-      } else {
-        throw primaryErr;
-      }
+    if (!reranked) {
+      // All hosts failed — return original order (graceful degrade)
+      return results.slice(0, effectiveTopN);
     }
 
     // Score validation: detect degenerate scores from misbehaving models
