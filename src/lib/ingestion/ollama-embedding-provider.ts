@@ -105,57 +105,9 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
    */
   private async getClient(): Promise<any> {
     if (this.ollamaClient) return this.ollamaClient;
-
-    logger.info('Initializing Ollama client...', { host: this.host, model: this.model });
-
+    logger.info('Initializing Ollama client', { host: this.host, model: this.model });
     const { Ollama } = await import('ollama');
     this.ollamaClient = new Ollama({ host: this.host });
-
-    // Verify connection and model availability
-    const verifyStart = Date.now();
-    try {
-      logger.info('Verifying Ollama connection with test embed...', { host: this.host, model: this.model });
-      const response = await this.ollamaClient.embed({
-        model: this.model,
-        input: ['test'],
-      });
-      // Update dimensions from actual response if available
-      if (response.embeddings?.[0]?.length) {
-        this.dimensions = response.embeddings[0].length;
-      }
-      logger.info('Ollama connection verified', {
-        host: this.host,
-        model: this.model,
-        dimensions: this.dimensions,
-        verifyDurationMs: Date.now() - verifyStart,
-      });
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      const stack = error instanceof Error ? error.stack : undefined;
-      const isConnRefused = msg.includes('ECONNREFUSED') || msg.includes('fetch failed');
-      const isModelMissing = msg.includes('not found') || msg.includes('pull');
-      const isTimeout = msg.includes('ETIMEDOUT') || msg.includes('timeout');
-
-      logger.error('Failed to connect to Ollama', error, {
-        host: this.host,
-        model: this.model,
-        verifyDurationMs: Date.now() - verifyStart,
-        errorMessage: msg,
-        errorStack: stack,
-        diagnosis: isConnRefused
-          ? 'CONNECTION_REFUSED — Ollama server is not running or unreachable'
-          : isModelMissing
-          ? `MODEL_NOT_FOUND — Run: ollama pull ${this.model}`
-          : isTimeout
-          ? 'TIMEOUT — Server took too long to respond (may be loading another model)'
-          : 'UNKNOWN — Check Ollama server logs',
-      });
-
-      // Reset client so next attempt retries from scratch
-      this.ollamaClient = null;
-      throw new Error(`Ollama connection failed (${this.host}): ${msg}. Ensure Ollama is running and the model "${this.model}" is pulled.`);
-    }
-
     return this.ollamaClient;
   }
 

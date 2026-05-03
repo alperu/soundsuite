@@ -64,9 +64,22 @@ export async function POST(request: NextRequest) {
 
     const stream = new ReadableStream({
       async start(controller) {
-        const send = (obj: Record<string, any>) => {
-          controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'));
+        let closed = false;
+        const safeClose = () => {
+          if (closed) return;
+          closed = true;
+          try { controller.close(); } catch { /* already closed */ }
         };
+        const send = (obj: Record<string, any>) => {
+          if (closed) return;
+          try { controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n')); }
+          catch { closed = true; }
+        };
+        const onAbort = () => {
+          console.log('[AI Search] Client aborted — closing stream');
+          safeClose();
+        };
+        request.signal.addEventListener('abort', onAbort);
 
         try {
           // Step 1: Vector search via query_case_knowledge
@@ -92,7 +105,7 @@ export async function POST(request: NextRequest) {
                 ? 'Embedding provider is not configured. Please check Admin > Embedding Config to set up an embedding provider and ensure documents have been indexed.'
                 : `Vector search failed: ${errorMsg}`,
             });
-            controller.close();
+            safeClose();
             return;
           }
 
@@ -279,7 +292,8 @@ ${contextChunks || '(No relevant documents found)'}`;
         } catch (error) {
           send({ type: 'error', error: error instanceof Error ? error.message : 'AI search failed' });
         } finally {
-          controller.close();
+          request.signal.removeEventListener('abort', onAbort);
+          safeClose();
         }
       },
     });

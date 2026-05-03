@@ -68,6 +68,8 @@ export interface DeepSearchOptions {
   maxTokens?: number;
   /** Anthropic Opus 4.7 adaptive-thinking effort. Default 'medium'. */
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /** Abort signal to cancel mid-pipeline. Checked between major phases. */
+  signal?: AbortSignal;
 }
 
 export interface DeepSearchResult {
@@ -514,18 +516,27 @@ export async function deepSearch(
   registry: ToolRegistry,
   options: DeepSearchOptions = {},
 ): Promise<DeepSearchResult> {
-  const { provider, model, caseId, onProgress, history, workflowContext, thinking, maxTokens, effort } = options;
+  const { provider, model, caseId, onProgress, history, workflowContext, thinking, maxTokens, effort, signal } = options;
   const emit = onProgress || (() => {});
+  const checkAbort = () => {
+    if (signal?.aborted) {
+      const err = new Error('Deep search aborted by client');
+      err.name = 'AbortError';
+      throw err;
+    }
+  };
 
   console.log(`[Deep Search] Starting for query: "${query.slice(0, 100)}"`);
   const t0 = Date.now();
 
   // Step 1: Decompose
+  checkAbort();
   emit({ step: 'decomposing', message: history?.length ? 'Analyzing follow-up in context...' : 'Breaking question into targeted sub-queries...' });
   const decomposition = await decomposeQuery(query, { provider, model, history, thinking, effort });
   console.log(`[Deep Search] Decomposed into ${decomposition.subQueries.length} sub-queries:`, decomposition.subQueries);
 
   // Step 2: Parallel searches
+  checkAbort();
   emit({
     step: 'searching',
     message: `Searching ${decomposition.subQueries.length} sub-queries in parallel...`,
@@ -541,6 +552,7 @@ export async function deepSearch(
   );
 
   // Step 2b: Supplementary pattern search (regex fallback for vocabulary mismatch)
+  checkAbort();
   emit({
     step: 'pattern_searching',
     message: 'Running keyword pattern search for exact text matches...',
@@ -558,6 +570,7 @@ export async function deepSearch(
   const totalRetrieved = subQueryResults.reduce((sum, r) => sum + r.sources.length, 0);
 
   // Step 3: Deduplicate and merge
+  checkAbort();
   emit({
     step: 'merging',
     message: `Deduplicating ${totalRetrieved} chunks and reranking...`,
@@ -569,6 +582,7 @@ export async function deepSearch(
   console.log(`[Deep Search] Merged: ${stats.totalRetrieved} total -> ${stats.uniqueAfterDedup} unique -> ${stats.finalAfterRerank} after rerank`);
 
   // Step 4: Generate report
+  checkAbort();
   emit({
     step: 'generating',
     message: `Generating research report from ${sources.length} sources...`,

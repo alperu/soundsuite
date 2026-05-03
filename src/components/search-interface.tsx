@@ -868,6 +868,12 @@ export default function SearchInterface({
 
   const handleStopAI = useCallback(() => {
     aiAbortRef.current?.abort();
+    aiAbortRef.current = null;
+    setAiLoading(false);
+    setAiError('Search stopped');
+    setDeepProgress(null);
+    setStreamingAnswer(null);
+    setAiProgressLog([]);
   }, []);
 
   // Start new chat — clear conversation

@@ -46,9 +46,23 @@ export async function POST(request: NextRequest) {
 
     const stream = new ReadableStream({
       async start(controller) {
-        const send = (obj: Record<string, any>) => {
-          controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'));
+        let closed = false;
+        const safeClose = () => {
+          if (closed) return;
+          closed = true;
+          try { controller.close(); } catch { /* already closed */ }
         };
+        const send = (obj: Record<string, any>) => {
+          if (closed) return;
+          try { controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n')); }
+          catch { closed = true; }
+        };
+
+        const onAbort = () => {
+          console.log('[Deep Search] Client aborted — closing stream');
+          safeClose();
+        };
+        request.signal.addEventListener('abort', onAbort);
 
         const onProgress = (progress: DeepSearchProgress) => {
           send({ type: 'progress', ...progress });
@@ -81,6 +95,7 @@ export async function POST(request: NextRequest) {
             thinking,
             ...(typeof maxTokens === 'number' ? { maxTokens } : {}),
             ...(effort ? { effort } : {}),
+            signal: request.signal,
           });
 
           send({
@@ -109,7 +124,8 @@ export async function POST(request: NextRequest) {
         } catch (error) {
           send({ type: 'error', error: error instanceof Error ? error.message : 'Deep search failed' });
         } finally {
-          controller.close();
+          request.signal.removeEventListener('abort', onAbort);
+          safeClose();
         }
       },
     });
