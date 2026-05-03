@@ -208,9 +208,23 @@ class RerankerLifecycle {
     }
   }
 
-  /** Push config (per-model idle timeouts, container name) to the agent. */
+  /** Push config (per-model idle timeouts, minOnline, container name) to the agent. */
   private async pushConfig(): Promise<void> {
     try {
+      // Best-effort: read app config so we can include minOnline. If unreachable
+      // (e.g. early boot), fall back to idle-timeouts only.
+      let minOnline: Record<string, number> | undefined;
+      try {
+        const { getConfig } = await import('@/lib/db/config');
+        const cfg = await getConfig();
+        minOnline = {
+          embedding: cfg.gpuMinEmbedding ?? 1,
+          completion: cfg.gpuMinCompletion ?? 0,
+          ocr: cfg.gpuMinOcr ?? 1,
+          reranker: cfg.gpuMinReranker ?? 1,
+        };
+      } catch { /* best-effort */ }
+
       await this.sendToSidecar('/config', 'POST', {
         idleTimeouts: {
           embedding: this.idleTimeouts.embedding,
@@ -218,6 +232,7 @@ class RerankerLifecycle {
           ocr: this.idleTimeouts.ocr,
           reranker: this.idleTimeouts.reranker,
         },
+        ...(minOnline ? { minOnline } : {}),
       });
       this.configPushed = true;
     } catch (err) {

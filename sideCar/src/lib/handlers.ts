@@ -1,6 +1,6 @@
 import { state } from './state';
 import { getContainerState, startContainer, stopContainer, removeContainer, createContainer, pullImage, getDockerMode, buildExpectedConfig, detectConfigDrift, isPortConflict, findContainerOnPort } from './docker';
-import { ollamaList, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
+import { ollamaList, ollamaShow, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
 import { loadGpuOnly } from './containers';
 import { clearIdleTimerForRole, clearAllIdleTimers, startIdleTimerForRole, startIdleTimer } from './idle-timers';
 import { getAllContainerStates } from './containers';
@@ -95,8 +95,25 @@ async function ensureOllamaModel(role: string): Promise<void> {
     const diskModels = await ollamaList(def.port);
     const modelBase = def.model.split(':')[0];
     log.info(`ensureOllamaModel: models on disk: ${diskModels.join(', ')}`);
-    const onDisk = diskModels.some(m => m.includes(modelBase));
-    log.info(`ensureOllamaModel: looking for "${modelBase}" → found=${onDisk}`);
+    let onDisk = diskModels.some(m => m === def.model || m.includes(modelBase));
+    log.info(`ensureOllamaModel: looking for "${def.model}" (base="${modelBase}") in /api/tags → found=${onDisk}`);
+    // Authoritative tiebreaker: /api/tags can return an empty list right after
+    // container start (Ollama scans the manifest store lazily) so a "not found"
+    // here often triggers a spurious 6 GB re-pull. /api/show is per-model and
+    // returns 404 only when the model is genuinely absent.
+    if (!onDisk) {
+      try {
+        const exists = await ollamaShow(def.port, def.model);
+        if (exists) {
+          log.info(`ensureOllamaModel: ${def.model} confirmed present via /api/show — skipping pull (was missing from /api/tags response, likely transient)`);
+          onDisk = true;
+        } else {
+          log.info(`ensureOllamaModel: /api/show returned 404 for ${def.model} — model genuinely missing, will pull`);
+        }
+      } catch (showErr) {
+        log.warn(`ensureOllamaModel: /api/show check failed: ${(showErr as Error).message} — falling back to pull`);
+      }
+    }
     if (onDisk) {
       log.info(`ensureOllamaModel: ${def.model} already present — skipping pull, loading into VRAM`);
       state.pullFailCount[role] = 0;

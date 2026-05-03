@@ -73,6 +73,22 @@ export async function ollamaList(port: number): Promise<string[]> {
   return (data.models || []).map((m: { name: string }) => m.name);
 }
 
+/**
+ * Authoritative check that a specific model exists on disk.
+ * POST /api/show {name} → 200 if present, 404 if missing. Use this when /api/tags
+ * gives a false negative (Ollama can return an empty list right after container
+ * start while it scans the manifest store, causing spurious re-pulls).
+ */
+export async function ollamaShow(port: number, name: string): Promise<boolean> {
+  const { status } = await ollamaRequest({
+    method: 'POST',
+    port,
+    path: '/api/show',
+    body: { name },
+  });
+  return status === 200;
+}
+
 export interface LoadedModel {
   name: string;
   size: number;

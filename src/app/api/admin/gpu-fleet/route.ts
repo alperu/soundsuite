@@ -197,6 +197,21 @@ export async function POST(request: NextRequest) {
           setConfigValue('gpu.min.ocr', String(body.gpuMinOcr ?? 0)),
           setConfigValue('gpu.min.reranker', String(body.gpuMinReranker ?? 0)),
         ]);
+        // Push the new policy to every reachable sidecar immediately so they
+        // start respecting min=0 on the next mode switch / orchestrator tick
+        // without waiting for a stale-config re-push.
+        try {
+          const fleet = await getFleetStatus();
+          const reachable = fleet.sidecars.filter(s => s.status === 'connected');
+          await Promise.all(reachable.map(s => sendToSidecar(s.url, '/config', {
+            minOnline: {
+              embedding: body.gpuMinEmbedding ?? 0,
+              completion: body.gpuMinCompletion ?? 0,
+              ocr: body.gpuMinOcr ?? 0,
+              reranker: body.gpuMinReranker ?? 0,
+            },
+          }, 'POST').catch(() => null)));
+        } catch { /* best-effort — orchestrator will re-push on next tick */ }
         return NextResponse.json({ saved: true });
       }
 

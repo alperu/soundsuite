@@ -130,6 +130,16 @@ export const state = {
     cuda: 0,
   } as Record<string, number>,
 
+  // Per-role minimum online instance count (pushed by master from /config).
+  // 0 means "never auto-start"; switchMode and other automatic starters skip
+  // these roles. Default 1 so legacy sidecars without master config still work.
+  minOnline: {
+    embedding: 1,
+    completion: 1,
+    ocr: 1,
+    reranker: 1,
+  } as Record<string, number>,
+
   // Per-role tracking
   perRole: initPerRole(),
 

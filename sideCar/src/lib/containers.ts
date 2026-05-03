@@ -322,10 +322,24 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
   return states;
 }
 
+/**
+ * Roles that should run in a given mode.
+ *
+ * Union of:
+ *   1. Roles whose registry definition includes this mode (the original semantic)
+ *   2. Roles with minOnline >= 1 (operator override — must run regardless of mode)
+ *
+ * minOnline=0 takes precedence: switchMode further filters those out so an
+ * opt-out wins even when the registry says the role belongs in this mode.
+ */
 export function containersForMode(mode: string): string[] {
-  return Object.entries(state.registry)
+  const fromRegistry = Object.entries(state.registry)
     .filter(([, def]) => def.modes.includes(mode as 'indexing' | 'searching'))
     .map(([role]) => role);
+  const forced = Object.entries(state.minOnline)
+    .filter(([role, n]) => (n ?? 0) > 0 && state.registry[role])
+    .map(([role]) => role);
+  return Array.from(new Set([...fromRegistry, ...forced]));
 }
 
 export async function switchMode(newMode: string): Promise<Record<string, unknown>> {
@@ -336,11 +350,18 @@ export async function switchMode(newMode: string): Promise<Record<string, unknow
 
   const oldRoles = containersForMode(state.currentMode);
   const newRoles = containersForMode(newMode);
-  const toStop = oldRoles.filter((r) => !newRoles.includes(r));
-  const toStart = newRoles.filter((r) => !oldRoles.includes(r));
+  // A role with minOnline>=1 stays running across mode switches — the operator
+  // policy overrides the mode definition. Only stop roles that are absent from
+  // the new mode AND have no min-online floor.
+  const toStop = oldRoles.filter((r) => !newRoles.includes(r) && (state.minOnline[r] ?? 0) === 0);
+  // Honor master-pushed minOnline=0 — never auto-start a role the operator
+  // has explicitly opted out of. The role can still be started on-demand
+  // via /acquire from a real request; this only suppresses mode-switch starts.
+  const skipped = newRoles.filter((r) => !oldRoles.includes(r) && (state.minOnline[r] ?? 1) === 0);
+  const toStart = newRoles.filter((r) => !oldRoles.includes(r) && (state.minOnline[r] ?? 1) > 0);
 
   log.info(`Switching mode: ${state.currentMode} -> ${newMode}`);
-  log.info(`Stop: ${toStop.join(', ') || 'none'} | Start: ${toStart.join(', ') || 'none'}`);
+  log.info(`Stop: ${toStop.join(', ') || 'none'} | Start: ${toStart.join(', ') || 'none'}${skipped.length ? ` | Skipped (minOnline=0): ${skipped.join(', ')}` : ''}`);
 
   // Start new containers first
   const startResults: Record<string, string> = {};

@@ -375,12 +375,19 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
 /** Push both idle timeouts AND model registry in a single /config call. */
 export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {
   const registry = await buildModelRegistry();
+  const cfg = await getConfig();
   return sendToSidecar(agentUrl, '/config', {
     idleTimeouts: {
       embedding: timeouts.embedding * 60_000,
       completion: timeouts.completion * 60_000,
       ocr: timeouts.ocr * 60_000,
       reranker: timeouts.reranker * 60_000,
+    },
+    minOnline: {
+      embedding: cfg.gpuMinEmbedding ?? 1,
+      completion: cfg.gpuMinCompletion ?? 0,
+      ocr: cfg.gpuMinOcr ?? 1,
+      reranker: cfg.gpuMinReranker ?? 1,
     },
     ...(Object.keys(registry).length > 0 ? { registry } : {}),
   });

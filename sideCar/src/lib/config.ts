@@ -25,6 +25,10 @@ export function loadSavedConfig(): Record<string, unknown> | null {
         Object.assign(state.idleTimeouts, data.idleTimeouts);
         log.info('Loaded saved idle timeouts', state.idleTimeouts);
       }
+      if (data.minOnline) {
+        Object.assign(state.minOnline, data.minOnline);
+        log.info('Loaded saved minOnline', state.minOnline);
+      }
       if (data.mode) {
         state.currentMode = data.mode;
         log.info(`Loaded saved mode: ${state.currentMode}`);
@@ -67,6 +71,7 @@ export function saveConfig(): void {
       serverUrl: state.serverUrl,
       agentUrl: state.savedAgentUrl,
       idleTimeouts: state.idleTimeouts,
+      minOnline: state.minOnline,
       mode: state.currentMode,
       registry: Object.fromEntries(
         Object.entries(state.registry).map(([role, def]) => [role, { model: def.model, port: def.port }])
