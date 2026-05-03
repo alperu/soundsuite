@@ -445,6 +445,8 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
     activeRequests: getTotalActiveRequests(),
     idleTimerActive: Object.values(state.perRole).some((r) => r.idleTimer !== null) || state.idleTimer !== null,
     idleTimeouts: state.idleTimeouts,
+    minOnline: state.minOnline,
+    lastConfigPushAt: state.lastConfigPushAt ?? null,
     roles,
     peakDemand: getPeakDemand(),
     containerName: state.CONTAINER_NAME,

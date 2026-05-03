@@ -182,7 +182,13 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
     }
     case 'config': {
       if (payload.idleTimeouts) Object.assign(state.idleTimeouts, payload.idleTimeouts);
+      if (payload.minOnline && typeof payload.minOnline === 'object') {
+        for (const [k, v] of Object.entries(payload.minOnline as Record<string, unknown>)) {
+          if (typeof v === 'number' && v >= 0) state.minOnline[k] = v;
+        }
+      }
       if (payload.containerName) state.CONTAINER_NAME = payload.containerName as string;
+      state.lastConfigPushAt = Date.now();
       const modelChangedRoles: string[] = [];
       if (payload.registry) {
         for (const [r, overrides] of Object.entries(payload.registry as Record<string, unknown>)) {

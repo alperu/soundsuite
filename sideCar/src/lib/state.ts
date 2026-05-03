@@ -140,6 +140,10 @@ export const state = {
     reranker: 1,
   } as Record<string, number>,
 
+  // Timestamp (epoch ms) of the last /config POST from master. Surfaced in
+  // /api/status so the operator can see how recently the sidecar was synced.
+  lastConfigPushAt: null as number | null,
+
   // Per-role tracking
   perRole: initPerRole(),
 

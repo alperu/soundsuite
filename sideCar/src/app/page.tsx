@@ -44,6 +44,8 @@ interface StatusData {
   serverUrl: string | null;
   roles: Record<string, { activeRequests: number; idleTimerActive: boolean }>;
   idleTimeouts?: Record<string, number>;
+  minOnline?: Record<string, number>;
+  lastConfigPushAt?: number | null;
   hostname?: string;
   ip?: string;
   tasks?: TaskInfo[];
@@ -54,6 +56,17 @@ interface StatusData {
 interface LogEntry {
   time: string;
   message: string;
+}
+
+function formatAge(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
 export default function Home() {
@@ -462,6 +475,45 @@ export default function Home() {
         wsCommandCount={status?.wsCommandCount ?? 0}
         wsConnected={status?.wsConnected ?? false}
       />
+
+      {/* Minimum Online (read-only — pushed by master) */}
+      {status?.minOnline && (
+        <div className="mb-6 rounded-lg border border-slate-200 bg-white p-4">
+          <div className="mb-2 flex items-baseline justify-between">
+            <h2 className="text-sm font-semibold text-slate-700">Minimum Online Instances</h2>
+            <span className="text-xs text-slate-400">
+              {status.lastConfigPushAt
+                ? `synced ${formatAge(Date.now() - status.lastConfigPushAt)} ago`
+                : 'never synced — using defaults'}
+            </span>
+          </div>
+          <p className="mb-3 text-xs text-slate-500">
+            Pushed by the master via <code className="rounded bg-slate-100 px-1">/config</code>. <code>0</code> means this role is never auto-started by mode-switch or the 30s enforcer; ≥1 forces the role to run regardless of current mode.
+          </p>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-slate-500">
+                <th className="pb-2 font-medium">Role</th>
+                <th className="pb-2 font-medium text-right">minOnline</th>
+                <th className="pb-2 font-medium">Effective behaviour</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(status.minOnline).map(([role, n]) => (
+                <tr key={role} className="border-t border-slate-100">
+                  <td className="py-2 capitalize text-slate-700">{role}</td>
+                  <td className="py-2 text-right font-mono text-slate-700">{n}</td>
+                  <td className="py-2 text-xs text-slate-500">
+                    {n === 0
+                      ? 'opt-out — mode-switch & enforcer skip'
+                      : `keep ≥${n} instance${n === 1 ? '' : 's'} running`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Idle Timeouts */}
       {Object.keys(editingTimeouts).length > 0 && (

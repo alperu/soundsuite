@@ -22,6 +22,8 @@ export async function POST(request: Request) {
       }
     }
 
+    state.lastConfigPushAt = Date.now();
+
     if (typeof body.idleTimeoutMs === 'number') {
       state.IDLE_TIMEOUT_MS = body.idleTimeoutMs;
       state.idleTimeouts.reranker = body.idleTimeoutMs;
