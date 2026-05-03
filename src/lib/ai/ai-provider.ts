@@ -32,6 +32,11 @@ export interface AICompletionRequest {
   thinking?: boolean;
   /** Effort level for Anthropic Opus 4.7 adaptive thinking. Default 'medium'. */
   effort?: AnthropicEffort;
+  /** JSON Schema for jsonMode. When provided, used as Anthropic forced-tool-use input_schema
+   *  so Claude actually emits the requested fields. With no properties, Claude returns `{}`. */
+  jsonSchema?: { type: 'object'; properties?: Record<string, unknown>; required?: string[]; [k: string]: unknown };
+  /** Abort signal forwarded to the underlying provider SDK. Cancels in-flight HTTP. */
+  signal?: AbortSignal;
 }
 
 export interface AICompletionResponse {
@@ -95,6 +100,8 @@ async function completeWithAnthropic(
   jsonMode?: boolean,
   thinking?: boolean,
   effort?: AnthropicEffort,
+  jsonSchema?: AICompletionRequest['jsonSchema'],
+  signal?: AbortSignal,
 ): Promise<AICompletionResponse> {
   // Anthropic's SDK rejects non-streaming requests it estimates may exceed
   // 10 minutes — common for large max_tokens + adaptive thinking (e.g. the
@@ -111,6 +118,8 @@ async function completeWithAnthropic(
     jsonMode,
     thinking,
     effort,
+    jsonSchema,
+    signal,
   )) {
     if (event.type === 'done') {
       return {
@@ -349,7 +358,7 @@ export async function* streamAI(req: AICompletionRequest): AsyncGenerator<Stream
 
     if (req.provider === 'anthropic') {
       const apiKey = getApiKey(config, 'anthropic');
-      yield* streamWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.effort);
+      yield* streamWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.effort, req.jsonSchema, req.signal);
       return;
     }
 
@@ -605,6 +614,8 @@ async function* streamWithAnthropic(
   jsonMode?: boolean,
   thinking?: boolean,
   effort?: AnthropicEffort,
+  jsonSchema?: AICompletionRequest['jsonSchema'],
+  signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey });
@@ -635,7 +646,23 @@ async function* streamWithAnthropic(
   // (Assistant-message prefill, the older approach, is rejected by Claude 4/4.5:
   //  "This model does not support assistant message prefill.")
   if (jsonMode) {
-    console.log(`[streamWithAnthropic] jsonMode=true, using forced tool use for ${model}`);
+    // Permissive fallback: the API requires `properties` to be present. Empty
+    // `{ type: 'object' }` (or no properties at all) makes Claude emit `{}` —
+    // see the contentLength=0 incident. additionalProperties:true lets Claude
+    // emit any shape described in the system prompt without a wrapper field.
+    // Real callers should pass jsonSchema so the model knows what to emit.
+    const inputSchema = jsonSchema ?? {
+      type: 'object' as const,
+      properties: {},
+      additionalProperties: true,
+    };
+    if (!jsonSchema) {
+      console.warn('[streamWithAnthropic] jsonMode without jsonSchema — model may emit empty {}. Pass a real schema.');
+    }
+    console.log(`[streamWithAnthropic] jsonMode=true, using forced tool use for ${model}`, {
+      schemaProperties: Object.keys((inputSchema as any).properties ?? {}),
+      required: (inputSchema as any).required ?? [],
+    });
     const response = await client.messages.create({
       model,
       max_tokens: maxTokens,
@@ -647,24 +674,33 @@ async function* streamWithAnthropic(
           name: 'emit_json_result',
           description:
             'Emit the structured JSON result that matches the schema described in the system prompt. Call this tool exactly once with your output as the tool input.',
-          // Permissive schema — the actual shape is enforced by downstream
-          // zod validation. This tool exists purely to force JSON mode.
-          input_schema: {
-            type: 'object' as const,
-          },
+          input_schema: inputSchema as any,
         },
       ],
       tool_choice: { type: 'tool' as const, name: 'emit_json_result' },
       stream: true,
       ...thinkingExtras,
-    });
+    }, signal ? { signal } : undefined);
 
     let fullContent = '';
     let batchBuffer = '';
     let inputTokens = 0;
     let outputTokens = 0;
+    const jsonStreamStart = Date.now();
+    let jsonLastHeartbeat = jsonStreamStart;
+    const JSON_HEARTBEAT_MS = 10_000;
 
     for await (const event of response) {
+      const nowJson = Date.now();
+      if (nowJson - jsonLastHeartbeat >= JSON_HEARTBEAT_MS) {
+        console.log('[streamWithAnthropic] jsonMode heartbeat', {
+          model,
+          elapsedSec: Math.round((nowJson - jsonStreamStart) / 1000),
+          contentChars: fullContent.length,
+          outputTokens,
+        });
+        jsonLastHeartbeat = nowJson;
+      }
       if (
         event.type === 'content_block_delta' &&
         (event.delta as { type?: string }).type === 'input_json_delta'
@@ -713,6 +749,9 @@ async function* streamWithAnthropic(
   }
 
   // Non-jsonMode path: standard text streaming.
+  const streamStart = Date.now();
+  let lastHeartbeat = streamStart;
+  const HEARTBEAT_MS = 10_000;
   const response = await client.messages.create({
     model,
     max_tokens: maxTokens,
@@ -721,14 +760,26 @@ async function* streamWithAnthropic(
     messages: outgoingMessages,
     stream: true,
     ...thinkingExtras,
-  });
+  }, signal ? { signal } : undefined);
 
   let fullContent = '';
   let batchBuffer = '';
   let inputTokens = 0;
   let outputTokens = 0;
+  let thinkingChars = 0;
 
   for await (const event of response) {
+    const now = Date.now();
+    if (now - lastHeartbeat >= HEARTBEAT_MS) {
+      console.log('[streamWithAnthropic] heartbeat', {
+        model,
+        elapsedSec: Math.round((now - streamStart) / 1000),
+        contentChars: fullContent.length,
+        thinkingChars,
+        outputTokens,
+      });
+      lastHeartbeat = now;
+    }
     if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
       const text = event.delta.text;
       fullContent += text;
@@ -745,7 +796,10 @@ async function* streamWithAnthropic(
       // client thinking-log can render them. `signature_delta` ignored
       // (not replaying thinking blocks in multi-turn tool use yet).
       const chunk = event.delta.thinking;
-      if (chunk) yield { type: 'thinking', text: chunk };
+      if (chunk) {
+        thinkingChars += chunk.length;
+        yield { type: 'thinking', text: chunk };
+      }
     } else if (event.type === 'message_delta') {
       outputTokens = (event as any).usage?.output_tokens ?? outputTokens;
     } else if (event.type === 'message_start') {
@@ -754,6 +808,15 @@ async function* streamWithAnthropic(
   }
 
   if (batchBuffer) yield { type: 'token', text: batchBuffer };
+
+  console.log('[streamWithAnthropic] stream complete', {
+    model,
+    elapsedSec: Math.round((Date.now() - streamStart) / 1000),
+    contentChars: fullContent.length,
+    thinkingChars,
+    inputTokens,
+    outputTokens,
+  });
 
   yield {
     type: 'done',
@@ -810,7 +873,7 @@ export async function completeAI(req: AICompletionRequest): Promise<AICompletion
   const apiKey = getApiKey(config, req.provider);
 
   if (req.provider === 'anthropic') {
-    return completeWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.effort);
+    return completeWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.effort, req.jsonSchema, req.signal);
   }
 
   const baseURL = OPENAI_COMPATIBLE_BASE_URLS[req.provider];

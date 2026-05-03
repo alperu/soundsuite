@@ -294,7 +294,9 @@ export default function SearchInterface({
   const [aiModel, setAiModel] = usePersistedState<string>('search.aiModel', '');
   const [aiResults, setAiResults] = useState<AISearchResult[]>([]);
   const [aiLoading, setAiLoading] = useState(false);
+  const [aiStopping, setAiStopping] = useState(false);
   const aiAbortRef = useRef<AbortController | null>(null);
+  const aiStoppedRef = useRef(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiSearchTime, setAiSearchTime] = useState<number | null>(null);
   const [compareMode, setCompareMode] = usePersistedState<boolean>('search.compareMode', hasExplicitPath ? initialCompareMode : false);
@@ -783,6 +785,8 @@ export default function SearchInterface({
     const isFollowUp = aiTurns.length > 0 || deepTurns.length > 0;
 
     aiAbortRef.current = new AbortController();
+    aiStoppedRef.current = false;
+    setAiStopping(false);
     setAiLoading(true);
     setAiError(null);
 
@@ -856,6 +860,7 @@ export default function SearchInterface({
       // Persist session immediately using the complete data we already have
       // (Don't rely on React state which may not be flushed yet)
       setTimeout(() => {
+        if (aiStoppedRef.current) return; // user stopped — skip persist
         setAiTurns(latestAi => {
           setDeepTurns(latestDeep => {
             persistSession(latestAi, latestDeep, currentSessionId);
@@ -865,7 +870,8 @@ export default function SearchInterface({
         });
       }, 500);
     } catch (err) {
-      const aborted = (err instanceof DOMException && err.name === 'AbortError')
+      const aborted = aiStoppedRef.current
+        || (err instanceof DOMException && err.name === 'AbortError')
         || (err instanceof Error && /aborted/i.test(err.message));
       if (aborted) {
         setAiError('Search stopped');
@@ -873,23 +879,29 @@ export default function SearchInterface({
         setAiError(err instanceof Error ? err.message : 'An error occurred');
       }
       // Restore query on error so user can retry
-      setAiQuery(currentQuery);
+      if (!aiStoppedRef.current) setAiQuery(currentQuery);
       setDeepProgress(null);
       setStreamingAnswer(null);
     } finally {
       aiAbortRef.current = null;
       setAiLoading(false);
+      setAiStopping(false);
     }
   };
 
   const handleStopAI = useCallback(() => {
-    aiAbortRef.current?.abort();
-    aiAbortRef.current = null;
-    setAiLoading(false);
+    if (!aiAbortRef.current) return;
+    aiStoppedRef.current = true;
+    aiAbortRef.current.abort();
+    setAiStopping(true);
     setAiError('Search stopped');
     setDeepProgress(null);
     setStreamingAnswer(null);
     setAiProgressLog([]);
+    // aiLoading stays true; the running async function will transition it
+    // via the catch + finally path in handleAISearch. This avoids button
+    // swap during the click and avoids stale buffered events repopulating
+    // progress state after Stop.
   }, []);
 
   // Start new chat — clear conversation
@@ -1484,12 +1496,12 @@ export default function SearchInterface({
                   )}
 
                   {/* Deep Search Progress */}
-                  {aiLoading && deepSearchMode && deepProgress && (
+                  {aiLoading && !aiStopping && deepSearchMode && deepProgress && (
                     <DeepSearchProgressCard progress={deepProgress} />
                   )}
 
                   {/* Thinking log for regular AI search */}
-                  {!deepSearchMode && (aiLoading || aiProgressLog.length > 0) && (
+                  {!deepSearchMode && !aiStopping && (aiLoading || aiProgressLog.length > 0) && (
                     <AIThinkingLog
                       entries={aiProgressLog}
                       expanded={thinkingExpanded}
@@ -1568,10 +1580,11 @@ export default function SearchInterface({
                       <button
                         type="button"
                         onClick={handleStopAI}
-                        className="px-5 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 transition-colors whitespace-nowrap inline-flex items-center gap-2"
+                        disabled={aiStopping}
+                        className="px-5 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:bg-red-400 disabled:cursor-wait transition-colors whitespace-nowrap inline-flex items-center gap-2"
                       >
                         <span className="inline-block w-2.5 h-2.5 bg-white rounded-sm" />
-                        Stop
+                        {aiStopping ? 'Stopping…' : 'Stop'}
                       </button>
                     ) : (
                       <button

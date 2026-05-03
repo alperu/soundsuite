@@ -113,7 +113,7 @@ Respond with JSON: { "subQueries": ["query1", "query2", ...], "intent": "brief i
 
 export async function decomposeQuery(
   query: string,
-  options?: { provider?: string; model?: string; history?: ConversationTurn[]; thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' },
+  options?: { provider?: string; model?: string; history?: ConversationTurn[]; thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal },
 ): Promise<DecompositionResult> {
   try {
     // For follow-ups, include conversation context so decomposition is aware of prior discussion
@@ -135,6 +135,24 @@ export async function decomposeQuery(
         model: options?.model,
         thinking: options?.thinking,
         effort: options?.effort,
+        signal: options?.signal,
+        jsonSchema: {
+          type: 'object',
+          properties: {
+            subQueries: {
+              type: 'array',
+              description: '2-5 focused sub-queries that decompose the original question. Each is a self-contained search query.',
+              items: { type: 'string' },
+              minItems: 1,
+              maxItems: 7,
+            },
+            intent: {
+              type: 'string',
+              description: 'A brief one-sentence summary of what the user is trying to find.',
+            },
+          },
+          required: ['subQueries', 'intent'],
+        },
       },
     );
 
@@ -417,7 +435,7 @@ export async function generateReport(
   query: string,
   decomposition: DecompositionResult,
   sources: DeepSearchSource[],
-  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' },
+  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal },
 ): Promise<string> {
   if (sources.length === 0) {
     return '## No Results Found\n\nThe deep search did not find any relevant document excerpts for your query. Try rephrasing your question or broadening the search scope.';
@@ -487,6 +505,7 @@ ${contextBlock}`;
       model: options?.model,
       thinking: options?.thinking,
       effort: options?.effort,
+      signal: options?.signal,
     });
   } catch (err) {
     // Surface the real error — the old bare catch hid it and only returned
@@ -532,7 +551,7 @@ export async function deepSearch(
   // Step 1: Decompose
   checkAbort();
   emit({ step: 'decomposing', message: history?.length ? 'Analyzing follow-up in context...' : 'Breaking question into targeted sub-queries...' });
-  const decomposition = await decomposeQuery(query, { provider, model, history, thinking, effort });
+  const decomposition = await decomposeQuery(query, { provider, model, history, thinking, effort, signal });
   console.log(`[Deep Search] Decomposed into ${decomposition.subQueries.length} sub-queries:`, decomposition.subQueries);
 
   // Step 2: Parallel searches
@@ -598,6 +617,7 @@ export async function deepSearch(
     thinking,
     maxTokens,
     effort,
+    signal,
   });
 
   console.log(`[Deep Search] Completed in ${Date.now() - t0}ms`);
