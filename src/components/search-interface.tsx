@@ -528,6 +528,7 @@ export default function SearchInterface({
     history?: Array<{ role: 'user' | 'assistant'; content: string }>,
   ): Promise<AISearchResult> => {
     const q = (query || aiQuery).trim();
+    const signal = aiAbortRef.current?.signal;
     const res = await fetch('/api/search/ai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -564,6 +565,12 @@ export default function SearchInterface({
     let finalResult: AISearchResult | null = null;
 
     while (true) {
+      if (signal?.aborted) {
+        try { await reader.cancel(); } catch { /* noop */ }
+        const err = new Error('aborted');
+        (err as any).name = 'AbortError';
+        throw err;
+      }
       const { done, value } = await reader.read();
       if (done) break;
 
@@ -572,6 +579,7 @@ export default function SearchInterface({
       buffer = lines.pop() || '';
 
       for (const line of lines) {
+        if (signal?.aborted) break;
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
@@ -613,6 +621,7 @@ export default function SearchInterface({
     history?: Array<{ role: 'user' | 'assistant'; content: string }>,
   ): Promise<DeepSearchResult> => {
     const q = (query || aiQuery).trim();
+    const signal = aiAbortRef.current?.signal;
     const res = await fetch('/api/search/deep', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -643,6 +652,12 @@ export default function SearchInterface({
     let finalResult: DeepSearchResult | null = null;
 
     while (true) {
+      if (signal?.aborted) {
+        try { await reader.cancel(); } catch { /* noop */ }
+        const err = new Error('aborted');
+        (err as any).name = 'AbortError';
+        throw err;
+      }
       const { done, value } = await reader.read();
       if (done) break;
 
@@ -651,6 +666,7 @@ export default function SearchInterface({
       buffer = lines.pop() || ''; // keep incomplete line in buffer
 
       for (const line of lines) {
+        if (signal?.aborted) break;
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
