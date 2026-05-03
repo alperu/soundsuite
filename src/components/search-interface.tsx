@@ -60,7 +60,7 @@ interface AISearchResult {
 }
 
 interface DeepSearchProgress {
-  step: 'decomposing' | 'searching' | 'pattern_searching' | 'merging' | 'reranking' | 'generating' | 'done';
+  step: 'decomposing' | 'searching' | 'pattern_searching' | 'merging' | 'reranking' | 'generating' | 'done' | 'warning';
   message: string;
   subQueryIndex?: number;
   subQueryTotal?: number;
@@ -72,6 +72,7 @@ interface DeepSearchProgress {
     finalAfterRerank: number;
     subQueryCount: number;
   }>;
+  warnings?: Array<{ source: string; host?: string; message: string }>;
 }
 
 interface AIConversationTurn {
@@ -309,6 +310,7 @@ export default function SearchInterface({
   const [deepTurns, setDeepTurns] = useState<DeepSearchTurn[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>(() => `session-${Date.now()}`);
   const [deepProgress, setDeepProgress] = useState<DeepSearchProgress | null>(null);
+  const [searchWarnings, setSearchWarnings] = useState<Array<{ source: string; host?: string; message: string }>>([]);
   const [aiProgressLog, setAiProgressLog] = useState<AIProgressEntry[]>([]);
   const [thinkingExpanded, setThinkingExpanded] = useState(true);
   const [searchStartTime, setSearchStartTime] = useState(0);
@@ -673,7 +675,18 @@ export default function SearchInterface({
         try {
           const event = JSON.parse(line);
           if (event.type === 'progress') {
-            setDeepProgress(event as DeepSearchProgress);
+            const p = event as DeepSearchProgress;
+            if (p.warnings && p.warnings.length > 0) {
+              setSearchWarnings(prev => [...prev, ...p.warnings!]);
+            }
+            // Don't replace deepProgress with a 'warning' step — leave the
+            // last real progress step visible so the pipeline keeps moving.
+            if (p.step !== 'warning') setDeepProgress(p);
+          } else if (event.type === 'token') {
+            setStreamingAnswer(prev => (prev ?? '') + event.text);
+          } else if (event.type === 'thinking') {
+            // Surface thinking deltas as a progress entry — distinct from tokens.
+            setAiProgressLog(prev => [...prev, { step: 'thinking', message: event.text, timestamp: Date.now() } as AIProgressEntry]);
           } else if (event.type === 'result') {
             finalResult = event.data as DeepSearchResult;
           } else if (event.type === 'error') {
@@ -789,6 +802,7 @@ export default function SearchInterface({
     setAiStopping(false);
     setAiLoading(true);
     setAiError(null);
+    setSearchWarnings([]);
 
     if (!isFollowUp) {
       // New conversation — clear everything
@@ -1499,6 +1513,16 @@ export default function SearchInterface({
                   {aiLoading && !aiStopping && deepSearchMode && deepProgress && (
                     <DeepSearchProgressCard progress={deepProgress} />
                   )}
+                  {!aiStopping && searchWarnings.length > 0 && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1">
+                      <p className="text-xs font-medium text-amber-900">Warnings</p>
+                      {searchWarnings.map((w, i) => (
+                        <p key={i} className="text-xs text-amber-800">
+                          <span className="font-medium">{w.source}{w.host ? ` (${w.host})` : ''}:</span> {w.message}
+                        </p>
+                      ))}
+                    </div>
+                  )}
 
                   {/* Thinking log for regular AI search */}
                   {!deepSearchMode && !aiStopping && (aiLoading || aiProgressLog.length > 0) && (
@@ -1512,12 +1536,15 @@ export default function SearchInterface({
                   )}
 
                   {/* Streaming answer (shows while tokens arrive, before final result) */}
-                  {streamingAnswer !== null && aiLoading && !deepSearchMode && (
-                    <div className="bg-white rounded-lg shadow-sm border border-purple-200 p-4">
+                  {streamingAnswer !== null && aiLoading && !aiStopping && (
+                    <div className={`bg-white rounded-lg shadow-sm border p-4 ${deepSearchMode ? 'border-indigo-200' : 'border-purple-200'}`}>
+                      {deepSearchMode && (
+                        <p className="text-xs font-medium text-indigo-700 mb-2">Streaming research report…</p>
+                      )}
                       <div className="prose prose-sm max-w-none text-gray-800">
                         <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{streamingAnswer}</ReactMarkdown>
                       </div>
-                      <span className="inline-block w-1.5 h-4 bg-purple-400 animate-pulse ml-0.5 rounded-sm" />
+                      <span className={`inline-block w-1.5 h-4 animate-pulse ml-0.5 rounded-sm ${deepSearchMode ? 'bg-indigo-400' : 'bg-purple-400'}`} />
                     </div>
                   )}
 

@@ -90,6 +90,8 @@ export async function POST(request: NextRequest) {
             model,
             caseId: caseId || undefined,
             onProgress,
+            onToken: (text) => send({ type: 'token', text }),
+            onThinking: (text) => send({ type: 'thinking', text }),
             history: history || undefined,
             ...(workflowContext ? { workflowContext } : {}),
             thinking,

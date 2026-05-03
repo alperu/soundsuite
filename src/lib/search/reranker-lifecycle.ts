@@ -41,6 +41,8 @@ class RerankerLifecycle {
   private agentBase: string | null = null; // e.g. "http://10.10.20.5:8098"
   private enabled = true;
   private configPushed = false;
+  private lastStartError: { at: number; error: Error } | null = null;
+  private static START_FAIL_TTL_MS = 5_000;
   private idleTimeoutMs = 5 * 60 * 1000;
   private idleTimeouts: PerModelIdleTimeouts = {
     embedding: 0,
@@ -105,12 +107,22 @@ class RerankerLifecycle {
       return;
     }
 
+    // Short-circuit: if a recent start attempt failed, don't hammer the sidecar.
+    // 6 parallel deep-search rerank calls would otherwise all retry /acquire.
+    if (this.lastStartError && Date.now() - this.lastStartError.at < RerankerLifecycle.START_FAIL_TTL_MS) {
+      throw this.lastStartError.error;
+    }
+
     // Start via agent and wait for health
     this.state = 'starting';
     this.startPromise = this.acquireAndWaitForHealth(host);
 
     try {
       await this.startPromise;
+      this.lastStartError = null;
+    } catch (err) {
+      this.lastStartError = { at: Date.now(), error: err as Error };
+      throw err;
     } finally {
       this.startPromise = null;
     }
@@ -256,9 +268,10 @@ class RerankerLifecycle {
       const result = await this.sendToSidecar('/acquire', 'POST');
 
       if (result.error) {
-        logger.warn('Agent acquire failed', { error: result.error });
         this.state = 'stopped';
-        return;
+        const err = new Error(`Reranker /acquire failed: ${result.error}`);
+        logger.warn('Agent acquire failed', { error: result.error });
+        throw err;
       }
 
       if (result.action === 'already_running') {
@@ -276,6 +289,7 @@ class RerankerLifecycle {
         'Failed to start reranker via agent',
         err instanceof Error ? err : new Error(String(err)),
       );
+      throw err;
     }
   }
 

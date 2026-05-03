@@ -7,7 +7,8 @@
  * 4. Generates a comprehensive markdown report with citations
  */
 
-import { callLLM, callLLMJson, buildContext } from '../mcp/tools/ai-helper';
+import { callLLM, callLLMJson, buildContext, getAvailableProvider } from '../mcp/tools/ai-helper';
+import { streamAI, AIProviderKey } from '../ai/ai-provider';
 import { rerank, RerankableResult } from './reranker';
 import type { ToolRegistry } from '../mcp/tool-registry';
 
@@ -36,7 +37,7 @@ interface DecompositionResult {
 }
 
 export interface DeepSearchProgress {
-  step: 'decomposing' | 'searching' | 'pattern_searching' | 'merging' | 'reranking' | 'generating' | 'done';
+  step: 'decomposing' | 'searching' | 'pattern_searching' | 'merging' | 'reranking' | 'generating' | 'done' | 'warning';
   message: string;
   /** For 'searching' step: which sub-query index (0-based) */
   subQueryIndex?: number;
@@ -45,6 +46,8 @@ export interface DeepSearchProgress {
   subQueries?: string[];
   intent?: string;
   searchStats?: Partial<DeepSearchResult['searchStats']>;
+  /** Non-fatal warnings collected during the run (e.g. reranker fallback). */
+  warnings?: Array<{ source: string; host?: string; message: string }>;
 }
 
 export interface ConversationTurn {
@@ -70,6 +73,10 @@ export interface DeepSearchOptions {
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /** Abort signal to cancel mid-pipeline. Checked between major phases. */
   signal?: AbortSignal;
+  /** Streamed report tokens — called for each chunk the report LLM emits. */
+  onToken?: (text: string) => void;
+  /** Streamed thinking tokens (Anthropic adaptive thinking). */
+  onThinking?: (text: string) => void;
 }
 
 export interface DeepSearchResult {
@@ -348,6 +355,7 @@ function makeDeduplicationKey(source: DeepSearchSource): string {
 export async function deduplicateAndMerge(
   subQueryResults: SubQueryResult[],
   originalQuery: string,
+  onWarning?: (w: { source: string; host?: string; message: string }) => void,
 ): Promise<{ sources: DeepSearchSource[]; stats: { totalRetrieved: number; uniqueAfterDedup: number; finalAfterRerank: number } }> {
   const seen = new Map<string, DeepSearchSource>();
   let totalRetrieved = 0;
@@ -388,7 +396,11 @@ export async function deduplicateAndMerge(
   // Rerank merged pool against original query
   if (merged.length > 0) {
     const rerankable = merged as (DeepSearchSource & RerankableResult)[];
-    merged = await rerank(originalQuery, rerankable, 150);
+    merged = await rerank(originalQuery, rerankable, 150, onWarning ? (w) => onWarning({
+      source: w.source,
+      host: w.host,
+      message: `${w.reason}: ${w.message}`,
+    }) : undefined);
   }
 
   // Sort by score descending
@@ -435,7 +447,7 @@ export async function generateReport(
   query: string,
   decomposition: DecompositionResult,
   sources: DeepSearchSource[],
-  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal },
+  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal; onToken?: (text: string) => void; onThinking?: (text: string) => void },
 ): Promise<string> {
   if (sources.length === 0) {
     return '## No Results Found\n\nThe deep search did not find any relevant document excerpts for your query. Try rephrasing your question or broadening the search scope.';
@@ -498,6 +510,40 @@ ${decomposition.intent}
 ${contextBlock}`;
 
   try {
+    // When the caller wants live tokens (deep-search route does), bypass the
+    // buffered callLLM helper and drive streamAI directly so the user sees
+    // the report appear word-by-word instead of after a 60-300s wait.
+    if (options?.onToken || options?.onThinking) {
+      const resolved = (options?.provider && options?.model)
+        ? { provider: options.provider as AIProviderKey, model: options.model }
+        : await getAvailableProvider();
+      let fullContent = '';
+      for await (const event of streamAI({
+        provider: resolved.provider,
+        model: resolved.model,
+        messages: [
+          { role: 'system', content: REPORT_SYSTEM_PROMPT },
+          { role: 'user', content: userContent },
+        ],
+        maxTokens: options?.maxTokens ?? 16384,
+        temperature: 0.3,
+        thinking: options?.thinking,
+        effort: options?.effort,
+        signal: options?.signal,
+      })) {
+        if (event.type === 'token' && options.onToken) {
+          options.onToken(event.text);
+          fullContent += event.text;
+        } else if (event.type === 'thinking' && options.onThinking) {
+          options.onThinking(event.text);
+        } else if (event.type === 'done') {
+          // streamAI's done event carries the full content as a fallback for
+          // providers that don't yield per-token (e.g. error fallback).
+          if (!fullContent && event.content) fullContent = event.content;
+        }
+      }
+      return fullContent;
+    }
     return await callLLM(REPORT_SYSTEM_PROMPT, userContent, {
       maxTokens: options?.maxTokens ?? 16384,
       temperature: 0.3,
@@ -535,7 +581,7 @@ export async function deepSearch(
   registry: ToolRegistry,
   options: DeepSearchOptions = {},
 ): Promise<DeepSearchResult> {
-  const { provider, model, caseId, onProgress, history, workflowContext, thinking, maxTokens, effort, signal } = options;
+  const { provider, model, caseId, onProgress, history, workflowContext, thinking, maxTokens, effort, signal, onToken, onThinking } = options;
   const emit = onProgress || (() => {});
   const checkAbort = () => {
     if (signal?.aborted) {
@@ -597,7 +643,11 @@ export async function deepSearch(
     intent: decomposition.intent,
     searchStats: { totalRetrieved, subQueryCount: decomposition.subQueries.length },
   });
-  const { sources, stats } = await deduplicateAndMerge(subQueryResults, query);
+  const warnings: Array<{ source: string; host?: string; message: string }> = [];
+  const { sources, stats } = await deduplicateAndMerge(subQueryResults, query, (w) => {
+    warnings.push(w);
+    emit({ step: 'warning', message: `${w.source}${w.host ? ` (${w.host})` : ''}: ${w.message}`, warnings: [w] });
+  });
   console.log(`[Deep Search] Merged: ${stats.totalRetrieved} total -> ${stats.uniqueAfterDedup} unique -> ${stats.finalAfterRerank} after rerank`);
 
   // Step 4: Generate report
@@ -618,11 +668,13 @@ export async function deepSearch(
     maxTokens,
     effort,
     signal,
+    onToken,
+    onThinking,
   });
 
   console.log(`[Deep Search] Completed in ${Date.now() - t0}ms`);
 
-  emit({ step: 'done', message: 'Deep search complete.' });
+  emit({ step: 'done', message: 'Deep search complete.', warnings: warnings.length > 0 ? warnings : undefined });
 
   return {
     report,

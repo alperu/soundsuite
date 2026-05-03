@@ -34,24 +34,65 @@ let _cacheTime = 0;
 const CACHE_TTL = 30_000; // 30 seconds
 
 /** Cached reranker preflight verdict (fast fail when vLLM is down) */
-const PREFLIGHT_OK_TTL_MS = 5_000;
+const PREFLIGHT_OK_TTL_MS = 30_000; // longer once warm-up confirms model is loaded
 const PREFLIGHT_FAIL_TTL_MS = 2_000;
 const PREFLIGHT_TIMEOUT_MS = 1_500;
+const WARMUP_TIMEOUT_MS = 5_000;
 let _preflightCache: { host: string; ok: boolean; at: number; error?: string } | null = null;
 
-async function rerankerPreflight(host: string): Promise<{ ok: boolean; error?: string }> {
+/** Module-level serializer: vLLM batches one rerank at a time per GPU, so
+ *  parallel deep-search calls to the same host should queue not stack. */
+let _rerankInflight: Promise<unknown> = Promise.resolve();
+function serializeRerank<T>(fn: () => Promise<T>): Promise<T> {
+  const next = _rerankInflight.then(fn, fn);
+  _rerankInflight = next.catch(() => {});
+  return next;
+}
+
+async function rerankerPreflight(host: string, model?: string): Promise<{ ok: boolean; error?: string }> {
   const now = Date.now();
   const cached = _preflightCache;
   if (cached && cached.host === host) {
     const ttl = cached.ok ? PREFLIGHT_OK_TTL_MS : PREFLIGHT_FAIL_TTL_MS;
     if (now - cached.at < ttl) return { ok: cached.ok, error: cached.error };
   }
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), PREFLIGHT_TIMEOUT_MS);
+  const base = host.replace(/\/+$/, '');
+  // Step 1: /health — confirms HTTP server is up
+  const healthCtrl = new AbortController();
+  const healthTimer = setTimeout(() => healthCtrl.abort(), PREFLIGHT_TIMEOUT_MS);
   try {
-    const res = await fetch(`${host.replace(/\/+$/, '')}/health`, { signal: ctrl.signal });
+    const res = await fetch(`${base}/health`, { signal: healthCtrl.signal });
     if (!res.ok) {
       const result = { ok: false, error: `HTTP ${res.status}` };
+      _preflightCache = { host, at: now, ...result };
+      return result;
+    }
+  } catch (err) {
+    const msg = (err as Error).name === 'AbortError'
+      ? `preflight /health timeout after ${PREFLIGHT_TIMEOUT_MS}ms`
+      : (err as Error).message;
+    _preflightCache = { host, at: now, ok: false, error: msg };
+    return { ok: false, error: msg };
+  } finally {
+    clearTimeout(healthTimer);
+  }
+  // Step 2: 1-doc warm-up — confirms the model is actually loaded.
+  // /health goes green the moment the HTTP server binds (well before model load).
+  if (!model) {
+    _preflightCache = { host, at: now, ok: true };
+    return { ok: true };
+  }
+  const warmCtrl = new AbortController();
+  const warmTimer = setTimeout(() => warmCtrl.abort(), WARMUP_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${base}/v1/rerank`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, query: 'ping', documents: ['ping'], top_n: 1, return_documents: false }),
+      signal: warmCtrl.signal,
+    });
+    if (!res.ok) {
+      const result = { ok: false, error: `warm-up HTTP ${res.status}` };
       _preflightCache = { host, at: now, ...result };
       return result;
     }
@@ -59,12 +100,12 @@ async function rerankerPreflight(host: string): Promise<{ ok: boolean; error?: s
     return { ok: true };
   } catch (err) {
     const msg = (err as Error).name === 'AbortError'
-      ? `preflight timeout after ${PREFLIGHT_TIMEOUT_MS}ms`
+      ? `model not ready (warm-up timeout after ${WARMUP_TIMEOUT_MS}ms — likely loading)`
       : (err as Error).message;
     _preflightCache = { host, at: now, ok: false, error: msg };
     return { ok: false, error: msg };
   } finally {
-    clearTimeout(timer);
+    clearTimeout(warmTimer);
   }
 }
 
@@ -85,11 +126,22 @@ async function getRerankConfig(): Promise<AppConfig> {
  * @param results  Search results with at least `text` and `score` fields
  * @param topN  Override for how many results to keep (defaults to config value)
  */
+export interface RerankWarning {
+  source: 'reranker';
+  host?: string;
+  reason: 'preflight' | 'lifecycle' | 'fetch' | 'score-validation' | 'fallback-model';
+  message: string;
+}
+
 export async function rerank<T extends RerankableResult>(
   query: string,
   results: T[],
   topN?: number,
+  onWarning?: (w: RerankWarning) => void,
 ): Promise<T[]> {
+  const warn = (reason: RerankWarning['reason'], host: string | undefined, message: string) => {
+    if (onWarning) onWarning({ source: 'reranker', host, reason, message });
+  };
   if (results.length === 0) {
     logger.info('Reranking skipped', { reason: 'empty results' });
     return results;
@@ -112,10 +164,22 @@ export async function rerank<T extends RerankableResult>(
 
   const effectiveTopN = topN ?? config.rerankTopN ?? 10;
 
-  // Configure and ensure the reranker container is running
+  // Configure and ensure the reranker container is running. ensureRunning()
+  // now throws on /acquire failure so we degrade gracefully instead of blasting
+  // 30s timeouts at a non-existent container.
   rerankerLifecycle.setEnabled(config.rerankAutoManage);
   rerankerLifecycle.setIdleTimeout(config.rerankIdleTimeoutMin * 60 * 1000);
-  await rerankerLifecycle.ensureRunning(config.rerankHost);
+  try {
+    await rerankerLifecycle.ensureRunning(config.rerankHost);
+  } catch (err) {
+    const message = (err as Error).message;
+    logger.warn('Reranker lifecycle ensureRunning failed — using original order', {
+      host: config.rerankHost,
+      error: message,
+    });
+    warn('lifecycle', config.rerankHost, message);
+    return results.slice(0, effectiveTopN);
+  }
 
   logger.info('Reranker route', {
     host: config.rerankHost,
@@ -128,13 +192,14 @@ export async function rerank<T extends RerankableResult>(
 
   const startMs = Date.now();
   try {
-    const pf = await rerankerPreflight(config.rerankHost);
+    const pf = await rerankerPreflight(config.rerankHost, config.rerankModel);
     if (!pf.ok) {
       logger.warn('Reranker preflight failed — using original order', {
         host: config.rerankHost,
         model: config.rerankModel,
         error: pf.error,
       });
+      warn('preflight', config.rerankHost, pf.error || 'preflight failed');
       return results.slice(0, effectiveTopN);
     }
 
@@ -149,9 +214,12 @@ export async function rerank<T extends RerankableResult>(
     let reranked: T[];
     let totalTokens: number;
     let usedModel = config.rerankModel;
+    const timeoutMs = config.rerankTimeoutMs ?? 90_000;
 
     try {
-      const primary = await rerankViaVllmWithRetry(query, results, config.rerankModel, config.rerankHost, effectiveTopN);
+      const primary = await serializeRerank(() =>
+        rerankViaVllmWithRetry(query, results, config.rerankModel, config.rerankHost, effectiveTopN, timeoutMs),
+      );
       reranked = primary.items;
       totalTokens = primary.totalTokens;
     } catch (primaryErr) {
@@ -162,7 +230,9 @@ export async function rerank<T extends RerankableResult>(
           fallbackModel: config.rerankFallbackModel,
           error: primaryErr instanceof Error ? primaryErr.message : String(primaryErr),
         });
-        const fallback = await rerankViaVllmWithRetry(query, results, config.rerankFallbackModel, config.rerankHost, effectiveTopN);
+        const fallback = await serializeRerank(() =>
+          rerankViaVllmWithRetry(query, results, config.rerankFallbackModel, config.rerankHost, effectiveTopN, timeoutMs),
+        );
         reranked = fallback.items;
         totalTokens = fallback.totalTokens;
         usedModel = config.rerankFallbackModel;
@@ -180,6 +250,7 @@ export async function rerank<T extends RerankableResult>(
           model: usedModel,
           scores: reranked.slice(0, 5).map(r => r.score),
         });
+        warn('score-validation', config.rerankHost, `score validation failed: ${validation.reason}`);
         return results.slice(0, effectiveTopN);
       }
     }
@@ -196,6 +267,7 @@ export async function rerank<T extends RerankableResult>(
     // Undici packs the real socket errno in err.cause — surface it so
     // future incidents don't hide behind the opaque "TypeError: fetch failed".
     const cause = (err as { cause?: { code?: string; errno?: number; syscall?: string } })?.cause;
+    const errMessage = err instanceof Error ? err.message : String(err);
     logger.error('vLLM reranking failed, using original order', err instanceof Error ? err : new Error(String(err)), {
       host: config.rerankHost,
       model: config.rerankModel,
@@ -205,6 +277,7 @@ export async function rerank<T extends RerankableResult>(
       causeErrno: cause?.errno,
       causeSyscall: cause?.syscall,
     });
+    warn('fetch', config.rerankHost, errMessage);
     return results;
   } finally {
     rerankerLifecycle.markRequestDone();
@@ -234,12 +307,13 @@ async function rerankViaVllmWithRetry<T extends RerankableResult>(
   model: string,
   host: string,
   topN: number,
+  timeoutMs: number,
 ): Promise<VllmRerankOutput<T>> {
   const MAX_ATTEMPTS = 2;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      return await rerankViaVllm(query, results, model, host, topN);
+      return await rerankViaVllm(query, results, model, host, topN, timeoutMs);
     } catch (err) {
       lastErr = err;
       // Classify the error. Socket errors come from undici wrapped as
@@ -280,6 +354,7 @@ async function rerankViaVllm<T extends RerankableResult>(
   model: string,
   host: string,
   topN: number,
+  timeoutMs: number,
 ): Promise<VllmRerankOutput<T>> {
   const url = `${host.replace(/\/+$/, '')}/v1/rerank`;
   const documents = results.map((r) => r.text);
@@ -294,7 +369,7 @@ async function rerankViaVllm<T extends RerankableResult>(
       top_n: Math.min(topN, results.length),
       return_documents: false,
     }),
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!res.ok) {
