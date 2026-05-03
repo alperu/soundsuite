@@ -86,7 +86,7 @@ class RerankerLifecycle {
     // If ready, verify health
     if (this.state === 'ready') {
       if (await this.isHealthy(host)) {
-        await this.sendToSidecar('/acquire', 'POST');
+        await this.sendToSidecar('/acquire', 'POST', { role: 'reranker' });
         return;
       }
       logger.warn('Container was marked ready but health check failed — restarting');
@@ -179,7 +179,7 @@ class RerankerLifecycle {
     if (!this.agentBase) return;
     this.state = 'stopping';
     try {
-      await this.sendToSidecar('/stop', 'POST');
+      await this.sendToSidecar('/stop', 'POST', { role: 'reranker' });
       this.state = 'stopped';
       logger.info('Reranker container stopped via agent — GPU VRAM freed');
     } catch (err) {
@@ -280,7 +280,7 @@ class RerankerLifecycle {
 
   private async acquireAndWaitForHealth(host: string): Promise<void> {
     try {
-      const result = await this.sendToSidecar('/acquire', 'POST');
+      const result = await this.sendToSidecar('/acquire', 'POST', { role: 'reranker' });
 
       if (result.error) {
         this.state = 'stopped';

@@ -1371,12 +1371,6 @@ export default function SearchInterface({
                   )}
                 </div>
               )}
-              {embeddingInfo && (
-                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gray-100 border border-gray-200">
-                  <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                  <span className="text-xs text-gray-600">Embedding: {formatEmbeddingLabel(embeddingInfo)}</span>
-                </div>
-              )}
             </div>
           </div>
         </div>
@@ -1652,9 +1646,17 @@ export default function SearchInterface({
                       </button>
                     )}
                   </form>
-                  <p className="text-[10px] text-gray-400 mt-1.5 text-center">
-                    Enter to send, Shift+Enter for new line
-                  </p>
+                  <div className="flex items-center justify-center gap-3 mt-1.5">
+                    <p className="text-[10px] text-gray-400">
+                      Enter to send, Shift+Enter for new line
+                    </p>
+                    {embeddingInfo && (
+                      <span className="inline-flex items-center gap-1 text-[10px] text-gray-400" title={`Embedding: ${formatEmbeddingLabel(embeddingInfo)}`}>
+                        <span className="w-1 h-1 rounded-full bg-green-500" />
+                        Embedding: {formatEmbeddingLabel(embeddingInfo)}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 </div>
               </div>
