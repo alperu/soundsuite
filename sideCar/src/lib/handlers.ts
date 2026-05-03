@@ -324,7 +324,7 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
     // /api/ollama/models calling resolveEndpoint('completion') just to list).
     // The master's caller should fall back to the static-host path or surface
     // the error to the user.
-    if ((state.minOnline[role] ?? 1) === 0) {
+    if ((state.minOnline?.[role] ?? 1) === 0) {
       log.info(`Acquire ${role} REJECTED — minOnline=0 (operator opted this role out)`);
       return { error: `Role "${role}" is disabled (minOnline=0). Set Minimum Online > 0 in admin to allow auto-start.` };
     }
