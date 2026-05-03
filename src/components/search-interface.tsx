@@ -867,6 +867,15 @@ export default function SearchInterface({
     setStreamTokenCount(0);
     setSearchStartTime(Date.now());
 
+    // Reset per-search transient state on EVERY submission (including
+    // follow-ups). Previously only the !isFollowUp branch cleared these, so
+    // a follow-up's stream appended onto the previous turn's text — making it
+    // look like the new answer was being added to the same box.
+    setStreamingAnswer(null);
+    setDeepProgress(null);
+    setAiProgressLog([]);
+    setSearchWarnings([]);
+
     if (!isFollowUp) {
       // New conversation — clear everything
       setAiResults([]);
@@ -1574,9 +1583,14 @@ export default function SearchInterface({
                     </>
                   )}
 
-                  {/* Deep Search Progress */}
+                  {/* Deep Search Progress — sticky so it stays visible while
+                      the streaming answer card grows below it. Without sticky,
+                      stick-to-bottom pins the user to the answer tail and the
+                      progress card scrolls off-screen, hiding stage info. */}
                   {aiLoading && !aiStopping && deepSearchMode && deepProgress && (
-                    <DeepSearchProgressCard progress={deepProgress} startTime={searchStartTime || Date.now()} tokenCount={streamTokenCount} />
+                    <div className="sticky top-0 z-10 -mx-6 px-6 py-1 bg-gray-50/95 backdrop-blur-sm">
+                      <DeepSearchProgressCard progress={deepProgress} startTime={searchStartTime || Date.now()} tokenCount={streamTokenCount} />
+                    </div>
                   )}
                   {!aiStopping && searchWarnings.length > 0 && (
                     <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 space-y-1">
