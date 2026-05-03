@@ -47,6 +47,50 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
   private dimensions: number;
   private useOrchestrator: boolean;
   private ollamaClient: any = null;
+  private lastPreflight: { host: string; ok: boolean; at: number; error?: string } | null = null;
+  private static PREFLIGHT_OK_TTL_MS = 5_000;
+  private static PREFLIGHT_FAIL_TTL_MS = 2_000;
+  private static PREFLIGHT_TIMEOUT_MS = 1_500;
+
+  private async preflight(host: string): Promise<{ ok: boolean; error?: string }> {
+    const now = Date.now();
+    const cached = this.lastPreflight;
+    if (cached && cached.host === host) {
+      const ttl = cached.ok
+        ? OllamaEmbeddingProvider.PREFLIGHT_OK_TTL_MS
+        : OllamaEmbeddingProvider.PREFLIGHT_FAIL_TTL_MS;
+      if (now - cached.at < ttl) return { ok: cached.ok, error: cached.error };
+    }
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), OllamaEmbeddingProvider.PREFLIGHT_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${host}/api/tags`, { signal: ctrl.signal });
+      if (!res.ok) {
+        const result = { ok: false, error: `HTTP ${res.status}` };
+        this.lastPreflight = { host, at: now, ...result };
+        return result;
+      }
+      const data: any = await res.json().catch(() => ({ models: [] }));
+      const has = Array.isArray(data?.models)
+        && data.models.some((m: any) => m?.name === this.model || m?.model === this.model);
+      if (!has) {
+        const result = { ok: false, error: `model "${this.model}" not pulled on ${host}` };
+        this.lastPreflight = { host, at: now, ...result };
+        return result;
+      }
+      this.lastPreflight = { host, at: now, ok: true };
+      return { ok: true };
+    } catch (err) {
+      const msg = (err as Error).name === 'AbortError'
+        ? `preflight timeout after ${OllamaEmbeddingProvider.PREFLIGHT_TIMEOUT_MS}ms`
+        : (err as Error).message;
+      this.lastPreflight = { host, at: now, ok: false, error: msg };
+      return { ok: false, error: msg };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   constructor(config: OllamaEmbeddingConfig) {
     super();
@@ -134,6 +178,16 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
           error: (err as Error).message, host: this.host,
         });
       }
+    }
+
+    const pf = await this.preflight(activeHost);
+    if (!pf.ok) {
+      logger.warn('Ollama preflight failed — skipping embed', {
+        host: activeHost,
+        model: this.model,
+        error: pf.error,
+      });
+      throw new Error(`Ollama unavailable (${activeHost}, model=${this.model}): ${pf.error}. Ensure Ollama is running and the model is pulled.`);
     }
 
     const embedStart = Date.now();
@@ -226,6 +280,8 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
    */
   async testConnection(): Promise<{ ok: boolean; error?: string }> {
     try {
+      const pf = await this.preflight(this.host);
+      if (!pf.ok) return pf;
       const client = await this.getClient();
       await client.embed({ model: this.model, input: ['ping'] });
       return { ok: true };

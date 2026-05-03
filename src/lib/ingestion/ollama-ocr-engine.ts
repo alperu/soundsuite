@@ -30,6 +30,49 @@ export class OllamaOCREngine implements IOCREngine {
   private model: string;
   private useOrchestrator: boolean;
   private lastResolvedHost: string | null = null;
+  private lastPreflight: { host: string; ok: boolean; at: number; error?: string } | null = null;
+  private static PREFLIGHT_OK_TTL_MS = 5_000;
+  private static PREFLIGHT_FAIL_TTL_MS = 2_000;
+  private static PREFLIGHT_TIMEOUT_MS = 1_500;
+
+  private async preflight(host: string): Promise<{ ok: boolean; error?: string }> {
+    const now = Date.now();
+    const cached = this.lastPreflight;
+    if (cached && cached.host === host) {
+      const ttl = cached.ok
+        ? OllamaOCREngine.PREFLIGHT_OK_TTL_MS
+        : OllamaOCREngine.PREFLIGHT_FAIL_TTL_MS;
+      if (now - cached.at < ttl) return { ok: cached.ok, error: cached.error };
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), OllamaOCREngine.PREFLIGHT_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${host}/api/tags`, { signal: ctrl.signal });
+      if (!res.ok) {
+        const result = { ok: false, error: `HTTP ${res.status}` };
+        this.lastPreflight = { host, at: now, ...result };
+        return result;
+      }
+      const data: any = await res.json().catch(() => ({ models: [] }));
+      const has = Array.isArray(data?.models)
+        && data.models.some((m: any) => m?.name === this.model || m?.model === this.model);
+      if (!has) {
+        const result = { ok: false, error: `model "${this.model}" not pulled on ${host}` };
+        this.lastPreflight = { host, at: now, ...result };
+        return result;
+      }
+      this.lastPreflight = { host, at: now, ok: true };
+      return { ok: true };
+    } catch (err) {
+      const msg = (err as Error).name === 'AbortError'
+        ? `preflight timeout after ${OllamaOCREngine.PREFLIGHT_TIMEOUT_MS}ms`
+        : (err as Error).message;
+      this.lastPreflight = { host, at: now, ok: false, error: msg };
+      return { ok: false, error: msg };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   constructor(config: OllamaOCRConfig) {
     this.host = config.host.replace(/\/+$/, '');
@@ -72,6 +115,16 @@ export class OllamaOCREngine implements IOCREngine {
     const imageSizeKB = Math.round(imageBuffer.length / 1024);
     let lastError: Error | undefined;
     const host = await this.resolveHost();
+
+    const pf = await this.preflight(host);
+    if (!pf.ok) {
+      logger.warn('Ollama OCR preflight failed — skipping request', {
+        host,
+        model: this.model,
+        error: pf.error,
+      });
+      throw new OcrNotReadyError(`Ollama OCR unavailable (${host}, model=${this.model}): ${pf.error}. Ensure Ollama is running and the model is pulled.`);
+    }
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       const startTime = Date.now();

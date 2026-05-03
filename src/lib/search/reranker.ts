@@ -33,6 +33,41 @@ let _cachedConfig: AppConfig | null = null;
 let _cacheTime = 0;
 const CACHE_TTL = 30_000; // 30 seconds
 
+/** Cached reranker preflight verdict (fast fail when vLLM is down) */
+const PREFLIGHT_OK_TTL_MS = 5_000;
+const PREFLIGHT_FAIL_TTL_MS = 2_000;
+const PREFLIGHT_TIMEOUT_MS = 1_500;
+let _preflightCache: { host: string; ok: boolean; at: number; error?: string } | null = null;
+
+async function rerankerPreflight(host: string): Promise<{ ok: boolean; error?: string }> {
+  const now = Date.now();
+  const cached = _preflightCache;
+  if (cached && cached.host === host) {
+    const ttl = cached.ok ? PREFLIGHT_OK_TTL_MS : PREFLIGHT_FAIL_TTL_MS;
+    if (now - cached.at < ttl) return { ok: cached.ok, error: cached.error };
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), PREFLIGHT_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${host.replace(/\/+$/, '')}/health`, { signal: ctrl.signal });
+    if (!res.ok) {
+      const result = { ok: false, error: `HTTP ${res.status}` };
+      _preflightCache = { host, at: now, ...result };
+      return result;
+    }
+    _preflightCache = { host, at: now, ok: true };
+    return { ok: true };
+  } catch (err) {
+    const msg = (err as Error).name === 'AbortError'
+      ? `preflight timeout after ${PREFLIGHT_TIMEOUT_MS}ms`
+      : (err as Error).message;
+    _preflightCache = { host, at: now, ok: false, error: msg };
+    return { ok: false, error: msg };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function getRerankConfig(): Promise<AppConfig> {
   const now = Date.now();
   if (_cachedConfig && now - _cacheTime < CACHE_TTL) return _cachedConfig;
@@ -93,6 +128,16 @@ export async function rerank<T extends RerankableResult>(
 
   const startMs = Date.now();
   try {
+    const pf = await rerankerPreflight(config.rerankHost);
+    if (!pf.ok) {
+      logger.warn('Reranker preflight failed — using original order', {
+        host: config.rerankHost,
+        model: config.rerankModel,
+        error: pf.error,
+      });
+      return results.slice(0, effectiveTopN);
+    }
+
     logger.info('Reranking via vLLM', {
       host: config.rerankHost,
       model: config.rerankModel,

@@ -179,6 +179,16 @@ export class FileWatcher {
         return;
       }
 
+      // Check for existing record at this filePath (chokidar may re-fire `add`
+      // for files already indexed — e.g. on watcher startup or restart).
+      const existingByPath = await this.prisma.document.findUnique({
+        where: { filePath },
+      });
+      if (existingByPath) {
+        this.logger.info(`Skipping file (filePath already indexed)`, { filePath });
+        return;
+      }
+
       // Find the case this file belongs to
       const caseRecord = await this.findCaseForFile(filePath);
       if (!caseRecord) {
@@ -248,11 +258,14 @@ export class FileWatcher {
         return;
       }
 
-      // Create new Document record for the modified file (Requirement 1.3)
-      // Uses DISCOVERED status — only transitions to QUEUED when user files it.
+      // Upsert by filePath: a change event for an already-indexed file should
+      // update the existing record's hash, not create a duplicate (filePath is
+      // a unique column).
       const fileName = path.basename(filePath);
-      const doc = await this.prisma.document.create({
-        data: {
+      const doc = await this.prisma.document.upsert({
+        where: { filePath },
+        update: { hash, fileName, status: 'DISCOVERED' },
+        create: {
           caseId: caseRecord.id,
           filePath,
           fileName,
