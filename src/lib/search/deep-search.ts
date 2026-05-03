@@ -78,6 +78,14 @@ export interface DeepSearchOptions {
   onToken?: (text: string) => void;
   /** Streamed thinking tokens (Anthropic adaptive thinking). */
   onThinking?: (text: string) => void;
+  /**
+   * Multi-pass report generation: stage 1 drafts outline + short sections
+   * (summary/gaps/significance/next steps), stage 2 streams each findings
+   * subsection as its own LLM call. Avoids mid-report truncation when the
+   * combined output would exceed the model's per-call output cap, and keeps
+   * each section under the attention sweet-spot (~4-8K tokens) for quality.
+   */
+  multiPass?: boolean;
 }
 
 export interface DeepSearchResult {
@@ -583,6 +591,250 @@ ${contextBlock}`;
 }
 
 // ---------------------------------------------------------------------------
+// 4b. Multi-Pass Report Generation
+// ---------------------------------------------------------------------------
+
+interface ReportOutline {
+  summary: string;
+  findingsSections: Array<{
+    heading: string;
+    instructions: string;
+    keyCitations?: string[];
+  }>;
+  gaps: string;
+  legalSignificance: string;
+  nextSteps: string[];
+}
+
+const OUTLINE_SYSTEM_PROMPT = `You are an expert legal research analyst planning a research report.
+
+Given the research question, sub-questions, and the full set of document excerpts, produce a structured outline AND draft the short sections inline. The detailed Findings sections will be expanded in a second pass — do NOT write Findings prose here, only plan the subsections.
+
+Respond with JSON shaped as:
+{
+  "summary": "2-3 sentence overview of overall findings (write this fully, citations allowed in brackets)",
+  "findingsSections": [
+    {
+      "heading": "Topic-focused subsection title (e.g. 'Evidence of Hiring an Appraiser')",
+      "instructions": "What this subsection must cover, what to look for in the excerpts, what conclusion to draw if any",
+      "keyCitations": ["[2 CR 140]", "[3 RR 184:12]"]
+    }
+  ],
+  "gaps": "1 paragraph: what wasn't found or needs further investigation (write this fully)",
+  "legalSignificance": "1-2 paragraphs: why these findings matter (write this fully, citations allowed)",
+  "nextSteps": ["actionable step 1", "actionable step 2", "..."]
+}
+
+Rules:
+- 3-7 findingsSections, organized by distinct topic — not by sub-query
+- Each findingsSection must be a meaningfully different angle (no overlap)
+- summary, gaps, legalSignificance must be COMPLETE prose, not placeholders
+- Use the citation format from the excerpts
+- Base everything ONLY on the provided excerpts`;
+
+const SECTION_SYSTEM_PROMPT = `You are writing ONE subsection of the Findings portion of a legal research report.
+
+You are given:
+- The original research question
+- The full report outline (so you know what other subsections cover — DO NOT duplicate their content)
+- All relevant document excerpts with citations
+- This subsection's heading and specific instructions
+
+Write ONLY the body content of THIS subsection. Do NOT include the heading (it will be added by the orchestrator). Do NOT write a preamble like "In this section we will...". Start directly with the analysis.
+
+Rules:
+- Use markdown citations in brackets, exact format from excerpts (e.g. [2 CR 140], [3 RR 184:12])
+- Quote pertinent language directly when material
+- Be analytical, not just descriptive — connect excerpts to the question
+- This subsection will NOT be truncated, so be thorough; stop when the analysis is complete, not at an arbitrary length
+- Base your analysis ONLY on the provided excerpts`;
+
+function buildSourceContext(sources: DeepSearchSource[], maxChars = 120000): { contextBlock: string; chars: number } {
+  const parts: string[] = [];
+  let total = 0;
+  for (const s of sources) {
+    const cite = s.citation || s.citationShort || `${s.document}, p.${s.page}`;
+    const block = `[${cite}]\n${s.text}\n`;
+    if (total + block.length > maxChars) break;
+    parts.push(block);
+    total += block.length;
+  }
+  return { contextBlock: parts.join('\n---\n'), chars: total };
+}
+
+export async function generateReportMultiPass(
+  query: string,
+  decomposition: DecompositionResult,
+  sources: DeepSearchSource[],
+  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal; onToken?: (text: string) => void; onThinking?: (text: string) => void },
+): Promise<string> {
+  if (sources.length === 0) {
+    return '## No Results Found\n\nThe deep search did not find any relevant document excerpts for your query. Try rephrasing your question or broadening the search scope.';
+  }
+
+  const { contextBlock } = buildSourceContext(sources);
+
+  let historySection = '';
+  if (options?.history && options.history.length > 0) {
+    const historyLines = options.history.map((t) =>
+      t.role === 'user' ? `**User:** ${t.content}` : `**Assistant:** ${t.content}`,
+    );
+    historySection = `## Previous Conversation\n${historyLines.join('\n\n')}\n\n---\n\nThe user is now asking a follow-up question. Build on the conversation above.\n\n`;
+  }
+
+  const workflowSection = options?.workflowContext
+    ? `## Active Workflow Context\n\n${options.workflowContext}\n\n`
+    : '';
+
+  const baseUserContent = `${historySection}${workflowSection}## Research Question
+${query}
+
+## Sub-Questions Investigated
+${decomposition.subQueries.map((sq, i) => `${i + 1}. ${sq}`).join('\n')}
+
+## Research Intent
+${decomposition.intent}
+
+## Document Excerpts (${sources.length} sources)
+
+${contextBlock}`;
+
+  // Stage 1: outline + short sections
+  let outline: ReportOutline;
+  try {
+    outline = await callLLMJson<ReportOutline>(
+      OUTLINE_SYSTEM_PROMPT,
+      baseUserContent,
+      {
+        maxTokens: 4096,
+        temperature: 0.2,
+        provider: options?.provider,
+        model: options?.model,
+        thinking: options?.thinking,
+        effort: options?.effort,
+        signal: options?.signal,
+        jsonSchema: {
+          type: 'object',
+          properties: {
+            summary: { type: 'string' },
+            findingsSections: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  heading: { type: 'string' },
+                  instructions: { type: 'string' },
+                  keyCitations: { type: 'array', items: { type: 'string' } },
+                },
+                required: ['heading', 'instructions'],
+              },
+              minItems: 1,
+              maxItems: 8,
+            },
+            gaps: { type: 'string' },
+            legalSignificance: { type: 'string' },
+            nextSteps: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['summary', 'findingsSections', 'gaps', 'legalSignificance', 'nextSteps'],
+        },
+      },
+    );
+  } catch (err) {
+    console.error('[Deep Search] Outline pass failed, falling back to single-pass', err);
+    return generateReport(query, decomposition, sources, options);
+  }
+
+  if (!outline.findingsSections || outline.findingsSections.length === 0) {
+    return generateReport(query, decomposition, sources, options);
+  }
+
+  const emit = (text: string) => { options?.onToken?.(text); };
+  let full = '';
+  const append = (text: string) => { full += text; emit(text); };
+
+  // Summary (already drafted)
+  append(`## Summary\n\n${outline.summary}\n\n`);
+
+  // Findings — stream each subsection as its own LLM call
+  append(`## Findings\n\n`);
+
+  const outlineSummary = outline.findingsSections
+    .map((s, i) => `${i + 1}. **${s.heading}** — ${s.instructions}`)
+    .join('\n');
+
+  const resolved = (options?.provider && options?.model)
+    ? { provider: options.provider as AIProviderKey, model: options.model }
+    : await getAvailableProvider();
+
+  const perSectionMaxTokens = Math.min(options?.maxTokens ?? 8192, 8192);
+
+  for (let i = 0; i < outline.findingsSections.length; i++) {
+    if (options?.signal?.aborted) {
+      const e = new Error('Deep search aborted by client');
+      e.name = 'AbortError';
+      throw e;
+    }
+
+    const section = outline.findingsSections[i];
+    append(`### ${section.heading}\n\n`);
+
+    const sectionUserContent = `${baseUserContent}
+
+## Full Report Outline (for context — do NOT duplicate other subsections)
+${outlineSummary}
+
+## Your Subsection
+**Heading:** ${section.heading}
+**Instructions:** ${section.instructions}
+${section.keyCitations && section.keyCitations.length > 0 ? `**Suggested citations to focus on:** ${section.keyCitations.join(', ')}` : ''}
+
+Write the body of this subsection now. Do not include the heading.`;
+
+    try {
+      let sectionContent = '';
+      for await (const event of streamAI({
+        provider: resolved.provider,
+        model: resolved.model,
+        messages: [
+          { role: 'system', content: SECTION_SYSTEM_PROMPT },
+          { role: 'user', content: sectionUserContent },
+        ],
+        maxTokens: perSectionMaxTokens,
+        temperature: 0.3,
+        thinking: options?.thinking,
+        effort: options?.effort,
+        signal: options?.signal,
+      })) {
+        if (event.type === 'token') {
+          sectionContent += event.text;
+          emit(event.text);
+        } else if (event.type === 'thinking' && options?.onThinking) {
+          options.onThinking(event.text);
+        } else if (event.type === 'done' && !sectionContent && event.content) {
+          sectionContent = event.content;
+          emit(event.content);
+        }
+      }
+      full += sectionContent;
+      append(`\n\n`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      append(`_Section generation failed: ${msg}_\n\n`);
+    }
+  }
+
+  // Short sections (already drafted in stage 1)
+  append(`## Gaps\n\n${outline.gaps}\n\n`);
+  append(`## Legal Significance\n\n${outline.legalSignificance}\n\n`);
+  append(`## Suggested Next Steps\n\n`);
+  for (const step of outline.nextSteps) {
+    append(`- ${step}\n`);
+  }
+
+  return full;
+}
+
+// ---------------------------------------------------------------------------
 // 5. Orchestrator
 // ---------------------------------------------------------------------------
 
@@ -591,7 +843,7 @@ export async function deepSearch(
   registry: ToolRegistry,
   options: DeepSearchOptions = {},
 ): Promise<DeepSearchResult> {
-  const { provider, model, caseId, onProgress, history, workflowContext, thinking, maxTokens, effort, signal, onToken, onThinking } = options;
+  const { provider, model, caseId, onProgress, history, workflowContext, thinking, maxTokens, effort, signal, onToken, onThinking, multiPass } = options;
   const emit = onProgress || (() => {});
   const checkAbort = () => {
     if (signal?.aborted) {
@@ -687,7 +939,8 @@ export async function deepSearch(
     intent: decomposition.intent,
     searchStats: { ...stats, subQueryCount: decomposition.subQueries.length },
   });
-  const report = await generateReport(query, decomposition, sources, {
+  const reportFn = multiPass ? generateReportMultiPass : generateReport;
+  const report = await reportFn(query, decomposition, sources, {
     provider,
     model,
     history,

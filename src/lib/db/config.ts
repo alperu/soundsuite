@@ -60,6 +60,9 @@ export interface AppConfig {
   gpuMinReranker: number;
   // Registered GPU sidecars (JSON string)
   gpuSidecars: string;
+  /** URL each sidecar uses to connect back to this master. Pushed via /config
+   *  on every register so the sidecar persists it for warm-boot without env. */
+  masterUrl: string;
   // GPU orchestrator mode and auto-management
   gpuMode: 'indexing' | 'searching';
   gpuAutoManage: boolean;
@@ -195,6 +198,7 @@ export async function getConfig(): Promise<AppConfig> {
     gpuMinReranker: parseInt(configMap.get('gpu.min.reranker') || '0', 10),
     // Registered sidecars
     gpuSidecars: configMap.get('gpu.sidecars') || '[]',
+    masterUrl: configMap.get('master.url') || process.env.SOUND_SUITE_MASTER_URL || '',
     // GPU orchestrator
     gpuMode: (configMap.get('gpu.mode') as any) || 'searching',
     gpuAutoManage: configMap.get('gpu.autoManage') === 'true',
@@ -442,6 +446,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.gpuSidecars !== undefined) {
     updates.push({ key: 'gpu.sidecars', value: config.gpuSidecars });
+  }
+  if (config.masterUrl !== undefined) {
+    updates.push({ key: 'master.url', value: config.masterUrl });
   }
   if (config.gpuMode !== undefined) {
     updates.push({ key: 'gpu.mode', value: config.gpuMode });

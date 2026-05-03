@@ -376,6 +376,7 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
 export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {
   const registry = await buildModelRegistry();
   const cfg = await getConfig();
+  const masterUrl = (cfg.masterUrl || '').trim();
   return sendToSidecar(agentUrl, '/config', {
     idleTimeouts: {
       embedding: timeouts.embedding * 60_000,
@@ -389,6 +390,10 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
       ocr: cfg.gpuMinOcr ?? 1,
       reranker: cfg.gpuMinReranker ?? 1,
     },
+    // Echo the master URL so the sidecar persists it for next boot. With this,
+    // a sidecar that bootstrapped from SOUND_SUITE_MASTER_URL env can warm-start
+    // from disk on subsequent boots without needing the env var.
+    ...(masterUrl ? { serverUrl: masterUrl } : {}),
     ...(Object.keys(registry).length > 0 ? { registry } : {}),
   });
 }

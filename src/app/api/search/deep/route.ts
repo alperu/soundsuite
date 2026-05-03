@@ -16,7 +16,7 @@ import { prisma } from '@/lib/db/prisma';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { query, provider, model, caseId, history, workflowIds, thinking, maxTokens, effort } = body as {
+    const { query, provider, model, caseId, history, workflowIds, thinking, maxTokens, effort, multiPass } = body as {
       query: string;
       provider: string;
       model: string;
@@ -26,6 +26,7 @@ export async function POST(request: NextRequest) {
       thinking?: boolean;
       maxTokens?: number;
       effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+      multiPass?: boolean;
     };
 
     if (!query?.trim()) {
@@ -97,6 +98,7 @@ export async function POST(request: NextRequest) {
             thinking,
             ...(typeof maxTokens === 'number' ? { maxTokens } : {}),
             ...(effort ? { effort } : {}),
+            ...(multiPass ? { multiPass: true } : {}),
             signal: request.signal,
           });
 

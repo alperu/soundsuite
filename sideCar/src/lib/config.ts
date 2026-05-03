@@ -69,15 +69,19 @@ export function loadSavedConfig(): Record<string, unknown> | null {
     log.error(`Failed to load sidecar.config.json: ${(err as Error).message}`);
   }
 
-  // Also load the SERVER_URL env var as a last-resort source. The self-update
-  // flow sets this when spawning the post-update child process.
-  if (!state.serverUrl && process.env.SERVER_URL) {
-    state.serverUrl = process.env.SERVER_URL;
-    log.info(`Loaded serverUrl from SERVER_URL env: ${state.serverUrl}`);
+  // Also load env var as a last-resort source. SOUND_SUITE_MASTER_URL is the
+  // canonical name; SERVER_URL kept as back-compat. Setting this in the docker
+  // run command lets a fully-wiped sidecar reconnect without UI entry — even
+  // when there's no south-bound HTTP from master to sidecar to push the config.
+  const envUrl = process.env.SOUND_SUITE_MASTER_URL || process.env.SERVER_URL;
+  if (!state.serverUrl && envUrl) {
+    state.serverUrl = envUrl;
+    const which = process.env.SOUND_SUITE_MASTER_URL ? 'SOUND_SUITE_MASTER_URL' : 'SERVER_URL';
+    log.info(`Loaded serverUrl from ${which} env: ${state.serverUrl}`);
   }
 
   if (!state.serverUrl) {
-    log.info('No saved serverUrl found in config.json, sidecar.config.json, or SERVER_URL env — fresh start');
+    log.info('No saved serverUrl found in config.json, sidecar.config.json, or SOUND_SUITE_MASTER_URL/SERVER_URL env — fresh start');
   }
   return data;
 }

@@ -305,6 +305,7 @@ export default function SearchInterface({
   const [thinkingMode, setThinkingMode] = usePersistedState<boolean>('search.thinkingMode', true);
   const [maxTokens, setMaxTokens] = usePersistedState<number>('search.maxTokens', 2048);
   const [effort, setEffort] = usePersistedState<'low' | 'medium' | 'high' | 'xhigh' | 'max'>('search.effort', 'medium');
+  const [multiPass, setMultiPass] = usePersistedState<boolean>('search.multiPass', false);
   const [inputHeight, setInputHeight] = usePersistedState<number>('search.inputHeight', 72);
   const [aiTurns, setAiTurns] = useState<AIConversationTurn[]>([]);
   const [deepTurns, setDeepTurns] = useState<DeepSearchTurn[]>([]);
@@ -637,6 +638,7 @@ export default function SearchInterface({
         thinking: thinkingMode,
         maxTokens,
         effort,
+        multiPass,
         ...(history && history.length > 0 ? { history } : {}),
         ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
       }),
@@ -1325,6 +1327,14 @@ export default function SearchInterface({
                       className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${thinkingMode ? 'bg-purple-600' : 'bg-gray-200'}`}
                     >
                       <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${thinkingMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2" title="Multi-Pass: outline first, then stream each findings subsection as its own LLM call. Avoids mid-report truncation and improves quality on long answers.">
+                    <label className="text-xs font-medium text-gray-500">Multi-Pass</label>
+                    <button type="button" onClick={() => setMultiPass(!multiPass)}
+                      className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${multiPass ? 'bg-emerald-600' : 'bg-gray-200'}`}
+                    >
+                      <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${multiPass ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
                     </button>
                   </div>
                   <div className="flex items-center gap-2">

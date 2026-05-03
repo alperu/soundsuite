@@ -60,6 +60,7 @@ export async function GET() {
       peakDemand,
       gpuMode: config.gpuMode,
       gpuAutoManage: config.gpuAutoManage,
+      masterUrl: config.masterUrl,
       latestBuildVersion: getLatestBuildVersion(),
     });
   } catch (error: any) {
@@ -213,6 +214,21 @@ export async function POST(request: NextRequest) {
           }, 'POST').catch(() => null)));
         } catch { /* best-effort — orchestrator will re-push on next tick */ }
         return NextResponse.json({ saved: true });
+      }
+
+      case 'saveMasterUrl': {
+        const value = String(body.masterUrl ?? '').trim();
+        await setConfigValue('master.url', value);
+        // Re-push to all reachable sidecars so they pick up the new URL
+        // immediately and persist it to disk for warm-boot next time.
+        if (value) {
+          try {
+            const fleet = await getFleetStatus();
+            const reachable = fleet.sidecars.filter(s => s.status === 'connected');
+            await Promise.all(reachable.map(s => sendToSidecar(s.url, '/config', { serverUrl: value }, 'POST').catch(() => null)));
+          } catch { /* best-effort */ }
+        }
+        return NextResponse.json({ saved: true, value });
       }
 
       case 'pullModel': {

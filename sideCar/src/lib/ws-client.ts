@@ -181,6 +181,15 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
       return updated ? { ok: true, message: `Updating to v${version}` } : { error: 'Update failed' };
     }
     case 'config': {
+      // Server URL echo from master — persist so subsequent boots warm-start
+      // from disk without needing the env var. Survives full state loss as
+      // long as the env var bootstraps the first connection.
+      if (typeof payload.serverUrl === 'string' && payload.serverUrl) {
+        if (state.serverUrl !== payload.serverUrl) {
+          log.info(`Master pushed serverUrl: ${state.serverUrl} → ${payload.serverUrl}`);
+          state.serverUrl = payload.serverUrl;
+        }
+      }
       if (payload.idleTimeouts) Object.assign(state.idleTimeouts, payload.idleTimeouts);
       const rolesNowOptOut: string[] = [];
       if (payload.minOnline && typeof payload.minOnline === 'object') {

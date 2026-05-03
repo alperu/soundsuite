@@ -397,6 +397,11 @@ function buildVllmCmd(model: string, port: number): string[] {
   // vLLM 0.8+: model is a positional arg (--model flag deprecated and removed in future)
   const cmd = [model, '--host', '0.0.0.0', '--port', String(port)];
   if (/qwen3-reranker/i.test(model)) {
+    // Qwen3-Reranker-8B weights take ~14 GiB; default max-model-len 40960
+    // leaves negative KV cache on 16 GiB cards and OOMs at startup.
+    // Reranker scoring fits well under 8K tokens.
+    cmd.push('--max-model-len', '8192');
+    cmd.push('--gpu-memory-utilization', '0.95');
     cmd.push('--hf-overrides', JSON.stringify({
       architectures: ['Qwen3ForSequenceClassification'],
       is_original_qwen3_reranker: true,
