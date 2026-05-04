@@ -37,7 +37,7 @@ const CACHE_TTL = 30_000; // 30 seconds
 const PREFLIGHT_OK_TTL_MS = 30_000; // longer once warm-up confirms model is loaded
 const PREFLIGHT_FAIL_TTL_MS = 2_000;
 const PREFLIGHT_TIMEOUT_MS = 1_500;
-const WARMUP_TIMEOUT_MS = 5_000;
+const WARMUP_TIMEOUT_MS = 10_000; // 5s was flaky on cold-start of 8B rerankers
 let _preflightCache: { host: string; ok: boolean; at: number; error?: string } | null = null;
 
 /** Module-level serializer: vLLM batches one rerank at a time per GPU, so
@@ -164,6 +164,7 @@ export async function rerank<T extends RerankableResult>(
 
   const effectiveTopN = topN ?? config.rerankTopN ?? 10;
   const timeoutMs = config.rerankTimeoutMs ?? 90_000;
+  const maxDocChars = config.rerankMaxDocChars ?? 30_000;
 
   // Configure lifecycle (idle timeout config)
   rerankerLifecycle.setEnabled(config.rerankAutoManage);
@@ -198,14 +199,14 @@ export async function rerank<T extends RerankableResult>(
     }
     try {
       const out = await serializeRerank(() =>
-        rerankViaVllmWithRetry(query, results, config.rerankModel, host, effectiveTopN, timeoutMs),
+        rerankViaVllmWithRetry(query, results, config.rerankModel, host, effectiveTopN, timeoutMs, maxDocChars),
       );
       return { items: out.items, tokens: out.totalTokens, model: config.rerankModel };
     } catch (primaryErr) {
       if (config.rerankFallbackModel) {
         try {
           const fb = await serializeRerank(() =>
-            rerankViaVllmWithRetry(query, results, config.rerankFallbackModel, host, effectiveTopN, timeoutMs),
+            rerankViaVllmWithRetry(query, results, config.rerankFallbackModel, host, effectiveTopN, timeoutMs, maxDocChars),
           );
           return { items: fb.items, tokens: fb.totalTokens, model: config.rerankFallbackModel };
         } catch (fbErr) {
@@ -323,12 +324,13 @@ async function rerankViaVllmWithRetry<T extends RerankableResult>(
   host: string,
   topN: number,
   timeoutMs: number,
+  maxDocChars: number,
 ): Promise<VllmRerankOutput<T>> {
   const MAX_ATTEMPTS = 2;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      return await rerankViaVllm(query, results, model, host, topN, timeoutMs);
+      return await rerankViaVllm(query, results, model, host, topN, timeoutMs, maxDocChars);
     } catch (err) {
       lastErr = err;
       // Classify the error. Socket errors come from undici wrapped as
@@ -370,9 +372,32 @@ async function rerankViaVllm<T extends RerankableResult>(
   host: string,
   topN: number,
   timeoutMs: number,
+  maxDocChars: number,
 ): Promise<VllmRerankOutput<T>> {
   const url = `${host.replace(/\/+$/, '')}/v1/rerank`;
-  const documents = results.map((r) => r.text);
+
+  // Trim each document to the model's context budget. vLLM rejects the entire
+  // batch with HTTP 400 if any single (query, doc) pair exceeds max_model_len,
+  // so one outlier blocks 99 valid docs. Beginning-keep is the standard cross-
+  // encoder default; truncated docs still get coherent relevance scores.
+  let truncatedCount = 0;
+  let longestOriginal = 0;
+  const documents = results.map((r) => {
+    const text = r.text ?? '';
+    if (text.length > longestOriginal) longestOriginal = text.length;
+    if (text.length <= maxDocChars) return text;
+    truncatedCount++;
+    return text.slice(0, maxDocChars - 4) + ' …';
+  });
+  if (truncatedCount > 0) {
+    logger.info('Rerank: truncated long documents to fit context window', {
+      truncated: truncatedCount,
+      total: documents.length,
+      maxChars: maxDocChars,
+      longestOriginal,
+      model,
+    });
+  }
 
   const res = await fetch(url, {
     method: 'POST',
