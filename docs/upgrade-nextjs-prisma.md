@@ -431,4 +431,20 @@ The "soak time" matters: land Step 1, run the app for a few days, then start Ste
 - [Prisma 7 LLM migration prompt](https://www.prisma.io/docs/ai/prompts/prisma-7)
 - [@prisma/adapter-better-sqlite3 on npm](https://www.npmjs.com/package/@prisma/adapter-better-sqlite3)
 - [Prisma issue #2955 — SQLite busy_timeout](https://github.com/prisma/prisma/issues/2955)
+
+---
+
+## 12. Follow-on research: XETO + Project Haystack court-domain layer
+
+This upgrade is a prerequisite for a larger architectural piece: layering [Project Haystack](https://project-haystack.org) tags + [XETO](https://github.com/Project-Haystack/xeto) typed specs onto the legal-domain models so the AI chat can reason about case state, per-state procedural rules, and "what's due / what's next".
+
+That research lives in **[`docs/xeto-haystack-research.md`](./xeto-haystack-research.md)**. Headlines:
+
+- **Stay on Prisma 7 + SQLite** — add `tags Json` columns, compile Haystack filter syntax to `json_extract` SQL, validate writes against XETO via `ajv`. No JS-native Haystack datastore worth switching to (Folio is JVM-only, j2inn ships SDK only).
+- **`@xeto/sdk` does not exist on npm.** XETO compiles to JSON Schema; ship the compiled schema, not the Fantom JS bundle.
+- **Encode procedural rules as XETO *instances*, not types.** Three libs: `proc.core`, `proc.tx`, `proc.ca`, `proc.frap`.
+- **Use React Flow for the visual case-action graph.** Rete.js is overkill for a read-only derived diagram.
+- **Calendar arithmetic stays in TypeScript.** XETO is the schema, not the rule engine.
+
+**Sequencing:** the better-sqlite3 driver adapter from Prisma 7 (Step 3 above) is a hard prerequisite for the tag-heavy concurrent reads/writes that layer needs. Do the framework upgrade first.
 - [Prisma discussion #15966 — SQLite WAL](https://github.com/prisma/prisma/discussions/15966)
