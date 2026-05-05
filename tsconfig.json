@@ -38,6 +38,8 @@
   ],
   "exclude": [
     "node_modules",
-    "sideCar"
+    "sideCar",
+    "marketing",
+    "scripts"
   ]
 }

@@ -6,8 +6,10 @@ generator client {
 }
 
 datasource db {
+  // Prisma 7+: `url` no longer lives here. The runtime URL is supplied by the
+  // driver adapter in src/lib/db/prisma.ts; the migrate runner reads it from
+  // prisma.config.ts at the project root.
   provider = "sqlite"
-  url      = env("DATABASE_URL")
 }
 
 model Case {

@@ -5,10 +5,10 @@
  * and appending citations to workflow content.
  */
 
-import { PrismaClient } from '@prisma/client';
+// Use the shared singleton (Prisma 7+ requires the driver adapter to be passed
+// at construction time; constructing a bare client here would throw).
+import { prisma } from '@/lib/db/prisma';
 import { getCitationFormatter, CitationInput, FormattedCitation } from '@/lib/citations/citation-formatter';
-
-const prisma = new PrismaClient();
 
 // ---------------------------------------------------------------------------
 // Types

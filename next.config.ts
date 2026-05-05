@@ -23,6 +23,11 @@ const nextConfig: NextConfig = {
     "tokenizers",
     "ollama",
     "ws",
+    // Prisma 7 + better-sqlite3 driver adapter — keep Turbopack from
+    // bundling the generated client + native bindings.
+    "@prisma/client",
+    "@prisma/adapter-better-sqlite3",
+    "better-sqlite3",
   ],
   turbopack: {},
 };

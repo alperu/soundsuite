@@ -1,16 +1,15 @@
 /**
  * Action log helper — fire-and-forget persistence of action logs to the database.
  *
- * Usage (client-side):
+ * Client-safe: this module is intentionally free of server-only imports
+ * (no Prisma, no Node native bindings) so client components like the
+ * case-management page can import it without dragging the DB driver into
+ * the client bundle. Writes go through the /api/admin/action-logs endpoint.
+ *
+ * Usage:
  *   import { persistActionLog } from '@/lib/action-log';
  *   persistActionLog({ action: 'Run Parser', target: 'file.pdf', status: 'success', caseId: '...' });
- *
- * Usage (server-side):
- *   import { createActionLog } from '@/lib/action-log';
- *   await createActionLog({ action: 'document_added', target: 'file.pdf', caseId: '...', logType: 'document_added' });
  */
-
-import { prisma } from '@/lib/db/prisma';
 
 export interface ActionLogEntry {
   caseId?: string;
@@ -22,23 +21,8 @@ export interface ActionLogEntry {
 }
 
 /**
- * Server-side: create an action log entry directly via Prisma.
- */
-export async function createActionLog(entry: ActionLogEntry) {
-  return prisma.actionLog.create({
-    data: {
-      caseId: entry.caseId || null,
-      action: entry.action,
-      target: entry.target,
-      status: entry.status || 'success',
-      detail: entry.detail || null,
-      logType: entry.logType || 'general',
-    },
-  });
-}
-
-/**
- * Client-side: fire-and-forget POST to the action-logs API.
+ * Fire-and-forget POST to the action-logs API. Safe to call from client
+ * components — uses fetch, never imports the database driver directly.
  */
 export function persistActionLog(entry: ActionLogEntry) {
   fetch('/api/admin/action-logs', {
