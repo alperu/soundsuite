@@ -447,4 +447,16 @@ That research lives in **[`docs/xeto-haystack-research.md`](./xeto-haystack-rese
 - **Calendar arithmetic stays in TypeScript.** XETO is the schema, not the rule engine.
 
 **Sequencing:** the better-sqlite3 driver adapter from Prisma 7 (Step 3 above) is a hard prerequisite for the tag-heavy concurrent reads/writes that layer needs. Do the framework upgrade first.
+
+---
+
+## 13. Forward look: Prisma 8 / `prisma-next`
+
+Prisma is shipping a TypeScript rewrite as a separate repo: [prisma/prisma-next](https://github.com/prisma/prisma-next). It introduces extension packs, a typed SQL plan builder, and explicit AI-agent ergonomics — all of which interact directly with the XETO + Haystack layer above.
+
+When `prisma-next` ships stable (likely as Prisma 8), the playbook for whether/how to adopt it lives in **[`docs/prisma-8-readiness.md`](./prisma-8-readiness.md)**. Headlines:
+
+- **Stay on Prisma 7 until prisma-next is stable.** Don't chase alpha.
+- **Extension packs would let us replace the hand-rolled `haystackFilter()` SQL emitter** with a first-class typed Haystack query operator. Eliminates the main compromise in the XETO/Haystack hybrid plan.
+- **Keep everything from this Step 3** when Prisma 8 lands: the better-sqlite3 driver-adapter pattern, `resolveSqlitePath()` shim, `serverExternalPackages` entries, the bare-`new PrismaClient()` purge in `src/services/workflow-service.ts`, the client-safe split in `src/lib/action-log.ts`. Those are foundational regardless of Prisma version.
 - [Prisma discussion #15966 — SQLite WAL](https://github.com/prisma/prisma/discussions/15966)

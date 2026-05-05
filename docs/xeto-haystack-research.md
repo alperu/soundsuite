@@ -549,6 +549,8 @@ That last item matters: if a customer ever wants to point SkySpark at Sound Suit
 **ORM / database**
 - Prisma SQLite Json type (added v6.2.0) — https://github.com/prisma/prisma/issues/3786
 - Prisma 7 + Next.js 16 Turbopack — see `upgrade-nextjs-prisma.md`
+- Prisma 8 / `prisma-next` extension packs — see `prisma-8-readiness.md` for how
+  they would replace the hand-rolled `haystackFilter()` SQL emitter once stable
 - SQLite expression indexes — https://www.sqlite.org/expridx.html
 
 **Visual graph**
