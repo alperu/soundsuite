@@ -1,22 +1,7 @@
 import { NextResponse } from 'next/server';
-import { state } from '@/lib/state';
+import { ensureMaster, state } from '@/lib/state';
 import { saveConfig } from '@/lib/config';
-import { connectWebSocket, disconnectWebSocket } from '@/lib/ws-client';
-import fs from 'fs';
-import path from 'path';
-
-// Inline sidecar config save to avoid module resolution issues in Next.js standalone builds
-function writeSidecarConfig(serverUrl: string) {
-  try {
-    const configPath = process.env.SIDECAR_CONFIG_PATH ||
-      path.join(path.dirname(process.argv[1] || __filename), 'config', 'sidecar.config.json');
-    const dir = path.dirname(configPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    let existing: any = { serverUrl: null };
-    try { if (fs.existsSync(configPath)) existing = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
-    fs.writeFileSync(configPath, JSON.stringify({ ...existing, serverUrl }, null, 2));
-  } catch {}
-}
+import { connectMaster } from '@/lib/ws-client';
 
 export async function POST(request: Request) {
   try {
@@ -29,14 +14,25 @@ export async function POST(request: Request) {
       );
     }
 
-    state.serverUrl = body.serverUrl;
-    writeSidecarConfig(body.serverUrl);
+    const url: string = body.serverUrl;
+    const authToken: string | undefined = typeof body.authToken === 'string' ? body.authToken : undefined;
+
+    const existed = state.masters.has(url);
+    const m = ensureMaster(url, { authToken });
     saveConfig();
-    disconnectWebSocket();
-    connectWebSocket();
+
+    if (!existed) {
+      connectMaster(m);
+    }
 
     return NextResponse.json(
-      { message: `Connecting to ${body.serverUrl}...` },
+      {
+        message: existed ? `Already connected to ${url}` : `Connecting to ${url}...`,
+        master: {
+          serverUrl: m.serverUrl,
+          connectionMode: m.connectionMode,
+        },
+      },
       { headers: { 'Access-Control-Allow-Origin': '*' } },
     );
   } catch (err) {

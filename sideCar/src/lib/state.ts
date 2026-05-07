@@ -175,15 +175,109 @@ export const state = {
   cudaUnavailable: false,  // set true if NVIDIA runtime not found — stops retry loop
   cudaRetried: false,      // tracks single retry attempt for ss-cuda
 
-  // WebSocket state
-  wsConnection: null as WebSocket | null,
-  wsReconnectTimer: null as ReturnType<typeof setTimeout> | null,
-  wsReconnectDelay: 1000,
-  wsHeartbeatTimer: null as ReturnType<typeof setInterval> | null,
+  // ─── Multi-master connections ──────────────────────────────────────────
+  // Keyed by serverUrl. Each entry owns its own WS, timers, pending-cmd map.
+  // Note: `serverUrl` below is a LEGACY single-URL field kept for back-compat
+  // surfaces (self-update, status payload, env-bootstrap). It tracks the
+  // "first" master URL — see legacyServerUrl(). New code MUST iterate
+  // state.masters.
+  masters: new Map<string, MasterConnection>(),
+
+  // Aggregate counter across all masters (UI displays it as "ws commands seen")
   wsCommandCount: 0,
+
+  // Legacy single-URL fields — DO NOT remove. self-update.ts, instrumentation.ts,
+  // /api/status, /api/update all read these. Helpers below keep them in sync.
   serverUrl: null as string | null,
   savedAgentUrl: null as string | null,
 
-  // Connection status for UI display
+  // Connection status for UI display (aggregate string from all masters)
   connectionStatus: '' as string,
 };
+
+// ─── Multi-master types & helpers ────────────────────────────────────────
+
+export interface PendingCommand {
+  id: string;
+  action: string;
+  startedAt: number;
+}
+
+export interface MasterConnection {
+  serverUrl: string;
+  authToken?: string;
+  ws: WebSocket | null;
+  connectionMode: 'websocket' | 'http' | 'disconnected';
+  wsReconnectDelay: number;
+  wsReconnectTimer: ReturnType<typeof setTimeout> | null;
+  heartbeatTimer: ReturnType<typeof setInterval> | null;
+  pollTimer: ReturnType<typeof setInterval> | null;
+  httpHeartbeatFailCount: number;
+  wsHeartbeatFailCount: number;
+  lastSeenServerVersion?: string;
+  lastHeartbeatAt?: number;
+  pendingCommands: Map<string, PendingCommand>;
+  connectionStatus: string;
+}
+
+export function getMaster(url: string): MasterConnection | undefined {
+  return state.masters.get(url);
+}
+
+export function ensureMaster(
+  url: string,
+  opts?: { authToken?: string },
+): MasterConnection {
+  let m = state.masters.get(url);
+  if (m) {
+    if (opts?.authToken) m.authToken = opts.authToken;
+    return m;
+  }
+  m = {
+    serverUrl: url,
+    authToken: opts?.authToken,
+    ws: null,
+    connectionMode: 'disconnected',
+    wsReconnectDelay: 1000,
+    wsReconnectTimer: null,
+    heartbeatTimer: null,
+    pollTimer: null,
+    httpHeartbeatFailCount: 0,
+    wsHeartbeatFailCount: 0,
+    pendingCommands: new Map(),
+    connectionStatus: '',
+  };
+  state.masters.set(url, m);
+  syncLegacyServerUrl();
+  return m;
+}
+
+export function removeMaster(url: string): MasterConnection | undefined {
+  const m = state.masters.get(url);
+  if (m) state.masters.delete(url);
+  syncLegacyServerUrl();
+  return m;
+}
+
+export function rekeyMaster(oldUrl: string, newUrl: string): MasterConnection | undefined {
+  const m = state.masters.get(oldUrl);
+  if (!m) return undefined;
+  if (oldUrl === newUrl) return m;
+  state.masters.delete(oldUrl);
+  m.serverUrl = newUrl;
+  state.masters.set(newUrl, m);
+  syncLegacyServerUrl();
+  return m;
+}
+
+/** Returns the first master URL (insertion order) or null. Used for legacy
+ * surfaces that still expect a single URL (self-update, env bootstrap echo). */
+export function legacyServerUrl(): string | null {
+  const first = state.masters.keys().next();
+  return first.done ? null : first.value;
+}
+
+/** Keep the legacy state.serverUrl field aligned with the first master. */
+export function syncLegacyServerUrl(): void {
+  state.serverUrl = legacyServerUrl();
+}
