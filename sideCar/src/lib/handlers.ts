@@ -463,9 +463,22 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
     containerName: state.CONTAINER_NAME,
     lastAcquire: state.lastAcquire,
     lastRelease: state.lastRelease,
-    wsConnected: state.wsConnection !== null && state.wsConnection.readyState === 1, // WebSocket.OPEN = 1
+    // Multi-master: wsConnected is "any master on WS"; preserved as boolean for legacy UI.
+    wsConnected: (() => {
+      for (const m of state.masters.values()) {
+        if (m.connectionMode === 'websocket' && m.ws !== null && (m.ws as { readyState: number }).readyState === 1) return true;
+      }
+      return false;
+    })(),
     wsCommandCount: state.wsCommandCount,
-    serverUrl: state.serverUrl,
+    serverUrl: state.serverUrl, // legacy single-URL — first master
+    masters: [...state.masters.values()].map(m => ({
+      serverUrl: m.serverUrl,
+      connectionMode: m.connectionMode,
+      lastHeartbeatAt: m.lastHeartbeatAt ?? null,
+      lastSeenServerVersion: m.lastSeenServerVersion ?? null,
+      pendingCommandCount: m.pendingCommands.size,
+    })),
     savedAgentUrl: state.savedAgentUrl,
     dockerMode: getDockerMode(),
     tasks: tasks.getAll(),

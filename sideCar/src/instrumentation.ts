@@ -28,30 +28,18 @@ export async function register() {
 
     log.info(`Sidecar v${version} started`);
 
-    if (state.serverUrl) {
-      log.info(`Resuming saved connection → ${state.serverUrl}`);
+    // Multi-master: state.masters is now the source of truth. Env-bootstrap
+    // already happened inside loadSavedConfig() (SIDECAR_MASTERS, SOUND_SUITE_MASTER_URL,
+    // SERVER_URL all merged). Just kick off the gossip client.
+    if (state.masters.size > 0) {
+      log.info(`Resuming with ${state.masters.size} master(s): ${[...state.masters.keys()].join(', ')}`);
     }
     if (state.savedAgentUrl) {
       log.info(`Resuming with saved agentUrl: ${state.savedAgentUrl}`);
     }
 
-    // CLI / env override: SOUND_SUITE_MASTER_URL (canonical) or SERVER_URL
-    // (back-compat) always wins. Critical for greenfield boots and surviving
-    // updates that wipe the local config dir — sidecar can reconstruct the
-    // master URL from a single env var the operator sets in `docker run`.
-    const envUrl = process.env.SOUND_SUITE_MASTER_URL || process.env.SERVER_URL;
-    if (envUrl) {
-      const which = process.env.SOUND_SUITE_MASTER_URL ? 'SOUND_SUITE_MASTER_URL' : 'SERVER_URL';
-      if (state.serverUrl && state.serverUrl !== envUrl) {
-        log.info(`Server URL override: ${state.serverUrl} → ${envUrl} (from ${which})`);
-      }
-      state.serverUrl = envUrl;
-      log.info(`Server URL from environment (${which}): ${state.serverUrl}`);
-    }
-
-    if (state.serverUrl) {
-      log.info(`Starting gossip client → ${state.serverUrl}`);
-      // Auto-provision + connect (async, don't block startup)
+    if (state.masters.size > 0) {
+      log.info(`Starting gossip client → ${state.masters.size} master(s)`);
       startGossipClient().catch(err => {
         log.error(`Gossip client startup failed: ${(err as Error).message}`);
       });

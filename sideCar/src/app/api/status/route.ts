@@ -1,22 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { handleStatus } from '@/lib/handlers';
-import { state } from '@/lib/state';
+import { state, ensureMaster, removeMaster } from '@/lib/state';
 import { saveConfig } from '@/lib/config';
-import { connectWebSocket, disconnectWebSocket } from '@/lib/ws-client';
-import fs from 'fs';
-import path from 'path';
-
-function writeSidecarConfig(serverUrl: string | null) {
-  try {
-    const configPath = process.env.SIDECAR_CONFIG_PATH ||
-      path.join(path.dirname(process.argv[1] || __filename), 'config', 'sidecar.config.json');
-    const dir = path.dirname(configPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    let existing: any = { serverUrl: null };
-    try { if (fs.existsSync(configPath)) existing = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
-    fs.writeFileSync(configPath, JSON.stringify({ ...existing, serverUrl }, null, 2));
-  } catch {}
-}
+import { connectMaster, disconnectMaster, disconnectAllMasters } from '@/lib/ws-client';
 import { switchMode } from '@/lib/containers';
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
@@ -42,18 +28,25 @@ export async function POST(request: NextRequest) {
       if (!serverUrl) {
         return NextResponse.json({ error: 'serverUrl is required' }, { status: 400, headers: cors });
       }
-      state.serverUrl = serverUrl;
-      writeSidecarConfig(serverUrl);
+      const existed = state.masters.has(serverUrl);
+      const m = ensureMaster(serverUrl);
       saveConfig();
-      disconnectWebSocket();
-      connectWebSocket();
+      if (!existed) connectMaster(m);
       return NextResponse.json({ message: `Connecting to ${serverUrl}...` }, { headers: cors });
     }
 
     if (action === 'disconnect') {
-      disconnectWebSocket();
-      state.serverUrl = null;
-      writeSidecarConfig(null);
+      // body.serverUrl optional — if provided, drop only that master. Else drop all.
+      if (typeof serverUrl === 'string' && serverUrl) {
+        const m = state.masters.get(serverUrl);
+        if (m) {
+          disconnectMaster(m);
+          removeMaster(serverUrl);
+        }
+      } else {
+        disconnectAllMasters();
+        for (const url of [...state.masters.keys()]) removeMaster(url);
+      }
       saveConfig();
       return NextResponse.json({ message: 'Disconnected' }, { headers: cors });
     }

@@ -1,20 +1,25 @@
 /**
- * Gossip Client — Sidecar ↔ Server Communication
+ * Gossip Client — Sidecar ↔ Server Communication (multi-master)
  *
- * All connections are OUTBOUND from sidecar. Server never initiates.
+ * The sidecar maintains an independent connection to N masters concurrently.
+ * Each MasterConnection owns its WebSocket, heartbeat timer, HTTP-poll timer,
+ * pendingCommands map, and reconnect backoff. Masters are key'd by serverUrl
+ * in state.masters.
  *
- * Primary:  WebSocket to server:3002 (real-time bidirectional)
- * Fallback: HTTP heartbeat to server:3000 (polls commands piggybacked on heartbeat)
+ * Wire format is unchanged — each master sees the same register/heartbeat/
+ * result frames it saw in the single-master era; from each master's POV
+ * nothing has changed.
  *
- * Heartbeats carry full status so the server never needs to query the sidecar.
- * Commands flow: server queues → sidecar picks up via WS push or HTTP poll.
+ * NOTE on shared state: registry/idleTimeouts/minOnline/perRole/peakDemand
+ * remain SHARED across masters. A config-push from any master mutates the
+ * shared GPU/container layer — needs namespacing later but kept simple for v1.
  */
 
 import os from 'os';
 import http from 'http';
 import https from 'https';
 import WebSocket from 'ws';
-import { state } from './state';
+import { state, ensureMaster, rekeyMaster, removeMaster, type MasterConnection } from './state';
 import { handleAcquire, handleRelease, handleStart, handleStop, handleStatus, getTotalActiveRequests } from './handlers';
 import { switchMode, provisionContainers, getAllContainerStates, containersForMode, ensureContainerForRole } from './containers';
 import { discoverGpus } from './gpu';
@@ -27,10 +32,10 @@ import { tasks } from './task-tracker';
 
 const log = createLogger('gossip');
 
+// Update-check is a process-wide concern, not per-master. Run it once against
+// the first master only — the binary doesn't need N parallel update probes.
 let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
-let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-let pollTimer: ReturnType<typeof setInterval> | null = null;
-let connectionMode: 'websocket' | 'http' | null = null;
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
 const PORT = parseInt(process.env.AGENT_PORT || process.env.PORT || '8098', 10);
 const HEARTBEAT_INTERVAL = 5_000;  // 5s heartbeat
@@ -59,22 +64,13 @@ export function getAgentUrl(): string {
   return `http://${fallback || '127.0.0.1'}:${PORT}`;
 }
 
-/**
- * Get a meaningful hostname for display.
- * Inside Docker, os.hostname() returns the container ID (e.g. "41972a76484b").
- * Use SIDECAR_HOSTNAME env var if set, otherwise detect if we're in Docker
- * and use a friendlier name.
- */
 function getDisplayHostname(): string {
   if (process.env.SIDECAR_HOSTNAME) return process.env.SIDECAR_HOSTNAME;
-  // Try Docker host's actual hostname (fetched via GET /info during initDocker)
   const dockerHostName = getDockerHostName();
   if (dockerHostName) return dockerHostName;
-  if (process.env.COMPUTERNAME) return process.env.COMPUTERNAME; // Windows via Docker env passthrough
+  if (process.env.COMPUTERNAME) return process.env.COMPUTERNAME;
   const hostname = os.hostname();
-  // Docker container IDs are 12+ hex chars — detect and replace with a friendlier name
   if (/^[0-9a-f]{12,}$/.test(hostname)) {
-    // Inside Docker — use the external IP as identifier if available
     const ip = process.env.EXTERNAL_IP;
     return ip ? `gpu-${ip.split('.').pop()}` : `sidecar-${hostname.substring(0, 8)}`;
   }
@@ -87,18 +83,27 @@ function getRegisteredContainers(): string[] {
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────
 
-function httpPost(url: string, body: object): Promise<{ status: number; body: string }> {
+function httpPost(
+  url: string,
+  body: object,
+  authToken?: string,
+): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
     const parsed = new URL(url);
     const client = parsed.protocol === 'https:' ? https : http;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Content-Length': String(Buffer.byteLength(payload)),
+    };
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
     const req = client.request(
       {
         hostname: parsed.hostname,
         port: parsed.port,
         path: parsed.pathname,
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+        headers,
       },
       (res) => {
         let data = '';
@@ -122,9 +127,10 @@ async function buildFullStatus(): Promise<Record<string, unknown>> {
     gpus = await discoverGpus();
   } catch { /* gpu discovery optional */ }
 
-  // Calculate total free VRAM for fleet routing decisions
   const freeVram = (gpus as any[]).reduce((sum, g) => sum + (g.memoryFree || 0), 0);
   const totalVram = (gpus as any[]).reduce((sum, g) => sum + (g.memoryTotal || 0), 0);
+
+  const anyWs = anyWebSocketConnected();
 
   return {
     agentUrl: getAgentUrl(),
@@ -138,28 +144,37 @@ async function buildFullStatus(): Promise<Record<string, unknown>> {
     roles: status.roles,
     peakDemand: status.peakDemand,
     gpus,
-    freeVram,    // total free GPU memory in MB — for fleet routing
-    totalVram,   // total GPU memory in MB
-    wsConnected: connectionMode === 'websocket',
+    freeVram,
+    totalVram,
+    wsConnected: anyWs,
     containerNames: getRegisteredContainers(),
     tasks: tasks.getAll(),
   };
 }
 
+export function anyWebSocketConnected(): boolean {
+  for (const m of state.masters.values()) {
+    if (m.connectionMode === 'websocket' && m.ws?.readyState === WebSocket.OPEN) return true;
+  }
+  return false;
+}
+
 // ─── Command execution ────────────────────────────────────────────────────
 
-async function executeCommand(cmd: { id: string; action: string; payload?: Record<string, unknown> }): Promise<Record<string, unknown>> {
+async function executeCommand(
+  m: MasterConnection,
+  cmd: { id: string; action: string; payload?: Record<string, unknown> },
+): Promise<Record<string, unknown>> {
   const action = cmd.action.replace(/^\//, '');
   const payload = cmd.payload || {};
   const role = payload.role as string | undefined;
 
-  log.info(`Executing command: ${action} (id: ${cmd.id})`);
+  log.info(`[${m.serverUrl}] Executing command: ${action} (id: ${cmd.id})`);
 
   switch (action) {
     case 'acquire': return handleAcquire(role);
     case 'release': return handleRelease(role);
     case 'start': {
-      // VRAM check before starting
       if (role) {
         const check = await checkVram(role);
         if (!check.ok) return { error: check.reason };
@@ -174,20 +189,20 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
     case 'mode': return switchMode(payload.mode as string);
     case 'provision': return provisionContainers();
     case 'update': {
-      if (!state.serverUrl) return { error: 'No server URL configured' };
-      const { available, version } = await checkForUpdate(state.serverUrl);
+      const { available, version } = await checkForUpdate(m.serverUrl);
       if (!available) return { ok: true, message: 'Already up to date' };
-      const updated = await performUpdate(state.serverUrl);
+      const updated = await performUpdate(m.serverUrl);
       return updated ? { ok: true, message: `Updating to v${version}` } : { error: 'Update failed' };
     }
     case 'config': {
-      // Server URL echo from master — persist so subsequent boots warm-start
-      // from disk without needing the env var. Survives full state loss as
-      // long as the env var bootstraps the first connection.
+      // config-push targets ONLY this master's slot — never adds a 2nd master.
+      // If payload.serverUrl != current key, we re-key this slot in place.
+      // SHARED FIELDS (idleTimeouts, minOnline, registry) still mutate global
+      // state — needs namespacing later (v1 limitation).
       if (typeof payload.serverUrl === 'string' && payload.serverUrl) {
-        if (state.serverUrl !== payload.serverUrl) {
-          log.info(`Master pushed serverUrl: ${state.serverUrl} → ${payload.serverUrl}`);
-          state.serverUrl = payload.serverUrl;
+        if (m.serverUrl !== payload.serverUrl) {
+          log.info(`[${m.serverUrl}] Master pushed serverUrl rename → ${payload.serverUrl}`);
+          rekeyMaster(m.serverUrl, payload.serverUrl);
         }
       }
       if (payload.idleTimeouts) Object.assign(state.idleTimeouts, payload.idleTimeouts);
@@ -203,7 +218,6 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
       }
       if (payload.containerName) state.CONTAINER_NAME = payload.containerName as string;
       state.lastConfigPushAt = Date.now();
-      // Auto-stop roles that just opted out (min transitioned to 0)
       if (rolesNowOptOut.length > 0) {
         const { stopContainer } = await import('./docker');
         for (const role of rolesNowOptOut) {
@@ -226,7 +240,6 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
           if (state.registry[r]) {
             const oldModel = state.registry[r].model;
             Object.assign(state.registry[r], overrides);
-            // Reset pull failure counter when config changes for a role
             state.pullFailCount[r] = 0;
             if (state.registry[r].model && state.registry[r].model !== oldModel) {
               modelChangedRoles.push(r);
@@ -235,7 +248,6 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
         }
       }
       saveConfig();
-      // Fire-and-forget: ensure new models are pulled for roles whose model changed
       if (modelChangedRoles.length > 0) {
         log.info(`Config push changed models for: ${modelChangedRoles.join(', ')} — triggering ensureOllamaModel`);
         for (const r of modelChangedRoles) {
@@ -250,10 +262,6 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
       if (!def) return { error: `Unknown role: ${pullRole}` };
       if (!def.model) return { error: `No model configured for ${pullRole}` };
 
-      // vLLM: pull the docker image, ensure container exists, start it.
-      // vLLM downloads the HF model on first start (cached to huggingface-cache
-      // volume so subsequent starts are instant). There's no separate model-pull
-      // API like Ollama's /api/pull — image pull + container start is the pull.
       if (def.type === 'vllm') {
         try {
           await pullImage(def.image);
@@ -268,12 +276,10 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
         return { ok: true, model: def.model, container: def.containerName, message: `${def.model} image pulled and container started — vLLM will download model from HuggingFace on first request (cached afterwards)` };
       }
 
-      // Ollama path
       if (def.type !== 'ollama') return { error: `${pullRole} is not an Ollama or vLLM container` };
       const cs = await getContainerState(def.containerName);
       if (cs.status !== 'running') return { error: `Container ${def.containerName} is not running` };
       await ollamaPull(def.port, def.model);
-      // Auto-load into VRAM after pull
       if (!state.modelLoading.has(pullRole)) {
         state.modelLoading.add(pullRole);
         ollamaLoad(def.port, def.model).finally(() => {
@@ -288,8 +294,6 @@ async function executeCommand(cmd: { id: string; action: string; payload?: Recor
       if (!def) return { error: `Unknown role: ${loadRole}` };
       if (!def.model) return { error: `No model configured for ${loadRole}` };
 
-      // vLLM loads its single configured model at container startup.
-      // "Load" for vLLM = ensure container is running.
       if (def.type === 'vllm') {
         const csv = await getContainerState(def.containerName);
         if (csv.status !== 'running') {
@@ -319,7 +323,7 @@ async function checkVram(role: string): Promise<{ ok: boolean; reason?: string }
 
   try {
     const gpus = await discoverGpus();
-    if (gpus.length === 0) return { ok: true }; // No GPU info = let Docker decide
+    if (gpus.length === 0) return { ok: true };
 
     const gpu = gpus[0];
     if (gpu.memoryFree < def.vram) {
@@ -330,7 +334,7 @@ async function checkVram(role: string): Promise<{ ok: boolean; reason?: string }
     }
     return { ok: true };
   } catch {
-    return { ok: true }; // Can't check = proceed
+    return { ok: true };
   }
 }
 
@@ -341,8 +345,7 @@ async function autoProvision(): Promise<void> {
   const activeRoles = containersForMode(state.currentMode);
   log.info(`Auto-provisioning ALL roles: ${allRoles.join(', ')} (active for "${state.currentMode}": ${activeRoles.join(', ')})`);
 
-  // Discover available VRAM upfront
-  let availableVram = Infinity; // default: unlimited if GPU probe fails
+  let availableVram = Infinity;
   try {
     const gpus = await discoverGpus();
     if (gpus.length > 0) {
@@ -353,11 +356,9 @@ async function autoProvision(): Promise<void> {
     log.warn('Could not discover GPU — will provision without VRAM checks');
   }
 
-  // Deduplicate images — pull each unique image only once
   const pulledImages = new Set<string>();
   let vramUsed = 0;
 
-  // Phase 1: Pull images + create containers for ALL roles (so mode switch is instant)
   for (const role of allRoles) {
     const def = state.registry[role];
     if (!def) continue;
@@ -370,7 +371,6 @@ async function autoProvision(): Promise<void> {
         continue;
       }
 
-      // Pull image only if not already local and not already pulled this session
       if (!pulledImages.has(def.image)) {
         try {
           const { status: imgStatus } = await dockerRequest('GET', `/images/${encodeURIComponent(def.image)}/json`);
@@ -399,7 +399,6 @@ async function autoProvision(): Promise<void> {
         log.info(`${role}: image ${def.image} already pulled`);
       }
 
-      // Create container (for ALL roles, not just active mode)
       log.info(`${role}: creating container ${def.containerName}...`);
       await createContainer(role);
       log.info(`${role}: container created`);
@@ -408,8 +407,6 @@ async function autoProvision(): Promise<void> {
     }
   }
 
-  // Phase 2: Start + pull models ONLY for active mode roles, with VRAM checks
-  // Sort active roles by VRAM (smallest first) to fit as many as possible
   const sortedActive = [...activeRoles].sort((a, b) => {
     const va = state.registry[a]?.vram || 0;
     const vb = state.registry[b]?.vram || 0;
@@ -422,18 +419,16 @@ async function autoProvision(): Promise<void> {
 
     try {
       const cs = await getContainerState(def.containerName);
-      if (!cs.exists) continue; // Creation failed in phase 1
+      if (!cs.exists) continue;
 
       const alreadyRunning = cs.status === 'running';
       if (alreadyRunning) vramUsed += def.vram;
 
-      // VRAM gate (only for containers that need starting)
       if (!alreadyRunning && vramUsed + def.vram > availableVram) {
         log.warn(`${role}: skipping start — needs ${def.vram}MB but only ${availableVram - vramUsed}MB free`);
         continue;
       }
 
-      // For Ollama containers with a model: ensure pulled + loaded via HTTP API
       if (def.type === 'ollama' && def.model) {
         try {
           if (!alreadyRunning) {
@@ -443,7 +438,6 @@ async function autoProvision(): Promise<void> {
           }
           await waitForOllama(def.port);
 
-          // Check if model is on disk — pull if not
           const diskModels = await ollamaList(def.port);
           const modelBase = def.model.split(':')[0];
           if (!diskModels.some(m => m.includes(modelBase))) {
@@ -455,7 +449,6 @@ async function autoProvision(): Promise<void> {
                   tasks.update(pullTaskId, { progress: pct, detail: detail.slice(0, 80) });
                 },
               });
-              // Post-pull verification
               const verifyModels = await ollamaList(def.port);
               if (!verifyModels.some(m => m.includes(modelBase))) {
                 tasks.fail(pullTaskId, 'Model not found on disk after pull');
@@ -473,7 +466,6 @@ async function autoProvision(): Promise<void> {
             log.info(`${role}: model ${def.model} already on disk`);
           }
 
-          // Fire-and-forget: load model into VRAM
           if (!state.modelLoading.has(role)) {
             state.modelLoading.add(role);
             const loadTaskId = tasks.start('model-load', `Load ${def.model} into VRAM`, role);
@@ -494,7 +486,6 @@ async function autoProvision(): Promise<void> {
           log.error(`${role}: model pull/load failed: ${(pullErr as Error).message}`);
         }
       } else if (!alreadyRunning) {
-        // Non-Ollama (e.g. vLLM) — start directly
         log.info(`${role}: starting container...`);
         await startContainer(def.containerName);
         vramUsed += def.vram;
@@ -508,123 +499,130 @@ async function autoProvision(): Promise<void> {
   log.info(`Auto-provision complete. VRAM allocated: ~${vramUsed}MB / ${availableVram === Infinity ? '??' : availableVram}MB`);
 }
 
-// ─── HTTP heartbeat + command poll ────────────────────────────────────────
+// ─── Per-master HTTP heartbeat + command poll ────────────────────────────
 
-let httpHeartbeatFailCount = 0;
-async function sendHttpHeartbeat(): Promise<void> {
-  if (!state.serverUrl) return;
-
+async function sendHttpHeartbeat(m: MasterConnection): Promise<void> {
   try {
     const fullStatus = await buildFullStatus();
     const { status, body: responseBody } = await httpPost(
-      `${state.serverUrl}/api/admin/gpu/sidecars/heartbeat`,
+      `${m.serverUrl}/api/admin/gpu/sidecars/heartbeat`,
       fullStatus,
+      m.authToken,
     );
 
     if (status === 200) {
-      if (httpHeartbeatFailCount > 0) {
-        log.info(`HTTP heartbeat recovered after ${httpHeartbeatFailCount} failures`);
+      if (m.httpHeartbeatFailCount > 0) {
+        log.info(`[${m.serverUrl}] HTTP heartbeat recovered after ${m.httpHeartbeatFailCount} failures`);
       }
-      httpHeartbeatFailCount = 0;
-      // Heartbeat response may contain piggybacked commands
+      m.httpHeartbeatFailCount = 0;
+      m.lastHeartbeatAt = Date.now();
       try {
         const response = JSON.parse(responseBody);
         if (response.commands && Array.isArray(response.commands)) {
           for (const cmd of response.commands) {
-            processCommand(cmd);
+            processCommand(m, cmd);
           }
         }
       } catch { /* parse error, ignore */ }
     } else {
-      httpHeartbeatFailCount++;
-      log.warn(`HTTP heartbeat returned ${status} (${httpHeartbeatFailCount}x)`);
+      m.httpHeartbeatFailCount++;
+      log.warn(`[${m.serverUrl}] HTTP heartbeat returned ${status} (${m.httpHeartbeatFailCount}x)`);
     }
   } catch (err) {
-    httpHeartbeatFailCount++;
-    log.error(`HTTP heartbeat failed (${httpHeartbeatFailCount}x): ${(err as Error).message}`);
+    m.httpHeartbeatFailCount++;
+    log.error(`[${m.serverUrl}] HTTP heartbeat failed (${m.httpHeartbeatFailCount}x): ${(err as Error).message}`);
   }
 }
 
-async function pollForCommands(): Promise<void> {
-  if (!state.serverUrl || connectionMode === 'websocket') return;
+async function pollForCommands(m: MasterConnection): Promise<void> {
+  if (m.connectionMode === 'websocket') return;
 
   try {
     const { status, body: responseBody } = await httpPost(
-      `${state.serverUrl}/api/admin/gpu/sidecars/poll`,
+      `${m.serverUrl}/api/admin/gpu/sidecars/poll`,
       { agentUrl: getAgentUrl() },
+      m.authToken,
     );
 
     if (status === 200) {
       const response = JSON.parse(responseBody);
       if (response.commands && Array.isArray(response.commands)) {
         for (const cmd of response.commands) {
-          processCommand(cmd);
+          processCommand(m, cmd);
         }
       }
     }
-  } catch (err) {
-    // Silent — poll failures are expected when server is down
+  } catch {
+    /* silent — poll failures expected when server is down */
   }
 }
 
-/** Execute a command and report result back to server. */
-function processCommand(cmd: { id: string; action: string; payload?: Record<string, unknown> }): void {
-  executeCommand(cmd).then(async (result) => {
-    log.info(`Command ${cmd.id} (${cmd.action}) completed`);
-    await reportResult(cmd.id, result);
+function processCommand(
+  m: MasterConnection,
+  cmd: { id: string; action: string; payload?: Record<string, unknown> },
+): void {
+  m.pendingCommands.set(cmd.id, { id: cmd.id, action: cmd.action, startedAt: Date.now() });
+  executeCommand(m, cmd).then(async (result) => {
+    log.info(`[${m.serverUrl}] Command ${cmd.id} (${cmd.action}) completed`);
+    m.pendingCommands.delete(cmd.id);
+    await reportResult(m, cmd.id, result);
   }).catch(async (err) => {
-    log.error(`Command ${cmd.id} (${cmd.action}) failed: ${(err as Error).message}`);
-    await reportResult(cmd.id, undefined, (err as Error).message);
+    log.error(`[${m.serverUrl}] Command ${cmd.id} (${cmd.action}) failed: ${(err as Error).message}`);
+    m.pendingCommands.delete(cmd.id);
+    await reportResult(m, cmd.id, undefined, (err as Error).message);
   });
 }
 
-async function reportResult(commandId: string, result?: unknown, error?: string): Promise<void> {
-  if (!state.serverUrl) return;
-
-  // If WS is connected, send result via WS (handled by the WS command flow)
-  // For HTTP-polled commands, report via HTTP
-  if (connectionMode !== 'websocket') {
+async function reportResult(
+  m: MasterConnection,
+  commandId: string,
+  result?: unknown,
+  error?: string,
+): Promise<void> {
+  // WS-mode commands send their result inline through the WS frame already;
+  // only HTTP-poll commands need this out-of-band POST.
+  if (m.connectionMode !== 'websocket') {
     try {
-      await httpPost(`${state.serverUrl}/api/admin/gpu/sidecars/result`, {
-        commandId,
-        result: result || {},
-        error,
-      });
+      await httpPost(
+        `${m.serverUrl}/api/admin/gpu/sidecars/result`,
+        { commandId, result: result || {}, error },
+        m.authToken,
+      );
     } catch (err) {
-      log.error(`Failed to report result for ${commandId}: ${(err as Error).message}`);
+      log.error(`[${m.serverUrl}] Failed to report result for ${commandId}: ${(err as Error).message}`);
     }
   }
 }
 
-function startHttpHeartbeat(): void {
-  stopHttpHeartbeat();
-  // Rich heartbeat every 5s
-  heartbeatTimer = setInterval(() => sendHttpHeartbeat(), HEARTBEAT_INTERVAL);
-  // Poll for commands every 3s (separate from heartbeat)
-  pollTimer = setInterval(() => pollForCommands(), POLL_INTERVAL);
+function startHttpHeartbeat(m: MasterConnection): void {
+  stopHttpHeartbeat(m);
+  m.heartbeatTimer = setInterval(() => sendHttpHeartbeat(m), HEARTBEAT_INTERVAL);
+  m.pollTimer = setInterval(() => pollForCommands(m), POLL_INTERVAL);
 }
 
-function stopHttpHeartbeat(): void {
-  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+function stopHttpHeartbeat(m: MasterConnection): void {
+  if (m.heartbeatTimer) { clearInterval(m.heartbeatTimer); m.heartbeatTimer = null; }
+  if (m.pollTimer) { clearInterval(m.pollTimer); m.pollTimer = null; }
 }
 
-// ─── Update checks ────────────────────────────────────────────────────────
+// ─── Update checks (process-wide, runs against first master) ─────────────
 
 function startUpdateChecks(): void {
-  if (updateCheckInterval) clearInterval(updateCheckInterval);
+  if (updateCheckInterval) return;
   updateCheckInterval = setInterval(async () => {
-    if (!state.serverUrl) return;
-    const { available, version } = await checkForUpdate(state.serverUrl);
+    const first = state.masters.values().next().value as MasterConnection | undefined;
+    if (!first) return;
+    const { available, version } = await checkForUpdate(first.serverUrl);
     if (available) {
       log.info(`Auto-updating to v${version}...`);
-      await performUpdate(state.serverUrl);
+      await performUpdate(first.serverUrl);
     }
   }, 5 * 60 * 1000);
 
   (async () => {
-    if (!state.serverUrl) return;
-    const { available, version } = await checkForUpdate(state.serverUrl);
+    const first = state.masters.values().next().value as MasterConnection | undefined;
+    if (!first) return;
+    const { available, version } = await checkForUpdate(first.serverUrl);
     if (available) {
       log.info(`Update available (v${version}), will apply on next check cycle`);
     }
@@ -635,38 +633,40 @@ function stopUpdateChecks(): void {
   if (updateCheckInterval) { clearInterval(updateCheckInterval); updateCheckInterval = null; }
 }
 
-// ─── WebSocket connection ─────────────────────────────────────────────────
+// ─── Per-master WebSocket connection ─────────────────────────────────────
 
-export function connectWebSocket(): void {
-  if (!state.serverUrl) return;
-  log.info(`connectWebSocket: attempting connection (serverUrl=${state.serverUrl}, currentMode=${connectionMode}, reconnectDelay=${state.wsReconnectDelay}ms)`);
+export function connectMaster(m: MasterConnection): void {
+  log.info(`[${m.serverUrl}] connectMaster: attempting (currentMode=${m.connectionMode}, reconnectDelay=${m.wsReconnectDelay}ms)`);
   try {
-    const serverHost = new URL(state.serverUrl).hostname;
+    const serverHost = new URL(m.serverUrl).hostname;
     const wsPort = 3002;
     const wsUrl = `ws://${serverHost}:${wsPort}/sidecar`;
     const agentUrl = getAgentUrl();
 
-    log.info(`Connecting to ${wsUrl} (agentUrl: ${agentUrl})...`);
-    const ws = new WebSocket(wsUrl);
+    log.info(`[${m.serverUrl}] Connecting to ${wsUrl} (agentUrl: ${agentUrl})...`);
+    const headers: Record<string, string> = {};
+    if (m.authToken) headers['Authorization'] = `Bearer ${m.authToken}`;
+    const ws = new WebSocket(wsUrl, { headers });
 
     const connectTimeout = setTimeout(async () => {
-      log.warn('WebSocket connect timed out, falling back to HTTP gossip');
+      log.warn(`[${m.serverUrl}] WebSocket connect timed out, falling back to HTTP gossip`);
       ws.terminate();
-      await fallbackToHttp();
+      await fallbackToHttp(m);
     }, 5_000);
 
     ws.on('open', () => {
       clearTimeout(connectTimeout);
-      log.info('WebSocket connected');
-      state.wsReconnectDelay = 1000;
-      state.wsConnection = ws;
-      connectionMode = 'websocket';
+      log.info(`[${m.serverUrl}] WebSocket connected`);
+      m.wsReconnectDelay = 1000;
+      m.ws = ws;
+      m.connectionMode = 'websocket';
+      m.connectionStatus = 'Connected via WebSocket';
+      // Aggregate connectionStatus is "best-of" the masters
       state.connectionStatus = 'Connected via WebSocket';
-      stopHttpHeartbeat(); // WS takes over
+      stopHttpHeartbeat(m);
 
       startUpdateChecks();
 
-      // Register with rich data
       ws.send(JSON.stringify({
         type: 'register',
         agentUrl,
@@ -674,12 +674,11 @@ export function connectWebSocket(): void {
         containers: getRegisteredContainers(),
       }));
 
-      // Rich heartbeat via WS every 5s
-      if (state.wsHeartbeatTimer) clearInterval(state.wsHeartbeatTimer);
-      let wsHeartbeatFailCount = 0;
-      state.wsHeartbeatTimer = setInterval(async () => {
+      if (m.heartbeatTimer) clearInterval(m.heartbeatTimer);
+      m.wsHeartbeatFailCount = 0;
+      m.heartbeatTimer = setInterval(async () => {
         if (ws.readyState !== WebSocket.OPEN) {
-          log.warn('WS heartbeat: socket not open, skipping');
+          log.warn(`[${m.serverUrl}] WS heartbeat: socket not open, skipping`);
           return;
         }
         try {
@@ -690,12 +689,13 @@ export function connectWebSocket(): void {
             activeRequests: getTotalActiveRequests(),
             statusData,
           }));
-          wsHeartbeatFailCount = 0;
+          m.wsHeartbeatFailCount = 0;
+          m.lastHeartbeatAt = Date.now();
         } catch (err) {
-          wsHeartbeatFailCount++;
-          log.error(`WS heartbeat failed (${wsHeartbeatFailCount}x): ${(err as Error).message}`);
-          if (wsHeartbeatFailCount >= 3) {
-            log.warn('WS heartbeat failed 3 times, forcing reconnect');
+          m.wsHeartbeatFailCount++;
+          log.error(`[${m.serverUrl}] WS heartbeat failed (${m.wsHeartbeatFailCount}x): ${(err as Error).message}`);
+          if (m.wsHeartbeatFailCount >= 3) {
+            log.warn(`[${m.serverUrl}] WS heartbeat failed 3 times, forcing reconnect`);
             ws.terminate();
           }
         }
@@ -707,122 +707,178 @@ export function connectWebSocket(): void {
       try { msg = JSON.parse(data.toString()); } catch { return; }
 
       if (msg.type === 'registered') {
-        log.info('Registration acknowledged by server');
+        log.info(`[${m.serverUrl}] Registration acknowledged by server`);
+        if (typeof msg.serverVersion === 'string') {
+          m.lastSeenServerVersion = msg.serverVersion;
+        }
       } else if (msg.type === 'command') {
         state.wsCommandCount++;
         const action = msg.action as string;
-        log.info(`WS command received: ${action} (id: ${msg.id})`);
+        const id = msg.id as string;
+        log.info(`[${m.serverUrl}] WS command received: ${action} (id: ${id})`);
+        m.pendingCommands.set(id, { id, action, startedAt: Date.now() });
         try {
-          const result = await executeCommand({
-            id: msg.id as string,
+          const result = await executeCommand(m, {
+            id,
             action,
             payload: msg as Record<string, unknown>,
           });
-          ws.send(JSON.stringify({ type: 'result', id: msg.id, ...result }));
+          m.pendingCommands.delete(id);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'result', id, ...result }));
+          }
         } catch (err) {
-          ws.send(JSON.stringify({ type: 'result', id: msg.id, error: (err as Error).message }));
+          m.pendingCommands.delete(id);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'result', id, error: (err as Error).message }));
+          }
+        }
+      } else if (msg.type === 'config-push' || msg.type === 'config') {
+        // Some master deployments push config as a top-level frame, not as a
+        // command. Route through the same handler.
+        try {
+          await executeCommand(m, {
+            id: (msg.id as string) || `cfg-${Date.now()}`,
+            action: 'config',
+            payload: (msg.payload as Record<string, unknown>) || (msg as Record<string, unknown>),
+          });
+        } catch (err) {
+          log.error(`[${m.serverUrl}] config-push handling failed: ${(err as Error).message}`);
         }
       }
     });
 
     ws.on('close', () => {
       clearTimeout(connectTimeout);
-      log.info('WebSocket disconnected');
-      state.wsConnection = null;
-      connectionMode = null;
-      state.connectionStatus = 'WebSocket disconnected';
-      if (state.wsHeartbeatTimer) clearInterval(state.wsHeartbeatTimer);
-      stopUpdateChecks();
-      // Fall back to HTTP gossip + schedule WS reconnect
-      startHttpHeartbeat();
-      scheduleReconnect();
+      log.info(`[${m.serverUrl}] WebSocket disconnected`);
+      m.ws = null;
+      m.connectionMode = 'disconnected';
+      m.connectionStatus = 'WebSocket disconnected';
+      if (m.heartbeatTimer) { clearInterval(m.heartbeatTimer); m.heartbeatTimer = null; }
+      // If no master is on WS, stop process-wide update checks.
+      if (!anyWebSocketConnected()) stopUpdateChecks();
+      startHttpHeartbeat(m);
+      scheduleReconnect(m);
     });
 
     ws.on('error', async (err: Error) => {
       clearTimeout(connectTimeout);
-      log.error(`WebSocket error: ${err.message || 'unknown'}`);
-      if (!state.wsConnection) {
-        log.info('Falling back to HTTP gossip...');
+      log.error(`[${m.serverUrl}] WebSocket error: ${err.message || 'unknown'}`);
+      if (!m.ws) {
+        log.info(`[${m.serverUrl}] Falling back to HTTP gossip...`);
         ws.terminate();
-        await fallbackToHttp();
+        await fallbackToHttp(m);
       }
     });
   } catch (err) {
-    log.error(`WebSocket connect failed: ${(err as Error).message}`);
-    fallbackToHttp();
+    log.error(`[${m.serverUrl}] WebSocket connect failed: ${(err as Error).message}`);
+    fallbackToHttp(m);
   }
 }
 
-async function fallbackToHttp(): Promise<void> {
-  connectionMode = 'http';
-  state.connectionStatus = 'Connected via HTTP fallback';
-  // Send initial heartbeat (acts as registration)
-  await sendHttpHeartbeat();
-  startHttpHeartbeat();
+async function fallbackToHttp(m: MasterConnection): Promise<void> {
+  m.connectionMode = 'http';
+  m.connectionStatus = 'Connected via HTTP fallback';
+  if (!anyWebSocketConnected()) state.connectionStatus = 'Connected via HTTP fallback';
+  await sendHttpHeartbeat(m);
+  startHttpHeartbeat(m);
   startUpdateChecks();
-  log.info('Running in HTTP gossip mode (heartbeat + poll)');
-  scheduleReconnect();
+  log.info(`[${m.serverUrl}] Running in HTTP gossip mode (heartbeat + poll)`);
+  scheduleReconnect(m);
 }
 
-export function scheduleReconnect(): void {
-  if (!state.serverUrl) return;
-  if (state.wsReconnectTimer) clearTimeout(state.wsReconnectTimer);
-  state.wsReconnectTimer = setTimeout(() => connectWebSocket(), state.wsReconnectDelay);
-  state.connectionStatus = `Reconnecting in ${Math.round(state.wsReconnectDelay / 1000)}s...`;
-  log.info(`WS reconnect in ${state.wsReconnectDelay / 1000}s...`);
-  state.wsReconnectDelay = Math.min(state.wsReconnectDelay * 2, 30_000);
+export function scheduleReconnect(m: MasterConnection): void {
+  if (m.wsReconnectTimer) clearTimeout(m.wsReconnectTimer);
+  // Master may have been removed between scheduling and firing
+  m.wsReconnectTimer = setTimeout(() => {
+    if (!state.masters.has(m.serverUrl)) return;
+    connectMaster(m);
+  }, m.wsReconnectDelay);
+  m.connectionStatus = `Reconnecting in ${Math.round(m.wsReconnectDelay / 1000)}s...`;
+  log.info(`[${m.serverUrl}] WS reconnect in ${m.wsReconnectDelay / 1000}s...`);
+  m.wsReconnectDelay = Math.min(m.wsReconnectDelay * 2, 30_000);
+}
+
+export function disconnectMaster(m: MasterConnection): void {
+  if (m.wsReconnectTimer) { clearTimeout(m.wsReconnectTimer); m.wsReconnectTimer = null; }
+  if (m.heartbeatTimer) { clearInterval(m.heartbeatTimer); m.heartbeatTimer = null; }
+  if (m.pollTimer) { clearInterval(m.pollTimer); m.pollTimer = null; }
+  if (m.ws) {
+    try { m.ws.close(); } catch { /* ignore */ }
+    m.ws = null;
+  }
+  m.connectionMode = 'disconnected';
+  m.pendingCommands.clear();
+  log.info(`[${m.serverUrl}] Disconnected (manual)`);
+}
+
+// ─── Fan-out wrappers ────────────────────────────────────────────────────
+
+export function connectAllMasters(): void {
+  if (state.masters.size === 0) {
+    log.info('connectAllMasters: no masters configured');
+    return;
+  }
+  for (const m of state.masters.values()) {
+    if (m.connectionMode === 'disconnected') {
+      connectMaster(m);
+    }
+  }
+}
+
+export function disconnectAllMasters(): void {
+  for (const m of state.masters.values()) {
+    disconnectMaster(m);
+  }
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+  stopUpdateChecks();
+}
+
+// ─── Back-compat shims for legacy single-master callsites ────────────────
+// instrumentation.ts, ws-connect/route.ts etc still call these names.
+
+export function connectWebSocket(): void {
+  connectAllMasters();
+}
+
+export function disconnectWebSocket(): void {
+  disconnectAllMasters();
 }
 
 // ─── Connection watchdog ─────────────────────────────────────────────────
-let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
 function startWatchdog(): void {
   if (watchdogTimer) return;
   watchdogTimer = setInterval(() => {
-    if (!state.serverUrl) return;
-    const wsOk = state.wsConnection?.readyState === WebSocket.OPEN;
-    const httpOk = connectionMode === 'http';
-    if (!wsOk && !httpOk && !state.wsReconnectTimer) {
-      log.warn('Watchdog: not connected and no reconnect scheduled — triggering reconnect');
-      state.wsReconnectDelay = 1000; // reset backoff
-      connectWebSocket();
-    } else if (!wsOk && httpOk) {
-      // In HTTP mode — ensure WS reconnect is still being attempted
-      if (!state.wsReconnectTimer) {
-        log.info('Watchdog: in HTTP fallback but no WS reconnect scheduled — scheduling');
-        scheduleReconnect();
+    for (const m of state.masters.values()) {
+      const wsOk = m.ws?.readyState === WebSocket.OPEN;
+      const httpOk = m.connectionMode === 'http';
+      if (!wsOk && !httpOk && !m.wsReconnectTimer) {
+        log.warn(`[${m.serverUrl}] Watchdog: not connected and no reconnect scheduled — triggering reconnect`);
+        m.wsReconnectDelay = 1000;
+        connectMaster(m);
+      } else if (!wsOk && httpOk) {
+        if (!m.wsReconnectTimer) {
+          log.info(`[${m.serverUrl}] Watchdog: in HTTP fallback but no WS reconnect scheduled — scheduling`);
+          scheduleReconnect(m);
+        }
       }
     }
   }, 30_000);
 }
 
-export function disconnectWebSocket(): void {
-  if (state.wsReconnectTimer) clearTimeout(state.wsReconnectTimer);
-  if (state.wsHeartbeatTimer) clearInterval(state.wsHeartbeatTimer);
-  stopHttpHeartbeat();
-  stopUpdateChecks();
-  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
-  if (state.wsConnection) {
-    state.wsConnection.close();
-    state.wsConnection = null;
-  }
-  connectionMode = null;
-  log.info('Disconnected (manual)');
-}
-
 // ─── Startup ──────────────────────────────────────────────────────────────
 
-/**
- * Called from instrumentation.ts on sidecar boot.
- * Auto-provisions containers, then connects to server.
- */
 export async function startGossipClient(): Promise<void> {
-  // Connect to server FIRST — so heartbeats flow during provisioning
-  if (state.serverUrl) {
-    connectWebSocket();
+  // Bootstrap any masters from legacy state.serverUrl if config.ts hasn't
+  // populated state.masters yet (back-compat path).
+  if (state.masters.size === 0 && state.serverUrl) {
+    ensureMaster(state.serverUrl);
   }
 
-  // Then provision containers (slow, but server knows we're alive)
+  // Connect FIRST so heartbeats flow during slow provisioning
+  connectAllMasters();
+
   try {
     await autoProvision();
   } catch (err) {
@@ -831,3 +887,7 @@ export async function startGossipClient(): Promise<void> {
 
   startWatchdog();
 }
+
+// Helper exported for /api/masters routes — not exported above to avoid
+// circular re-export conflicts.
+export { ensureMaster, removeMaster };
