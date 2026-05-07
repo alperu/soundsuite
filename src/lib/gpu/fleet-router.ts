@@ -321,9 +321,20 @@ export async function controlContainer(
   return sendToSidecar(agentUrl, `/${action}`, body, 'POST', timeout);
 }
 
+/**
+ * Record that this Sound Suite master just pushed config to a sidecar. Stamps
+ * `selfLastConfigPushAt` in the status cache so the UI can compare against
+ * the sidecar's reported `lastConfigPushAt` and flag overrides from other
+ * masters in a multi-master setup.
+ */
+function markSelfConfigPush(agentUrl: string): void {
+  const normalized = agentUrl.replace(/\/+$/, '');
+  statusCache.updateSidecarStatus(normalized, { selfLastConfigPushAt: Date.now() });
+}
+
 /** Push idle timeout configuration to a sidecar (converts minutes to ms). */
 export async function pushIdleTimeouts(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {
-  return sendToSidecar(agentUrl, '/config', {
+  const result = await sendToSidecar(agentUrl, '/config', {
     idleTimeouts: {
       embedding: timeouts.embedding * 60_000,
       completion: timeouts.completion * 60_000,
@@ -331,6 +342,8 @@ export async function pushIdleTimeouts(agentUrl: string, timeouts: IdleTimeouts)
       reranker: timeouts.reranker * 60_000,
     },
   });
+  markSelfConfigPush(agentUrl);
+  return result;
 }
 
 /** Build a model registry object from current admin config. */
@@ -369,15 +382,16 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
     return { pushed: false, reason: 'no model overrides configured' };
   }
   logger.info('Pushing model registry to sidecar', { agent: agentUrl, roles: Object.keys(registry) });
-  return sendToSidecar(agentUrl, '/config', { registry });
+  const result = await sendToSidecar(agentUrl, '/config', { registry });
+  markSelfConfigPush(agentUrl);
+  return result;
 }
 
 /** Push both idle timeouts AND model registry in a single /config call. */
 export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {
   const registry = await buildModelRegistry();
   const cfg = await getConfig();
-  const masterUrl = (cfg.masterUrl || '').trim();
-  return sendToSidecar(agentUrl, '/config', {
+  const result = await sendToSidecar(agentUrl, '/config', {
     idleTimeouts: {
       embedding: timeouts.embedding * 60_000,
       completion: timeouts.completion * 60_000,
@@ -390,12 +404,10 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
       ocr: cfg.gpuMinOcr ?? 1,
       reranker: cfg.gpuMinReranker ?? 1,
     },
-    // Echo the master URL so the sidecar persists it for next boot. With this,
-    // a sidecar that bootstrapped from SOUND_SUITE_MASTER_URL env can warm-start
-    // from disk on subsequent boots without needing the env var.
-    ...(masterUrl ? { serverUrl: masterUrl } : {}),
     ...(Object.keys(registry).length > 0 ? { registry } : {}),
   });
+  markSelfConfigPush(agentUrl);
+  return result;
 }
 
 // ─── Smart Routing ───────────────────────────────────────────────────────────

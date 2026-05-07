@@ -68,6 +68,21 @@ interface CachedStatus {
     ts: number;
   };
   wsConnected: boolean;
+  /**
+   * List of masters this sidecar is currently registered with. Populated by
+   * the multi-master sidecar (>=v?). Older sidecars omit this field — UI
+   * should treat absent/length<=1 as "exclusive to this Sound Suite master".
+   */
+  masters?: Array<{
+    serverUrl: string;
+    connectionMode: 'websocket' | 'http' | 'disconnected';
+    lastHeartbeatAt?: number;
+    lastSeenServerVersion?: string;
+  }>;
+  /** Sidecar's timestamp of the last config push from ANY master. */
+  lastConfigPushAt?: number;
+  /** Wall-clock timestamp of the last config push from THIS Sound Suite master. */
+  selfLastConfigPushAt?: number;
   tasks?: Array<{
     id: string;
     type: string;
@@ -511,6 +526,37 @@ export default function GpuFleetPanel() {
                       {s.sidecarStatus?.version && (
                         <span className="ml-2 text-xs text-gray-400">v{s.sidecarStatus.version}</span>
                       )}
+                      {(() => {
+                        const others = (s.sidecarStatus?.masters || [])
+                          .filter(m => !fleet?.masterUrl || m.serverUrl !== fleet.masterUrl);
+                        if (others.length === 0) return null;
+                        const tooltip = `Sidecar also serves: ${others.map(m => `${m.serverUrl} (${m.connectionMode})`).join(', ')}`;
+                        return (
+                          <span
+                            title={tooltip}
+                            className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-100 text-orange-800"
+                          >shared ×{others.length + 1}</span>
+                        );
+                      })()}
+                      {(() => {
+                        // Multi-master shared-policy override warning. Sidecar v1
+                        // keeps idleTimeouts/minOnline/registry as last-writer-wins
+                        // shared state; flag when another master pushed after we did.
+                        const status = s.sidecarStatus;
+                        if (!status?.masters || status.masters.length <= 1) return null;
+                        const last = status.lastConfigPushAt;
+                        const selfLast = status.selfLastConfigPushAt;
+                        if (!last || !selfLast) return null;
+                        // 1s tolerance for clock skew between Sound Suite and the sidecar.
+                        if (last <= selfLast + 1000) return null;
+                        const ageSec = Math.max(0, Math.round((Date.now() - last) / 1000));
+                        return (
+                          <span
+                            title={`Another master pushed config ${ageSec}s ago, after Sound Suite's last push. Shared sidecar policies (idle timeouts, minOnline, model registry) follow last-writer-wins in v1.`}
+                            className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-100 text-yellow-800"
+                          >policy overridden</span>
+                        );
+                      })()}
                     </td>
                     <td className="py-2 px-3 font-mono text-xs text-gray-600">{s.url}</td>
                     <td className="py-2 px-3">

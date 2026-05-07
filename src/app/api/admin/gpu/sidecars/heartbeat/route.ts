@@ -58,6 +58,8 @@ export async function POST(request: NextRequest) {
       peakDemand: body.peakDemand,
       gpus: body.gpus,
       wsConnected: body.wsConnected,
+      masters: body.masters,
+      lastConfigPushAt: body.lastConfigPushAt,
       vram: body.vram,
     });
 

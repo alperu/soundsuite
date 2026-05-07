@@ -161,6 +161,8 @@ export function startWsRelay(): WebSocketServer {
             idleTimeouts: msg.statusData?.idleTimeouts,
             version: msg.statusData?.version,
             wsConnected: true,
+            masters: msg.statusData?.masters,
+            lastConfigPushAt: msg.statusData?.lastConfigPushAt,
             vram: msg.statusData?.vram,
           });
         }

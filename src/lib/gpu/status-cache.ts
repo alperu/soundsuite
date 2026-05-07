@@ -73,6 +73,30 @@ export interface CachedSidecarStatus {
     temperature: number;
   }>;
   wsConnected: boolean;
+  /**
+   * Multi-master awareness: list of masters the sidecar is currently
+   * registered with. Populated by the multi-master sidecar; absent on
+   * older sidecars (treat as exclusive to this Sound Suite master).
+   */
+  masters?: Array<{
+    serverUrl: string;
+    connectionMode: 'websocket' | 'http' | 'disconnected';
+    lastHeartbeatAt?: number;
+    lastSeenServerVersion?: string;
+  }>;
+  /**
+   * Sidecar's own timestamp of the latest config push it accepted from ANY
+   * master. Used together with `selfLastConfigPushAt` (below) to detect when
+   * another master has overridden Sound Suite's pushed policies.
+   */
+  lastConfigPushAt?: number;
+  /**
+   * Wall-clock timestamp (ms) of the last successful config push from THIS
+   * Sound Suite master. Updated by fleet-router on each pushFullConfig /
+   * pushIdleTimeouts / pushModelRegistry success. Compared against
+   * `lastConfigPushAt` to flag policy collisions when masters.length > 1.
+   */
+  selfLastConfigPushAt?: number;
   freeVram?: number;   // total free GPU memory in MB
   totalVram?: number;  // total GPU memory in MB
   tasks?: Array<{
@@ -138,6 +162,9 @@ export function updateSidecarStatus(agentUrl: string, status: Partial<CachedSide
     freeVram: status.freeVram ?? existing?.freeVram,
     totalVram: status.totalVram ?? existing?.totalVram,
     wsConnected: status.wsConnected ?? existing?.wsConnected ?? false,
+    masters: status.masters ?? existing?.masters,
+    lastConfigPushAt: status.lastConfigPushAt ?? existing?.lastConfigPushAt,
+    selfLastConfigPushAt: status.selfLastConfigPushAt ?? existing?.selfLastConfigPushAt,
     tasks: status.tasks || existing?.tasks || [],
     vram: status.vram ?? existing?.vram,
     lastSeen: Date.now(),
