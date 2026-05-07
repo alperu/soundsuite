@@ -474,6 +474,7 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
     serverUrl: state.serverUrl, // legacy single-URL — first master
     masters: [...state.masters.values()].map(m => ({
       serverUrl: m.serverUrl,
+      wsPort: m.wsPort ?? null,
       connectionMode: m.connectionMode,
       lastHeartbeatAt: m.lastHeartbeatAt ?? null,
       lastSeenServerVersion: m.lastSeenServerVersion ?? null,

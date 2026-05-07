@@ -9,7 +9,7 @@ const log = createLogger('config');
 const CONFIG_PATH = process.env.CONFIG_PATH ||
   path.join(path.dirname(process.argv[1] || __filename), 'config', 'config.json');
 
-interface MasterEntry { serverUrl: string; authToken?: string }
+interface MasterEntry { serverUrl: string; authToken?: string; wsPort?: number }
 
 function parseMastersField(raw: unknown): MasterEntry[] {
   if (!raw) return [];
@@ -20,10 +20,10 @@ function parseMastersField(raw: unknown): MasterEntry[] {
       else if (item && typeof item === 'object') {
         const obj = item as Record<string, unknown>;
         if (typeof obj.serverUrl === 'string' && obj.serverUrl) {
-          out.push({
-            serverUrl: obj.serverUrl,
-            authToken: typeof obj.authToken === 'string' ? obj.authToken : undefined,
-          });
+          const entry: MasterEntry = { serverUrl: obj.serverUrl };
+          if (typeof obj.authToken === 'string') entry.authToken = obj.authToken;
+          if (typeof obj.wsPort === 'number' && obj.wsPort > 0) entry.wsPort = obj.wsPort;
+          out.push(entry);
         }
       }
     }
@@ -43,6 +43,7 @@ export function loadSavedConfig(): Record<string, unknown> | null {
     const existing = collected.get(e.serverUrl);
     if (existing) {
       if (e.authToken && !existing.authToken) existing.authToken = e.authToken;
+      if (e.wsPort !== undefined && existing.wsPort === undefined) existing.wsPort = e.wsPort;
     } else {
       collected.set(e.serverUrl, { ...e });
     }
@@ -106,10 +107,14 @@ export function loadSavedConfig(): Record<string, unknown> | null {
   }
 
   // Env: SIDECAR_MASTERS (comma list, NEW), SOUND_SUITE_MASTER_URL, SERVER_URL.
+  // Per-token syntax: "<url>" or "<url>|<wsPort>" — pipe lets ops override
+  // the default 3002 for masters that consolidate WS+HTTP on one port.
   const envList = process.env.SIDECAR_MASTERS;
   if (envList) {
-    for (const url of envList.split(',').map(s => s.trim()).filter(Boolean)) {
-      addMaster({ serverUrl: url });
+    for (const tok of envList.split(',').map(s => s.trim()).filter(Boolean)) {
+      const [url, wsPortStr] = tok.split('|');
+      const wsPort = wsPortStr ? Number(wsPortStr) : undefined;
+      addMaster({ serverUrl: url, wsPort: Number.isFinite(wsPort) && wsPort! > 0 ? wsPort : undefined });
     }
     log.info(`Loaded masters from SIDECAR_MASTERS env: ${envList}`);
   }
@@ -122,7 +127,7 @@ export function loadSavedConfig(): Record<string, unknown> | null {
 
   // Populate state.masters
   for (const entry of collected.values()) {
-    ensureMaster(entry.serverUrl, { authToken: entry.authToken });
+    ensureMaster(entry.serverUrl, { authToken: entry.authToken, wsPort: entry.wsPort });
   }
   syncLegacyServerUrl();
 
@@ -139,9 +144,14 @@ export function saveConfig(): void {
   try {
     const dir = path.dirname(CONFIG_PATH);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const masters = [...state.masters.values()].map((m) =>
-      m.authToken ? { serverUrl: m.serverUrl, authToken: m.authToken } : { serverUrl: m.serverUrl },
-    );
+    const masters = [...state.masters.values()].map((m) => {
+      const entry: { serverUrl: string; authToken?: string; wsPort?: number } = {
+        serverUrl: m.serverUrl,
+      };
+      if (m.authToken) entry.authToken = m.authToken;
+      if (m.wsPort) entry.wsPort = m.wsPort;
+      return entry;
+    });
     const firstUrl = masters.length > 0 ? masters[0].serverUrl : null;
     const data = {
       // Canonical multi-master field

@@ -36,6 +36,7 @@ interface TaskInfo {
 
 interface MasterStatus {
   serverUrl: string;
+  wsPort?: number | null;
   connectionMode?: 'websocket' | 'http' | 'disconnected';
   lastHeartbeatAt?: number | null;
   lastSeenServerVersion?: string | null;
@@ -218,18 +219,48 @@ export default function Home() {
     }
   };
 
-  const handleAddMaster = async (url: string, authToken?: string) => {
+  const handleAddMaster = async (url: string, opts: { authToken?: string; wsPort?: number }) => {
     try {
-      addLog(`Adding master: ${url}`);
+      addLog(`Adding master: ${url}${opts.wsPort ? ` (wsPort=${opts.wsPort})` : ''}`);
       const res = await fetch('/api/masters', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ serverUrl: url, ...(authToken ? { authToken } : {}) }),
+        body: JSON.stringify({
+          serverUrl: url,
+          ...(opts.authToken ? { authToken: opts.authToken } : {}),
+          ...(opts.wsPort ? { wsPort: opts.wsPort } : {}),
+        }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       addLog('Master added');
     } catch (err) {
       addLog(`Add master failed: ${(err as Error).message}`);
+    }
+  };
+
+  const handleEditMaster = async (
+    originalUrl: string,
+    patch: { serverUrl?: string; wsPort?: number | null },
+  ) => {
+    try {
+      const summary = [
+        patch.serverUrl ? `url=${patch.serverUrl}` : null,
+        patch.wsPort === null ? 'wsPort=default' :
+          patch.wsPort !== undefined ? `wsPort=${patch.wsPort}` : null,
+      ].filter(Boolean).join(', ');
+      addLog(`Editing master ${originalUrl}: ${summary || '(no changes)'}`);
+      const res = await fetch(`/api/masters/${encodeURIComponent(originalUrl)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `HTTP ${res.status}`);
+      }
+      addLog('Master updated');
+    } catch (err) {
+      addLog(`Edit master failed: ${(err as Error).message}`);
     }
   };
 
@@ -445,6 +476,7 @@ export default function Home() {
         serverUrl={status?.serverUrl ?? null}
         wsConnected={status?.wsConnected ?? false}
         onAdd={handleAddMaster}
+        onEdit={handleEditMaster}
         onRemove={handleRemoveMaster}
       />
 

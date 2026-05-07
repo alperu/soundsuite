@@ -639,7 +639,11 @@ export function connectMaster(m: MasterConnection): void {
   log.info(`[${m.serverUrl}] connectMaster: attempting (currentMode=${m.connectionMode}, reconnectDelay=${m.wsReconnectDelay}ms)`);
   try {
     const serverHost = new URL(m.serverUrl).hostname;
-    const wsPort = 3002;
+    // Per-master WS port. Sound Suite uses 3002 (relay listens on a dedicated
+    // port). Fantom MCP accepts WS upgrades on the same port as its HTTP API
+    // (e.g. 3848). Default keeps Sound Suite single-master deployments
+    // unchanged.
+    const wsPort = m.wsPort ?? 3002;
     const wsUrl = `ws://${serverHost}:${wsPort}/sidecar`;
     const agentUrl = getAgentUrl();
 

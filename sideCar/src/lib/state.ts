@@ -206,6 +206,13 @@ export interface PendingCommand {
 export interface MasterConnection {
   serverUrl: string;
   authToken?: string;
+  /**
+   * WebSocket port for the master's /sidecar relay. Defaults to 3002 when
+   * undefined (Sound Suite's two-port deployment). Per-master so a single
+   * sidecar can serve masters on different WS ports — e.g. Fantom MCP
+   * accepts WS upgrades on the same port as its HTTP API (3848).
+   */
+  wsPort?: number;
   ws: WebSocket | null;
   connectionMode: 'websocket' | 'http' | 'disconnected';
   wsReconnectDelay: number;
@@ -226,16 +233,18 @@ export function getMaster(url: string): MasterConnection | undefined {
 
 export function ensureMaster(
   url: string,
-  opts?: { authToken?: string },
+  opts?: { authToken?: string; wsPort?: number },
 ): MasterConnection {
   let m = state.masters.get(url);
   if (m) {
     if (opts?.authToken) m.authToken = opts.authToken;
+    if (opts?.wsPort !== undefined) m.wsPort = opts.wsPort;
     return m;
   }
   m = {
     serverUrl: url,
     authToken: opts?.authToken,
+    wsPort: opts?.wsPort,
     ws: null,
     connectionMode: 'disconnected',
     wsReconnectDelay: 1000,

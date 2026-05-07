@@ -4,6 +4,7 @@ import { useState } from 'react';
 
 export interface MasterEntry {
   serverUrl: string;
+  wsPort?: number | null;
   connectionMode?: 'websocket' | 'http' | 'disconnected';
   lastHeartbeatAt?: number | null;
   lastSeenServerVersion?: string | null;
@@ -20,9 +21,12 @@ interface ServerConnectionProps {
   /** Legacy single-URL field for back-compat with old sidecar builds. */
   serverUrl: string | null;
   wsConnected: boolean;
-  onAdd: (url: string, authToken?: string) => void;
+  onAdd: (url: string, opts: { authToken?: string; wsPort?: number }) => void;
+  onEdit: (originalUrl: string, patch: { serverUrl?: string; wsPort?: number | null }) => void;
   onRemove: (url: string) => void;
 }
+
+const DEFAULT_WS_PORT = 3002;
 
 function formatHeartbeat(ms: number | null | undefined): string {
   if (!ms) return 'never';
@@ -43,14 +47,124 @@ function modeStyle(mode?: string): string {
   return 'bg-red-100 text-red-800';
 }
 
+function MasterRow({
+  m,
+  onEdit,
+  onRemove,
+}: {
+  m: MasterEntry;
+  onEdit: (originalUrl: string, patch: { serverUrl?: string; wsPort?: number | null }) => void;
+  onRemove: (url: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draftUrl, setDraftUrl] = useState(m.serverUrl);
+  const [draftPort, setDraftPort] = useState<string>(
+    m.wsPort != null ? String(m.wsPort) : '',
+  );
+
+  const startEdit = () => {
+    setDraftUrl(m.serverUrl);
+    setDraftPort(m.wsPort != null ? String(m.wsPort) : '');
+    setEditing(true);
+  };
+
+  const cancel = () => setEditing(false);
+
+  const save = () => {
+    const patch: { serverUrl?: string; wsPort?: number | null } = {};
+    const trimmedUrl = draftUrl.trim();
+    if (trimmedUrl && trimmedUrl !== m.serverUrl) patch.serverUrl = trimmedUrl;
+
+    const trimmedPort = draftPort.trim();
+    const currentPort = m.wsPort ?? null;
+    if (trimmedPort === '') {
+      if (currentPort !== null) patch.wsPort = null; // clear → default
+    } else {
+      const n = Number(trimmedPort);
+      if (Number.isFinite(n) && n > 0 && n <= 65535 && n !== currentPort) {
+        patch.wsPort = n;
+      }
+    }
+    if (Object.keys(patch).length > 0) onEdit(m.serverUrl, patch);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <tr className="border-t border-slate-100 bg-blue-50">
+        <td className="py-2 px-3" colSpan={2}>
+          <input
+            type="text"
+            value={draftUrl}
+            onChange={(e) => setDraftUrl(e.target.value)}
+            placeholder="http://master:port"
+            className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs font-mono focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+        </td>
+        <td className="py-2 px-3" colSpan={2}>
+          <input
+            type="number"
+            value={draftPort}
+            onChange={(e) => setDraftPort(e.target.value)}
+            placeholder={`WS port (default ${DEFAULT_WS_PORT})`}
+            className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+        </td>
+        <td className="py-2 px-3 text-right space-x-1">
+          <button
+            onClick={save}
+            className="text-xs px-2 py-1 rounded bg-blue-500 hover:bg-blue-600 text-white"
+          >Save</button>
+          <button
+            onClick={cancel}
+            className="text-xs px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700"
+          >Cancel</button>
+        </td>
+      </tr>
+    );
+  }
+
+  return (
+    <tr className="border-t border-slate-100">
+      <td className="py-2 px-3 font-mono text-xs text-slate-800">{m.serverUrl}</td>
+      <td className="py-2 px-3 text-slate-600 text-xs">
+        {m.wsPort ?? <span className="text-slate-400">{DEFAULT_WS_PORT} <span className="text-[10px]">(default)</span></span>}
+      </td>
+      <td className="py-2 px-3">
+        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${modeStyle(m.connectionMode)}`}>
+          {m.connectionMode || 'disconnected'}
+        </span>
+      </td>
+      <td className="py-2 px-3 text-slate-600 text-xs">
+        {formatHeartbeat(m.lastHeartbeatAt)}
+        {m.lastSeenServerVersion && (
+          <span className="ml-2 text-slate-400">v{m.lastSeenServerVersion}</span>
+        )}
+      </td>
+      <td className="py-2 px-3 text-right space-x-1">
+        <button
+          onClick={startEdit}
+          className="text-xs px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700"
+        >Edit</button>
+        <button
+          onClick={() => onRemove(m.serverUrl)}
+          className="text-xs px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700"
+        >Remove</button>
+      </td>
+    </tr>
+  );
+}
+
 export default function ServerConnection({
   masters,
   serverUrl,
   wsConnected,
   onAdd,
+  onEdit,
   onRemove,
 }: ServerConnectionProps) {
   const [url, setUrl] = useState('');
+  const [wsPort, setWsPort] = useState('');
   const [authToken, setAuthToken] = useState('');
   const [showAuthField, setShowAuthField] = useState(false);
 
@@ -70,8 +184,15 @@ export default function ServerConnection({
   const submit = () => {
     const trimmed = url.trim();
     if (!trimmed) return;
-    onAdd(trimmed, authToken.trim() || undefined);
+    const opts: { authToken?: string; wsPort?: number } = {};
+    if (authToken.trim()) opts.authToken = authToken.trim();
+    const portNum = Number(wsPort.trim());
+    if (wsPort.trim() && Number.isFinite(portNum) && portNum > 0 && portNum <= 65535) {
+      opts.wsPort = portNum;
+    }
+    onAdd(trimmed, opts);
     setUrl('');
+    setWsPort('');
     setAuthToken('');
     setShowAuthField(false);
   };
@@ -97,34 +218,15 @@ export default function ServerConnection({
             <thead className="bg-slate-50 text-slate-600">
               <tr>
                 <th className="text-left py-2 px-3 font-medium">URL</th>
+                <th className="text-left py-2 px-3 font-medium">WS Port</th>
                 <th className="text-left py-2 px-3 font-medium">Mode</th>
                 <th className="text-left py-2 px-3 font-medium">Last heartbeat</th>
-                <th className="text-left py-2 px-3 font-medium">Server</th>
                 <th className="text-right py-2 px-3 font-medium">&nbsp;</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((m) => (
-                <tr key={m.serverUrl} className="border-t border-slate-100">
-                  <td className="py-2 px-3 font-mono text-xs text-slate-800">{m.serverUrl}</td>
-                  <td className="py-2 px-3">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${modeStyle(m.connectionMode)}`}>
-                      {m.connectionMode || 'disconnected'}
-                    </span>
-                  </td>
-                  <td className="py-2 px-3 text-slate-600 text-xs">
-                    {formatHeartbeat(m.lastHeartbeatAt)}
-                  </td>
-                  <td className="py-2 px-3 text-slate-500 text-xs">
-                    {m.lastSeenServerVersion || '—'}
-                  </td>
-                  <td className="py-2 px-3 text-right">
-                    <button
-                      onClick={() => onRemove(m.serverUrl)}
-                      className="text-xs px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700"
-                    >Remove</button>
-                  </td>
-                </tr>
+                <MasterRow key={m.serverUrl} m={m} onEdit={onEdit} onRemove={onRemove} />
               ))}
             </tbody>
           </table>
@@ -142,6 +244,14 @@ export default function ServerConnection({
             onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
             placeholder="http://your-master:3000"
             className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+          <input
+            type="number"
+            value={wsPort}
+            onChange={(e) => setWsPort(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+            placeholder={`WS port (${DEFAULT_WS_PORT})`}
+            className="w-40 rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
           />
           <button
             onClick={submit}
@@ -167,7 +277,7 @@ export default function ServerConnection({
       </div>
 
       <p className="mt-3 text-xs text-slate-400">
-        WebSocket relay connects on port 3002 of the server URL. Sidecar registers + heartbeats independently to every master listed.
+        Default WebSocket port is {DEFAULT_WS_PORT}. Override per master when the master accepts WS upgrades on a different port (e.g. Fantom MCP at 3848).
       </p>
     </div>
   );
