@@ -507,6 +507,7 @@ Haystack answers *which records*. MCP answers *what to do with them*. The chat u
 4. **Add `commit`** once the read path is solid.
 5. **Add SCRAM** if a real client needs it.
 6. **Add `watchSub` / SSE** when there's an actual subscriber; until then `/api/progress` covers in-app push.
+7. **Wire format**: Hayson (JSON v4) primary; see §13 for the rationale and the content-negotiation fallback for Zinc.
 
 ### What stays MCP-only (forever)
 
@@ -798,12 +799,123 @@ Slots into the original 10-step sequence as follows:
 
 Estimated incremental effort vs the original §10: **~2 extra days** for the Kysely + generated-columns + type-pipeline scaffolding. Pays for itself by removing the hand-rolled `$queryRaw` SQL string-building entirely.
 
-## 13. References
+## 13. Wire format and UI rendering
+
+> *Question raised:* "Will the backend UI only utilize Haystack to render pages? And should we use Zinc because Zinc makes everything faster to render — Haystack passes Zinc and React renders Zinc on the UI level."
+
+Short answer, up front: **no on both counts, for related but distinct reasons.** React stays React — the UI is not auto-rendered from Haystack records, it just *consumes* them via fetch. And Zinc is not a renderer at all; it's a wire format that a JS parser turns into HDict objects before any React JSX runs. At Sound Suite's grid sizes — and on the local/LAN deployments that are the actual product surface — native `JSON.parse` beats `ZincReader` by ~3× in absolute parse time, so Hayson (the JSON v4 encoding) is the right default. Zinc is worth keeping as a content-negotiation fallback for SkySpark/Haxall interop, not as the primary wire.
+
+### 13.1 The two questions tangled together
+
+The framing folds two independent decisions into one sentence:
+
+| Question | Scope | Section |
+|---|---|---|
+| **A.** Does the React UI render itself *from* Haystack records (declarative views driven by tags)? | UI architecture | §13.2 |
+| **B.** What bytes flow on the wire between server and client — Zinc text grids or Hayson JSON? | Transport encoding | §13.3 |
+
+These don't constrain each other. You could ship a fully Haystack-driven UI over Hayson, or a hand-written React UI over Zinc. The answers below treat them separately.
+
+### 13.2 React stays React; the UI consumes Haystack data, doesn't render from it
+
+"Haystack-driven UI" in the wild means SkySpark's Axon views — a server-side template engine that emits HTML from Axon expressions over Folio records. That's an *alternative* to React, not a layer on top of it. There's no React component library that takes an HGrid and produces a finished page; `haystack-react` (j2inn) is a hooks/context wrapper for fetching and caching grids, not a renderer.
+
+For Sound Suite specifically, the case explorer, draft editor, and chat panels are the value-add. They stay hand-written React. What §11 changes is the *data source*: instead of bespoke `/api/cases/[id]` endpoints, the relevant pages issue Haystack `read` calls (filter by `case` + `caseRef==@...`) and render the returned grid in normal JSX:
+
+```tsx
+const { grid } = useHaystackRead({ filter: 'motion and caseRef==@case-Foo' })
+return <MotionList motions={grid.rows} />
+```
+
+`useHaystackRead` deserialises the response into HDict objects; `MotionList` is the same React component the team would write today. The UI doesn't *know* the data came from Haystack; it just knows the shape of HDict.
+
+**Optional follow-up (out of scope for §11/§13):** the small CRUD-form portion of the UI (≈5–10 % of surface — per-record edit panels, settings forms) could be auto-generated from XETO specs by piping through `json-schema-to-typescript`'s sibling `json-schema-form` ecosystem (`@rjsf/core`, JSON Forms, uniforms). That's a real ergonomic win for forms, but it's a separate adoption decision and doesn't change the React-stays-React verdict for the rest of the app.
+
+### 13.3 Wire format: Hayson primary, Zinc as fallback
+
+The user's intuition that "Zinc is faster" comes from one true datapoint and one that's smaller than folklore suggests:
+
+- **True, but smaller than expected:** Zinc is meaningfully smaller on the wire, but not the "70 %" figure that gets quoted. On a representative grid (100 records × 30 tags built from court-lens-shaped data — `HRef`/`HStr`/`HNum`/`HMarker`/`HBool`/`HDateTime`), measured wire sizes are **Zinc 46 KB vs Hayson 98 KB** — Zinc is **~53 % smaller** (ratio 0.47). The 500-row stress case holds the same ratio (232 KB vs 489 KB).
+- **Still wrong, just less dramatically:** Native `JSON.parse` is implemented in C++; `haystack-core`'s `ZincReader` is hand-written TypeScript walking a character stream. Measured speedup is **~6× faster per byte** for `JSON.parse` over `ZincReader`, and **~3× faster in absolute time** despite Hayson having ~2.1× more bytes to chew through. (Earlier folklore — including the Hayson proposal's "Tests show…" line — implied 20–40× per byte; we couldn't reproduce that magnitude.)
+
+Concrete measured numbers (Node v25.5.0, V8 == browser JSON parser; `haystack-core@3.0.9`; 200-iteration median after warmup):
+
+| Grid | Wire (Zinc) | Wire (Hayson) | Parse Zinc (median) | Parse Hayson (median) | JSON speedup |
+|---|---|---|---|---|---|
+| 100 × 30 | 46 KB | 98 KB | 0.90 ms | 0.30 ms | **3.0×** absolute, **6.4×** per byte |
+| 500 × 30 | 232 KB | 489 KB | 4.48 ms | 1.53 ms | **2.9×** absolute, **6.2×** per byte |
+
+Per-KB throughput is steady across sizes: ZincReader ≈ 20 µs/KB, JSON.parse ≈ 3.1 µs/KB.
+
+What that means end-to-end depends on the link, and this is where the original framing of this section was misleading:
+
+- **On localhost / LAN** (Sound Suite's actual deployment — local, self-hosted): network is effectively free. Parse dominates. Hayson wins by the full ~3× absolute parse-time margin. Even on the 500-row case the entire round trip is sub-5 ms either way; the user-perceptible difference is nil, but the cleaner code path is JSON.
+- **On a constrained WAN** (e.g. ~50 Mbit, which is *not* our deployment but is worth being honest about): network dominates. Zinc's 2.1× wire-size advantage outruns JSON's 3× parse advantage — for a 500-row grid, Zinc would finish in ~42 ms (37 ms transfer + 4.5 ms parse) vs Hayson's ~80 ms (78 ms transfer + 1.5 ms parse). Zinc wins by ~2× on that link.
+
+So the conclusion — Hayson primary, Zinc fallback — holds for the deployments we ship to, but the rationale is "parse dominates on localhost, and JSON.parse is 3× faster there," not "JSON.parse is 20-40× faster everywhere."
+
+> *Footnote:* Numbers above are from a measured benchmark on Node v25.5.0 (V8) against `haystack-core@3.0.9`, dated 2026-05-03. Benchmark grids used realistic court-lens shapes (HRef IDs, HDateTime timestamps, HMarker flags, HStr captions, HNum counters). Browser JSON.parse uses the same V8 implementation, so numbers transfer to Chromium/Edge clients; Safari/Firefox parsers are within ~30 % of V8 in third-party benchmarks.
+
+Other points that fall out the same way:
+
+- **Bundle weight is a wash.** `haystack-core` already ships in our bundle (§3a/§12.2 use `HFilter` for the SQL emitter), and that bundle includes `ZincReader`. Adding Zinc support costs zero kilobytes; *removing* it would save nothing because we still need `HDict`/`HGrid` from the same package.
+- **The Haystack ecosystem agrees.** SkySpark's web client defaults to Hayson; Haxall's docs recommend Hayson for browser consumers; the Hayson proposal explicitly says: *"Tests show that parsing JSON is faster than parsing large Zinc encoding strings."*
+- **Zinc still has a job.** Server-to-server (Haxall scripts, SkySpark integrations, CLI tools) negotiate `Accept: text/zinc` and benefit from the smaller wire on slower links. Keeping Zinc available is a few lines of code and unlocks free interop the day a customer points SkySpark at us.
+
+### 13.4 Content-negotiation snippet
+
+The §11 route handler (`src/app/api/haystack/[op]/route.ts`) does the switch in ≈10 LOC:
+
+```ts
+import { HGrid, ZincWriter } from 'haystack-core'
+
+function encodeGrid(grid: HGrid, accept: string | null): { body: string; type: string } {
+  // Default to Hayson — fastest end-to-end for browser clients.
+  if (!accept || accept.includes('application/json')) {
+    return { body: JSON.stringify(grid.toJSON()), type: 'application/vnd.haystack+json;version=4' }
+  }
+  if (accept.includes('text/zinc')) {
+    return { body: ZincWriter.gridToString(grid), type: 'text/zinc;version=4' }
+  }
+  // Unknown Accept → Hayson, per Haystack HTTP spec.
+  return { body: JSON.stringify(grid.toJSON()), type: 'application/vnd.haystack+json;version=4' }
+}
+```
+
+The browser never sets `Accept: text/zinc`, so `useHaystackRead` always gets Hayson and uses native `JSON.parse`. Server-to-server clients that ask for Zinc get Zinc.
+
+### 13.5 What the misconception was
+
+"Zinc is faster to render" only makes sense if you imagine Zinc bytes being painted directly to the screen. They aren't. The pipeline is:
+
+```
+Server                  Network             Client
+HGrid in memory  →  encode (Zinc|Hayson)  →  parse → HDict objects → React JSX → DOM
+```
+
+React renders DOM from JS objects. The format on the wire is invisible past the parse step. So the real comparison is *encode + network + parse* end-to-end, not "rendering speed." On a localhost/LAN deployment the network term collapses to ~0 ms and parse dominates — JSON.parse wins by the measured ~3× margin (see §13.3). On a slow WAN the wire-size term takes over and Zinc would actually win; we don't ship to that regime, so the default stays Hayson.
+
+### 13.6 Impact on the §11 implementation order
+
+Append a wire-format line to the v1 ops list (already done above):
+
+> 7. **Wire format**: Hayson (JSON v4) primary; see §13 for the rationale and the content-negotiation fallback for Zinc.
+
+Concretely, that means:
+
+- v1: implement `encodeGrid` with the Hayson branch only. Set `Content-Type: application/vnd.haystack+json;version=4`.
+- v1.1: add the Zinc branch the day a SkySpark/Haxall integration partner asks for it. ZincWriter is already in the bundle; the diff is the four lines in §13.4.
+- Never: bother with `text/csv` or `text/trio` content types. Hayson + Zinc covers every real consumer.
+
+## 14. References
 
 **XETO + Project Haystack**
 - XETO compiler — https://github.com/Project-Haystack/xeto (active, May 2026, 269 commits, 40 stars, DOE-funded)
 - Project Haystack v4 — https://project-haystack.org/doc/docHaystack
 - Hayson JSON encoding — https://project-haystack.org/doc/docHaystack/Json
+- Hayson proposal (j2inn) — https://github.com/j2inn/hayson
+- HTTP API content negotiation — https://project-haystack.org/doc/docHaystack/HttpApi#contentNegotiation
+- Zinc grid spec — https://project-haystack.org/doc/docHaystack/Zinc
 - Haxall (the only XETO runtime today) — https://haxall.io
 - **`@haxall/haxall` — npm package (XETO + Folio + Haystack runtime, Fantom-compiled JS, AFL-3.0)** — https://www.npmjs.com/package/@haxall/haxall
 - Haystack HTTP API spec — https://project-haystack.org/doc/docHaystack/HttpApi

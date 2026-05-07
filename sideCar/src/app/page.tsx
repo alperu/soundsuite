@@ -34,6 +34,14 @@ interface TaskInfo {
   error?: string;
 }
 
+interface MasterStatus {
+  serverUrl: string;
+  connectionMode?: 'websocket' | 'http' | 'disconnected';
+  lastHeartbeatAt?: number | null;
+  lastSeenServerVersion?: string | null;
+  pendingCommandCount?: number;
+}
+
 interface StatusData {
   agent: { uptime: number; version: string };
   containers: Record<string, ContainerInfo>;
@@ -42,6 +50,11 @@ interface StatusData {
   wsConnected: boolean;
   wsCommandCount: number;
   serverUrl: string | null;
+  /**
+   * Multi-master payload from the new sidecar. Older builds omit this; the UI
+   * falls back to the legacy single `serverUrl` field when absent.
+   */
+  masters?: MasterStatus[];
   roles: Record<string, { activeRequests: number; idleTimerActive: boolean }>;
   idleTimeouts?: Record<string, number>;
   minOnline?: Record<string, number>;
@@ -205,33 +218,31 @@ export default function Home() {
     }
   };
 
-  const handleConnect = async (url: string) => {
+  const handleAddMaster = async (url: string, authToken?: string) => {
     try {
-      addLog(`Connecting to server: ${url}`);
-      const res = await fetch('/api/status', {
+      addLog(`Adding master: ${url}`);
+      const res = await fetch('/api/masters', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'connect', serverUrl: url }),
+        body: JSON.stringify({ serverUrl: url, ...(authToken ? { authToken } : {}) }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      addLog('Connection request sent');
+      addLog('Master added');
     } catch (err) {
-      addLog(`Connection failed: ${(err as Error).message}`);
+      addLog(`Add master failed: ${(err as Error).message}`);
     }
   };
 
-  const handleDisconnect = async () => {
+  const handleRemoveMaster = async (url: string) => {
     try {
-      addLog('Disconnecting from server');
-      const res = await fetch('/api/status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'disconnect' }),
+      addLog(`Removing master: ${url}`);
+      const res = await fetch(`/api/masters/${encodeURIComponent(url)}`, {
+        method: 'DELETE',
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      addLog('Disconnect request sent');
+      addLog('Master removed');
     } catch (err) {
-      addLog(`Disconnect failed: ${(err as Error).message}`);
+      addLog(`Remove master failed: ${(err as Error).message}`);
     }
   };
 
@@ -379,11 +390,26 @@ export default function Home() {
             <p className="mt-1 text-sm text-slate-500">
               {status?.hostname || '?'} ({status?.ip || '?'}) &middot; v{status?.agent?.version || '?'} &middot; Roles: {roles}
             </p>
-            {status?.serverUrl && (
-              <p className="text-xs text-slate-400">
-                Connected to {status.serverUrl}
-              </p>
-            )}
+            {(() => {
+              const masters = status?.masters;
+              if (masters && masters.length > 0) {
+                const live = masters.filter(m => m.connectionMode === 'websocket').length;
+                return (
+                  <p className="text-xs text-slate-400">
+                    Connected to {masters.length} {masters.length === 1 ? 'master' : 'masters'}
+                    {live > 0 && ` (${live} live)`}: {masters.map(m => m.serverUrl).join(', ')}
+                  </p>
+                );
+              }
+              if (status?.serverUrl) {
+                return (
+                  <p className="text-xs text-slate-400">
+                    Connected to {status.serverUrl}
+                  </p>
+                );
+              }
+              return null;
+            })()}
           </div>
           <div className="flex items-center gap-2">
             {updateState === 'rebooting' && (
@@ -415,10 +441,11 @@ export default function Home() {
       </div>
 
       <ServerConnection
+        masters={status?.masters}
         serverUrl={status?.serverUrl ?? null}
         wsConnected={status?.wsConnected ?? false}
-        onConnect={handleConnect}
-        onDisconnect={handleDisconnect}
+        onAdd={handleAddMaster}
+        onRemove={handleRemoveMaster}
       />
 
       <ModeSelector
