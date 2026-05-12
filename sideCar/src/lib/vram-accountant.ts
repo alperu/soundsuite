@@ -17,8 +17,9 @@
 import { state, type ContainerDef } from './state';
 import { getContainerState } from './docker';
 import { ollamaPs } from './ollama-api';
-import { discoverGpus } from './gpu';
+import { discoverGpus, discoverGpuProcesses, getRoleHostPids } from './gpu';
 import { createLogger } from './logger';
+import http from 'http';
 
 const log = createLogger('vram-accountant');
 
@@ -44,6 +45,108 @@ export interface VramSnapshot {
   perRole: Record<string, RoleVramSnapshot>;
   unattributedMb: number;        // usedMb - sum(perRole.actualMb), clamped >=0
   ts: number;                    // capture timestamp (Date.now())
+  /** Provenance for totalMb/freeMb. 'nvidia-smi' on Linux+NVIDIA hosts;
+   *  'host-declared' when host-Ollama is enabled and the operator set
+   *  SS_HOST_OLLAMA_BUDGET_MB; 'unknown' when neither source is available
+   *  (the planner falls back to per-role declared `def.vram`). */
+  vramSource?: 'nvidia-smi' | 'host-declared' | 'host-helper' | 'unknown';
+}
+
+/**
+ * Per-model entry for the inferenceMemory block.
+ */
+export interface InferenceModelEntry {
+  name: string;
+  role: string | null;     // mapped role if def.model matches; null otherwise
+  sizeVramMb: number;
+}
+
+/**
+ * "Sound Suite inference memory" — accurate, in-container snapshot of what
+ * the host's Ollama is holding for Sound Suite right now. Distinct from
+ * device-level VRAM (Linux+NVIDIA) and from host-wide RAM pressure (Mac
+ * helper). This is the "can I fit one more model?" answer.
+ */
+export interface InferenceMemorySnapshot {
+  usedMb: number;          // sum(size_vram) across loaded models on host Ollama
+  budgetMb: number;        // operator-declared SS_HOST_OLLAMA_BUDGET_MB (0 if unset)
+  freeMb: number;          // max(0, budgetMb - usedMb); 0 when budgetMb=0
+  models: InferenceModelEntry[];
+}
+
+/**
+ * Snapshot Sound Suite's host-Ollama inference memory. Used by /api/status
+ * to surface "what is currently loaded for inference, and how much budget
+ * is left." Pure Tier 1 — works without any host-side helper.
+ *
+ * Returns zeroed snapshot when host-Ollama is disabled or when /api/ps
+ * fails (still includes budgetMb so the UI can render "0 / 16384 MB used").
+ */
+export async function snapshotInferenceMemory(): Promise<InferenceMemorySnapshot> {
+  const budgetMb = state.hostOllamaEnabled ? state.hostOllamaBudgetMb : 0;
+  const models: InferenceModelEntry[] = [];
+  let usedMb = 0;
+
+  if (state.hostOllamaEnabled) {
+    // Pick any host-runtime role just for URL resolution — they share one endpoint.
+    const sampleHostRole = Object.entries(state.registry).find(([, d]) => d.runtime === 'host');
+    if (sampleHostRole) {
+      try {
+        const ps = await ollamaPs(sampleHostRole[1].port, sampleHostRole[0]);
+        for (const m of ps) {
+          const sizeMb = Math.round((m.sizeVram || 0) / (1024 * 1024));
+          // Try to find a role whose def.model matches this loaded model.
+          let mappedRole: string | null = null;
+          for (const [role, def] of Object.entries(state.registry)) {
+            if (!def.model) continue;
+            const base = def.model.split(':')[0];
+            if (m.name === def.model || m.name.startsWith(`${base}:`) || m.name.includes(base)) {
+              mappedRole = role;
+              break;
+            }
+          }
+          models.push({ name: m.name, role: mappedRole, sizeVramMb: sizeMb });
+          usedMb += sizeMb;
+        }
+      } catch (err) {
+        log.info(`snapshotInferenceMemory: ollamaPs failed: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  const freeMb = budgetMb > 0 ? Math.max(0, budgetMb - usedMb) : 0;
+  return { usedMb, budgetMb, freeMb, models };
+}
+
+/**
+ * Scrape vLLM's Prometheus `/metrics` endpoint for a measured VRAM total.
+ * vLLM doesn't have an `ollama ps`-equivalent, but it does expose:
+ *   - vllm:gpu_cache_usage_perc      (0..1, fraction of the KV-cache slab in use)
+ *   - vllm:num_gpu_blocks_total      (KV-cache pool block count)
+ *
+ * We can't reliably compute exact bytes from those alone — vLLM pre-allocates
+ * `gpu_memory_utilization × device_total` at startup and uses it for both
+ * weights and the KV pool. The HONEST answer for "how much VRAM does this
+ * vLLM container hold?" is "the configured slab, period" — that's what
+ * nvidia-smi sees per-process. So this function returns null and the caller
+ * should prefer the per-process attribution path. Kept for completeness if
+ * vLLM ever adds a `vllm:gpu_memory_bytes` metric.
+ */
+async function scrapeVllmMetrics(port: number): Promise<{ kvUsedPct?: number } | null> {
+  return new Promise((resolve) => {
+    const req = http.request({ hostname: 'localhost', port, path: '/metrics', method: 'GET' }, (res) => {
+      let body = '';
+      res.on('data', (c: Buffer) => (body += c));
+      res.on('end', () => {
+        if (res.statusCode !== 200) { resolve(null); return; }
+        const m = body.match(/^vllm:gpu_cache_usage_perc(?:\{[^}]*\})?\s+([\d.eE+-]+)/m);
+        resolve({ kvUsedPct: m ? parseFloat(m[1]) : undefined });
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(2_000, () => { req.destroy(); resolve(null); });
+    req.end();
+  });
 }
 
 /**
@@ -56,45 +159,135 @@ export async function snapshotVram(): Promise<VramSnapshot> {
   // calling it on every snapshot is cheap.
   let totalMb = 0;
   let freeMb = 0;
+  let vramSource: 'nvidia-smi' | 'host-declared' | 'unknown' = 'unknown';
   try {
     const gpus = await discoverGpus();
     for (const g of gpus) {
       totalMb += g.memoryTotal;
       freeMb += g.memoryFree;
     }
+    if (gpus.length > 0) vramSource = 'nvidia-smi';
   } catch (err) {
     log.warn(`snapshotVram: nvidia-smi unavailable: ${(err as Error).message}`);
   }
-  const usedMb = Math.max(0, totalMb - freeMb);
 
   const perRole: Record<string, RoleVramSnapshot> = {};
   let attributedMb = 0;
 
+  // Cache the host-runtime Ollama /api/ps result. All host-runtime roles
+  // share ONE Ollama process — querying once per role triple-counts VRAM
+  // and triggers redundant HTTP roundtrips. Fetch the list once, then
+  // attribute each loaded model to the role whose `def.model` matches.
+  let hostOllamaPs: Awaited<ReturnType<typeof ollamaPs>> | null = null;
+  const hasHostRole = Object.values(state.registry).some(d => d.runtime === 'host');
+  if (hasHostRole) {
+    // Pick any host-runtime role just for URL resolution — they all share
+    // the same endpoint (host.docker.internal:HOST_OLLAMA_PORT).
+    const sampleHostRole = Object.entries(state.registry).find(([, d]) => d.runtime === 'host');
+    if (sampleHostRole) {
+      try {
+        hostOllamaPs = await ollamaPs(sampleHostRole[1].port, sampleHostRole[0]);
+      } catch (err) {
+        log.info(`snapshotVram: shared ollamaPs failed: ${(err as Error).message}`);
+        hostOllamaPs = [];
+      }
+    }
+  }
+
+  // Per-process GPU attribution. When available (Linux+NVIDIA or
+  // Windows-with-helper), this gives us truthful per-container VRAM —
+  // matters most for vLLM, which holds a static slab the size of
+  // `gpu_memory_utilization × device_total` (often 40+ GB) but has no
+  // per-model size endpoint to query.
+  //
+  // We map each managed Docker container's host PID (from State.Pid) to
+  // the rows nvidia-smi returns under `--query-compute-apps`. Sum per role.
+  const procs = vramSource === 'nvidia-smi' ? await discoverGpuProcesses() : [];
+  const rolePids = procs.length > 0 ? await getRoleHostPids() : {};
+  const rolePidToRole: Record<number, string> = {};
+  for (const [role, pid] of Object.entries(rolePids)) rolePidToRole[pid] = role;
+  // Linux containers may spawn child PIDs that hold the CUDA context. We
+  // can detect parent→child via /proc on the host, but that needs host
+  // mount. Cheap heuristic: any process whose PID == container's main PID
+  // counts directly. Anything else falls into "unattributed" — better
+  // than over-reporting a role's footprint.
+  const procVramByRole: Record<string, number> = {};
+  for (const p of procs) {
+    const r = rolePidToRole[p.pid];
+    if (r) procVramByRole[r] = (procVramByRole[r] || 0) + p.usedMemoryMb;
+  }
+
   for (const [role, def] of Object.entries(state.registry)) {
-    const cs = await getContainerState(def.containerName).catch(() => null);
-    const containerStatus = cs?.status ?? 'unknown';
+    const isHost = def.runtime === 'host';
+    const cs = isHost ? null : await getContainerState(def.containerName).catch(() => null);
+    const containerStatus = isHost ? 'running' : (cs?.status ?? 'unknown');
     const isRunning = containerStatus === 'running';
 
     let actualMb = 0;
     let loaded = false;
 
     if (def.type === 'ollama' && isRunning) {
-      try {
-        const ps = await ollamaPs(def.port);
-        for (const m of ps) actualMb += m.sizeVram || 0;
-        // Convert bytes → MB. Ollama reports size_vram in bytes.
-        actualMb = Math.round(actualMb / (1024 * 1024));
-        loaded = actualMb > 0;
-      } catch (err) {
-        log.info(`snapshotVram: ollamaPs failed for ${role}: ${(err as Error).message}`);
+      if (isHost) {
+        // Host-runtime: attribute by model name from the SHARED ollamaPs
+        // result. Each loaded model belongs to exactly one role (the one
+        // whose def.model matches). Avoids triple-counting when multiple
+        // roles share one Ollama endpoint.
+        if (hostOllamaPs && def.model) {
+          const modelBase = def.model.split(':')[0];
+          for (const m of hostOllamaPs) {
+            if (m.name === def.model || m.name.startsWith(`${modelBase}:`) || m.name.includes(modelBase)) {
+              actualMb += m.sizeVram || 0;
+            }
+          }
+          actualMb = Math.round(actualMb / (1024 * 1024));
+          loaded = actualMb > 0;
+        }
+      } else {
+        try {
+          const ps = await ollamaPs(def.port, role);
+          for (const m of ps) actualMb += m.sizeVram || 0;
+          // Convert bytes → MB. Ollama reports size_vram in bytes.
+          actualMb = Math.round(actualMb / (1024 * 1024));
+          loaded = actualMb > 0;
+        } catch (err) {
+          log.info(`snapshotVram: ollamaPs failed for ${role}: ${(err as Error).message}`);
+        }
       }
     } else if (def.type === 'vllm' && isRunning) {
-      // vLLM doesn't expose per-model VRAM; the container holds whatever it
-      // pre-allocated at startup (typically gpu_memory_utilization * total).
-      // We use the registry budget as a conservative estimate. This is an
-      // over-estimate when --gpu-memory-utilization is low, but for planning
-      // purposes (will OCR fit?) the over-estimate is the safe direction.
-      actualMb = def.vram;
+      // vLLM holds a fixed slab = `gpu_memory_utilization × device_total`
+      // at startup and never gives it back to the driver until the
+      // container exits. There's no `ollama ps` equivalent for vLLM, so
+      // there are three signals in priority order:
+      //
+      //   1. Per-process VRAM from nvidia-smi --query-compute-apps mapped
+      //      via State.Pid → role. Truthful, matches what nvidia-smi sees
+      //      at the device level. Works when ss-cuda is up (Linux+NVIDIA
+      //      or Windows-with-helper).
+      //   2. Optional vLLM /metrics scrape — gives us KV cache utilization
+      //      but not the slab size itself. Surfaced as info only.
+      //   3. Static def.vram budget as last-resort fallback. Conservative
+      //      under-estimate when gpu-memory-utilization >> def.vram (e.g.
+      //      0.95 of 48GB ≈ 45GB vs def.vram=7000) — that's why "33 GB
+      //      unattributed" appeared in production before this fix.
+      if (procVramByRole[role] !== undefined) {
+        actualMb = procVramByRole[role];
+      } else if (totalMb > 0) {
+        // No per-process attribution available. Make the static fallback
+        // truthful: vLLM is launched with --gpu-memory-utilization 0.95
+        // (see docker.ts buildVllmCmd), so it actually holds ~95% of
+        // device_total. Use that instead of the much-smaller def.vram
+        // budget — without this, the UI under-reports by tens of GB and
+        // surfaces a misleading "unattributed" delta.
+        const VLLM_DEFAULT_GPU_MEM_UTIL = 0.95;
+        actualMb = Math.round(totalMb * VLLM_DEFAULT_GPU_MEM_UTIL);
+      } else {
+        actualMb = def.vram;
+      }
+      // Best-effort enrichment from /metrics — doesn't change actualMb,
+      // but useful diagnostics if surfaced upward later.
+      try {
+        await scrapeVllmMetrics(def.port);
+      } catch { /* metrics is optional */ }
       loaded = true;
     } else if (def.type === 'utility') {
       // ss-cuda holds negligible VRAM (just nvidia-smi calls)
@@ -116,6 +309,17 @@ export async function snapshotVram(): Promise<VramSnapshot> {
     attributedMb += actualMb;
   }
 
+  // Host-Ollama fallback: when nvidia-smi reports nothing AND operator set a
+  // declared budget, surface that as totalMb so the planner can still gate
+  // loads. usedMb is then sum(attributedMb) from /api/ps which IS accurate
+  // for the host endpoint (Ollama reports size_vram on Metal/CUDA alike).
+  if (vramSource === 'unknown' && state.hostOllamaEnabled && state.hostOllamaBudgetMb > 0) {
+    totalMb = state.hostOllamaBudgetMb;
+    freeMb = Math.max(0, totalMb - attributedMb);
+    vramSource = 'host-declared';
+  }
+  const usedMb = vramSource === 'host-declared' ? attributedMb : Math.max(0, totalMb - freeMb);
+
   return {
     totalMb,
     freeMb,
@@ -123,5 +327,6 @@ export async function snapshotVram(): Promise<VramSnapshot> {
     perRole,
     unattributedMb: Math.max(0, usedMb - attributedMb),
     ts: Date.now(),
+    vramSource,
   };
 }

@@ -99,6 +99,34 @@ export interface CachedSidecarStatus {
   selfLastConfigPushAt?: number;
   freeVram?: number;   // total free GPU memory in MB
   totalVram?: number;  // total GPU memory in MB
+  /**
+   * Host-level memory/inference stats for non-NVIDIA-container sidecars
+   * (Mac Apple Silicon, Windows Docker Desktop without an nvidia-smi helper).
+   * Populated by the sidecar's host-stats collector. Mac sidecars typically
+   * have `gpus: []` and rely on this block; Linux+NVIDIA sidecars usually
+   * omit it. Windows-with-helper may have both `gpus[]` and `host.stats`.
+   */
+  host?: {
+    os?: 'darwin' | 'linux' | 'win32' | string;
+    osConfidence?: string;
+    dockerDesktop?: boolean;
+    stats?: {
+      at?: number;
+      ageMs?: number;
+      totalMb?: number;
+      freeMb?: number;
+      usedMb?: number;
+      pressurePct?: number;
+      source?: 'host-helper' | 'host-declared' | 'nvidia-smi' | 'docker-info' | 'unknown' | string;
+    };
+    inferenceMemory?: {
+      usedMb?: number;
+      budgetMb?: number;
+      freeMb?: number;
+      source?: string;
+      models?: Array<{ name: string; sizeVramMb?: number; processor?: string; gpuPercent?: number }>;
+    };
+  };
   tasks?: Array<{
     id: string;
     type: string;
@@ -167,6 +195,7 @@ export function updateSidecarStatus(agentUrl: string, status: Partial<CachedSide
     selfLastConfigPushAt: status.selfLastConfigPushAt ?? existing?.selfLastConfigPushAt,
     tasks: status.tasks || existing?.tasks || [],
     vram: status.vram ?? existing?.vram,
+    host: status.host ?? existing?.host,
     lastSeen: Date.now(),
   });
 }

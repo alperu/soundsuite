@@ -155,8 +155,20 @@ function isRunningInDocker(): boolean {
  * - Sidecar in Docker + socket mode: ports are on host.docker.internal (not localhost!)
  * - TCP mode: ports are on the Docker host's hostname
  * Used by ollama-api.ts to address Ollama containers by their mapped ports.
+ *
+ * When `role` is provided and the role's registry entry has `runtime: 'host'`,
+ * returns `state.hostOllamaHost` (a native Ollama on the Docker host) instead
+ * of the Docker container host. Lets ollama-api.ts transparently route to
+ * either a managed container or a native host process.
  */
-export function getDockerHost(): string {
+export function getDockerHost(role?: string): string {
+  // Host-Ollama runtime: bypass Docker entirely and address the native process.
+  if (role) {
+    const def = state.registry[role];
+    if (def?.runtime === 'host') return state.hostOllamaHost;
+    // Docker Model Runner: address DMR's TCP endpoint on the Docker host.
+    if (def?.runtime === 'docker-model-runner') return state.dmrHost;
+  }
   // TCP mode: Docker host is explicitly known
   if (resolvedConnection?.hostname) return resolvedConnection.hostname;
   // Socket mode: if sidecar runs in Docker, localhost is the sidecar container itself
@@ -402,6 +414,15 @@ function buildVllmCmd(model: string, port: number): string[] {
     // Reranker scoring fits well under 8K tokens.
     cmd.push('--max-model-len', '8192');
     cmd.push('--gpu-memory-utilization', '0.95');
+    // Cross-encoder rerank scores a fresh (query, doc) pair every call —
+    // there is no shared prefix worth caching. Disabling prefix caching
+    // stops KV blocks from accumulating in VRAM across calls.
+    cmd.push('--no-enable-prefix-caching');
+    // Skip CUDA graph capture. vLLM captures a new graph per batch shape
+    // the first time it sees one and never releases them, so VRAM climbs
+    // over the first several calls and plateaus near 99% even when idle.
+    // Eager mode trades ~5–15% latency for flat VRAM use.
+    cmd.push('--enforce-eager');
     cmd.push('--hf-overrides', JSON.stringify({
       architectures: ['Qwen3ForSequenceClassification'],
       is_original_qwen3_reranker: true,
@@ -469,6 +490,14 @@ export async function createContainer(role: string): Promise<{ Id?: string; exis
     Hostname: name,
     ExposedPorts: { [`${def.port}/tcp`]: {} },
     HostConfig: {
+      // Init: true → docker spawns tini as PID-1 inside the container so
+      // SIGTERM is forwarded to the Python worker tree. Without it, vLLM
+      // C-extension worker threads can deadlock on a kernel call and PID-1
+      // (uvicorn) becomes a zombie that `docker stop` cannot kill. Seen on
+      // BASWS34 (2026-05-11) — required manual `docker rm -f` on the host.
+      // Only affects newly-created containers; existing ones must be
+      // recreated to pick this up.
+      Init: true,
       PortBindings: { [`${def.port}/tcp`]: [{ HostPort: hostPort }] },
       RestartPolicy: { Name: 'unless-stopped' },
       DeviceRequests: [{ Driver: '', Count: -1, Capabilities: [['gpu']] }],

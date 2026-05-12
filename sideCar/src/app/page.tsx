@@ -231,7 +231,13 @@ export default function Home() {
           ...(opts.wsPort ? { wsPort: opts.wsPort } : {}),
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        // Surface the server's error message instead of just the status code,
+        // matching handleEditMaster's pattern. Without this the operator sees
+        // only "HTTP 500" with no actionable info.
+        const errBody = await res.json().catch(() => ({} as { error?: string }));
+        throw new Error(errBody.error || `HTTP ${res.status}`);
+      }
       addLog('Master added');
     } catch (err) {
       addLog(`Add master failed: ${(err as Error).message}`);
@@ -443,6 +449,13 @@ export default function Home() {
             })()}
           </div>
           <div className="flex items-center gap-2">
+            <a
+              href="/setup"
+              className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100"
+              title="Configure host runtime backend"
+            >
+              Setup
+            </a>
             {updateState === 'rebooting' && (
               <span className="px-3 py-1.5 rounded-md text-sm bg-yellow-100 text-yellow-800 animate-pulse">
                 Rebooting...

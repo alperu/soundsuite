@@ -37,6 +37,117 @@ interface ContainerTableProps {
   onPullAndLoad?: (role: string) => void;
 }
 
+function formatVramGB(bytes?: number): string {
+  if (!bytes || bytes <= 0) return '0.0 GB';
+  return `${(bytes / 1e9).toFixed(1)} GB`;
+}
+
+function formatRelativeUntil(until?: string): string {
+  if (!until) return '';
+  const target = Date.parse(until);
+  if (Number.isNaN(target)) {
+    if (typeof until === 'string' && until.toLowerCase().includes('forever')) return 'forever';
+    return '';
+  }
+  const ms = target - Date.now();
+  if (ms <= 0) return 'now';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h`;
+  const d = Math.round(h / 24);
+  return `${d}d`;
+}
+
+function ProcessorTag({ m }: { m: LoadedModel }) {
+  const proc = (m.processor || '').toUpperCase();
+  const pct = m.gpuPercent;
+  if (proc === 'CPU' || pct === 0) {
+    return <span className="font-semibold text-red-700">{pct ?? 0}% CPU</span>;
+  }
+  if (proc === 'GPU' && (pct === undefined || pct >= 99)) {
+    return <span className="text-green-700">{pct ?? 100}% GPU</span>;
+  }
+  if (pct !== undefined && pct > 0 && pct < 99) {
+    return <span className="font-semibold text-amber-700">{pct}% {proc || 'MIXED'}</span>;
+  }
+  return <span className="text-slate-500">{proc || '—'}</span>;
+}
+
+function renderPsCell(container: ContainerInfo) {
+  const type = container.config?.type;
+  if (type === 'vllm') {
+    return <span className="text-slate-400" title="vLLM does not expose per-model VRAM via /api/ps">—</span>;
+  }
+  if (type !== 'ollama' && type !== 'dmr') {
+    return <span className="text-slate-300">—</span>;
+  }
+  if (container.status !== 'running') return <span className="text-slate-300">—</span>;
+  const models = (container.loadedModels ?? []).slice().sort((a, b) => (b.sizeVram || 0) - (a.sizeVram || 0));
+  if (models.length === 0) {
+    if (container.modelOnDisk) {
+      return (
+        <div className="flex items-center gap-1 text-blue-600 text-[11px]">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+          pulled, loading...
+        </div>
+      );
+    }
+    const gpuOnly = container.config?.gpuOnly === true;
+    return (
+      <div className={`flex items-center gap-1 text-[11px] ${gpuOnly ? 'text-red-700' : 'text-orange-600'}`}>
+        <span className={`inline-block w-1.5 h-1.5 rounded-full ${gpuOnly ? 'bg-red-600' : 'bg-orange-400'}`} />
+        {gpuOnly ? 'not loaded (GPU required)' : 'not loaded'}
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-0.5">
+      {models.map(m => {
+        const rel = formatRelativeUntil(m.until);
+        return (
+          <div key={m.name} className="flex items-center gap-2 whitespace-nowrap">
+            <span className="font-mono text-[11px] text-slate-800">{m.name}</span>
+            <span className="text-[11px] text-slate-600">{formatVramGB(m.sizeVram || m.sizeBytes)}</span>
+            <ProcessorTag m={m} />
+            {rel && <span className="text-[10px] text-slate-400">until {rel}</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function PsSummaryLine({ containers }: { containers: Record<string, ContainerInfo> }) {
+  const all: LoadedModel[] = [];
+  let anyOllama = false;
+  for (const c of Object.values(containers)) {
+    const type = c.config?.type;
+    if (type === 'ollama' || type === 'dmr') anyOllama = true;
+    if (c.loadedModels) all.push(...c.loadedModels);
+  }
+  if (!anyOllama) return null;
+  if (all.length === 0) {
+    return <div className="mb-2 text-xs text-slate-500">No models loaded in VRAM.</div>;
+  }
+  const totalVram = all.reduce((s, m) => s + (m.sizeVram || 0), 0);
+  const gpuPctAvg = Math.round(
+    all.reduce((s, m) => s + (m.gpuPercent ?? (m.processor === 'GPU' ? 100 : 0)), 0) / all.length
+  );
+  const anyCpu = all.some(m => (m.gpuPercent ?? -1) === 0 || m.processor?.toUpperCase() === 'CPU');
+  return (
+    <div className="mb-3 text-xs text-slate-600">
+      <span className="font-semibold">{all.length}</span> model{all.length === 1 ? '' : 's'} loaded
+      <span className="mx-1.5 text-slate-300">·</span>
+      <span className="font-semibold">{formatVramGB(totalVram)}</span> VRAM total
+      <span className="mx-1.5 text-slate-300">·</span>
+      <span className={anyCpu ? 'font-semibold text-red-700' : 'text-green-700'}>{gpuPctAvg}% GPU{anyCpu ? ' (CPU FALLBACK)' : ''}</span>
+    </div>
+  );
+}
+
 function StatusBadge({ status }: { status: string }) {
   if (status === 'running') {
     return (
@@ -65,6 +176,7 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
   return (
     <div className="rounded-xl bg-white p-6 shadow-sm mb-6">
       <h2 className="text-lg font-semibold text-slate-900 mb-4">Containers</h2>
+      <PsSummaryLine containers={containers} />
 
       {entries.length === 0 ? (
         <p className="text-sm text-slate-400">No containers configured.</p>
@@ -100,45 +212,7 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
                     {container.config?.model || <span className="text-slate-300 italic">none</span>}
                   </td>
                   <td className="py-3 pr-4 text-xs">
-                    {container.config?.type === 'ollama' && container.status === 'running' ? (
-                      container.loadedModels && container.loadedModels.length > 0 ? (
-                        <div className="flex items-center gap-1">
-                          {(() => {
-                            const m = container.loadedModels![0];
-                            const gpuPct = m.gpuPercent ?? (m.processor === 'GPU' ? 100 : 0);
-                            const isFullGpu = gpuPct >= 99;
-                            const isPartial = gpuPct > 0 && gpuPct < 99;
-                            const gpuOnly = container.config?.gpuOnly === true;
-                            const isBlocked = gpuOnly && !isFullGpu;
-                            const colorClass = isBlocked ? 'text-red-700' : isFullGpu ? 'text-green-700' : isPartial ? 'text-orange-600' : 'text-red-600';
-                            const dotClass = isBlocked ? 'bg-red-600' : isFullGpu ? 'bg-green-500' : isPartial ? 'bg-orange-400' : 'bg-red-500';
-                            return (
-                              <>
-                                <span className={`inline-block w-1.5 h-1.5 rounded-full ${dotClass}`} />
-                                <span className={colorClass}>
-                                  {container.loadedModels!.map(m => m.name).join(', ')}
-                                </span>
-                                <span className={`ml-1 ${isFullGpu && !gpuOnly ? 'text-slate-400' : colorClass + ' font-semibold'}`}>
-                                  ({m.processor} {gpuPct}% {m.size}{isBlocked ? ' — GPU not ready' : ''})
-                                </span>
-                              </>
-                            );
-                          })()}
-                        </div>
-                      ) : container.modelOnDisk ? (
-                        <div className="flex items-center gap-1 text-blue-600">
-                          <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                          pulled, loading...
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-1 text-orange-600">
-                          <span className="inline-block w-1.5 h-1.5 rounded-full bg-orange-400" />
-                          not pulled
-                        </div>
-                      )
-                    ) : (
-                      <span className="text-slate-300">—</span>
-                    )}
+                    {renderPsCell(container)}
                   </td>
                   <td className="py-3 pr-4">
                     <StatusBadge status={container.status} />

@@ -69,6 +69,33 @@ interface CachedStatus {
   };
   wsConnected: boolean;
   /**
+   * Host-level memory/inference stats. Present for Mac sidecars (Apple Silicon
+   * unified memory) and Windows Docker Desktop without an nvidia-smi helper.
+   * Linux+NVIDIA sidecars usually omit this; Windows-with-helper may have both
+   * `gpus[]` and `host.stats`.
+   */
+  host?: {
+    os?: string;
+    osConfidence?: string;
+    dockerDesktop?: boolean;
+    stats?: {
+      at?: number;
+      ageMs?: number;
+      totalMb?: number;
+      freeMb?: number;
+      usedMb?: number;
+      pressurePct?: number;
+      source?: string;
+    };
+    inferenceMemory?: {
+      usedMb?: number;
+      budgetMb?: number;
+      freeMb?: number;
+      source?: string;
+      models?: Array<{ name: string; sizeVramMb?: number; processor?: string; gpuPercent?: number }>;
+    };
+  };
+  /**
    * List of masters this sidecar is currently registered with. Populated by
    * the multi-master sidecar (>=v?). Older sidecars omit this field — UI
    * should treat absent/length<=1 as "exclusive to this Sound Suite master".
@@ -126,6 +153,120 @@ interface FleetData {
 }
 
 const ROLES = ['embedding', 'completion', 'ocr', 'reranker'] as const;
+
+type LoadedModel = NonNullable<ContainerState['loadedModels']>[number];
+
+function formatVramGB(bytes?: number): string {
+  if (!bytes || bytes <= 0) return '0.0 GB';
+  return `${(bytes / 1e9).toFixed(1)} GB`;
+}
+
+/** Parse Ollama-style "until" timestamp into compact relative ("24h", "5m", "now"). */
+function formatRelativeUntil(until?: string): string {
+  if (!until) return '';
+  const target = Date.parse(until);
+  if (Number.isNaN(target)) {
+    // Ollama sometimes returns "Forever" or other strings — fall through.
+    if (typeof until === 'string' && until.toLowerCase().includes('forever')) return 'forever';
+    return '';
+  }
+  const ms = target - Date.now();
+  if (ms <= 0) return 'now';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h`;
+  const d = Math.round(h / 24);
+  return `${d}d`;
+}
+
+/** Compact processor tag — bold red when CPU (operationally critical). */
+function ProcessorTag({ m }: { m: LoadedModel }) {
+  const proc = (m.processor || '').toUpperCase();
+  const pct = m.gpuPercent;
+  if (proc === 'CPU' || pct === 0) {
+    return <span className="font-semibold text-red-700">{pct ?? 0}% CPU</span>;
+  }
+  if (proc === 'GPU' && (pct === undefined || pct >= 99)) {
+    return <span className="text-green-700">{pct ?? 100}% GPU</span>;
+  }
+  if (pct !== undefined && pct > 0 && pct < 99) {
+    return <span className="font-semibold text-amber-700">{pct}% {proc || 'MIXED'}</span>;
+  }
+  // DMR / unknown
+  return <span className="text-slate-500">{proc || '—'}</span>;
+}
+
+/** Render the PS column for a single container row. */
+function renderPsCell(c: ContainerState): React.ReactNode {
+  const type = c.type || c.config?.type;
+  // vLLM has no /api/ps equivalent.
+  if (type === 'vllm') {
+    return (
+      <span className="text-gray-400" title="vLLM does not expose per-model VRAM via /api/ps">—</span>
+    );
+  }
+  if (type !== 'ollama' && type !== 'dmr') {
+    return <span className="text-gray-300">—</span>;
+  }
+  if (c.status !== 'running') return <span className="text-gray-300">—</span>;
+  const models = (c.loadedModels ?? []).slice().sort((a, b) => (b.sizeVram || 0) - (a.sizeVram || 0));
+  if (models.length === 0) {
+    const gpuOnly = c.config?.gpuOnly === true;
+    return (
+      <div className={`flex items-center gap-1 text-[11px] ${gpuOnly ? 'text-red-700' : 'text-orange-600'}`}>
+        <span className={`inline-block w-1.5 h-1.5 rounded-full ${gpuOnly ? 'bg-red-600' : 'bg-orange-400'}`} />
+        {gpuOnly ? 'not loaded (GPU required)' : 'not loaded'}
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-0.5">
+      {models.map(m => {
+        const rel = formatRelativeUntil(m.until);
+        return (
+          <div key={m.name} className="flex items-center gap-2 whitespace-nowrap">
+            <span className="font-mono text-[11px] text-slate-800">{m.name}</span>
+            <span className="text-[11px] text-slate-600">{formatVramGB(m.sizeVram || m.sizeBytes)}</span>
+            <ProcessorTag m={m} />
+            {rel && <span className="text-[10px] text-slate-400">until {rel}</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** One-line summary of all models loaded across the sidecar's Ollama/DMR endpoints. */
+function PsSummaryLine({ containers }: { containers: Record<string, ContainerState> }) {
+  const all: LoadedModel[] = [];
+  let anyOllama = false;
+  for (const c of Object.values(containers)) {
+    const type = c.type || c.config?.type;
+    if (type === 'ollama' || type === 'dmr') anyOllama = true;
+    if (c.loadedModels) all.push(...c.loadedModels);
+  }
+  if (!anyOllama) return null;
+  if (all.length === 0) {
+    return <div className="mb-2 text-xs text-slate-500">No models loaded in VRAM.</div>;
+  }
+  const totalVram = all.reduce((s, m) => s + (m.sizeVram || 0), 0);
+  const gpuPctAvg = Math.round(
+    all.reduce((s, m) => s + (m.gpuPercent ?? (m.processor === 'GPU' ? 100 : 0)), 0) / all.length
+  );
+  const anyCpu = all.some(m => (m.gpuPercent ?? -1) === 0 || m.processor?.toUpperCase() === 'CPU');
+  return (
+    <div className="mb-2 text-xs text-slate-600">
+      <span className="font-semibold">{all.length}</span> model{all.length === 1 ? '' : 's'} loaded
+      <span className="mx-1.5 text-slate-300">·</span>
+      <span className="font-semibold">{formatVramGB(totalVram)}</span> VRAM total
+      <span className="mx-1.5 text-slate-300">·</span>
+      <span className={anyCpu ? 'font-semibold text-red-700' : 'text-green-700'}>{gpuPctAvg}% GPU{anyCpu ? ' (CPU FALLBACK)' : ''}</span>
+    </div>
+  );
+}
 
 export default function GpuFleetPanel() {
   const [fleet, setFleet] = useState<FleetData | null>(null);
@@ -215,7 +356,7 @@ export default function GpuFleetPanel() {
 
   useEffect(() => {
     fetchFleet();
-    const interval = setInterval(fetchFleet, 10_000);
+    const interval = setInterval(fetchFleet, 5_000);
     return () => clearInterval(interval);
   }, [fetchFleet]);
 
@@ -526,6 +667,8 @@ export default function GpuFleetPanel() {
                       {s.sidecarStatus?.version && (
                         <span className="ml-2 text-xs text-gray-400">v{s.sidecarStatus.version}</span>
                       )}
+                      <RoleBadges sidecarUrl={s.url} hostOs={s.sidecarStatus?.host?.os} />
+
                       {(() => {
                         const others = (s.sidecarStatus?.masters || [])
                           .filter(m => !fleet?.masterUrl || m.serverUrl !== fleet.masterUrl);
@@ -659,8 +802,22 @@ export default function GpuFleetPanel() {
                 <StatCard label="Sidecar Mode" value={cachedStatus.mode || '-'} color="blue" />
                 <StatCard label="Agent Uptime" value={cachedStatus.uptime ? formatUptime(cachedStatus.uptime) : '-'} color="purple" />
                 <StatCard label="Version" value={cachedStatus.version || '1.x'} color="gray" />
-                <StatCard label="Total VRAM" value={detailGpus.length > 0 ? `${detailGpus.reduce((s, g) => s + g.memoryTotal, 0)} MB` : '-'} color="purple" />
+                <StatCard label="Total Memory" value={(() => {
+                  if (detailGpus.length > 0) {
+                    const totalMb = detailGpus.reduce((s, g) => s + g.memoryTotal, 0);
+                    return `${(totalMb / 1024).toFixed(1)} GB VRAM`;
+                  }
+                  const totalMb = cachedStatus.host?.stats?.totalMb;
+                  if (totalMb) return `${(totalMb / 1024).toFixed(1)} GB RAM`;
+                  const budgetMb = cachedStatus.host?.inferenceMemory?.budgetMb;
+                  if (budgetMb) return `${(budgetMb / 1024).toFixed(1)} GB budget`;
+                  return '-';
+                })()} color="purple" />
               </div>
+
+              {/* Host memory panel — shows for Mac/Windows-no-helper, and as a
+                  supplement for Windows-with-helper to surface host RAM. */}
+              <HostMemoryPanel cached={cachedStatus} />
 
               {/* GPU Topology */}
               {detailGpus.length > 0 && (
@@ -741,6 +898,7 @@ export default function GpuFleetPanel() {
               {cachedStatus.containers && Object.keys(cachedStatus.containers).length > 0 && (
                 <div className="mb-6">
                   <h3 className="text-sm font-medium text-gray-700 mb-3">Containers</h3>
+                  <PsSummaryLine containers={cachedStatus.containers} />
                   <div className="overflow-x-auto">
                     <table className="min-w-full text-sm">
                       <thead>
@@ -778,37 +936,7 @@ export default function GpuFleetPanel() {
                                 {c.model || c.config?.model || <span className="text-gray-300 italic">none</span>}
                               </td>
                               <td className="py-2 px-3 text-xs font-mono">
-                                {(c.type === 'ollama' || c.config?.type === 'ollama') && c.status === 'running' ? (
-                                  c.loadedModels && c.loadedModels.length > 0 ? (
-                                    (() => {
-                                      const m0 = c.loadedModels![0];
-                                      const gpuPct = m0.gpuPercent ?? (m0.processor === 'GPU' ? 100 : 0);
-                                      const isFullGpu = gpuPct >= 99;
-                                      const isPartial = gpuPct > 0 && gpuPct < 99;
-                                      const gpuOnly = c.config?.gpuOnly === true;
-                                      // For gpuOnly roles, partial offload is a hard error — treat as red.
-                                      const isBlocked = gpuOnly && !isFullGpu;
-                                      const colorClass = isBlocked ? 'text-red-700' : isFullGpu ? 'text-green-700' : isPartial ? 'text-orange-600' : 'text-red-600';
-                                      const dotClass = isBlocked ? 'bg-red-600' : isFullGpu ? 'bg-green-500' : isPartial ? 'bg-orange-400' : 'bg-red-500';
-                                      return (
-                                        <div className="flex items-center gap-1">
-                                          <span className={`inline-block w-1.5 h-1.5 rounded-full ${dotClass}`} />
-                                          <span className={colorClass}>{c.loadedModels!.map(m => m.name).join(', ')}</span>
-                                          <span className={`ml-1 ${isFullGpu && !gpuOnly ? 'text-gray-400' : colorClass + ' font-semibold'}`}>
-                                            ({m0.processor} {gpuPct}% {m0.size}{isBlocked ? ' — GPU not ready (CPU offload blocked)' : ''})
-                                          </span>
-                                        </div>
-                                      );
-                                    })()
-                                  ) : (
-                                    <div className={`flex items-center gap-1 ${c.config?.gpuOnly ? 'text-red-700' : 'text-orange-600'}`}>
-                                      <span className={`inline-block w-1.5 h-1.5 rounded-full ${c.config?.gpuOnly ? 'bg-red-600' : 'bg-orange-400'}`} />
-                                      {c.config?.gpuOnly ? 'not loaded (GPU required)' : 'not loaded'}
-                                    </div>
-                                  )
-                                ) : (
-                                  <span className="text-gray-300">—</span>
-                                )}
+                                {renderPsCell(c)}
                               </td>
                               <td className="py-2 px-3 text-xs font-mono">{c.vram ? `${c.vram} MB` : c.config?.vram ? `${c.config.vram} MB` : '-'}</td>
                               <td className="py-2 px-3 text-xs">{roleInfo?.activeRequests ?? '-'}</td>
@@ -1171,6 +1299,191 @@ function GpuCard({ gpu }: { gpu: GpuInfo }) {
   );
 }
 
+/**
+ * Host memory / inference panel for non-NVIDIA-container sidecars.
+ * Renders the right summary based on which fields the sidecar reported:
+ *   - `gpus[]` populated → NVIDIA (Linux/Windows-with-helper) — show GPU summary
+ *   - `host.stats` present → show host RAM usage (Mac unified, or Windows host)
+ *   - `host.inferenceMemory` present → show Sound Suite's loaded-model budget (Mac)
+ *   - none of the above → "memory stats unavailable" hint
+ *
+ * Includes a provenance badge identifying where the numbers came from and a
+ * stale indicator when `host.stats.ageMs > 30_000` (helper not running).
+ */
+function HostMemoryPanel({ cached }: { cached: CachedStatus }) {
+  const gpus = cached.gpus || [];
+  const host = cached.host;
+  const stats = host?.stats;
+  const infer = host?.inferenceMemory;
+
+  const hasGpu = gpus.length > 0;
+  const hasHostStats = !!stats && (stats.totalMb || stats.freeMb || stats.usedMb);
+  const hasInfer = !!infer && (infer.budgetMb || infer.usedMb || (infer.models && infer.models.length > 0));
+
+  // If we have nothing at all and this isn't a Linux+NVIDIA sidecar with the
+  // legacy vram block, render a hint rather than nothing.
+  if (!hasGpu && !hasHostStats && !hasInfer && !cached.vram) {
+    if (host?.os) {
+      return (
+        <div className="mb-4 rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+          <div className="font-medium">Host memory stats unavailable</div>
+          <div className="mt-1 opacity-80">
+            Sidecar reports <code className="px-1 bg-amber-100 rounded">{host.os}</code> but no host-memory helper data.
+            Install/check the host-stats helper to enable RAM tracking.
+          </div>
+        </div>
+      );
+    }
+    return null;
+  }
+
+  // Stale detection (only meaningful when we have host.stats with an age).
+  const ageMs = stats?.ageMs;
+  const stale = typeof ageMs === 'number' && ageMs > 30_000;
+
+  // Provenance label.
+  const source = stats?.source || infer?.source;
+  const provenanceLabel = (() => {
+    if (hasGpu && (source === 'nvidia-smi' || !source)) return 'nvidia-smi (container)';
+    if (source === 'host-helper') return 'nvidia-smi (host helper)';
+    if (source === 'host-declared') return 'host-declared';
+    if (source === 'docker-info') return 'Docker info estimate';
+    if (infer && !stats) return 'Ollama /api/ps + declared budget';
+    if (source) return source;
+    return 'unknown';
+  })();
+
+  // Pick header line based on what's available — see the table in the task spec.
+  const gb = (mb?: number) => typeof mb === 'number' ? (mb / 1024).toFixed(1) : '?';
+
+  let headerLine: React.ReactNode = null;
+  if (hasGpu) {
+    const totalMb = gpus.reduce((s, g) => s + (g.memoryTotal || 0), 0);
+    const usedMb = gpus.reduce((s, g) => s + (g.memoryUsed || 0), 0);
+    const pct = totalMb > 0 ? Math.round((usedMb / totalMb) * 100) : 0;
+    const name = gpus[0]?.name || 'GPU';
+    headerLine = (
+      <>
+        <span className="font-medium">{name}</span>
+        <span className="mx-1">—</span>
+        <span className="font-mono">{gb(usedMb)}/{gb(totalMb)} GB used ({pct}%)</span>
+        {hasHostStats && (
+          <span className="ml-2 text-gray-500 font-mono">· host RAM: {gb(stats!.usedMb ?? (stats!.totalMb && stats!.freeMb ? stats!.totalMb - stats!.freeMb : undefined))} / {gb(stats!.totalMb)} GB</span>
+        )}
+      </>
+    );
+  } else if (hasInfer && infer) {
+    const usedMb = infer.usedMb ?? 0;
+    const budgetMb = infer.budgetMb ?? 0;
+    const isMac = host?.os === 'darwin';
+    headerLine = (
+      <>
+        <span className="font-medium">{isMac ? 'Apple Silicon' : 'Host'}</span>
+        <span className="mx-1">—</span>
+        <span className="font-mono">Sound Suite using {gb(usedMb)} GB of {gb(budgetMb)} GB budget</span>
+        {hasHostStats && typeof stats!.pressurePct === 'number' && (
+          <span className="ml-2 text-gray-500 font-mono">
+            · host pressure: {stats!.pressurePct}%
+            {typeof ageMs === 'number' && ` (${Math.round(ageMs / 1000)}s ago)`}
+          </span>
+        )}
+      </>
+    );
+  } else if (hasHostStats) {
+    const totalMb = stats!.totalMb;
+    const freeMb = stats!.freeMb;
+    const usedMb = stats!.usedMb ?? (totalMb && freeMb ? totalMb - freeMb : undefined);
+    headerLine = (
+      <>
+        <span className="font-medium">No discrete GPU</span>
+        <span className="mx-1">—</span>
+        <span className="font-mono">host RAM: {gb(usedMb)} / {gb(totalMb)} GB used</span>
+        {typeof stats!.pressurePct === 'number' && (
+          <span className="ml-2 text-gray-500 font-mono">({stats!.pressurePct}% pressure)</span>
+        )}
+      </>
+    );
+  } else {
+    return null;
+  }
+
+  // Bar values — prefer inference budget for Mac, host stats otherwise, fall
+  // back to GPU totals (avoids duplicating the GPU bar that already renders
+  // below for Linux/Windows-with-helper).
+  let barUsed = 0, barTotal = 0, barLabel = '';
+  if (hasInfer && infer) {
+    barUsed = infer.usedMb ?? 0;
+    barTotal = infer.budgetMb ?? 0;
+    barLabel = 'inference budget';
+  } else if (hasHostStats) {
+    barTotal = stats!.totalMb ?? 0;
+    barUsed = stats!.usedMb ?? (stats!.totalMb && stats!.freeMb ? stats!.totalMb - stats!.freeMb : 0);
+    barLabel = 'host RAM';
+  }
+  const showBar = !hasGpu && barTotal > 0;
+  const pct = barTotal > 0 ? Math.min(100, Math.round((barUsed / barTotal) * 100)) : 0;
+  const barColor = pct >= 85 ? 'bg-red-500' : pct >= 65 ? 'bg-orange-400' : 'bg-emerald-500';
+
+  const models = infer?.models || [];
+
+  return (
+    <div className={`mb-4 rounded border p-3 ${stale ? 'border-amber-300 bg-amber-50/40 opacity-90' : 'border-gray-200 bg-gray-50'}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+        <h3 className="text-sm text-gray-800">{headerLine}</h3>
+        <div className="flex items-center gap-1.5">
+          <span
+            title={`Memory numbers came from: ${provenanceLabel}${source ? ` (source=${source})` : ''}`}
+            className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-800 cursor-help"
+          >
+            {provenanceLabel}
+          </span>
+          {stale && (
+            <span
+              title={`Host stats are stale — last reported ${Math.round((ageMs ?? 0) / 1000)}s ago. Install or check the host-stats helper.`}
+              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-200 text-amber-900"
+            >
+              stale {Math.round((ageMs ?? 0) / 1000)}s
+            </span>
+          )}
+        </div>
+      </div>
+      {showBar && (
+        <>
+          <div className="h-2 w-full rounded bg-gray-200 overflow-hidden">
+            <div className={`h-full ${barColor}`} style={{ width: `${pct}%` }} />
+          </div>
+          <div className="mt-1 text-[11px] text-gray-500 font-mono">
+            {gb(barUsed)} / {gb(barTotal)} GB {barLabel} ({pct}%)
+          </div>
+        </>
+      )}
+      {stale && (
+        <div className="mt-2 text-[11px] text-amber-800">
+          Host stats stale — install/check the host-stats helper on this machine to keep RAM numbers fresh.
+        </div>
+      )}
+      {models.length > 0 && (
+        <div className="mt-2">
+          <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-1">Loaded models</div>
+          <div className="flex flex-wrap gap-1.5 text-[10px]">
+            {models.map((m, i) => (
+              <span key={`${m.name}-${i}`} className="inline-flex items-center gap-1 rounded border border-gray-300 bg-white px-1.5 py-0.5 font-mono">
+                <span className="text-gray-800">{m.name}</span>
+                {typeof m.sizeVramMb === 'number' && (
+                  <span className="text-gray-400">{(m.sizeVramMb / 1024).toFixed(1)}GB</span>
+                )}
+                {typeof m.gpuPercent === 'number' && m.gpuPercent < 99 && (
+                  <span className="text-orange-600">{m.gpuPercent}% GPU</span>
+                )}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ContainerStatusBadge({ status, exists }: { status: string; exists?: boolean }) {
   if (status === 'running') {
     return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">running</span>;
@@ -1244,5 +1557,82 @@ function NumberInput({ label, value, onChange, unit, hint }: { label: string; va
       </div>
       {hint && <span className="text-xs text-gray-400">{hint}</span>}
     </div>
+  );
+}
+
+/**
+ * RoleBadges — inline mode assignment chips for a sidecar. Best-effort fetch
+ * from /api/admin/role-assignments + /api/admin/mode-catalog. Silently
+ * renders nothing on 404 or error.
+ *
+ * A mode that's enabled but unavailable on the host OS is greyed out with an
+ * amber ⓘ to flag the misconfiguration.
+ */
+function RoleBadges({ sidecarUrl, hostOs }: { sidecarUrl: string; hostOs?: string }) {
+  const [roles, setRoles] = useState<string[] | null>(null);
+  const [availability, setAvailability] = useState<Record<string, string[]>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [aRes, cRes] = await Promise.all([
+          fetch(`/api/admin/role-assignments?sidecarUrl=${encodeURIComponent(sidecarUrl)}`),
+          fetch('/api/admin/mode-catalog').catch(() => null),
+        ]);
+        if (cancelled) return;
+        if (aRes.ok) {
+          const data = await aRes.json();
+          const list: any[] = Array.isArray(data.assignments) ? data.assignments : [];
+          setRoles(
+            list
+              .filter((a) => a.enabled)
+              .map((a) => a.mode || a.roleType?.name || a.roleTypeName)
+              .filter(Boolean),
+          );
+        }
+        if (cRes && cRes.ok) {
+          const data = await cRes.json();
+          const modes: any[] = Array.isArray(data?.modes) ? data.modes : [];
+          const map: Record<string, string[]> = {};
+          for (const m of modes) {
+            if (m?.name) map[m.name] = Array.isArray(m.availableOn) ? m.availableOn : [];
+          }
+          setAvailability(map);
+        }
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [sidecarUrl]);
+
+  if (!roles || roles.length === 0) return null;
+
+  return (
+    <span className="ml-2 inline-flex flex-wrap gap-1">
+      {roles.map((r) => {
+        const supported = availability[r];
+        const unsupported = hostOs && supported && supported.length > 0 && !supported.includes(hostOs);
+        return (
+          <a
+            key={r}
+            href="/admin/roleassign"
+            onClick={(e) => e.stopPropagation()}
+            title={
+              unsupported
+                ? `${r} is not available on ${hostOs} — sidecar will refuse to start it`
+                : `Manage ${r} assignment`
+            }
+            className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium border ${
+              unsupported
+                ? 'bg-gray-50 text-gray-400 border-gray-200 ring-1 ring-amber-300'
+                : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border-blue-200'
+            }`}
+          >
+            {r}
+            {unsupported && <span className="text-amber-500">ⓘ</span>}
+          </a>
+        );
+      })}
+    </span>
   );
 }

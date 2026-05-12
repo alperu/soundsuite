@@ -1,6 +1,6 @@
-import { state } from './state';
-import { getContainerState, startContainer, stopContainer, removeContainer, createContainer, pullImage, getDockerMode, buildExpectedConfig, detectConfigDrift, isPortConflict, findContainerOnPort } from './docker';
-import { ollamaList, ollamaShow, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
+import { state, HOST_STATS_TTL_MS } from './state';
+import { getContainerState, startContainer, stopContainer, removeContainer, createContainer, pullImage, getDockerMode, buildExpectedConfig, detectConfigDrift, isPortConflict, findContainerOnPort, dockerRequest } from './docker';
+import { ollamaList, ollamaShow, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama } from './ollama-api';
 import { loadGpuOnly } from './containers';
 import { clearIdleTimerForRole, clearAllIdleTimers, startIdleTimerForRole, startIdleTimer } from './idle-timers';
 import { getAllContainerStates } from './containers';
@@ -80,19 +80,27 @@ async function ensureOllamaModel(role: string): Promise<void> {
   const def = state.registry[role];
   if (!def || def.type !== 'ollama' || !def.model) return;
 
+  // Honor operator's minOnline=0 opt-out. The acquire path already rejects;
+  // belt-and-suspenders here so heartbeat / container-create callers can't
+  // sneak a pull+load past the policy.
+  if ((state.minOnline?.[role] ?? 1) === 0) {
+    log.info(`ensureOllamaModel: skipping ${role} — minOnline=0 (operator opted this role out)`);
+    return;
+  }
+
   // Skip if this model has failed too many times
   if ((state.pullFailCount[role] || 0) >= 3) {
     log.info(`ensureOllamaModel: skipping ${role} — pull failed 3+ times, not retrying until config change or restart`);
     return;
   }
 
-  log.info(`ensureOllamaModel: starting for ${role} — model=${def.model} port=${def.port}`);
+  log.info(`ensureOllamaModel: starting for ${role} — model=${def.model} port=${def.port}${def.runtime === 'host' ? ' [host-runtime]' : ''}`);
   try {
     // Wait for Ollama HTTP API to be ready (polls /api/tags, up to 30s)
     log.info(`ensureOllamaModel: waiting for Ollama API on port ${def.port}...`);
-    await waitForOllama(def.port);
+    await waitForOllama(def.port, 30_000, role);
     log.info(`ensureOllamaModel: API ready, checking if ${def.model} is on disk...`);
-    const diskModels = await ollamaList(def.port);
+    const diskModels = await ollamaList(def.port, role);
     const modelBase = def.model.split(':')[0];
     log.info(`ensureOllamaModel: models on disk: ${diskModels.join(', ')}`);
     let onDisk = diskModels.some(m => m === def.model || m.includes(modelBase));
@@ -103,7 +111,7 @@ async function ensureOllamaModel(role: string): Promise<void> {
     // returns 404 only when the model is genuinely absent.
     if (!onDisk) {
       try {
-        const exists = await ollamaShow(def.port, def.model);
+        const exists = await ollamaShow(def.port, def.model, role);
         if (exists) {
           log.info(`ensureOllamaModel: ${def.model} confirmed present via /api/show — skipping pull (was missing from /api/tags response, likely transient)`);
           onDisk = true;
@@ -131,13 +139,14 @@ async function ensureOllamaModel(role: string): Promise<void> {
           log.info(`ensureOllamaModel: pull progress: ${pct}% ${detail.slice(0, 80)}`);
           tasks.update(pullTaskId, { progress: pct, detail: detail.slice(0, 80) });
         },
+        role,
       });
       const pullDuration = Math.round((Date.now() - pullStart) / 1000);
       log.info(`ensureOllamaModel: pull finished in ${pullDuration}s`);
 
       // Post-pull verification: confirm model is now on disk
       log.info(`ensureOllamaModel: verifying ${def.model} is on disk after pull...`);
-      const verifyModels = await ollamaList(def.port);
+      const verifyModels = await ollamaList(def.port, role);
       log.info(`ensureOllamaModel: post-pull models: ${verifyModels.join(', ')}`);
       if (!verifyModels.some(m => m.includes(modelBase))) {
         tasks.fail(pullTaskId, 'Model not found on disk after pull');
@@ -178,9 +187,12 @@ function fireAndForgetLoad(role: string, port: number, model: string, attempt = 
   const MAX_ATTEMPTS = 3;
   const RETRY_DELAY = 30_000; // 30s between retries
 
-  // Check available VRAM before attempting load
+  // Check available VRAM before attempting load. Skip for host-runtime roles:
+  // state.gpuCache is from nvidia-smi inside the sidecar container, which is
+  // empty on Mac/Windows hosts. Ollama on the host manages its own VRAM and
+  // will simply return a load error if there's no room.
   const def = state.registry[role];
-  if (def && def.vram > 0 && state.gpuCache) {
+  if (def && def.runtime !== 'host' && def.vram > 0 && state.gpuCache) {
     const freeVram = state.gpuCache.reduce((sum: number, g: any) => sum + (g.memoryFree || 0), 0);
     if (freeVram < def.vram * 0.5) {
       log.warn(`fireAndForgetLoad: ${role} needs ~${def.vram}MB VRAM but only ${freeVram}MB free — deferring load (attempt ${attempt}/${MAX_ATTEMPTS})`);
@@ -193,7 +205,7 @@ function fireAndForgetLoad(role: string, port: number, model: string, attempt = 
     }
   }
 
-  log.info(`fireAndForgetLoad: loading ${model} for ${role} on port ${port} (attempt ${attempt}/${MAX_ATTEMPTS})${def?.gpuOnly ? ' [gpuOnly: evict + force GPU]' : ''}`);
+  log.info(`fireAndForgetLoad: loading ${model} for ${role} on port ${port} (attempt ${attempt}/${MAX_ATTEMPTS})${def?.gpuOnly ? ' [gpuOnly: evict + force GPU]' : ''}${def?.runtime === 'host' ? ' [host-runtime]' : ''}`);
   state.modelLoading.add(role);
   const loadTaskId = tasks.start('model-load', `Load ${model} into VRAM`, role);
   const loadPromise = def?.gpuOnly
@@ -205,6 +217,7 @@ function fireAndForgetLoad(role: string, port: number, model: string, attempt = 
             tasks.update(loadTaskId, { detail: detail.slice(0, 100) });
           }
         },
+        role,
       });
   loadPromise.then((ok) => {
     if (ok) {
@@ -245,19 +258,25 @@ export { getTotalActiveRequests };
 export function pullOllamaModelAsync(role: string, andLoad: boolean): void {
   const def = state.registry[role];
   if (!def || def.type !== 'ollama' || !def.model) return;
+  // Honor operator opt-out — applies to background pulls as well as acquire.
+  if ((state.minOnline?.[role] ?? 1) === 0) {
+    log.info(`pullOllamaModelAsync: skipping ${role} — minOnline=0 (operator opted this role out)`);
+    return;
+  }
   const model = def.model;
 
   const pullTaskId = tasks.start('model-pull', `Pull ${model}`, role);
   log.info(`pullOllamaModelAsync: pulling ${model} on port ${def.port} (andLoad=${andLoad})`);
 
   (async () => {
-    await waitForOllama(def.port);
+    await waitForOllama(def.port, 30_000, role);
     const pullStart = Date.now();
     await ollamaPull(def.port, model, {
       onProgress: (pct, detail) => {
         log.info(`pullOllamaModelAsync: progress: ${pct}% ${detail.slice(0, 80)}`);
         tasks.update(pullTaskId, { progress: pct, detail: detail.slice(0, 80) });
       },
+      role,
     });
     const pullDuration = Math.round((Date.now() - pullStart) / 1000);
     log.info(`pullOllamaModelAsync: pull finished in ${pullDuration}s`);
@@ -331,9 +350,39 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
 
     r.activeRequests++;
     clearIdleTimerForRole(role);
+    // Manual Acquire clears any prior user-stopped intent — the operator
+    // is asking us to use this role again, so the heartbeat may re-engage.
+    state.userStopped.delete(role);
     r.lastAcquire = new Date().toISOString();
     recordDemandSample(role);
-    log.info(`Acquire ${role} (active: ${r.activeRequests})`);
+    log.info(`Acquire ${role} (active: ${r.activeRequests})${def.runtime === 'host' ? ' [host-runtime]' : def.runtime === 'docker-model-runner' ? ' [dmr]' : ''}`);
+
+    // Host-runtime: no container to start. ensureContainer() probed Ollama
+    // reachability; if it didn't throw, the native Ollama is up. Kick off
+    // model pull/load asynchronously and report ready.
+    if (def.runtime === 'host') {
+      try {
+        await ensureContainer(role); // probes; throws if unreachable
+      } catch (err) {
+        r.activeRequests = Math.max(0, r.activeRequests - 1);
+        return { error: (err as Error).message };
+      }
+      ensureOllamaModel(role).catch((err) => log.error(`ensureOllamaModel fire-and-forget failed for ${role}: ${(err as Error).message}`));
+      return { action: 'host-runtime', role, activeRequests: r.activeRequests };
+    }
+
+    // Docker Model Runner: probe DMR's TCP endpoint. No image, no model
+    // pull (DMR has no auto-pull API). Master talks directly to
+    // dmrHost:dmrPort/engines/v1 for inference.
+    if (def.runtime === 'docker-model-runner') {
+      try {
+        await ensureContainer(role);
+      } catch (err) {
+        r.activeRequests = Math.max(0, r.activeRequests - 1);
+        return { error: (err as Error).message };
+      }
+      return { action: 'docker-model-runner', role, activeRequests: r.activeRequests };
+    }
 
     const containerName = await ensureContainer(role);
     const cs = await getContainerState(containerName);
@@ -386,9 +435,95 @@ export async function handleRelease(role?: string): Promise<Record<string, unkno
   return { activeRequests: state.activeRequests, idleTimerStarted: state.activeRequests === 0 };
 }
 
+/**
+ * Reset leaked activeRequests counters.
+ * Used to recover from master-side bugs that send more /acquire than /release
+ * (the historic failure mode that pinned VRAM at 99% — see
+ * src/lib/search/reranker.ts pre-fix). Zeroes the counter for the given role
+ * (or every role if none specified) and starts the idle timer when the role
+ * is otherwise idle so the container can stop on its own schedule.
+ */
+export async function handleResetCounters(role?: string): Promise<Record<string, unknown>> {
+  const targets = role ? [role] : Object.keys(state.perRole);
+  const reset: Record<string, { previous: number; idleTimerStarted: boolean }> = {};
+
+  for (const r of targets) {
+    const perRole = state.perRole[r];
+    if (!perRole) {
+      reset[r] = { previous: 0, idleTimerStarted: false };
+      continue;
+    }
+    const previous = perRole.activeRequests;
+    perRole.activeRequests = 0;
+    perRole.lastRelease = new Date().toISOString();
+    let idleTimerStarted = false;
+    if (previous > 0) {
+      startIdleTimerForRole(r);
+      idleTimerStarted = true;
+      log.warn(`Reset ${r} counter: ${previous} -> 0 (idle timer started)`);
+    } else {
+      log.info(`Reset ${r} counter: already 0 (no-op)`);
+    }
+    reset[r] = { previous, idleTimerStarted };
+  }
+
+  // Legacy single-counter — only zero when no role filter was given
+  let legacy: { previous: number; idleTimerStarted: boolean } | undefined;
+  if (!role) {
+    const previous = state.activeRequests;
+    state.activeRequests = 0;
+    state.lastRelease = new Date().toISOString();
+    let idleTimerStarted = false;
+    if (previous > 0) {
+      startIdleTimer();
+      idleTimerStarted = true;
+      log.warn(`Reset legacy counter: ${previous} -> 0`);
+    }
+    legacy = { previous, idleTimerStarted };
+  }
+
+  return { reset, legacy };
+}
+
 export async function handleStart(role?: string): Promise<Record<string, unknown>> {
-  if (role) clearIdleTimerForRole(role);
-  else clearAllIdleTimers();
+  // Honor operator opt-out. handleStart can be called from the master's WS
+  // "start" command, from setup-overrides reapply, and from autoProvision
+  // fall-through. Without this guard, a minOnline=0 role can still start its
+  // container / load its model — the exact bug that left qwen3.5:9b loaded.
+  if (role && (state.minOnline?.[role] ?? 1) === 0) {
+    log.info(`handleStart ${role} REJECTED — minOnline=0 (operator opted this role out)`);
+    return { error: `Role "${role}" is disabled (minOnline=0). Set Minimum Online > 0 in admin to allow start.` };
+  }
+  if (role) {
+    clearIdleTimerForRole(role);
+    // Manual Start clears the user-stopped intent — symmetric with Acquire.
+    state.userStopped.delete(role);
+  } else {
+    clearAllIdleTimers();
+  }
+
+  // Host-runtime: "start" means probe + load model. No Docker.
+  if (role && state.registry[role]?.runtime === 'host') {
+    const def = state.registry[role];
+    try {
+      await ensureContainer(role);
+    } catch (err) {
+      return { error: (err as Error).message };
+    }
+    ensureOllamaModel(role).catch((err) => log.error(`ensureOllamaModel fire-and-forget failed for ${role}: ${(err as Error).message}`));
+    return { status: 'running', message: `host Ollama for ${role} ready (${state.hostOllamaHost}:${def.port})` };
+  }
+
+  // Docker Model Runner: probe only. No model load — DMR lazy-starts on
+  // first inference request.
+  if (role && state.registry[role]?.runtime === 'docker-model-runner') {
+    try {
+      await ensureContainer(role);
+    } catch (err) {
+      return { error: (err as Error).message };
+    }
+    return { status: 'running', message: `Docker Model Runner ready for ${role} at ${state.dmrHost}:${state.dmrPort}` };
+  }
 
   // Auto-provision if role is known and container doesn't exist
   let containerName: string;
@@ -410,9 +545,39 @@ export async function handleStart(role?: string): Promise<Record<string, unknown
 }
 
 export async function handleStop(role?: string): Promise<Record<string, unknown>> {
+  // Docker Model Runner: no unload API. Clear idle timer and return —
+  // DMR's scheduler reaps idle workers on its own. Deferred to v2 when
+  // DMR exposes an unload endpoint.
+  if (role && state.registry[role]?.runtime === 'docker-model-runner') {
+    clearIdleTimerForRole(role);
+    return { status: 'exited', message: `${role} on DMR — no unload API; idle timer cleared (DMR manages its own lifecycle)` };
+  }
+
+  // Host-runtime: "stop" means evict the model from host Ollama VRAM via
+  // keep_alive: 0. The Ollama process itself keeps running. We also mark
+  // the role as user-stopped so the heartbeat auto-loader doesn't reload
+  // it within 60 s; cleared on the next Acquire/Start for the role.
+  if (role && state.registry[role]?.runtime === 'host') {
+    const def = state.registry[role];
+    clearIdleTimerForRole(role);
+    state.userStopped.add(role);
+    if (!def.model) return { status: 'exited', message: `${role}: no model configured to unload` };
+    const ok = await ollamaUnload(def.port, def.model, role);
+    return ok
+      ? { status: 'exited', message: `host Ollama unloaded ${def.model} for ${role} — VRAM freed (auto-load suppressed until next Acquire)` }
+      : { error: `Failed to unload ${def.model} on host Ollama (best-effort)` };
+  }
+
   const containerName = role && state.registry[role] ? state.registry[role].containerName : state.CONTAINER_NAME;
-  if (role) clearIdleTimerForRole(role);
-  else clearAllIdleTimers();
+  if (role) {
+    clearIdleTimerForRole(role);
+    // Same user-stopped intent for Docker-runtime roles. Even though the
+    // container being `exited` already gates the heartbeat, recording the
+    // intent makes the policy uniform across runtimes.
+    state.userStopped.add(role);
+  } else {
+    clearAllIdleTimers();
+  }
   log.info(`Manual stop requested: ${containerName}`);
 
   const cs = await getContainerState(containerName);
@@ -446,12 +611,135 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
     log.warn(`handleStatus: vram snapshot failed: ${(err as Error).message}`);
   }
 
+  // Host-Ollama block — only meaningful when SS_HOST_OLLAMA=1. Surfaces the
+  // last health probe so admin UI can render an actionable error (install
+  // Ollama vs check Docker networking vs start the service).
+  const hostOllama = {
+    enabled: state.hostOllamaEnabled,
+    host: state.hostOllamaHost,
+    roles: Array.from(state.hostOllamaRoles),
+    budgetMb: state.hostOllamaBudgetMb,
+    lastHealth: state.hostOllamaLastHealth,
+  };
+
+  // DMR (Docker Model Runner) block — surfaced for master visibility.
+  // baseUrl is the URL the master should use for direct inference calls
+  // (master never proxies inference through the sidecar).
+  const dmr = {
+    enabled: state.dmrEnabled,
+    host: state.dmrHost,
+    port: state.dmrPort,
+    roles: Array.from(state.dmrRoles),
+    budgetMb: state.dmrBudgetMb,
+    lastHealth: state.dmrLastHealth,
+    baseUrl: state.dmrEnabled ? `http://${state.dmrHost}:${state.dmrPort}/engines/v1` : null,
+  };
+
+  // Tier 1: "Sound Suite inference memory" — what's currently loaded on host
+  // Ollama and how much of the operator's budget is left. Pure in-container,
+  // works without any host-side helper.
+  let inferenceMemory: unknown = null;
+  try {
+    const { snapshotInferenceMemory } = await import('./vram-accountant');
+    inferenceMemory = await snapshotInferenceMemory();
+  } catch (err) {
+    log.warn(`handleStatus: inferenceMemory snapshot failed: ${(err as Error).message}`);
+  }
+
+  // Tier 2 (with fallback): host-wide stats. Prefer fresh helper data; fall
+  // back to docker /info.MemTotal (the VM's RAM, not the true host's) when
+  // the helper is absent or stale. The UI uses `source` to label accordingly.
+  const now = Date.now();
+  let hostStatsOut: Record<string, unknown> | null = null;
+  if (state.hostStats && now - state.hostStats.at <= HOST_STATS_TTL_MS) {
+    const s = state.hostStats;
+    // Normalize: helper-provided MB fields and structured byte fields can
+    // both be present. Pick the most informative.
+    const totalMb =
+      s.memory?.totalBytes !== undefined
+        ? Math.round(s.memory.totalBytes / (1024 * 1024))
+        : s.totalMb ?? 0;
+    const freeMb =
+      s.memory?.freeBytes !== undefined
+        ? Math.round(s.memory.freeBytes / (1024 * 1024))
+        : s.freeMb ?? 0;
+    const pressurePct = s.mac?.memoryPressurePct ?? s.pressurePct ?? 0;
+    hostStatsOut = {
+      at: s.at,
+      ageMs: Math.max(0, now - s.at),
+      totalMb,
+      freeMb,
+      pressurePct,
+      gpuName: s.mac?.gpuName ?? s.gpuName ?? null,
+      gpuUtilPct: s.mac?.gpuUtilPct ?? s.gpuUtilPct ?? null,
+      source: 'helper' as const,
+      stale: false,
+    };
+  } else {
+    // Fallback: probe Docker /info for VM memory total. Not the host's RAM,
+    // but at least non-null on Mac/Windows so the UI can render a label.
+    let dockerVmTotalMb = 0;
+    try {
+      const { status, body } = await dockerRequest('GET', '/info');
+      if (status === 200) {
+        const info = JSON.parse(body) as { MemTotal?: number };
+        if (typeof info.MemTotal === 'number') {
+          dockerVmTotalMb = Math.round(info.MemTotal / (1024 * 1024));
+        }
+      }
+    } catch (err) {
+      log.info(`handleStatus: docker /info probe failed: ${(err as Error).message}`);
+    }
+    // For "free", subtract whatever Sound Suite currently has loaded. Not
+    // accurate (other host processes consume RAM too) but better than nothing.
+    const inferenceUsed =
+      inferenceMemory && typeof inferenceMemory === 'object'
+        ? (inferenceMemory as { usedMb?: number }).usedMb ?? 0
+        : 0;
+    hostStatsOut = {
+      at: state.hostStats?.at ?? null,
+      ageMs: state.hostStats ? now - state.hostStats.at : null,
+      totalMb: dockerVmTotalMb,
+      freeMb: Math.max(0, dockerVmTotalMb - inferenceUsed),
+      pressurePct: 0,
+      gpuName: null,
+      gpuUtilPct: null,
+      source: dockerVmTotalMb > 0 ? ('docker-info' as const) : ('unknown' as const),
+      // True iff we had data once but it has since aged out.
+      stale: state.hostStats !== null,
+    };
+  }
+
+  // Host OS detection for admin-UI affordances (correct install instructions).
+  // `hasNvidia` is sticky — once a helper has reported an NVIDIA card we
+  // surface it even if the latest stats are stale, so /admin/gpu can render
+  // "helper-script disconnected" instead of "no GPU".
+  const host = {
+    os: state.hostOs,
+    osConfidence: state.hostOsConfidence,
+    dockerDesktop: state.hostOsDockerDesktop,
+    hasNvidia: state.hasNvidiaSmi,
+    stats: hostStatsOut,
+    inferenceMemory,
+    // Pass through the most recent GPU list reported by the host helper.
+    // Mirrors top-level `gpus` below; included on `host` so /admin/gpu
+    // can render even without joining two payload sections.
+    gpus: state.hostStats?.gpus ?? state.gpuCache ?? [],
+  };
+
+  // Top-level GPU list — same data /api/gpu returns. Master's GPU page
+  // reads this so both endpoints agree.
+  const gpus = state.hostStats?.gpus ?? state.gpuCache ?? [];
+
   return {
     hostname: os.hostname(),
     ip: getPrimaryIp(),
     agent: { uptime: Math.floor((Date.now() - state.startedAt) / 1000), version: sidecarVersion },
     container: containers.reranker || await getContainerState(),
     containers,
+    hostOllama,
+    dmr,
+    host,
     mode: state.currentMode,
     activeRequests: getTotalActiveRequests(),
     idleTimerActive: Object.values(state.perRole).some((r) => r.idleTimer !== null) || state.idleTimer !== null,
@@ -485,5 +773,6 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
     tasks: tasks.getAll(),
     connectionStatus: state.connectionStatus,
     vram,
+    gpus,
   };
 }

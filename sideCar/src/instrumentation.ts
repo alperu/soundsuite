@@ -17,7 +17,46 @@ export async function register() {
     log.info(`Default mode: ${state.currentMode}`);
     log.info(`Idle timeouts: ${JSON.stringify(state.idleTimeouts)}`);
 
+    // Detect Docker host OS (darwin/win32/linux) — used by admin UI to render
+    // OS-correct install instructions for native Ollama. Cheap, one /info call.
+    try {
+      const { detectHostOs } = await import('./lib/host-os');
+      await detectHostOs();
+    } catch (err) {
+      log.warn(`host-os detection failed: ${(err as Error).message}`);
+    }
+
     loadSavedConfig();
+
+    // Apply setup-wizard overrides from sidecar.config.json BEFORE the
+    // overrides reapply below. These set hostOs / hostOllama / dmr fields
+    // from operator's UI selections (taking precedence over env / autodetect).
+    try {
+      const { applySetupOverrides } = await import('./lib/setup-overrides');
+      applySetupOverrides();
+    } catch (err) {
+      log.warn(`setup overrides failed: ${(err as Error).message}`);
+    }
+
+    // Re-apply host-Ollama overrides after config load — loadSavedConfig may
+    // have replaced the registry with a master-pushed version that doesn't
+    // carry the `runtime: 'host'` field.
+    try {
+      const { applyHostOllamaOverrides } = await import('./lib/state');
+      applyHostOllamaOverrides();
+      if (state.hostOllamaEnabled) {
+        log.info(`host-ollama enabled: host=${state.hostOllamaHost} roles=[${[...state.hostOllamaRoles].join(',')}] budgetMb=${state.hostOllamaBudgetMb}`);
+      }
+      if (state.dmrEnabled) {
+        log.info(`DMR enabled: host=${state.dmrHost} port=${state.dmrPort} roles=[${[...state.dmrRoles].join(',')}] budgetMb=${state.dmrBudgetMb}`);
+      }
+      if (state.hostOllamaEnabled || state.dmrEnabled) {
+        const { startHostOllamaWatchdog } = await import('./lib/host-ollama-watchdog');
+        startHostOllamaWatchdog();
+      }
+    } catch (err) {
+      log.warn(`host-runtime setup failed: ${(err as Error).message}`);
+    }
 
     // Read version from VERSION file
     const path = await import('path');

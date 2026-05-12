@@ -23,19 +23,62 @@ echo ""
 # --- Download manifest ---
 echo "[1/4] Fetching version info..."
 MANIFEST_URL="$SERVER/sideCar/builds/manifest.json"
-if ! curl -sf "$MANIFEST_URL" -o "$TMP_DIR/manifest.json"; then
+echo "  URL: $MANIFEST_URL"
+# `-m 15` caps the whole transfer at 15 s so we fail fast on unreachable
+# masters instead of curl's default ~5-min timeout (which feels like a hang).
+# Show curl's own error text on failure so the operator can tell DNS vs
+# connection-refused vs HTTP error at a glance.
+CURL_ERR=$(curl -fsS -m 15 --connect-timeout 5 "$MANIFEST_URL" -o "$TMP_DIR/manifest.json" 2>&1) || {
   echo "[ERROR] Could not reach $MANIFEST_URL"
-  echo "  Make sure the server is running and has a published sidecar build."
+  echo "  curl said: $CURL_ERR"
+  echo ""
+  echo "  Diagnostics:"
+  echo "  - Is the master server running at $SERVER?"
+  echo "      (curl -v $SERVER/api/health from this host)"
+  echo "  - Is this host on the same network as the master?"
+  echo "  - Is a firewall blocking outbound TCP to $SERVER?"
   exit 1
-fi
+}
 
-VERSION=$(python3 -c "import json; print(json.load(open('$TMP_DIR/manifest.json'))['version'])" 2>/dev/null \
-  || node -e "console.log(JSON.parse(require('fs').readFileSync('$TMP_DIR/manifest.json','utf8')).version)" 2>/dev/null \
-  || grep -o '"version":"[^"]*"' "$TMP_DIR/manifest.json" | head -1 | cut -d'"' -f4)
+# Parse JSON manifest. We deliberately avoid `python3` entirely: on macOS,
+# /usr/bin/python3 is a stub that EXISTS in PATH but pops the "Install Xcode
+# Command Line Tools" GUI dialog when actually invoked. `command -v python3`
+# returns success there, so guarding with it isn't enough. Same trap exists
+# for `git`. Use node if present, otherwise sed — neither triggers the
+# macOS dialog.
+#
+# IMPORTANT: the manifest is pretty-printed JSON ("version": "2.2.71" with
+# whitespace after the colon). Earlier this used `grep -o '"k":"v"'` with no
+# space, which silently failed under `set -eo pipefail` when Node wasn't
+# installed and killed the script with no error message. The sed pattern
+# below tolerates arbitrary whitespace.
+parse_json_field() {
+  local field="$1"
+  local file="$2"
+  local val=""
+  if command -v node >/dev/null 2>&1; then
+    val=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$file','utf8')).$field)" 2>/dev/null) || val=""
+    if [ -n "$val" ]; then printf '%s' "$val"; return 0; fi
+  fi
+  # POSIX sed fallback: capture the string value after `"<field>" : "..."`,
+  # tolerating any whitespace around the colon.
+  val=$(sed -nE 's/.*"'"$field"'"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$file" | head -1)
+  if [ -n "$val" ]; then printf '%s' "$val"; return 0; fi
+  return 1
+}
 
-EXPECTED_SHA=$(python3 -c "import json; print(json.load(open('$TMP_DIR/manifest.json'))['sha256'])" 2>/dev/null \
-  || node -e "console.log(JSON.parse(require('fs').readFileSync('$TMP_DIR/manifest.json','utf8')).sha256)" 2>/dev/null \
-  || grep -o '"sha256":"[^"]*"' "$TMP_DIR/manifest.json" | head -1 | cut -d'"' -f4)
+# Wrap assignments in explicit error handling so a parse failure surfaces
+# clearly instead of silently exiting under `set -e`.
+VERSION=$(parse_json_field version "$TMP_DIR/manifest.json") || {
+  echo "[ERROR] Could not parse 'version' from manifest. Manifest content:"
+  sed -n '1,20p' "$TMP_DIR/manifest.json"
+  exit 1
+}
+EXPECTED_SHA=$(parse_json_field sha256 "$TMP_DIR/manifest.json") || {
+  echo "[ERROR] Could not parse 'sha256' from manifest. Manifest content:"
+  sed -n '1,20p' "$TMP_DIR/manifest.json"
+  exit 1
+}
 
 echo "  Latest version: v$VERSION"
 

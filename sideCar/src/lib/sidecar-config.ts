@@ -8,9 +8,19 @@ const log = createLogger('sidecar-config');
 const SIDECAR_CONFIG_PATH = process.env.SIDECAR_CONFIG_PATH ||
   path.join(path.dirname(process.argv[1] || __filename), 'config', 'sidecar.config.json');
 
+export type HostOsValue = 'darwin' | 'win32' | 'linux';
+
 interface SidecarConfig {
   serverUrl: string | null;
   name?: string; // optional friendly name
+  // Setup-wizard overrides — when present, override auto-detected / env values
+  // at boot. Persisted by POST /api/host-os and POST /api/host-backend.
+  hostOsOverride?: HostOsValue;
+  hostOllamaEnabledOverride?: boolean;
+  hostOllamaRolesOverride?: string[];
+  hostOllamaBudgetMbOverride?: number;
+  dmrEnabledOverride?: boolean;
+  dmrRolesOverride?: string[];
 }
 
 export function loadSidecarConfig(): SidecarConfig | null {

@@ -3,7 +3,7 @@ import { redirect } from 'next/navigation';
 import AdminDashboard from '@/components/admin-dashboard';
 import { getConfig, getModelDownloadStatus } from '@/lib/db/config';
 
-const VALID_TABS = ['general', 'health', 'embedding', 'reranking', 'gpu', 'ocr', 'localai', 'aikeys', 'workers', 'redis', 'cache', 'filings', 'jobs', 'actionlog', 'drafts'] as const;
+const VALID_TABS = ['general', 'health', 'embedding', 'reranking', 'gpu', 'roletypes', 'roleassign', 'ocr', 'localai', 'aikeys', 'workers', 'redis', 'cache', 'filings', 'jobs', 'actionlog', 'drafts'] as const;
 
 type TabKey = (typeof VALID_TABS)[number];
 

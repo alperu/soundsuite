@@ -325,3 +325,26 @@ model SidecarCommand {
   @@index([sidecarUrl, status])
   @@index([status, expiresAt])
 }
+
+// ─── Role Registry (simplified — fixed mode catalog) ────────────────────
+//
+// The RoleType CRUD model was retired in favor of a fixed 4-mode catalog
+// resolved per-OS by the sidecar (see sideCar/src/lib/mode-templates.ts).
+// Operators no longer pick image/port/vram/type — they just enable modes
+// per sidecar and optionally override the model. HostRoleAssignment now
+// keys by `mode` string instead of a RoleType FK.
+
+model HostRoleAssignment {
+  id             String   @id @default(cuid())
+  sidecarUrl     String                  // e.g. "http://10.10.20.5:8098"
+  mode           String                  // 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker'
+  enabled        Boolean  @default(true)
+  minOnline      Int      @default(0)
+  idleTimeoutMin Int      @default(5)
+  modelOverride  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([sidecarUrl, mode])
+  @@index([sidecarUrl])
+}

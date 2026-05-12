@@ -61,6 +61,12 @@ if [ "$USE_DOCKER" = "1" ]; then
     echo "[ERROR] Dockerfile.run not found in $DIR. Re-run install.sh or use Node mode."
     exit 1
   fi
+  # macOS shim trap: /usr/bin/git is an Xcode-CLT stub that pops the
+  # "Install developer tools" dialog when invoked. Docker Desktop's BuildKit
+  # runs `git rev-parse` during `docker build` to add provenance labels.
+  # Force the legacy builder (no git probe) and disable attestations.
+  export DOCKER_BUILDKIT=0
+  export BUILDX_NO_DEFAULT_ATTESTATIONS=1
   DOCKER_ARGS="-d --name ss-sidecar --restart unless-stopped"
   if [ "$(uname)" = "Linux" ]; then
     DOCKER_ARGS="$DOCKER_ARGS --network host"

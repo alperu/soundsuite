@@ -1,12 +1,89 @@
-import { state } from './state';
+import { state, dockerSupportsGpu, type ContainerDef } from './state';
 import { getContainerState, startContainer, stopContainer, removeContainer, pullImage, createContainer, dockerRequest, buildExpectedConfig, detectConfigDrift, type ContainerState } from './docker';
-import { ollamaPs, ollamaList, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama } from './ollama-api';
+import { ollamaPs, ollamaList, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama, ollamaIsReady } from './ollama-api';
+import { dmrIsReady, dmrListModels } from './dmr-api';
 import { snapshotVram } from './vram-accountant';
 import { planEviction, type EvictionStep } from './eviction-planner';
 import { clearIdleTimerForRole } from './idle-timers';
 import { saveConfig } from './config';
 import { createLogger } from './logger';
 import { tasks } from './task-tracker';
+
+/**
+ * Build a synthetic "running" ContainerState for a host-runtime role. The
+ * sidecar doesn't manage a Docker container for these — Ollama runs natively
+ * on the Docker host. Returning a running state keeps the master's existing
+ * `containerStatus === 'running'` routing logic working without a master-side
+ * enum change.
+ */
+export function syntheticHostOllamaState(role: string, def: ContainerDef): ContainerState {
+  return {
+    exists: true,
+    status: 'running',
+    name: def.containerName,
+    image: 'host-ollama',
+    role,
+    ports: [{ host: def.port, container: def.port }],
+  } as ContainerState;
+}
+
+/** Synthetic "running" state for a Docker Model Runner role. Identical
+ *  shape to host-ollama — master's container-status routing keys on
+ *  `status === 'running'` only. Image label `'dmr'` so admin UI can
+ *  render the runtime correctly. */
+export function syntheticDmrState(role: string, def: ContainerDef): ContainerState {
+  return {
+    exists: true,
+    status: 'running',
+    name: def.containerName,
+    image: 'dmr',
+    role,
+    ports: [{ host: def.port, container: def.port }],
+  } as ContainerState;
+}
+
+/**
+ * Probe Docker Model Runner on the host. Updates state.dmrLastHealth.
+ * Cheap — single GET /engines/v1/models with 5s timeout.
+ */
+async function probeDmr(role: string): Promise<boolean> {
+  const started = Date.now();
+  const { ready, error, modelCount } = await dmrIsReady();
+  const at = Date.now();
+  let classified: 'dns' | 'dmr_not_running' | 'network' | undefined;
+  if (!ready) {
+    if (error === 'ENOTFOUND' || error === 'EAI_AGAIN') classified = 'dns';
+    else if (error === 'ECONNREFUSED') classified = 'dmr_not_running';
+    else if (error) classified = 'network';
+  }
+  state.dmrLastHealth = { at, ok: ready, error: classified, latencyMs: at - started, modelCount };
+  if (!ready) {
+    log.warn(`DMR probe failed for ${role} at ${state.dmrHost}:${state.dmrPort} — ${classified || error || 'unknown'}`);
+  }
+  return ready;
+}
+
+/**
+ * Probe the native Ollama on the Docker host for a host-runtime role.
+ * Updates state.hostOllamaLastHealth as a side-effect. Returns true if
+ * reachable. Cheap — single GET /api/tags with 5s timeout.
+ */
+async function probeHostOllama(role: string, def: ContainerDef): Promise<boolean> {
+  const started = Date.now();
+  const { ready, error } = await ollamaIsReady(def.port, role);
+  const at = Date.now();
+  let classified: 'dns' | 'ollama_not_running' | 'network' | undefined;
+  if (!ready) {
+    if (error === 'ENOTFOUND' || error === 'EAI_AGAIN') classified = 'dns';
+    else if (error === 'ECONNREFUSED') classified = 'ollama_not_running';
+    else if (error) classified = 'network';
+  }
+  state.hostOllamaLastHealth = { at, ok: ready, error: classified, latencyMs: at - started };
+  if (!ready) {
+    log.warn(`host-ollama probe failed for ${role} at ${state.hostOllamaHost}:${def.port} — ${classified || error || 'unknown'}`);
+  }
+  return ready;
+}
 
 /**
  * Ensure a container exists for a role: pull image + create if needed.
@@ -16,6 +93,59 @@ export async function ensureContainerForRole(role: string): Promise<void> {
   if (!def) return;
   // Utility containers (e.g. cuda) are managed by their own modules (gpu.ts)
   if (def.type === 'utility') return;
+  // Host-runtime roles: no Docker container to ensure. Probe reachability so
+  // we surface a clear error if native Ollama isn't running on the host.
+  if (def.runtime === 'host') {
+    const ok = await probeHostOllama(role, def);
+    if (!ok) {
+      const err = state.hostOllamaLastHealth.error || 'unreachable';
+      throw new Error(`host-ollama for ${role} not reachable at ${state.hostOllamaHost}:${def.port} (${err})`);
+    }
+    return;
+  }
+  // Docker Model Runner: probe DMR's TCP endpoint. No image pull, no
+  // container create. If unreachable, surface an actionable error.
+  if (def.runtime === 'docker-model-runner') {
+    const ok = await probeDmr(role);
+    if (!ok) {
+      const err = state.dmrLastHealth.error || 'unreachable';
+      const hint = err === 'dmr_not_running'
+        ? `Enable Docker Model Runner in Docker Desktop (Settings → AI → Enable Docker Model Runner + Enable host-side TCP support on port ${state.dmrPort}).`
+        : err === 'dns'
+        ? `host.docker.internal cannot be resolved — check Docker networking.`
+        : `Verify SS_DMR_HOST/SS_DMR_PORT and that Docker Model Runner is listening on TCP.`;
+      throw new Error(
+        `Docker Model Runner for ${role} not reachable at ${state.dmrHost}:${state.dmrPort} (${err}). ${hint}` +
+        (def.model ? ` After enabling, run: docker model pull ${def.model}` : ''),
+      );
+    }
+    if (def.model) {
+      // DMR doesn't auto-pull on demand the way Ollama does — log a hint
+      // so the operator knows to run `docker model pull` themselves.
+      const known = await dmrListModels().catch(() => []);
+      const modelBase = def.model.split(':')[0];
+      const present = known.some((m) => m === def.model || m.includes(modelBase));
+      if (!present) {
+        log.warn(
+          `DMR is reachable but model "${def.model}" is not in /engines/v1/models. ` +
+          `Run on the Docker host: \`docker model pull ${def.model}\` (DMR has no auto-pull API).`,
+        );
+      }
+    }
+    return;
+  }
+  // Mac/Windows Docker has no GPU passthrough. Refuse to pull or create
+  // containers that need it — they always fail with the CDI "no known GPU
+  // vendor" error and put the sidecar into a retry loop that fills logs
+  // and burns bandwidth (the nvidia/cuda image is ~200 MB, vllm is multi-GB).
+  if (!dockerSupportsGpu()) {
+    throw new Error(
+      `Cannot provision ${role} (${def.type}) on this host: Docker has no GPU support on ${state.hostOs}. ` +
+      `Options: SS_HOST_OLLAMA=1 (native Ollama, Ollama-protocol roles only), ` +
+      `SS_DMR=1 (Docker Model Runner / vllm-metal on Apple Silicon, supports vLLM rerank), ` +
+      `or move this role to a Linux+NVIDIA sidecar.`,
+    );
+  }
   const cs = await getContainerState(def.containerName);
   if (cs.exists) {
     const expected = buildExpectedConfig(role);
@@ -121,6 +251,23 @@ export async function evictForRole(role: string): Promise<EvictionStep[]> {
 export async function loadGpuOnly(role: string): Promise<boolean> {
   const def = state.registry[role];
   if (!def || def.type !== 'ollama' || !def.model) return false;
+  // Host-runtime: skip the eviction loop entirely. We can't `docker stop`
+  // anything on the host's native Ollama (it isn't a container we own), and
+  // the eviction planner's VRAM snapshot is built from `nvidia-smi`, which
+  // doesn't exist on Mac. Ollama itself manages placement on the host; if it
+  // can't fit, the load returns false and the caller retries on the normal
+  // back-off path.
+  if (def.runtime === 'host') {
+    return ollamaLoad(def.port, def.model, { forceFullGpu: true, role });
+  }
+  // DMR: no manual load — DMR's scheduler spins up vllm-metal on first
+  // request. Skip eviction (we don't own any host VRAM) and report ready
+  // if DMR is reachable. The model itself isn't validated until a real
+  // request hits /engines/v1/chat/completions.
+  if (def.runtime === 'docker-model-runner') {
+    const { ready } = await dmrIsReady();
+    return ready;
+  }
   const evicted = await evictForRole(role);
   if (evicted.length > 0) {
     // VRAM doesn't release instantly. unloadModel (Ollama keep_alive=0) frees
@@ -144,14 +291,43 @@ export async function loadGpuOnly(role: string): Promise<boolean> {
 export async function getAllContainerStates(): Promise<Record<string, ContainerState>> {
   const states: Record<string, ContainerState> = {};
   for (const [role, def] of Object.entries(state.registry)) {
-    states[role] = await getContainerState(def.containerName);
-    states[role].role = role;
+    // Host-runtime roles: synthesize a "running" state. No Docker inspect.
+    if (def.runtime === 'host') {
+      states[role] = syntheticHostOllamaState(role, def);
+    } else if (def.runtime === 'docker-model-runner') {
+      // DMR: synthesize running, list models from /engines/v1/models in
+      // place of Ollama's /api/ps. We don't know which model is "loaded"
+      // (DMR doesn't expose per-process VRAM) — just surface what's
+      // available so the master can route.
+      states[role] = syntheticDmrState(role, def);
+      try {
+        const known = await dmrListModels();
+        states[role].loadedModels = known.map((name) => ({
+          name,
+          size: '?',
+          sizeBytes: 0,
+          sizeVram: 0,
+          gpuPercent: undefined,
+          processor: 'DMR',
+          until: '',
+        }));
+        if (def.model) {
+          const modelBase = def.model.split(':')[0];
+          states[role].modelOnDisk = known.some((m) => m === def.model || m.includes(modelBase));
+        }
+      } catch {
+        /* non-critical — leave loadedModels undefined */
+      }
+    } else {
+      states[role] = await getContainerState(def.containerName);
+      states[role].role = role;
+    }
     states[role].config = { image: def.image, model: def.model, port: def.port, vram: def.vram, type: def.type, gpuOnly: def.gpuOnly };
 
     // Fetch loaded models for running Ollama containers via HTTP API
     if (def.type === 'ollama' && states[role].status === 'running') {
       try {
-        const psModels = await ollamaPs(def.port);
+        const psModels = await ollamaPs(def.port, role);
         const models = psModels.map(m => ({
           name: m.name,
           size: m.size ? `${Math.round(m.size / 1e9)}GB` : '?',
@@ -194,7 +370,7 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
               log.warn(`gpuOnly watchdog: ${role}/${m.name} on CPU — unloading and reloading with full GPU`);
               state.modelLoading.add(role);
               const remediateTaskId = tasks.start('model-load', `Remediate ${m.name} (force GPU)`, role);
-              ollamaUnload(def.port, m.name)
+              ollamaUnload(def.port, m.name, role)
                 // Wait ~1.5s for VRAM to actually free; otherwise the planner's
                 // snapshot inside loadGpuOnly still sees the old model in VRAM
                 // and may over-evict.
@@ -213,7 +389,7 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
         // Check if configured model is on disk (for UI status display)
         if (def.model) {
           try {
-            const diskModelsForCheck = await ollamaList(def.port);
+            const diskModelsForCheck = await ollamaList(def.port, role);
             const modelBase = def.model.split(':')[0];
             states[role].modelOnDisk = diskModelsForCheck.some(m => m.includes(modelBase));
           } catch { /* non-critical */ }
@@ -227,12 +403,25 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
         const lastAttempt = state.lastModelAttempt[role] || 0;
         const hasActiveTask = tasks.getActive().some(t => t.role === role);
         const pullFails = state.pullFailCount[role] || 0;
-        if (model && models.length === 0 && !state.modelLoading.has(role) && !hasActiveTask && (Date.now() - lastAttempt) > MODEL_ATTEMPT_COOLDOWN && pullFails < 3) {
+        // Honor operator's minOnline=0 opt-out for background auto-load.
+        // Without this, the heartbeat keeps pulling+loading models for roles
+        // the operator has explicitly turned off.
+        const optedOut = (state.minOnline?.[role] ?? 1) === 0;
+        // Honor manual Stop: once the user clicks Stop on a host-runtime
+        // role, the heartbeat would otherwise see `status: 'running'` +
+        // `models.length === 0` and immediately reload within 60s. Skip
+        // until the next manual Acquire/Start clears state.userStopped.
+        const userStopped = state.userStopped.has(role);
+        if ((optedOut || userStopped) && model && models.length === 0) {
+          const reason = optedOut ? 'minOnline=0' : 'manually stopped';
+          log.info(`heartbeat: skipping ${role} auto-load — ${reason} (operator opted out)`);
+        }
+        if (!optedOut && !userStopped && model && models.length === 0 && !state.modelLoading.has(role) && !hasActiveTask && (Date.now() - lastAttempt) > MODEL_ATTEMPT_COOLDOWN && pullFails < 3) {
           log.info(`heartbeat: ${role} model ${model} not in VRAM (0 models loaded), checking disk...`);
           state.lastModelAttempt[role] = Date.now();
           const modelBase = model.split(':')[0];
           try {
-            const diskModels = await ollamaList(def.port);
+            const diskModels = await ollamaList(def.port, role);
             log.info(`heartbeat: ollama list → ${diskModels.length} models: ${diskModels.join(', ')}`);
             const onDisk = diskModels.some(m => m.includes(modelBase));
             if (onDisk) {
@@ -245,6 +434,7 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
                 ? loadGpuOnly(role)
                 : ollamaLoad(def.port, model, {
                     onProgress: (detail) => tasks.update(loadTaskId, { detail: detail.slice(0, 100) }),
+                    role,
                   });
               loadPromise.then((ok) => {
                 if (ok) tasks.complete(loadTaskId);
@@ -265,10 +455,11 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
                   log.info(`heartbeat: pull progress: ${pct}% ${detail.slice(0, 80)}`);
                   tasks.update(pullTaskId, { progress: pct, detail: detail.slice(0, 80) });
                 },
+                role,
               })
                 .then(async () => {
                   // Post-pull verification
-                  const verifyModels = await ollamaList(def.port);
+                  const verifyModels = await ollamaList(def.port, role);
                   log.info(`heartbeat: post-pull verify → ${verifyModels.join(', ')}`);
                   if (!verifyModels.some(m => m.includes(modelBase))) {
                     tasks.fail(pullTaskId, 'Model not found on disk after pull');
@@ -287,6 +478,7 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
                     ? loadGpuOnly(role)
                     : ollamaLoad(def.port, model, {
                         onProgress: (detail) => tasks.update(loadTaskId, { detail: detail.slice(0, 100) }),
+                        role,
                       });
                   return loadPromise.then((ok) => {
                     if (ok) tasks.complete(loadTaskId);
@@ -368,11 +560,22 @@ export async function switchMode(newMode: string): Promise<Record<string, unknow
   for (const role of toStart) {
     try {
       await ensureContainerForRole(role);
-      const cs = await getContainerState(state.registry[role].containerName);
+      const def = state.registry[role];
+      // Host-runtime roles have no Docker container to inspect/start —
+      // ensureContainerForRole already probed reachability.
+      if (def.runtime === 'host') {
+        startResults[role] = 'host-runtime';
+        continue;
+      }
+      if (def.runtime === 'docker-model-runner') {
+        startResults[role] = 'docker-model-runner';
+        continue;
+      }
+      const cs = await getContainerState(def.containerName);
       if (cs.status === 'running') {
         startResults[role] = 'already_running';
       } else {
-        await startContainer(state.registry[role].containerName);
+        await startContainer(def.containerName);
         startResults[role] = 'started';
       }
     } catch (err) {
@@ -392,7 +595,28 @@ export async function switchMode(newMode: string): Promise<Record<string, unknow
     }
     try {
       clearIdleTimerForRole(role);
-      await stopContainer(state.registry[role].containerName);
+      const def = state.registry[role];
+      // Host-runtime: unload the model from host Ollama instead of docker stop.
+      // Other models on the same Ollama (other roles) remain loaded — Ollama's
+      // keep_alive: 0 is keyed by model name.
+      if (def.runtime === 'host') {
+        if (def.model) {
+          await ollamaUnload(def.port, def.model, role);
+          stopResults[role] = 'unloaded';
+        } else {
+          stopResults[role] = 'host-runtime';
+        }
+        continue;
+      }
+      if (def.runtime === 'docker-model-runner') {
+        // DMR has no public unload API. Skip — DMR's scheduler decides
+        // when to evict vllm-metal workers. Logged as a no-op so the
+        // operator sees we tried.
+        log.info(`switchMode stop: ${role} on DMR — no unload API available, model stays resident`);
+        stopResults[role] = 'docker-model-runner (no unload API)';
+        continue;
+      }
+      await stopContainer(def.containerName);
       stopResults[role] = 'stopped';
     } catch (err) {
       stopResults[role] = `error: ${(err as Error).message}`;
@@ -413,6 +637,47 @@ export async function provisionContainers(): Promise<Record<string, Record<strin
     // Utility containers (e.g. cuda) are managed by their own modules (gpu.ts)
     if (def.type === 'utility') continue;
     results[role] = { image: 'skipped', container: 'skipped', model: 'skipped' };
+
+    // Mac/Windows: refuse to pull/create any GPU container. The image pulls
+    // alone are gigabytes and the containers will never start.
+    if (def.runtime !== 'host' && def.runtime !== 'docker-model-runner' && !dockerSupportsGpu()) {
+      results[role].image = 'skipped-no-gpu';
+      results[role].container = `skipped-no-gpu (host=${state.hostOs}; try SS_HOST_OLLAMA=1 or SS_DMR=1)`;
+      continue;
+    }
+
+    // Docker Model Runner: no image pull, no container create. Probe
+    // reachability and hint at `docker model pull` if model is missing.
+    if (def.runtime === 'docker-model-runner') {
+      results[role].image = 'docker-model-runner';
+      results[role].container = 'docker-model-runner';
+      try {
+        await ensureContainerForRole(role); // probes DMR + logs pull hint
+        results[role].model = def.model ? 'managed-by-dmr' : 'no-model';
+      } catch (err) {
+        results[role].model = `error: ${(err as Error).message}`;
+      }
+      continue;
+    }
+
+    // Host-runtime: no Docker image to pull, no container to create. Probe
+    // reachability and pull the model on the host Ollama if needed.
+    if (def.runtime === 'host') {
+      results[role].image = 'host-runtime';
+      results[role].container = 'host-runtime';
+      try {
+        await ensureContainerForRole(role); // probes host Ollama
+        if (def.model) {
+          await waitForOllama(def.port, 30_000, role);
+          await ollamaPull(def.port, def.model, { role });
+          results[role].model = 'pulled';
+          log.info(`Model ${def.model} pulled for ${role} on host Ollama`);
+        }
+      } catch (err) {
+        results[role].model = `error: ${(err as Error).message}`;
+      }
+      continue;
+    }
 
     try {
       if (!pulledImages.has(def.image)) {

@@ -6,6 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Sound Suite (court-lens-mcp) is a local, self-hosted document intelligence platform for legal case management. It monitors directories for court PDFs, processes them through a hybrid OCR/vector pipeline, exposes data via Model Context Protocol (MCP) for AI consumption, and provides a Next.js dashboard.
 
+## Tooling notes for Claude
+
+**context-mode is installed in this repo.** Use its MCP helpers instead of raw shell or `WebFetch`:
+
+- **Fetching web pages**: use `mcp__plugin_context-mode_context-mode__ctx_fetch_and_index(url, source)` to fetch + index a page, then `mcp__plugin_context-mode_context-mode__ctx_search(queries: [...])` to query it. For one-off scrapes where you only need a small extract, use `mcp__plugin_context-mode_context-mode__ctx_execute(language: "javascript", code: "...")` with a plain `await fetch(...)` and `console.log()` only the relevant slice. **Do not** use `WebFetch`, `curl`, or `wget` for web content — the PreToolUse hook will block them.
+- **Large command output**: use `mcp__plugin_context-mode_context-mode__ctx_batch_execute({commands, queries})` for multi-step shell + analysis (auto-indexes results), or `ctx_execute({language: "shell", code: "..."})` for a single noisy command. Bash via the Bash tool is fine for short outputs (git, mkdir, mv, navigation).
+- **Analyzing files**: prefer `ctx_execute_file(path, language, code)` over reading the whole file when you just need a summary or extraction. `Read` is correct when you're about to `Edit` the file.
+- **Writing files**: always use the native `Write` / `Edit` tools — never use `ctx_execute` or `Bash` to author code or configs.
+
+Memory of context-mode tool routing: check `~/.claude/projects/-Users-alper-Code-court-lens-mcp/memory/MEMORY.md` for any user-specific preferences before invoking a tool that might have been overridden.
+
 ## Commands
 
 ```bash
@@ -117,6 +128,69 @@ Supports auth modes: `none`, `apikey`, `oauth` (configured via `MCP_AUTH_MODE`).
 - **Back up the database** before any migration: `cp prisma/data/sound-suite.db prisma/data/sound-suite.db.bak`
 - **Prefer `prisma migrate deploy`** for applying migrations to an existing database with data — it applies without resetting.
 - The active database file is `prisma/data/sound-suite.db` (NOT `data/sound-suite.db` at project root).
+
+### Host-Ollama mode (Mac / Windows hosts)
+
+The sidecar can manage a **native Ollama process on the Docker host** instead of a containerized one. Used on macOS (Metal) and Windows (CUDA) hosts where Docker has no GPU passthrough but native Ollama does.
+
+**Operator setup on the host (one-time):**
+- macOS: `brew install ollama && brew services start ollama && launchctl setenv OLLAMA_HOST 0.0.0.0:11434`
+- Windows: install Ollama from ollama.com, then set system env `OLLAMA_HOST=0.0.0.0:11434` and restart the Ollama service.
+- Pull the models you'll use: `ollama pull qwen3-embedding:4b`, etc.
+
+**Sidecar run command:**
+```
+docker run -d --name ss-sidecar \
+  -p 8098:3000 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --add-host host.docker.internal:host-gateway \
+  -e MASTER_URL=http://<master>:3000 \
+  -e SS_HOST_OLLAMA=1 \
+  -e SS_HOST_OLLAMA_ROLES=embedding,completion,ocr \
+  -e SS_HOST_OLLAMA_BUDGET_MB=16384 \
+  -e HOST_OS=darwin \
+  soundsuite-sidecar:2.2.70
+```
+
+**Env vars:**
+- `SS_HOST_OLLAMA=1` — enable host-Ollama mode (default off; sidecar manages Docker containers as usual).
+- `SS_HOST_OLLAMA_ROLES` — comma-separated roles to route to host Ollama (only `ollama`-type roles; `reranker` stays vLLM CUDA-only).
+- `SS_HOST_OLLAMA_HOST` — default `host.docker.internal`. Override if the host is reachable elsewhere.
+- `SS_HOST_OLLAMA_BUDGET_MB` — operator-declared VRAM budget for the host endpoint (e.g. `16384` for a 24 GB Mac leaving 8 GB for the OS). `0` = unknown; planner falls back to per-role `def.vram`.
+- `HOST_OS` — `darwin` / `win32` / `linux`. Optional hint; sidecar detects from Docker `/info` if unset.
+
+**Behavior changes for host-runtime roles:**
+- `getContainerState` returns a synthetic `{status: 'running'}` (master routes unchanged).
+- `ollamaPull` / `ollamaLoad` / `ollamaUnload` hit `host.docker.internal:11434` instead of the in-container Ollama.
+- Idle timer fires `ollamaUnload(model)` with `keep_alive: 0` instead of `docker stop`. Other models on the same Ollama keep their VRAM.
+- `nvidia-smi` is unavailable on Mac/Windows → `vramSource: 'host-declared'` (when budget set) or `'unknown'`.
+
+**Health watchdog**: `host-ollama-watchdog.ts` probes the host endpoint every 15 s and reconciles `state.modelLoading` against `/api/ps` every 60 s. Status surfaced at `/api/status.hostOllama`. The same watchdog also probes Docker Model Runner when `SS_DMR=1` (see below) and surfaces health at `/api/status.dmr`.
+
+### Docker Model Runner mode (vllm-metal on Apple Silicon)
+
+A third runtime: `'docker-model-runner'`. When `SS_DMR=1`, roles listed in `SS_DMR_ROLES` are served by Docker Model Runner on the Docker host (default TCP port `12434`). On Mac this means **vllm-metal** — real vLLM via MLX/Metal, including `/engines/vllm/v1/rerank`. The sidecar does not manage DMR's lifecycle; DMR's scheduler lazy-starts vllm-metal workers on first request and reaps them on its own.
+
+**Env vars:**
+- `SS_DMR=1` — enable DMR mode.
+- `SS_DMR_ROLES` — comma-separated roles routed to DMR (e.g. `reranker,embedding`). Works for any role (vLLM rerank is the killer use case — host-Ollama can't do that).
+- `SS_DMR_HOST` — default `host.docker.internal`.
+- `SS_DMR_PORT` — default `12434` (Docker Desktop → AI → Enable host-side TCP).
+- `SS_DMR_BUDGET_MB` — operator-declared VRAM budget (informational; DMR manages eviction itself).
+
+**Example:** reranker on Mac via DMR, embedding via host-Ollama:
+```
+-e SS_HOST_OLLAMA=1 -e SS_HOST_OLLAMA_ROLES=embedding,completion,ocr \
+-e SS_DMR=1 -e SS_DMR_ROLES=reranker -e SS_DMR_PORT=12434 \
+```
+
+**Behavior:**
+- `getDockerHost(role)` returns `state.dmrHost` for DMR roles; their `def.port` is rewritten to `state.dmrPort`.
+- `ensureContainerForRole`: probes `GET /engines/v1/models` (5 s timeout). On failure throws with hint to enable DMR in Docker Desktop and `docker model pull <model>`.
+- `getAllContainerStates`: synthesizes `{status: 'running', image: 'dmr'}`, lists models from `/engines/v1/models`.
+- Idle timer: no-op — DMR has no public unload API. Logged as deferred-to-v2.
+- Operator must `docker model pull <model>` on the host; DMR has no auto-pull from the sidecar.
+- Master inference calls go DIRECT to `http://<dmr-host>:12434/engines/v1/...` (chat, embed) or `/engines/vllm/v1/rerank` — NOT through the sidecar.
 
 ### Auto-Commit Hook
 

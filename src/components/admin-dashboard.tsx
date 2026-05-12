@@ -11,6 +11,8 @@ import { useRouter, usePathname } from 'next/navigation';
 import AdminSettings from '@/components/admin-settings';
 import AdminRerankingSettings from '@/components/admin-reranking-settings';
 import GpuFleetPanel from '@/components/admin-gpu-fleet';
+import AdminRoleTypes from '@/components/admin-role-types';
+import AdminRoleAssignments from '@/components/admin-role-assignments';
 import CacheManager from '@/components/admin/cache-manager';
 import { CopyButton } from '@/components/copy-button';
 import { AppConfig, ModelDownloadInfo } from '@/lib/db/config';
@@ -21,7 +23,7 @@ interface Props {
   initialTab?: TabKey;
 }
 
-type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'ocr' | 'localai' | 'aikeys' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts';
+type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'ocr' | 'localai' | 'aikeys' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts';
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'general', label: 'General', icon: '⊞' },
@@ -29,6 +31,8 @@ const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'embedding', label: 'Embedding', icon: '⬡' },
   { key: 'reranking', label: 'Reranking', icon: '⇅' },
   { key: 'gpu', label: 'GPU Fleet', icon: '⊛' },
+  { key: 'roletypes', label: 'Mode Types', icon: '◆' },
+  { key: 'roleassign', label: 'Role Assignments', icon: '⇆' },
   { key: 'ocr', label: 'OCR', icon: '◉' },
   { key: 'localai', label: 'Local AI', icon: '⊚' },
   { key: 'aikeys', label: 'AI Keys $', icon: '⚷' },
@@ -95,6 +99,27 @@ const TAB_DOCS: Record<TabKey, { title: string; description: string; details: st
       'Start/stop containers remotely with one click',
       'Per-model idle timeouts auto-stop containers to free GPU VRAM',
       'Push timeout config to all connected sidecars at once',
+    ],
+  },
+  roletypes: {
+    title: 'Mode Types',
+    description: 'Fixed catalog of 4 GPU workload modes. Sidecars auto-resolve image/port/VRAM by host OS.',
+    details: [
+      'ss-embedding — document and query embeddings (vector search)',
+      'ss-completion — chat / completion model for agent calls',
+      'ss-ocr — vision-LLM OCR for scanned PDFs and exhibit images',
+      'ss-reranker — cross-encoder reranking (Linux + NVIDIA only; vllm-metal lacks cross-encoders)',
+      'To assign modes to hosts, see the Role Assignments tab',
+    ],
+  },
+  roleassign: {
+    title: 'Role Assignments',
+    description: 'Pick which modes each sidecar should run. Per-host model and runtime overrides.',
+    details: [
+      'Click a chip to toggle a mode on/off — auto-syncs within a few seconds',
+      'Unavailable modes (e.g. ss-reranker on macOS) are greyed out with a tooltip',
+      'Click the gear on an enabled chip to override model / minOnline / idle timeout',
+      'Reset to defaults restores per-OS sensible assignments for a sidecar',
     ],
   },
   ocr: {
@@ -246,6 +271,8 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
           {activeTab === 'embedding' && <AdminSettings initialConfig={initialConfig} initialModelDownloads={initialModelDownloads} />}
           {activeTab === 'reranking' && <AdminRerankingSettings initialConfig={initialConfig} />}
           {activeTab === 'gpu' && <GpuFleetPanel />}
+          {activeTab === 'roletypes' && <AdminRoleTypes />}
+          {activeTab === 'roleassign' && <AdminRoleAssignments />}
           {activeTab === 'ocr' && <OCRProviderPanel initialConfig={initialConfig} />}
           {activeTab === 'localai' && <LocalAIPanel />}
           {activeTab === 'aikeys' && <AIKeysPanel />}

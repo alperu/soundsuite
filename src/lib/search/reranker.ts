@@ -164,7 +164,19 @@ export async function rerank<T extends RerankableResult>(
 
   const effectiveTopN = topN ?? config.rerankTopN ?? 10;
   const timeoutMs = config.rerankTimeoutMs ?? 90_000;
-  const maxDocChars = config.rerankMaxDocChars ?? 30_000;
+  // Model context budget. Qwen3-Reranker-8B is started with --max-model-len 8192;
+  // any single (query, doc) pair over that is rejected with HTTP 400 and aborts
+  // the whole batch. Keep in sync with sideCar/src/lib/docker.ts buildVllmCmd.
+  const MAX_MODEL_TOKENS = 8192;
+  const SAFETY_MARGIN_TOKENS = 256;
+  const CHARS_PER_TOKEN = 3.0; // conservative for English legal prose
+  const queryTokensEstimate = Math.ceil((query?.length ?? 0) / CHARS_PER_TOKEN);
+  const perDocTokenBudget = Math.max(
+    256,
+    MAX_MODEL_TOKENS - queryTokensEstimate - SAFETY_MARGIN_TOKENS,
+  );
+  const perDocCharBudget = Math.floor(perDocTokenBudget * CHARS_PER_TOKEN);
+  const maxDocChars = Math.min(config.rerankMaxDocChars ?? 30_000, perDocCharBudget);
 
   // Configure lifecycle (idle timeout config)
   rerankerLifecycle.setEnabled(config.rerankAutoManage);
@@ -179,6 +191,26 @@ export async function rerank<T extends RerankableResult>(
     const configHostname = (() => { try { return new URL(config.rerankHost).hostname; } catch { return ''; } })();
     for (const s of fleet.sidecars) {
       if (s.status !== 'connected') continue;
+      // Only sidecars that actually host a running vLLM reranker. Skip:
+      //  - synthetic images ('dmr', 'host-ollama'): the sidecar reports the
+      //    role as "running" for routing purposes but doesn't serve /v1/rerank
+      //    (e.g. Mac with host-Ollama for embedding doesn't run vLLM).
+      //  - status !== 'running': no container, exited, or in progress.
+      //  - missing reranker block: older sidecars or non-GPU hosts that don't
+      //    track the role at all.
+      // Without this guard, a Mac sidecar at host.docker.internal lands in
+      // the candidate list and the master burns 5-15 s waiting for preflight
+      // to fail before falling through to a real reranker host.
+      const rerCS = (s.sidecarStatus as { containers?: Record<string, { status?: string; image?: string }> } | undefined)?.containers?.reranker;
+      if (!rerCS) continue;
+      if (rerCS.status !== 'running') {
+        logger.info(`Rerank candidate skip: ${s.hostname} reranker.status=${rerCS.status}`);
+        continue;
+      }
+      if (rerCS.image === 'dmr' || rerCS.image === 'host-ollama') {
+        logger.info(`Rerank candidate skip: ${s.hostname} reranker.image=${rerCS.image} (synthetic — not a real vLLM endpoint)`);
+        continue;
+      }
       try {
         const h = new URL(s.url).hostname;
         if (h === configHostname) continue;
@@ -187,12 +219,21 @@ export async function rerank<T extends RerankableResult>(
     }
   } catch { /* fleet-router unavailable, single-host only */ }
 
+  // Lifecycle acquire happens ONCE for the primary host below — not per
+  // candidate. Previously this ran inside tryHost, so every failed failover
+  // sent an extra /acquire to the sidecar while markRequestDone() only sent
+  // one /release. Net leak: +1 activeRequests per failed call, which kept
+  // idle timers from ever starting and pinned VRAM at 99%.
+  let lifecycleAcquired = false;
+  try {
+    await rerankerLifecycle.ensureRunning(config.rerankHost);
+    lifecycleAcquired = true;
+  } catch (err) {
+    warn('lifecycle', config.rerankHost, (err as Error).message);
+    // Fall through — preflight on each candidate will catch unreachable hosts.
+  }
+
   const tryHost = async (host: string): Promise<{ items: T[]; tokens: number; model: string } | { error: RerankWarning }> => {
-    try {
-      await rerankerLifecycle.ensureRunning(host);
-    } catch (err) {
-      return { error: { source: 'reranker', host, reason: 'lifecycle', message: (err as Error).message } };
-    }
     const pf = await rerankerPreflight(host, config.rerankModel);
     if (!pf.ok) {
       return { error: { source: 'reranker', host, reason: 'preflight', message: pf.error || 'preflight failed' } };
@@ -296,7 +337,12 @@ export async function rerank<T extends RerankableResult>(
     warn('fetch', config.rerankHost, errMessage);
     return results;
   } finally {
-    rerankerLifecycle.markRequestDone();
+    // Pair with the single ensureRunning() above. Only release if the
+    // initial acquire actually succeeded — otherwise we'd decrement a
+    // counter we never incremented.
+    if (lifecycleAcquired) {
+      rerankerLifecycle.markRequestDone();
+    }
   }
 }
 

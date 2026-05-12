@@ -14,10 +14,25 @@ export async function register() {
       console.error('[instrumentation] Failed to apply SQLite pragmas:', err);
     });
 
+  // Seed the role registry on first run (idempotent; no-op once seeded).
+  import('./lib/db/role-registry-seed')
+    .then(({ seedRoleRegistry }) => seedRoleRegistry())
+    .catch((err) => {
+      console.error('[instrumentation] Role registry seed failed:', err);
+    });
+
   // Fire-and-forget — server must always start regardless of worker init outcome
   import('./services/worker-init')
     .then(({ getWorkerManager }) => getWorkerManager())
     .catch((err) => {
       console.error('[instrumentation] Failed to auto-start worker pool:', err);
+    });
+
+  // Reranker deep-health watchdog — auto-restarts deadlocked vLLM workers.
+  // Idempotent; safe across HMR reloads.
+  import('./lib/search/reranker-watchdog')
+    .then(({ startRerankerWatchdog }) => startRerankerWatchdog())
+    .catch((err) => {
+      console.error('[instrumentation] Failed to start reranker watchdog:', err);
     });
 }

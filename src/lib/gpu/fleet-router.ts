@@ -13,6 +13,13 @@ import { getConfig, setConfigValue } from '@/lib/db/config';
 import * as wsRelay from '@/lib/gpu/ws-relay';
 import { queueSidecarCommand } from '@/lib/gpu/command-queue';
 import * as statusCache from '@/lib/gpu/status-cache';
+import {
+  getEnabledModesForHost,
+  getModelOverridesForHost,
+  getEffectiveMinOnline,
+  getEffectiveIdleTimeoutsMs,
+} from '@/lib/db/role-registry';
+import { seedAssignmentsForHost } from '@/lib/db/role-registry-seed';
 
 const logger = createLogger('FleetRouter');
 
@@ -346,65 +353,155 @@ export async function pushIdleTimeouts(agentUrl: string, timeouts: IdleTimeouts)
   return result;
 }
 
-/** Build a model registry object from current admin config. */
-async function buildModelRegistry(): Promise<Record<string, { model: string }>> {
-  const config = await getConfig();
-  const registry: Record<string, { model: string }> = {};
-
-  // Embedding model — only if Ollama provider
-  if (config.embeddingProvider === 'ollama' && config.ollamaModel) {
-    registry.embedding = { model: config.ollamaModel };
-  }
-
-  // Completion model
-  if (config.ollamaCompletionModel) {
-    registry.completion = { model: config.ollamaCompletionModel };
-  }
-
-  // OCR model — only if Ollama OCR provider
-  if (config.ocrProvider === 'ollama' && config.ocrOllamaModel) {
-    registry.ocr = { model: config.ocrOllamaModel };
-  }
-
-  // Reranker model
-  if (config.rerankModel) {
-    registry.reranker = { model: config.rerankModel };
-  }
-
-  return registry;
+/**
+ * Detect the sidecar's reported hostOs from the status cache. Returns
+ * 'unknown' when the sidecar has not yet reported a host block.
+ */
+function detectHostOs(agentUrl: string): 'linux' | 'darwin' | 'win32' | 'unknown' {
+  const cached = statusCache.getSidecarStatus(agentUrl);
+  const os = cached?.host?.os;
+  if (os === 'linux' || os === 'darwin' || os === 'win32') return os;
+  return 'unknown';
 }
 
-/** Push current admin model names to a sidecar's container registry. */
-export async function pushModelRegistry(agentUrl: string): Promise<any> {
-  const registry = await buildModelRegistry();
-  if (Object.keys(registry).length === 0) {
-    logger.info('No model overrides to push', { agent: agentUrl });
-    return { pushed: false, reason: 'no model overrides configured' };
+/**
+ * Build a legacy `registry: { role: ContainerDef }` payload from a set of
+ * enabled modes + per-mode overrides + the host's OS. Mirrors the sidecar's
+ * mode-templates.resolveMode() so old sidecars (pre-2.3) that only
+ * understand the legacy shape still get a coherent definition.
+ *
+ * Skips modes that are unavailable on the given OS (e.g. ss-reranker on
+ * darwin/win32). Returns short role keys (`embedding`, `completion`, ...)
+ * matching the sidecar's internal registry keys.
+ */
+function buildLegacyRegistry(
+  enabledModes: string[],
+  modelOverrides: Record<string, string>,
+  hostOs: 'linux' | 'darwin' | 'win32' | 'unknown',
+): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
+  const isLinux = hostOs === 'linux';
+  for (const mode of enabledModes) {
+    const role = mode.replace(/^ss-/, '');
+    const override = modelOverrides[mode];
+    const containerName = `ss-${role}`;
+    switch (mode) {
+      case 'ss-embedding':
+        out[role] = isLinux
+          ? { image: 'ollama/ollama', model: override || 'qwen3-embedding:0.6b', port: 11434, vram: 1200, type: 'ollama', modes: ['indexing', 'searching'], containerName, priority: 'high' }
+          : { image: '', model: override || 'qwen3-embedding:0.6b', port: 11434, vram: 1200, type: 'ollama', modes: ['indexing', 'searching'], containerName, priority: 'high', runtime: 'host' };
+        break;
+      case 'ss-completion':
+        out[role] = isLinux
+          ? { image: 'ollama/ollama', model: override || 'qwen3.5:9b', port: 11435, vram: 10000, type: 'ollama', modes: ['searching'], containerName, priority: 'normal' }
+          : { image: '', model: override || 'qwen3.5:9b', port: 11434, vram: 10000, type: 'ollama', modes: ['searching'], containerName, priority: 'normal', runtime: 'host' };
+        break;
+      case 'ss-ocr':
+        out[role] = isLinux
+          ? { image: 'ollama/ollama', model: override || 'richardyoung/olmocr2:7b-q8', port: 11436, vram: 8000, type: 'ollama', modes: ['indexing'], containerName, gpuOnly: true, priority: 'critical' }
+          : { image: '', model: override || 'richardyoung/olmocr2:7b-q8', port: 11434, vram: 8000, type: 'ollama', modes: ['indexing'], containerName, priority: 'critical', runtime: 'host' };
+        break;
+      case 'ss-reranker':
+        if (!isLinux) break; // unavailable on darwin/win32
+        out[role] = { image: 'vllm/vllm-openai', model: override || 'Qwen/Qwen3-Reranker-8B', port: 8099, vram: 7000, type: 'vllm', modes: ['searching'], containerName, priority: 'normal' };
+        break;
+    }
   }
-  logger.info('Pushing model registry to sidecar', { agent: agentUrl, roles: Object.keys(registry) });
-  const result = await sendToSidecar(agentUrl, '/config', { registry });
+  return out;
+}
+
+/**
+ * Push the per-host effective registry to a sidecar.
+ *
+ * Driven by the DB-backed HostRoleAssignment table. The sidecar uses this
+ * payload to ADD or UPDATE roles AND (post-2.3) REMOVE any non-utility role
+ * not in the enabled list.
+ *
+ * Defense in depth:
+ *   1. If this sidecar has zero assignments yet, seed the OS-appropriate
+ *      defaults first so the first push isn't an empty payload.
+ *   2. Send BOTH the new {enabledModes, modelOverrides} shape AND a legacy
+ *      `registry: {...}` mirror so pre-2.3 sidecars get a usable payload.
+ *      Newer sidecars prefer the new shape and ignore `registry`.
+ */
+export async function pushModelRegistry(agentUrl: string): Promise<any> {
+  // Seed on demand for fresh sidecars so the first push isn't empty.
+  const hostOs = detectHostOs(agentUrl);
+  try {
+    const seeded = await seedAssignmentsForHost(agentUrl, hostOs);
+    if (seeded > 0) {
+      logger.info(`Seeded ${seeded} default assignments for ${agentUrl} (hostOs=${hostOs}) before first config push`);
+    }
+  } catch (err) {
+    logger.warn(`On-demand seed failed for ${agentUrl}: ${(err as Error).message}`);
+  }
+
+  const enabledModes = await getEnabledModesForHost(agentUrl);
+  const modelOverrides = await getModelOverridesForHost(agentUrl);
+  const registry = buildLegacyRegistry(enabledModes, modelOverrides, hostOs);
+  logger.info('Pushing per-host mode set to sidecar', {
+    agent: agentUrl,
+    hostOs,
+    enabledModes,
+    overrides: Object.keys(modelOverrides),
+    legacyRoles: Object.keys(registry),
+  });
+  const result = await sendToSidecar(agentUrl, '/config', {
+    enabledModes,
+    modelOverrides,
+    registry,
+  });
   markSelfConfigPush(agentUrl);
   return result;
 }
 
-/** Push both idle timeouts AND model registry in a single /config call. */
+/**
+ * Push the full per-host config — registry, idle timeouts, minOnline — in
+ * one /config call. Falls back to global config keys for roles that have no
+ * per-host assignment, preserving back-compat for built-in role names.
+ */
 export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {
-  const registry = await buildModelRegistry();
+  // Seed on demand for fresh sidecars so the first push isn't empty.
+  const hostOs = detectHostOs(agentUrl);
+  try {
+    const seeded = await seedAssignmentsForHost(agentUrl, hostOs);
+    if (seeded > 0) {
+      logger.info(`Seeded ${seeded} default assignments for ${agentUrl} (hostOs=${hostOs}) before first full-config push`);
+    }
+  } catch (err) {
+    logger.warn(`On-demand seed (full-config) failed for ${agentUrl}: ${(err as Error).message}`);
+  }
+
+  const enabledModes = await getEnabledModesForHost(agentUrl);
+  const modelOverrides = await getModelOverridesForHost(agentUrl);
+  const registry = buildLegacyRegistry(enabledModes, modelOverrides, hostOs);
+  const dbIdle = await getEffectiveIdleTimeoutsMs(agentUrl);
+  const dbMin = await getEffectiveMinOnline(agentUrl);
   const cfg = await getConfig();
+
+  // Global-config fallback layer (legacy keys, keyed by short role name).
+  // Per-host DB values win.
+  const idleTimeouts: Record<string, number> = {
+    embedding: timeouts.embedding * 60_000,
+    completion: timeouts.completion * 60_000,
+    ocr: timeouts.ocr * 60_000,
+    reranker: timeouts.reranker * 60_000,
+    ...dbIdle,
+  };
+  const minOnline: Record<string, number> = {
+    embedding: cfg.gpuMinEmbedding ?? 1,
+    completion: cfg.gpuMinCompletion ?? 0,
+    ocr: cfg.gpuMinOcr ?? 1,
+    reranker: cfg.gpuMinReranker ?? 1,
+    ...dbMin,
+  };
+
   const result = await sendToSidecar(agentUrl, '/config', {
-    idleTimeouts: {
-      embedding: timeouts.embedding * 60_000,
-      completion: timeouts.completion * 60_000,
-      ocr: timeouts.ocr * 60_000,
-      reranker: timeouts.reranker * 60_000,
-    },
-    minOnline: {
-      embedding: cfg.gpuMinEmbedding ?? 1,
-      completion: cfg.gpuMinCompletion ?? 0,
-      ocr: cfg.gpuMinOcr ?? 1,
-      reranker: cfg.gpuMinReranker ?? 1,
-    },
-    ...(Object.keys(registry).length > 0 ? { registry } : {}),
+    idleTimeouts,
+    minOnline,
+    enabledModes,
+    modelOverrides,
+    registry,
   });
   markSelfConfigPush(agentUrl);
   return result;
@@ -441,7 +538,38 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
   };
 
   // Try sidecars that are connected/reachable
-  const reachable = fleet.sidecars.filter(s => s.status === 'connected' && !isExcluded(s.url));
+  let reachable = fleet.sidecars.filter(s => s.status === 'connected' && !isExcluded(s.url));
+
+  // Reranker-specific health filtering: the watchdog tracks deep-health
+  // (real /v1/rerank probe) and marks deadlocked or restarting hosts so we
+  // never route real rerank traffic to them. See reranker-watchdog.ts.
+  // Skip: unhealthy | restarting | chronic-unhealthy
+  // Allow but de-prioritize: cooldown
+  // Allow (logged): suspect
+  if (role === 'reranker' && reachable.length > 0) {
+    try {
+      const { getRerankerHostHealth } = await import('@/lib/search/reranker-watchdog');
+      const health = getRerankerHostHealth();
+      const blocked = new Set(['unhealthy', 'restarting', 'chronic-unhealthy']);
+      const filtered = reachable.filter(s => {
+        const st = health[s.url];
+        if (st && blocked.has(st)) {
+          logger.info(`Route: skipping ${s.hostname} for reranker — watchdog state=${st}`);
+          return false;
+        }
+        if (st === 'suspect') {
+          logger.info(`Route: ${s.hostname} reranker state=suspect (still allowed)`);
+        }
+        return true;
+      });
+      // De-prioritize cooldown hosts: move them to the end.
+      const healthy = filtered.filter(s => health[s.url] !== 'cooldown');
+      const cooldown = filtered.filter(s => health[s.url] === 'cooldown');
+      reachable = [...healthy, ...cooldown];
+    } catch {
+      // Watchdog not yet initialized — proceed without filtering.
+    }
+  }
 
   // gpuOnly is enforced at the role level. The sidecar registry is the source
   // of truth (sideCar/src/lib/state.ts); we mirror the well-known set here as

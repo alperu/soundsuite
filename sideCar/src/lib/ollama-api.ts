@@ -15,6 +15,11 @@ interface OllamaRequestOpts {
   path: string;
   body?: unknown;
   timeoutMs?: number;
+  /** When set, getDockerHost() consults the role's registry entry — a role
+   *  with runtime:'host' routes to state.hostOllamaHost instead of the Docker
+   *  container hostname. Omit (or leave undefined) for plain dockerized
+   *  Ollama. */
+  role?: string;
 }
 
 function ollamaRequestOnce(opts: OllamaRequestOpts): Promise<{ status: number; body: string }> {
@@ -22,7 +27,7 @@ function ollamaRequestOnce(opts: OllamaRequestOpts): Promise<{ status: number; b
     const payload = opts.body ? JSON.stringify(opts.body) : undefined;
     const req = http.request(
       {
-        hostname: getDockerHost(),
+        hostname: getDockerHost(opts.role),
         port: opts.port,
         method: opts.method,
         path: opts.path,
@@ -66,8 +71,8 @@ async function ollamaRequest(opts: OllamaRequestOpts, retries = 3): Promise<{ st
 }
 
 /** List models on disk. GET /api/tags → string[] of model names. */
-export async function ollamaList(port: number): Promise<string[]> {
-  const { status, body } = await ollamaRequest({ method: 'GET', port, path: '/api/tags' });
+export async function ollamaList(port: number, role?: string): Promise<string[]> {
+  const { status, body } = await ollamaRequest({ method: 'GET', port, path: '/api/tags', role });
   if (status !== 200) throw new Error(`ollamaList failed (${status}): ${body.slice(0, 200)}`);
   const data = JSON.parse(body);
   return (data.models || []).map((m: { name: string }) => m.name);
@@ -79,12 +84,13 @@ export async function ollamaList(port: number): Promise<string[]> {
  * gives a false negative (Ollama can return an empty list right after container
  * start while it scans the manifest store, causing spurious re-pulls).
  */
-export async function ollamaShow(port: number, name: string): Promise<boolean> {
+export async function ollamaShow(port: number, name: string, role?: string): Promise<boolean> {
   const { status } = await ollamaRequest({
     method: 'POST',
     port,
     path: '/api/show',
     body: { name },
+    role,
   });
   return status === 200;
 }
@@ -98,8 +104,8 @@ export interface LoadedModel {
 }
 
 /** List models currently loaded in VRAM. GET /api/ps → LoadedModel[]. */
-export async function ollamaPs(port: number): Promise<LoadedModel[]> {
-  const { status, body } = await ollamaRequest({ method: 'GET', port, path: '/api/ps' });
+export async function ollamaPs(port: number, role?: string): Promise<LoadedModel[]> {
+  const { status, body } = await ollamaRequest({ method: 'GET', port, path: '/api/ps', role });
   if (status !== 200) throw new Error(`ollamaPs failed (${status}): ${body.slice(0, 200)}`);
   const data = JSON.parse(body);
   return (data.models || []).map((m: Record<string, unknown>) => ({
@@ -132,14 +138,14 @@ export interface PullProgress {
 export async function ollamaPull(
   port: number,
   model: string,
-  opts?: { onProgress?: (pct: number, detail: string) => void; timeoutMs?: number },
+  opts?: { onProgress?: (pct: number, detail: string) => void; timeoutMs?: number; role?: string },
 ): Promise<void> {
   const timeoutMs = opts?.timeoutMs ?? 1_800_000; // 30 min default for large models
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({ name: model, stream: true });
     const req = http.request(
       {
-        hostname: getDockerHost(),
+        hostname: getDockerHost(opts?.role),
         port,
         method: 'POST',
         path: '/api/pull',
@@ -247,6 +253,7 @@ async function ollamaPost(
   timeoutMs: number,
   onData?: (chunk: string) => void,
   retries = 3,
+  role?: string,
 ): Promise<{ status: number; body: string }> {
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -255,7 +262,7 @@ async function ollamaPost(
         const payload = JSON.stringify(body);
         const req = http.request(
           {
-            hostname: getDockerHost(),
+            hostname: getDockerHost(role),
             port,
             method: 'POST',
             path,
@@ -298,9 +305,10 @@ async function ollamaPost(
 export async function ollamaLoad(
   port: number,
   model: string,
-  opts?: { onProgress?: (detail: string) => void; timeoutMs?: number; forceFullGpu?: boolean },
+  opts?: { onProgress?: (detail: string) => void; timeoutMs?: number; forceFullGpu?: boolean; role?: string },
 ): Promise<boolean> {
   const timeoutMs = opts?.timeoutMs ?? 120_000;
+  const role = opts?.role;
   // num_gpu: 999 asks Ollama to put all layers on GPU; if VRAM is tight Ollama
   // will reject the load instead of silently splitting layers to CPU.
   const gpuOptions = opts?.forceFullGpu ? { num_gpu: 999 } : undefined;
@@ -320,7 +328,7 @@ export async function ollamaLoad(
     let loaded = false;
     for (const ep of endpoints) {
       try {
-        const result = await ollamaPost(port, ep.path, ep.body, timeoutMs, opts?.onProgress);
+        const result = await ollamaPost(port, ep.path, ep.body, timeoutMs, opts?.onProgress, 3, role);
         results.push(`${ep.path}=${result.status}`);
         if (result.status === 200) {
           log.info(`ollamaLoad: ${model} loaded via ${ep.path} on port ${port}`);
@@ -343,11 +351,11 @@ export async function ollamaLoad(
       // Verify the load actually landed fully on GPU. Ollama can still split
       // layers under memory pressure even when num_gpu is requested high.
       try {
-        const ps = await ollamaPs(port);
+        const ps = await ollamaPs(port, role);
         const me = ps.find((m) => m.name === model || m.name.startsWith(`${model}:`));
         if (!me) {
           log.warn(`ollamaLoad: forceFullGpu — ${model} not in /api/ps after load on port ${port}`);
-          await ollamaUnload(port, model).catch(() => undefined);
+          await ollamaUnload(port, model, role).catch(() => undefined);
           return false;
         }
         if (!me.size || me.size === 0) {
@@ -357,7 +365,7 @@ export async function ollamaLoad(
         const gpuPct = Math.round((me.sizeVram / me.size) * 100);
         if (gpuPct < 99) {
           log.warn(`ollamaLoad: forceFullGpu — ${model} loaded only ${gpuPct}% on GPU (processor=${me.processor}); unloading`);
-          await ollamaUnload(port, model).catch(() => undefined);
+          await ollamaUnload(port, model, role).catch(() => undefined);
           return false;
         }
         log.info(`ollamaLoad: forceFullGpu — ${model} verified at ${gpuPct}% GPU on port ${port}`);
@@ -378,16 +386,27 @@ export async function ollamaLoad(
  * Evict a model from VRAM. POST /api/generate with keep_alive: 0 — Ollama
  * unloads immediately. Best-effort: returns false on error but does not throw.
  */
-export async function ollamaUnload(port: number, model: string): Promise<boolean> {
+export async function ollamaUnload(port: number, model: string, role?: string): Promise<boolean> {
   try {
     const result = await ollamaPost(
       port,
       '/api/generate',
       { model, prompt: '', keep_alive: 0, stream: false },
       15_000,
+      undefined,
+      3,
+      role,
     );
     if (result.status === 200) {
       log.info(`ollamaUnload: ${model} unloaded on port ${port}`);
+      return true;
+    }
+    // 404 = model not found / not pulled — treat as success (already unloaded,
+    // goal of stop is satisfied: no VRAM held by this model). Otherwise stop
+    // becomes non-idempotent when registry's model name doesn't match what's
+    // actually installed on the host.
+    if (result.status === 404) {
+      log.info(`ollamaUnload: ${model} not present on port ${port} (404) — treating as already unloaded`);
       return true;
     }
     log.warn(`ollamaUnload: ${model} on port ${port} returned ${result.status}: ${result.body.slice(0, 150)}`);
@@ -399,10 +418,10 @@ export async function ollamaUnload(port: number, model: string): Promise<boolean
 }
 
 /** Check if Ollama API is reachable. GET /api/tags with 5s timeout → boolean. */
-export async function ollamaIsReady(port: number): Promise<{ ready: boolean; error?: string }> {
+export async function ollamaIsReady(port: number, role?: string): Promise<{ ready: boolean; error?: string }> {
   try {
     // Use ollamaRequestOnce directly — no retries for a readiness probe
-    const { status } = await ollamaRequestOnce({ method: 'GET', port, path: '/api/tags', timeoutMs: 5_000 });
+    const { status } = await ollamaRequestOnce({ method: 'GET', port, path: '/api/tags', timeoutMs: 5_000, role });
     return { ready: status === 200 };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -411,8 +430,8 @@ export async function ollamaIsReady(port: number): Promise<{ ready: boolean; err
 }
 
 /** Poll ollamaIsReady every 2s until ready or maxMs elapsed. Throws on timeout. */
-export async function waitForOllama(port: number, maxMs = 30_000): Promise<void> {
-  const host = getDockerHost();
+export async function waitForOllama(port: number, maxMs = 30_000, role?: string): Promise<void> {
+  const host = getDockerHost(role);
   const start = Date.now();
   const pollInterval = 2_000;
   let attempt = 0;
@@ -420,7 +439,7 @@ export async function waitForOllama(port: number, maxMs = 30_000): Promise<void>
   log.info(`waitForOllama: polling ${host}:${port} (max ${maxMs / 1000}s)...`);
   while (Date.now() - start < maxMs) {
     attempt++;
-    const { ready, error } = await ollamaIsReady(port);
+    const { ready, error } = await ollamaIsReady(port, role);
     if (ready) {
       log.info(`waitForOllama: ${host}:${port} ready after ${attempt} attempts (${Math.round((Date.now() - start) / 1000)}s)`);
       return;

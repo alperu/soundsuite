@@ -19,8 +19,8 @@ import os from 'os';
 import http from 'http';
 import https from 'https';
 import WebSocket from 'ws';
-import { state, ensureMaster, rekeyMaster, removeMaster, type MasterConnection } from './state';
-import { handleAcquire, handleRelease, handleStart, handleStop, handleStatus, getTotalActiveRequests } from './handlers';
+import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, type MasterConnection } from './state';
+import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, getTotalActiveRequests } from './handlers';
 import { switchMode, provisionContainers, getAllContainerStates, containersForMode, ensureContainerForRole } from './containers';
 import { discoverGpus } from './gpu';
 import { getContainerState, pullImage, createContainer, startContainer, dockerRequest, getDockerHostName } from './docker';
@@ -174,8 +174,17 @@ async function executeCommand(
   switch (action) {
     case 'acquire': return handleAcquire(role);
     case 'release': return handleRelease(role);
+    case 'reset-counters': return handleResetCounters(role);
     case 'start': {
       if (role) {
+        // Honor operator opt-out — symmetric with acquire/pullModel/loadModel.
+        // A master that sends `start` for an opted-out role is bypassing the
+        // policy; reject so the smoking-gun "background start loaded the
+        // model" path can't fire.
+        if ((state.minOnline?.[role] ?? 1) === 0) {
+          log.info(`start ${role} REJECTED — minOnline=0 (operator opted this role out)`);
+          return { error: `Role "${role}" is disabled (minOnline=0). Set Minimum Online > 0 in admin to allow start.` };
+        }
         const check = await checkVram(role);
         if (!check.ok) return { error: check.reason };
       }
@@ -220,23 +229,156 @@ async function executeCommand(
       state.lastConfigPushAt = Date.now();
       if (rolesNowOptOut.length > 0) {
         const { stopContainer } = await import('./docker');
+        const { ollamaUnload } = await import('./ollama-api');
         for (const role of rolesNowOptOut) {
           const def = state.registry[role];
           if (!def) continue;
           const active = state.perRole[role]?.activeRequests ?? 0;
           if (active > 0) continue;
+          // Mark user-stopped so the heartbeat auto-loader doesn't reload
+          // within the next cycle.
+          state.userStopped.add(role);
           try {
-            const cs = await getContainerState(def.containerName);
-            if (cs.status === 'running') {
-              await stopContainer(def.containerName);
-              log.info(`Auto-stopped ${def.containerName} — minOnline transitioned to 0`);
+            if (def.runtime === 'host') {
+              // Host-runtime: model lives in native Ollama's VRAM with
+              // keep_alive: 24h. The Docker stopContainer path doesn't
+              // touch it — we must call /api/generate with keep_alive=0
+              // to actually evict. THIS is the smoking-gun fix for
+              // qwen3.5:9b staying loaded after opt-out.
+              if (def.model) {
+                const ok = await ollamaUnload(def.port, def.model, role);
+                if (ok) log.info(`Auto-unloaded ${def.model} (${role}) on host Ollama — minOnline transitioned to 0`);
+                else log.warn(`Failed to auto-unload ${def.model} (${role}) on host Ollama (best-effort)`);
+              }
+            } else if (def.runtime === 'docker-model-runner') {
+              // DMR has no unload API; its scheduler reaps idle workers.
+              log.info(`minOnline→0 for ${role} on DMR — no unload API; DMR will reap on idle`);
+            } else {
+              const cs = await getContainerState(def.containerName);
+              if (cs.status === 'running') {
+                await stopContainer(def.containerName);
+                log.info(`Auto-stopped ${def.containerName} — minOnline transitioned to 0`);
+              }
             }
-          } catch { /* best-effort */ }
+          } catch (err) {
+            log.warn(`Auto-evict on opt-out failed for ${role}: ${(err as Error).message}`);
+          }
         }
       }
       const modelChangedRoles: string[] = [];
-      if (payload.registry) {
-        for (const [r, overrides] of Object.entries(payload.registry as Record<string, unknown>)) {
+
+      // ─── NEW SHAPE: enabledModes + modelOverrides ────────────────────
+      // Master sends a list of mode names (`ss-embedding`, etc) and the
+      // sidecar resolves each to a ContainerDef via its own hostOs. This
+      // is the canonical post-2.3 contract. Falls through to the legacy
+      // `payload.registry` branch when neither field is present, so older
+      // masters keep working during rollout.
+      //
+      // DEFENSIVE: empty enabledModes array is treated as "no opinion —
+      // keep defaults" rather than "remove everything". This protects
+      // against a master pushing an empty list during initial sync (e.g.
+      // because no operator assignments exist yet, or the master's
+      // simplify_role_catalog migration hasn't been applied). The sidecar
+      // only trims roles when the operator has explicitly assigned a
+      // non-empty mode set. Fail closed, not open.
+      if (Array.isArray(payload.enabledModes) && (payload.enabledModes as unknown[]).length > 0) {
+        const { resolveMode, modeToRole, isModeName, ALL_MODES } =
+          await import('./mode-templates');
+        const enabled = (payload.enabledModes as unknown[]).filter(
+          (m): m is string => typeof m === 'string',
+        );
+        const overrides =
+          (payload.modelOverrides && typeof payload.modelOverrides === 'object'
+            ? (payload.modelOverrides as Record<string, unknown>)
+            : {}) as Record<string, unknown>;
+
+        // Build the per-host effective set of role keys (short names).
+        const enabledRoles = new Set<string>();
+        for (const mode of enabled) {
+          if (!isModeName(mode)) {
+            log.warn(`[${m.serverUrl}] Unknown mode "${mode}" — skipping`);
+            continue;
+          }
+          const def = resolveMode(mode, state.hostOs);
+          if (!def) {
+            log.warn(
+              `[${m.serverUrl}] Mode "${mode}" unavailable on ${state.hostOs} — skipping (reranker requires linux+NVIDIA)`,
+            );
+            continue;
+          }
+          const role = modeToRole(mode);
+          // Apply per-mode modelOverride (looked up by mode name).
+          const overrideVal = overrides[mode];
+          if (typeof overrideVal === 'string' && overrideVal.length > 0) {
+            def.model = overrideVal;
+          }
+
+          const existing = state.registry[role];
+          if (existing) {
+            const oldModel = existing.model;
+            // Replace wholesale — the sidecar is now the authority on
+            // image/port/vram/type per OS. Operator only owns model.
+            state.registry[role] = def;
+            state.pullFailCount[role] = 0;
+            if (def.model && def.model !== oldModel) modelChangedRoles.push(role);
+          } else {
+            state.registry[role] = def;
+            state.perRole[role] = { activeRequests: 0, idleTimer: null, lastAcquire: null, lastRelease: null };
+            state.peakDemand[role] = { samples: [], peak: 0, windowMs: 5 * 60 * 1000 };
+            if (def.model) modelChangedRoles.push(role);
+            log.info(`Resolved mode ${mode} → role ${role} (image=${def.image || 'host'}, model=${def.model ?? 'n/a'})`);
+          }
+          enabledRoles.add(role);
+        }
+
+        // TRIM: drop any non-utility role no longer in enabledRoles.
+        // Guard: if EVERY mode in the payload failed to resolve (e.g. all
+        // unknown names, or all unavailable on this OS), `enabledRoles` is
+        // empty even though the master sent a non-empty list. Skip trim
+        // in that case — wiping the registry on a malformed payload is
+        // worse than tolerating drift until the next valid push.
+        if (enabledRoles.size > 0) {
+          for (const r of Object.keys(state.registry)) {
+            if (state.registry[r].type === 'utility') continue;
+            if (!enabledRoles.has(r)) {
+              log.info(`Mode no longer enabled for role "${r}" — removing from registry`);
+              delete state.registry[r];
+              delete state.perRole[r];
+              delete state.peakDemand[r];
+              delete state.pullFailCount[r];
+              delete state.lastModelAttempt[r];
+              state.modelLoading.delete(r);
+              state.userStopped.delete(r);
+            }
+          }
+        } else {
+          log.warn(
+            `[${m.serverUrl}] enabledModes resolved to zero roles on ${state.hostOs} — skipping trim (defensive)`,
+          );
+        }
+
+        // Acknowledge ALL_MODES for symmetry (silences unused-var lints).
+        void ALL_MODES;
+
+        // Do NOT call applyHostOllamaOverrides() here — resolveMode() already
+        // encodes the host/docker choice based on hostOs. The legacy env-driven
+        // override would revert runtime='host' to 'docker' when SS_HOST_OLLAMA
+        // is unset, breaking darwin/win32 (which need runtime='host' and have
+        // image=''). The mode catalog is the authoritative source for runtime.
+        //
+        // We still call applySetupOverrides for /setup-persisted operator
+        // choices (model name overrides, mainly).
+        try {
+          const { applySetupOverrides } = await import('./setup-overrides');
+          applySetupOverrides();
+        } catch { /* not present in older sidecars; safe to skip */ }
+      } else if (payload.registry && typeof payload.registry === 'object') {
+        const incoming = payload.registry as Record<string, Partial<import('./state').ContainerDef>>;
+        // ADD or UPDATE: existing roles get a shallow merge; new role names
+        // are accepted as long as the master sent enough fields to define
+        // them. Missing fields fall back to safe defaults so an older master
+        // that only sends `{ model: "..." }` still works for built-in roles.
+        for (const [r, overrides] of Object.entries(incoming)) {
           if (state.registry[r]) {
             const oldModel = state.registry[r].model;
             Object.assign(state.registry[r], overrides);
@@ -244,8 +386,65 @@ async function executeCommand(
             if (state.registry[r].model && state.registry[r].model !== oldModel) {
               modelChangedRoles.push(r);
             }
+          } else {
+            // New role definition. Require at least image+port+type to build
+            // something coherent; otherwise skip and log.
+            const ov = overrides as Record<string, unknown>;
+            if (typeof ov.image === 'string' && typeof ov.port === 'number' && typeof ov.type === 'string') {
+              const def: import('./state').ContainerDef = {
+                image: ov.image,
+                model: typeof ov.model === 'string' ? ov.model : null,
+                port: ov.port,
+                vram: typeof ov.vram === 'number' ? ov.vram : 0,
+                type: ov.type as 'ollama' | 'vllm' | 'utility',
+                modes: Array.isArray(ov.modes) ? (ov.modes as ('indexing' | 'searching')[]) : ['indexing', 'searching'],
+                containerName: typeof ov.containerName === 'string' ? ov.containerName : `ss-${r}`,
+                gpuOnly: typeof ov.gpuOnly === 'boolean' ? ov.gpuOnly : false,
+                priority: (typeof ov.priority === 'string' ? ov.priority : 'normal') as 'critical' | 'high' | 'normal',
+              };
+              state.registry[r] = def;
+              state.perRole[r] = { activeRequests: 0, idleTimer: null, lastAcquire: null, lastRelease: null };
+              state.peakDemand[r] = { samples: [], peak: 0, windowMs: 5 * 60 * 1000 };
+              if (def.model) modelChangedRoles.push(r);
+              log.info(`Master added new role definition: ${r} (image=${def.image}, model=${def.model ?? 'n/a'})`);
+            } else {
+              log.warn(`Master sent unknown role "${r}" without full definition (need image+port+type); ignored`);
+            }
           }
         }
+        // REMOVE: any non-utility role the master did NOT include is now
+        // unassigned for this host. Drop it from the registry so the UI no
+        // longer renders a "not_found" row and the auto-loader stops trying
+        // to provision it. Utility roles (cuda) are managed locally by the
+        // sidecar and never appear in master-driven assignments.
+        for (const r of Object.keys(state.registry)) {
+          if (state.registry[r].type === 'utility') continue;
+          if (!(r in incoming)) {
+            log.info(`Master no longer assigns role "${r}" to this host — removing from registry`);
+            delete state.registry[r];
+            delete state.perRole[r];
+            delete state.peakDemand[r];
+            delete state.pullFailCount[r];
+            delete state.lastModelAttempt[r];
+            state.modelLoading.delete(r);
+            state.userStopped.delete(r);
+          }
+        }
+        // CRITICAL: the master's config push contains per-role definitions
+        // (model, port, image, type) that obliterate our host-runtime + DMR
+        // port normalization. Re-apply overrides so SS_HOST_OLLAMA_ROLES /
+        // SS_DMR_ROLES stay honored after every push. Without this, the
+        // sidecar starts probing host.docker.internal:11435 (completion's
+        // original docker port — nothing listens there) and floods the log
+        // with ECONNREFUSED while host-Ollama itself is on :11434.
+        const { applyHostOllamaOverrides } = await import('./state');
+        applyHostOllamaOverrides();
+        // Also re-apply setup-UI overrides so /setup persisted choices
+        // take precedence over what the master pushed.
+        try {
+          const { applySetupOverrides } = await import('./setup-overrides');
+          applySetupOverrides();
+        } catch { /* not present in older sidecars; safe to skip */ }
       }
       saveConfig();
       if (modelChangedRoles.length > 0) {
@@ -261,6 +460,14 @@ async function executeCommand(
       const def = state.registry[pullRole];
       if (!def) return { error: `Unknown role: ${pullRole}` };
       if (!def.model) return { error: `No model configured for ${pullRole}` };
+      // Honor operator opt-out — same policy as acquire. Today the master's
+      // "Pull & Load" UI button can fire this for any role; if the operator
+      // has set minOnline=0, refuse so we don't load qwen3.5:9b into VRAM
+      // for 24 hours behind their back.
+      if ((state.minOnline?.[pullRole] ?? 1) === 0) {
+        log.info(`pullModel ${pullRole} REJECTED — minOnline=0 (operator opted this role out)`);
+        return { error: `Role "${pullRole}" is disabled (minOnline=0). Set Minimum Online > 0 in admin to allow Pull & Load.` };
+      }
 
       if (def.type === 'vllm') {
         try {
@@ -293,6 +500,11 @@ async function executeCommand(
       const def = state.registry[loadRole];
       if (!def) return { error: `Unknown role: ${loadRole}` };
       if (!def.model) return { error: `No model configured for ${loadRole}` };
+      // Honor operator opt-out — same policy as acquire/pullModel.
+      if ((state.minOnline?.[loadRole] ?? 1) === 0) {
+        log.info(`loadModel ${loadRole} REJECTED — minOnline=0 (operator opted this role out)`);
+        return { error: `Role "${loadRole}" is disabled (minOnline=0). Set Minimum Online > 0 in admin to allow loading.` };
+      }
 
       if (def.type === 'vllm') {
         const csv = await getContainerState(def.containerName);
@@ -343,6 +555,26 @@ async function checkVram(role: string): Promise<{ ok: boolean; reason?: string }
 async function autoProvision(): Promise<void> {
   const allRoles = Object.keys(state.registry);
   const activeRoles = containersForMode(state.currentMode);
+
+  // Mac/Windows Docker has no GPU passthrough. Any nvidia/cuda or vllm
+  // container will fail with "no known GPU vendor", and CPU-only Ollama
+  // is unusably slow. Refuse to auto-provision Docker containers here —
+  // operator should set SS_HOST_OLLAMA=1 to use native Ollama instead.
+  if (!dockerSupportsGpu()) {
+    const hostRoles = allRoles.filter(r => state.registry[r]?.runtime === 'host');
+    log.warn(
+      `Auto-provisioning skipped: Docker on ${state.hostOs} has no GPU support. ` +
+      `${hostRoles.length > 0
+        ? `Host-Ollama mode is on for: ${hostRoles.join(', ')} (managed via native Ollama, not Docker).`
+        : 'Set SS_HOST_OLLAMA=1 with SS_HOST_OLLAMA_ROLES=embedding,completion,ocr to enable native Ollama. ' +
+          'Or move this sidecar to a Linux+NVIDIA host for Docker-managed roles.'
+      }`,
+    );
+    // Still run the post-provision activation loop below — it handles host-
+    // runtime roles (model pull + warm-up on native Ollama) without Docker.
+    if (hostRoles.length === 0) return;
+  }
+
   log.info(`Auto-provisioning ALL roles: ${allRoles.join(', ')} (active for "${state.currentMode}": ${activeRoles.join(', ')})`);
 
   let availableVram = Infinity;
@@ -362,6 +594,19 @@ async function autoProvision(): Promise<void> {
   for (const role of allRoles) {
     const def = state.registry[role];
     if (!def) continue;
+
+    // Honor operator's minOnline=0 opt-out. autoProvision runs on boot and
+    // after every WS config push, so without this guard a role with
+    // minOnline=0 still gets its image pulled, container created, and
+    // sometimes auto-started — defeating the operator's policy.
+    if ((state.minOnline?.[role] ?? 1) === 0) {
+      log.info(`autoProvision: skipping ${role} — minOnline=0 (operator opted this role out)`);
+      continue;
+    }
+
+    // On a Mac/Windows sidecar, skip every Docker-runtime role — only
+    // host-runtime roles get further processing (model pull on native Ollama).
+    if (!dockerSupportsGpu() && def.runtime !== 'host') continue;
 
     try {
       const cs = await getContainerState(def.containerName);
