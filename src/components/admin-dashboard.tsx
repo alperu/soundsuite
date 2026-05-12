@@ -13,6 +13,7 @@ import AdminRerankingSettings from '@/components/admin-reranking-settings';
 import GpuFleetPanel from '@/components/admin-gpu-fleet';
 import AdminRoleTypes from '@/components/admin-role-types';
 import AdminRoleAssignments from '@/components/admin-role-assignments';
+import AdminHostProvisioning from '@/components/admin-host-provisioning';
 import CacheManager from '@/components/admin/cache-manager';
 import { CopyButton } from '@/components/copy-button';
 import { AppConfig, ModelDownloadInfo } from '@/lib/db/config';
@@ -23,7 +24,7 @@ interface Props {
   initialTab?: TabKey;
 }
 
-type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'ocr' | 'localai' | 'aikeys' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts';
+type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'hostprov' | 'ocr' | 'localai' | 'aikeys' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts';
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'general', label: 'General', icon: '⊞' },
@@ -33,6 +34,7 @@ const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'gpu', label: 'GPU Fleet', icon: '⊛' },
   { key: 'roletypes', label: 'Mode Types', icon: '◆' },
   { key: 'roleassign', label: 'Role Assignments', icon: '⇆' },
+  { key: 'hostprov', label: 'Host Provisioning', icon: '⌂' },
   { key: 'ocr', label: 'OCR', icon: '◉' },
   { key: 'localai', label: 'Local AI', icon: '⊚' },
   { key: 'aikeys', label: 'AI Keys $', icon: '⚷' },
@@ -120,6 +122,17 @@ const TAB_DOCS: Record<TabKey, { title: string; description: string; details: st
       'Unavailable modes (e.g. ss-reranker on macOS) are greyed out with a tooltip',
       'Click the gear on an enabled chip to override model / minOnline / idle timeout',
       'Reset to defaults restores per-OS sensible assignments for a sidecar',
+    ],
+  },
+  hostprov: {
+    title: 'Host Provisioning',
+    description: 'Per-sidecar overrides for the master URL each host calls home to, plus OS pin and notes.',
+    details: [
+      'Each sidecar can use a different master URL — different subnets, VPN, etc.',
+      'OS override forces darwin/win32/linux when auto-detection is wrong',
+      'Empty master URL inherits the global default (SOUND_SUITE_MASTER_URL or Config DB)',
+      'The same sidecar can serve a second master app (e.g. Fantom MCP) at another URL',
+      'Saves push to the sidecar on its next config sync (~30s diff-only)',
     ],
   },
   ocr: {
@@ -273,6 +286,7 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
           {activeTab === 'gpu' && <GpuFleetPanel />}
           {activeTab === 'roletypes' && <AdminRoleTypes />}
           {activeTab === 'roleassign' && <AdminRoleAssignments />}
+          {activeTab === 'hostprov' && <AdminHostProvisioning />}
           {activeTab === 'ocr' && <OCRProviderPanel initialConfig={initialConfig} />}
           {activeTab === 'localai' && <LocalAIPanel />}
           {activeTab === 'aikeys' && <AIKeysPanel />}

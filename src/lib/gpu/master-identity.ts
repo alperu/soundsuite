@@ -83,15 +83,28 @@ export async function getCanonicalMasterUrl(): Promise<string | null> {
   return null;
 }
 
-/** Build the master-identity WS frame payload. Returns null if URL unknown. */
-export async function buildMasterIdentityFrame(): Promise<{
+/**
+ * Build the master-identity WS frame payload. Returns null if URL unknown.
+ *
+ * If `sidecarUrl` is passed, the per-host override from `HostProvisioning`
+ * wins over global resolution. This is how operators give different sidecars
+ * different master URLs (LAN vs VPN vs lab subnet).
+ */
+export async function buildMasterIdentityFrame(sidecarUrl?: string | null): Promise<{
   type: 'master-identity';
   canonicalUrl: string;
   wsPort: number;
   name?: string;
   pushedAt: number;
 } | null> {
-  const url = await getCanonicalMasterUrl();
+  let url: string | null = null;
+  if (sidecarUrl) {
+    // Avoid circular import at module-eval time.
+    const { resolveMasterUrlForHost } = await import('@/lib/gpu/resolve-master-url-for-host');
+    url = await resolveMasterUrlForHost(sidecarUrl);
+  } else {
+    url = await getCanonicalMasterUrl();
+  }
   if (!url) return null;
   const wsPort = parseInt(process.env.GPU_WS_PORT || '3002', 10);
   const name = process.env.SOUND_SUITE_MASTER_NAME || undefined;

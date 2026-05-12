@@ -3,9 +3,9 @@ import { getConfig, setConfigValue } from '@/lib/db/config';
 import {
   MASTER_URL_HEADER,
   deriveOriginFromHeaders,
-  getCanonicalMasterUrl,
   noteRequestOrigin,
 } from '@/lib/gpu/master-identity';
+import { resolveMasterUrlForHost } from '@/lib/gpu/resolve-master-url-for-host';
 
 interface SidecarEntry {
   url: string;
@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
     await setConfigValue('gpu.sidecars', JSON.stringify(sidecars));
 
     const headers: Record<string, string> = {};
-    const masterUrl = await getCanonicalMasterUrl();
+    const masterUrl = await resolveMasterUrlForHost(agentUrl);
     if (masterUrl) headers[MASTER_URL_HEADER] = masterUrl;
 
     return NextResponse.json(

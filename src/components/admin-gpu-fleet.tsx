@@ -348,10 +348,6 @@ export default function GpuFleetPanel() {
   // GPU orchestrator settings
   const [gpuAutoManage, setGpuAutoManage] = useState(false);
 
-  // Master URL — what the sidecar should phone home to
-  const [masterUrl, setMasterUrl] = useState('');
-  const [masterUrlDirty, setMasterUrlDirty] = useState(false);
-
   // Action feedback
   const [actionMsg, setActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -377,7 +373,6 @@ export default function GpuFleetPanel() {
         setMinReranker(data.minOnline.reranker);
       }
       setGpuAutoManage(data.gpuAutoManage);
-      if (!masterUrlDirty) setMasterUrl(data.masterUrl ?? '');
       setError(null);
     } catch (e: any) {
       setError(e.message);
@@ -561,17 +556,6 @@ export default function GpuFleetPanel() {
     });
     if (saved) {
       setActionMsg({ type: 'success', text: 'Minimum online settings saved. Enforcement runs every 30s.' });
-    }
-  };
-
-  const handleSaveMasterUrl = async () => {
-    const value = masterUrl.trim();
-    const saved = await doAction('saveMasterUrl', { masterUrl: value });
-    if (saved) {
-      setMasterUrlDirty(false);
-      setActionMsg({ type: 'success', text: value
-        ? `Master URL saved and pushed to ${fleet?.sidecars.filter(s => s.status === 'connected').length ?? 0} connected sidecar(s).`
-        : 'Master URL cleared. Sidecars will rely on the SOUND_SUITE_MASTER_URL env var.' });
     }
   };
 
@@ -1148,24 +1132,23 @@ export default function GpuFleetPanel() {
       <div className="bg-white shadow rounded-lg p-6">
         <h2 className="text-xl font-semibold text-gray-900 mb-4">Fleet Settings</h2>
 
-        {/* Master URL */}
+        {/* Master URL → moved to Host Provisioning (per-host overrides) */}
         <div className="mb-6 p-4 bg-gray-50 rounded-lg">
           <div className="font-medium text-gray-900 text-sm mb-1">Master URL</div>
-          <div className="text-xs text-gray-500 mb-3">
-            The URL each sidecar uses to connect back to this master. Pushed via <code className="px-1 bg-gray-200 rounded">/config</code> on every register so sidecars persist it for warm-boot. If empty, sidecars rely on the <code className="px-1 bg-gray-200 rounded">SOUND_SUITE_MASTER_URL</code> environment variable in their <code className="px-1 bg-gray-200 rounded">docker run</code> command.
-          </div>
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={masterUrl}
-              onChange={(e) => { setMasterUrl(e.target.value); setMasterUrlDirty(true); }}
-              placeholder={typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.host}` : 'http://master:3000'}
-              className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
-            />
-            <button onClick={handleSaveMasterUrl} disabled={!masterUrlDirty || actionLoading !== null}
-              className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
-              {actionLoading === 'saveMasterUrl' ? 'Saving…' : 'Save & Push'}
-            </button>
+          <div className="text-xs text-gray-500">
+            Per-host master URLs and OS overrides moved to the{' '}
+            <a href="/admin/hostprov" className="text-blue-600 hover:underline font-medium">Host Provisioning</a>{' '}
+            tab. Sidecars on different subnets / VPNs need different
+            URLs to call home — one global value can&apos;t cover that
+            fleet. The global fallback still works via{' '}
+            <code className="px-1 bg-gray-200 rounded">SOUND_SUITE_MASTER_URL</code>{' '}
+            on the master.
+            {fleet?.masterUrl && (
+              <>
+                {' '}Current global value:{' '}
+                <code className="px-1 bg-gray-200 rounded font-mono">{fleet.masterUrl}</code>.
+              </>
+            )}
           </div>
         </div>
 

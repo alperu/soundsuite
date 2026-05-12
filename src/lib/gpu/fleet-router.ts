@@ -22,6 +22,7 @@ import {
 } from '@/lib/db/role-registry';
 import { resolveModelFromConfig, type ModeName } from '@/lib/gpu/mode-catalog';
 import { seedAssignmentsForHost } from '@/lib/db/role-registry-seed';
+import { getProvisioning } from '@/lib/db/host-provisioning';
 
 const logger = createLogger('FleetRouter');
 
@@ -507,6 +508,11 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
     legacyRoles: Object.keys(registry),
     minOnline: dbMin,
   });
+  // Per-host operator override for the sidecar's hostOs (Mac/Win/Linux).
+  // Lets the operator pin `state.hostOs` when auto-detection guesses wrong.
+  const provisioning = await getProvisioning(agentUrl).catch(() => null);
+  const hostOsOverride = provisioning?.hostOsOverride ?? null;
+
   const result = await sendToSidecar(agentUrl, '/config', {
     enabledModes,
     modelOverrides: effectiveModels,
@@ -514,6 +520,7 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
     registry,
     minOnline: dbMin,
     idleTimeouts: dbIdle,
+    hostOsOverride,
   });
   markSelfConfigPush(agentUrl);
   return result;
@@ -562,6 +569,10 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
     ...dbMin,
   };
 
+  // Per-host operator override for the sidecar's hostOs detection.
+  const provisioning = await getProvisioning(agentUrl).catch(() => null);
+  const hostOsOverride = provisioning?.hostOsOverride ?? null;
+
   const result = await sendToSidecar(agentUrl, '/config', {
     idleTimeouts,
     minOnline,
@@ -569,6 +580,7 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
     modelOverrides: effectiveModels,
     runtimes,
     registry,
+    hostOsOverride,
   });
   markSelfConfigPush(agentUrl);
   return result;

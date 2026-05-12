@@ -125,7 +125,7 @@ export function startWsRelay(): WebSocketServer {
         // container recreation without operator re-config. Fire-and-forget.
         import('@/lib/gpu/master-identity').then(async ({ buildMasterIdentityFrame }) => {
           try {
-            const frame = await buildMasterIdentityFrame();
+            const frame = await buildMasterIdentityFrame(msg.agentUrl);
             if (frame && ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify(frame));
               logger.info('Pushed master-identity frame to sidecar', {

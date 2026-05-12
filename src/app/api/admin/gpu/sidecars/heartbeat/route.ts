@@ -5,9 +5,9 @@ import { fetchPendingCommands } from '@/lib/gpu/command-queue';
 import {
   MASTER_URL_HEADER,
   deriveOriginFromHeaders,
-  getCanonicalMasterUrl,
   noteRequestOrigin,
 } from '@/lib/gpu/master-identity';
+import { resolveMasterUrlForHost } from '@/lib/gpu/resolve-master-url-for-host';
 
 interface SidecarEntry {
   url: string;
@@ -104,7 +104,7 @@ export async function POST(request: NextRequest) {
     const commands = await fetchPendingCommands(agentUrl);
 
     const headers: Record<string, string> = {};
-    const masterUrl = await getCanonicalMasterUrl();
+    const masterUrl = await resolveMasterUrlForHost(agentUrl);
     if (masterUrl) headers[MASTER_URL_HEADER] = masterUrl;
 
     return NextResponse.json({ ok: true, commands, masterUrl: masterUrl || undefined }, { headers });
