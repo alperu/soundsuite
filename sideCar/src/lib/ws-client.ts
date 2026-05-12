@@ -20,8 +20,8 @@ import http from 'http';
 import https from 'https';
 import WebSocket from 'ws';
 import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, type MasterConnection } from './state';
-import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, getTotalActiveRequests } from './handlers';
-import { switchMode, provisionContainers, getAllContainerStates, containersForMode, ensureContainerForRole } from './containers';
+import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, handlePullModel, handleLoadModel, getTotalActiveRequests } from './handlers';
+import { switchMode, provisionContainers, getAllContainerStates, containersForMode } from './containers';
 import { discoverGpus } from './gpu';
 import { getContainerState, pullImage, createContainer, startContainer, dockerRequest, getDockerHostName } from './docker';
 import { ollamaList, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
@@ -248,6 +248,33 @@ async function executeCommand(
       }
       if (payload.containerName) state.CONTAINER_NAME = payload.containerName as string;
       state.lastConfigPushAt = Date.now();
+
+      // ─── Master-pushed hostOs override ────────────────────────────────
+      // Pinned by the operator via /admin/host-provisioning. Highest
+      // precedence — overrides env hint and auto-detect. Applied BEFORE
+      // the registry-rebuild logic so resolveMode() below sees the new
+      // hostOs. Idempotent: same value pushed twice = no-op. Persists via
+      // saveConfig() at the end of this handler so it survives reboot.
+      const pushedOs = payload.hostOsOverride;
+      if (pushedOs === 'darwin' || pushedOs === 'win32' || pushedOs === 'linux') {
+        if (state.hostOs !== pushedOs || state.hostOsConfidence !== 'master-override') {
+          log.info(`[${m.serverUrl}] Master pushed hostOsOverride: ${state.hostOs} (${state.hostOsConfidence}) -> ${pushedOs} (master-override)`);
+          state.hostOs = pushedOs;
+          state.hostOsConfidence = 'master-override';
+        }
+      } else if (pushedOs === null && state.hostOsConfidence === 'master-override') {
+        // Operator picked "Auto" on the UI — clear the pin and re-detect.
+        // detectHostOs() walks env → Docker /info; resets confidence to
+        // whatever it finds. saveConfig() at end of handler drops the
+        // null hostOsOverride from disk.
+        log.info(`[${m.serverUrl}] Master cleared hostOsOverride — re-running detection`);
+        try {
+          const { detectHostOs } = await import('./host-os');
+          await detectHostOs();
+        } catch (err) {
+          log.warn(`detectHostOs after master clear failed: ${(err as Error).message}`);
+        }
+      }
       if (rolesNowOptOut.length > 0) {
         const { stopContainer } = await import('./docker');
         const { ollamaUnload } = await import('./ollama-api');
@@ -529,71 +556,29 @@ async function executeCommand(
       return { ok: true, idleTimeouts: state.idleTimeouts, containerName: state.CONTAINER_NAME };
     }
     case 'pullModel': {
+      // Master's "Pull" / "Pull & Load" button. Runtime-aware dispatch lives
+      // in handlePullModel — host-Ollama, docker-ollama, docker-vllm, and
+      // docker-model-runner all routed there. Default behavior remains
+      // pull-and-load (matches the historical wire contract); to pull only,
+      // pass payload.andLoad=false.
       const pullRole = payload.role as string;
-      const def = state.registry[pullRole];
-      if (!def) return { error: `Unknown role: ${pullRole}` };
-      if (!def.model) return { error: `No model configured for ${pullRole}` };
-      // Honor operator opt-out — same policy as acquire. Today the master's
-      // "Pull & Load" UI button can fire this for any role; if the operator
-      // has set minOnline=0, refuse so we don't load qwen3.5:9b into VRAM
-      // for 24 hours behind their back.
-      if ((state.minOnline?.[pullRole] ?? 1) === 0) {
-        log.info(`pullModel ${pullRole} REJECTED — minOnline=0 (operator opted this role out)`);
-        return { error: `Role "${pullRole}" is disabled (minOnline=0). Set Minimum Online > 0 in admin to allow Pull & Load.` };
-      }
-
-      if (def.type === 'vllm') {
-        try {
-          await pullImage(def.image);
-        } catch (err) {
-          return { error: `Image pull failed: ${(err as Error).message}` };
-        }
-        await ensureContainerForRole(pullRole);
-        const csv = await getContainerState(def.containerName);
-        if (csv.status !== 'running') {
-          await startContainer(def.containerName);
-        }
-        return { ok: true, model: def.model, container: def.containerName, message: `${def.model} image pulled and container started — vLLM will download model from HuggingFace on first request (cached afterwards)` };
-      }
-
-      if (def.type !== 'ollama') return { error: `${pullRole} is not an Ollama or vLLM container` };
-      const cs = await getContainerState(def.containerName);
-      if (cs.status !== 'running') return { error: `Container ${def.containerName} is not running` };
-      await ollamaPull(def.port, def.model);
-      if (!state.modelLoading.has(pullRole)) {
-        state.modelLoading.add(pullRole);
-        ollamaLoad(def.port, def.model).finally(() => {
-          state.modelLoading.delete(pullRole);
-        });
-      }
-      return { ok: true, model: def.model, container: def.containerName, message: `${def.model} pulled & loading into VRAM` };
+      const andLoad = payload.andLoad === false ? false : true;
+      return handlePullModel(pullRole, andLoad);
+    }
+    case 'pullAndLoad': {
+      // Explicit form used by the sidecar GUI; kept distinct for clarity even
+      // though pullModel above defaults to andLoad=true.
+      const pullRole = payload.role as string;
+      return handlePullModel(pullRole, true);
     }
     case 'loadModel': {
+      // Master's "Load" button. handleLoadModel branches on runtime/type:
+      //   host           → ollamaLoad on hostOllamaHost
+      //   docker-ollama  → ensureContainer + ollamaLoad
+      //   docker-vllm    → start container (vLLM loads at startup)
+      //   docker-model-runner → no-op (DMR lazy-loads)
       const loadRole = payload.role as string;
-      const def = state.registry[loadRole];
-      if (!def) return { error: `Unknown role: ${loadRole}` };
-      if (!def.model) return { error: `No model configured for ${loadRole}` };
-      // Honor operator opt-out — same policy as acquire/pullModel.
-      if ((state.minOnline?.[loadRole] ?? 1) === 0) {
-        log.info(`loadModel ${loadRole} REJECTED — minOnline=0 (operator opted this role out)`);
-        return { error: `Role "${loadRole}" is disabled (minOnline=0). Set Minimum Online > 0 in admin to allow loading.` };
-      }
-
-      if (def.type === 'vllm') {
-        const csv = await getContainerState(def.containerName);
-        if (csv.status !== 'running') {
-          await startContainer(def.containerName);
-          return { ok: true, model: def.model, container: def.containerName, message: `${def.containerName} started — vLLM is loading ${def.model}` };
-        }
-        return { ok: true, model: def.model, container: def.containerName, message: `${def.containerName} already running` };
-      }
-
-      if (def.type !== 'ollama') return { error: `${loadRole} is not an Ollama or vLLM container` };
-      const cs = await getContainerState(def.containerName);
-      if (cs.status !== 'running') return { error: `Container ${def.containerName} is not running` };
-      const loaded = await ollamaLoad(def.port, def.model);
-      if (!loaded) return { error: `Failed to load ${def.model} into VRAM` };
-      return { ok: true, model: def.model, container: def.containerName, message: `${def.model} loaded into VRAM` };
+      return handleLoadModel(loadRole);
     }
     default:
       return { error: `Unknown action: ${action}` };

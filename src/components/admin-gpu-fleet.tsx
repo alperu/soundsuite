@@ -156,6 +156,51 @@ const ROLES = ['embedding', 'completion', 'ocr', 'reranker'] as const;
 
 type LoadedModel = NonNullable<ContainerState['loadedModels']>[number];
 
+/**
+ * Display label for the runtime a container/role is using. Image-derived when
+ * a container exists; falls back to the assignment row's `runtime` field so
+ * the operator sees what the role is CONFIGURED to use even before the
+ * container is created.
+ */
+type RuntimeLabel = 'Ollama (native)' | 'Docker Ollama' | 'Docker vLLM' | 'Docker Model Runner' | '—';
+
+function runtimeLabel(image: string | undefined, assignmentRuntime?: string | null): RuntimeLabel {
+  if (image === 'host-ollama') return 'Ollama (native)';
+  if (image === 'dmr') return 'Docker Model Runner';
+  if (image) {
+    if (/(^|\/)vllm/i.test(image)) return 'Docker vLLM';
+    if (/(^|\/)ollama/i.test(image)) return 'Docker Ollama';
+  }
+  if (assignmentRuntime === 'host') return 'Ollama (native)';
+  if (assignmentRuntime === 'docker-vllm') return 'Docker vLLM';
+  if (assignmentRuntime === 'docker-ollama') return 'Docker Ollama';
+  return '—';
+}
+
+function RuntimeChip({ label }: { label: RuntimeLabel }) {
+  const cls =
+    label === 'Ollama (native)' ? 'bg-slate-50 text-slate-700 border-slate-200'
+    : label === 'Docker Ollama' ? 'bg-blue-50 text-blue-700 border-blue-200'
+    : label === 'Docker vLLM' ? 'bg-purple-50 text-purple-700 border-purple-200'
+    : label === 'Docker Model Runner' ? 'bg-amber-50 text-amber-700 border-amber-200'
+    : 'bg-gray-100 text-gray-500 border-gray-200';
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium border ${cls}`}>
+      {label}
+    </span>
+  );
+}
+
+/** Normalize a container name for display — guards against literal "undefined"
+ *  strings that older sidecars sometimes serialize when name was actually
+ *  undefined, alongside the usual nullish/empty cases. */
+function displayContainerName(name: unknown): string {
+  if (typeof name !== 'string') return '—';
+  const trimmed = name.trim();
+  if (!trimmed || trimmed === 'undefined' || trimmed === 'null') return '—';
+  return trimmed;
+}
+
 function formatVramGB(bytes?: number): string {
   if (!bytes || bytes <= 0) return '0.0 GB';
   return `${(bytes / 1e9).toFixed(1)} GB`;
@@ -355,6 +400,12 @@ export default function GpuFleetPanel() {
   // Communication logs
   const [commLogs, setCommLogs] = useState<Array<{ ts: number; level: string; component: string; message: string; meta?: Record<string, any> }>>([]);
   const [showCommLogs, setShowCommLogs] = useState(false);
+
+  // Per-role configured runtime for the selected sidecar — feeds the
+  // "Running On" column fallback when a container hasn't been provisioned yet
+  // (status `not_found` w/ no image). Keyed by short role name
+  // ("embedding"), value is one of 'host' | 'docker-ollama' | 'docker-vllm'.
+  const [runtimeByRole, setRuntimeByRole] = useState<Record<string, string>>({});
 
   const fetchFleet = useCallback(async () => {
     try {
@@ -613,6 +664,32 @@ export default function GpuFleetPanel() {
       setSidecarHasOverrides(false);
     }
   }, [selectedUrl, fleet]);
+
+  // Load per-role runtime configuration for the selected sidecar from the
+  // role-assignments table. Used as a fallback in the Containers "Running On"
+  // column when a container has no image yet (status `not_found`). Mode names
+  // are prefixed `ss-` server-side (e.g. `ss-embedding`); we key by the short
+  // role name to match `cachedStatus.containers` keys.
+  useEffect(() => {
+    if (!selectedUrl) { setRuntimeByRole({}); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/admin/role-assignments?sidecarUrl=${encodeURIComponent(selectedUrl)}`);
+        if (cancelled || !res.ok) return;
+        const data = await res.json();
+        const list: Array<{ mode?: string; runtime?: string | null }> = Array.isArray(data?.assignments) ? data.assignments : [];
+        const map: Record<string, string> = {};
+        for (const a of list) {
+          if (!a.mode || !a.runtime) continue;
+          const role = a.mode.startsWith('ss-') ? a.mode.slice(3) : a.mode;
+          map[role] = a.runtime;
+        }
+        if (!cancelled) setRuntimeByRole(map);
+      } catch { /* ignore — chip falls back to "—" */ }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedUrl]);
 
   const handleSaveSidecarTimeouts = async () => {
     if (!selectedUrl) return;
@@ -915,6 +992,7 @@ export default function GpuFleetPanel() {
                           <th className="text-left py-2 px-3 font-medium text-gray-600">Container</th>
                           <th className="text-left py-2 px-3 font-medium text-gray-600">Status</th>
                           <th className="text-left py-2 px-3 font-medium text-gray-600">Image</th>
+                          <th className="text-left py-2 px-3 font-medium text-gray-600">Running On</th>
                           <th className="text-left py-2 px-3 font-medium text-gray-600">Model</th>
                           <th className="text-left py-2 px-3 font-medium text-gray-600">PS</th>
                           <th className="text-left py-2 px-3 font-medium text-gray-600">VRAM</th>
@@ -926,10 +1004,12 @@ export default function GpuFleetPanel() {
                         {Object.entries(cachedStatus.containers).map(([role, c]) => {
                           const roleInfo = cachedStatus.roles?.[role];
                           const isPending = pendingAction === `start-${role}` || pendingAction === `stop-${role}`;
+                          const imageForRuntime = c.image || c.config?.image;
+                          const label = runtimeLabel(imageForRuntime, runtimeByRole[role]);
                           return (
                             <tr key={role} className="border-b border-gray-100">
                               <td className="py-2 px-3 font-medium text-gray-900 capitalize">{role}</td>
-                              <td className="py-2 px-3 font-mono text-xs text-gray-600">{c.name || '-'}</td>
+                              <td className="py-2 px-3 font-mono text-xs text-gray-600">{displayContainerName(c.name)}</td>
                               <td className="py-2 px-3">
                                 {isPending ? (
                                   <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800 animate-pulse">
@@ -940,6 +1020,7 @@ export default function GpuFleetPanel() {
                                 )}
                               </td>
                               <td className="py-2 px-3 text-xs text-gray-500">{c.image || c.config?.image || '-'}</td>
+                              <td className="py-2 px-3"><RuntimeChip label={label} /></td>
                               <td className="py-2 px-3 text-xs text-gray-500 font-mono">
                                 {c.model || c.config?.model || <span className="text-gray-300 italic">none</span>}
                               </td>

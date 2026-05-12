@@ -23,9 +23,16 @@ export function applySetupOverrides(): void {
   if (!cfg) return;
 
   if (cfg.hostOsOverride && (cfg.hostOsOverride === 'darwin' || cfg.hostOsOverride === 'win32' || cfg.hostOsOverride === 'linux')) {
-    state.hostOs = cfg.hostOsOverride;
-    state.hostOsConfidence = 'override';
-    log.info(`Applied hostOs override: ${cfg.hostOsOverride}`);
+    // Master-pushed override (from config.json) takes precedence — don't
+    // clobber it with a stale /setup-wizard choice. The operator's latest
+    // intent on /admin/host-provisioning wins over an earlier local choice.
+    if (state.hostOsConfidence === 'master-override') {
+      log.info(`Skipping local hostOs override (${cfg.hostOsOverride}) — master-pushed override (${state.hostOs}) takes precedence`);
+    } else {
+      state.hostOs = cfg.hostOsOverride;
+      state.hostOsConfidence = 'override';
+      log.info(`Applied hostOs override: ${cfg.hostOsOverride}`);
+    }
   }
 
   if (typeof cfg.hostOllamaEnabledOverride === 'boolean') {

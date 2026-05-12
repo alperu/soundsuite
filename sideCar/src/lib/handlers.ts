@@ -293,6 +293,215 @@ export function pullOllamaModelAsync(role: string, andLoad: boolean): void {
 }
 
 /**
+ * Manual "Pull" (and optional Load) for a role.
+ *
+ * Runtime-aware dispatch:
+ *   - host           → Ollama HTTP API on the host's native Ollama
+ *                      (ollamaPull then optionally ollamaLoad). No Docker.
+ *   - docker-ollama  → ensureContainer (pull image + create + start) then
+ *                      ollamaPull/ollamaLoad against the container's port.
+ *   - docker-vllm    → pullImage + ensureContainer + startContainer. vLLM
+ *                      lazy-downloads the HuggingFace model on first request.
+ *   - docker-model-runner → no-op; DMR has no pull API. Operator must run
+ *                      `docker model pull <model>` on the host.
+ *
+ * Returns a plain { ok / error / message } payload suitable for both the
+ * HTTP `/api/containers` route and the WS dispatcher.
+ */
+export async function handlePullModel(role: string, andLoad: boolean): Promise<Record<string, unknown>> {
+  const def = state.registry[role];
+  if (!def) return { error: `Unknown role: ${role}` };
+
+  // Honor operator opt-out — same policy as acquire/start.
+  if ((state.minOnline?.[role] ?? 1) === 0) {
+    log.info(`Pull ${role}: REJECTED — minOnline=0 (operator opted this role out)`);
+    return { error: `Role "${role}" is disabled (minOnline=0). Set Minimum Online > 0 in admin to allow pull.` };
+  }
+
+  // Manual Pull clears user-stopped intent — the operator is asking us to
+  // load this role's model, so the heartbeat may re-engage afterwards.
+  state.userStopped.delete(role);
+
+  if (def.runtime === 'docker-model-runner') {
+    log.info(`Pull ${role}: runtime=docker-model-runner -> no-op (operator must run "docker model pull ${def.model}" on host)`);
+    return {
+      ok: true,
+      message: `${role} on Docker Model Runner — pull is host-side. Run "docker model pull ${def.model}" on ${state.dmrHost} to fetch the model.`,
+    };
+  }
+
+  if (def.type === 'vllm') {
+    // docker-vllm path. pull image + ensure container + start so vLLM
+    // begins downloading the HF model.
+    if (!def.image) return { error: `${role}: no docker image configured` };
+    log.info(`Pull ${role}: runtime=docker-vllm -> pullImage ${def.image} + start container ${def.containerName}`);
+    try {
+      await pullImage(def.image);
+    } catch (err) {
+      return { error: `Image pull failed: ${(err as Error).message}` };
+    }
+    await ensureContainerForRole(role);
+    const csv = await getContainerState(def.containerName);
+    if (csv.status !== 'running') {
+      await startContainer(def.containerName);
+    }
+    return {
+      ok: true,
+      model: def.model,
+      container: def.containerName,
+      message: `${def.model} image pulled and container started — vLLM downloads the HF model on first request (cached afterwards)`,
+    };
+  }
+
+  if (def.type !== 'ollama' || !def.model) {
+    return { error: `${role}: not an Ollama role with a model` };
+  }
+
+  // Both host-ollama and docker-ollama use the same Ollama HTTP API path.
+  // pullOllamaModelAsync is fire-and-forget — progress reported via task system.
+  // For host: ollamaPull/Load address state.hostOllamaHost:HOST_OLLAMA_PORT
+  // via getDockerHost(role). For docker: addresses the container by its port.
+  if (def.runtime === 'host') {
+    log.info(`Pull ${role}: runtime=host -> ollamaPull ${def.model} on ${state.hostOllamaHost}:${def.port}${andLoad ? ' (and load)' : ''}`);
+    pullOllamaModelAsync(role, andLoad);
+    return {
+      ok: true,
+      model: def.model,
+      message: `Pull${andLoad ? ' + load' : ''} started for ${def.model} on host Ollama (${state.hostOllamaHost}:${def.port})`,
+    };
+  }
+
+  // docker-ollama: ensure the container is up before talking to its
+  // /api/pull. pullOllamaModelAsync handles the rest.
+  log.info(`Pull ${role}: runtime=docker-ollama -> ensureContainer ${def.containerName} + ollamaPull ${def.model}${andLoad ? ' (and load)' : ''}`);
+  try {
+    await ensureContainer(role);
+    const cs = await getContainerState(def.containerName);
+    if (cs.status !== 'running') {
+      await startContainer(def.containerName);
+    }
+  } catch (err) {
+    return { error: `Failed to prepare ${def.containerName}: ${(err as Error).message}` };
+  }
+  pullOllamaModelAsync(role, andLoad);
+  return {
+    ok: true,
+    model: def.model,
+    container: def.containerName,
+    message: `Pull${andLoad ? ' + load' : ''} started for ${def.model}`,
+  };
+}
+
+/**
+ * Manual "Load" for a role — load the configured model into VRAM (or start
+ * the vLLM container, which loads the model at startup).
+ *
+ * Runtime-aware dispatch:
+ *   - host           → ollamaLoad against the host's native Ollama.
+ *   - docker-ollama  → ensureContainer + ollamaLoad against the container.
+ *                      gpuOnly roles use loadGpuOnly() (evicts competitors
+ *                      and forces num_gpu).
+ *   - docker-vllm    → start the vLLM container; vLLM loads on startup.
+ *   - docker-model-runner → no-op; DMR lazy-loads on first inference.
+ */
+export async function handleLoadModel(role: string): Promise<Record<string, unknown>> {
+  const def = state.registry[role];
+  if (!def) return { error: `Unknown role: ${role}` };
+  if (!def.model) return { error: `No model configured for ${role}` };
+
+  if ((state.minOnline?.[role] ?? 1) === 0) {
+    log.info(`Load ${role}: REJECTED — minOnline=0 (operator opted this role out)`);
+    return { error: `Role "${role}" is disabled (minOnline=0). Set Minimum Online > 0 in admin to allow loading.` };
+  }
+
+  // Manual Load clears user-stopped intent.
+  state.userStopped.delete(role);
+
+  if (def.runtime === 'docker-model-runner') {
+    log.info(`Load ${role}: runtime=docker-model-runner -> no-op (DMR lazy-loads on first inference)`);
+    return {
+      ok: true,
+      model: def.model,
+      message: `${role} on Docker Model Runner — no explicit load API; DMR lazy-starts ${def.model} on first inference request.`,
+    };
+  }
+
+  if (def.type === 'vllm') {
+    log.info(`Load ${role}: runtime=docker-vllm -> start container ${def.containerName} (vLLM loads model at startup)`);
+    const csv = await getContainerState(def.containerName);
+    if (csv.status !== 'running') {
+      try {
+        await ensureContainerForRole(role);
+        await startContainer(def.containerName);
+      } catch (err) {
+        return { error: `Failed to start ${def.containerName}: ${(err as Error).message}` };
+      }
+      return {
+        ok: true,
+        model: def.model,
+        container: def.containerName,
+        message: `${def.containerName} started — vLLM is loading ${def.model}`,
+      };
+    }
+    return {
+      ok: true,
+      model: def.model,
+      container: def.containerName,
+      message: `${def.containerName} already running`,
+    };
+  }
+
+  if (def.type !== 'ollama') {
+    return { error: `${role}: not an Ollama or vLLM role` };
+  }
+
+  if (def.runtime === 'host') {
+    log.info(`Load ${role}: runtime=host -> ollamaLoad ${def.model} on ${state.hostOllamaHost}:${def.port}`);
+    const loaded = def.gpuOnly
+      ? await loadGpuOnly(role)
+      : await ollamaLoad(def.port, def.model, { role });
+    if (!loaded) {
+      const reason = def.gpuOnly
+        ? `Failed to load ${def.model} fully on GPU on host Ollama (insufficient VRAM after eviction)`
+        : `Failed to load ${def.model} on host Ollama (${state.hostOllamaHost}:${def.port})`;
+      return { error: reason };
+    }
+    return {
+      ok: true,
+      model: def.model,
+      message: `${def.model} loaded into VRAM on host Ollama${def.gpuOnly ? ' (full GPU)' : ''}`,
+    };
+  }
+
+  // docker-ollama: ensure the container is running before /api/generate.
+  log.info(`Load ${role}: runtime=docker-ollama -> ensureContainer ${def.containerName} + ollamaLoad ${def.model}`);
+  try {
+    await ensureContainer(role);
+    const cs = await getContainerState(def.containerName);
+    if (cs.status !== 'running') {
+      await startContainer(def.containerName);
+    }
+  } catch (err) {
+    return { error: `Failed to prepare ${def.containerName}: ${(err as Error).message}` };
+  }
+  const loaded = def.gpuOnly
+    ? await loadGpuOnly(role)
+    : await ollamaLoad(def.port, def.model, { role });
+  if (!loaded) {
+    const reason = def.gpuOnly
+      ? `Failed to load ${def.model} fully on GPU (insufficient VRAM after eviction)`
+      : `Failed to load ${def.model} into VRAM`;
+    return { error: reason };
+  }
+  return {
+    ok: true,
+    model: def.model,
+    container: def.containerName,
+    message: `${def.model} loaded into VRAM${def.gpuOnly ? ' (full GPU)' : ''}`,
+  };
+}
+
+/**
  * Recover from a Docker port conflict when starting a container.
  * Identifies what holds the port and attempts self-healing.
  */
@@ -559,6 +768,8 @@ export async function handleStop(role?: string): Promise<Record<string, unknown>
   // DMR exposes an unload endpoint.
   if (role && state.registry[role]?.runtime === 'docker-model-runner') {
     clearIdleTimerForRole(role);
+    state.userStopped.add(role);
+    log.info(`Stop ${role}: runtime=docker-model-runner -> no unload API (DMR manages eviction); idle timer cleared`);
     return { status: 'exited', message: `${role} on DMR — no unload API; idle timer cleared (DMR manages its own lifecycle)` };
   }
 
@@ -570,7 +781,11 @@ export async function handleStop(role?: string): Promise<Record<string, unknown>
     const def = state.registry[role];
     clearIdleTimerForRole(role);
     state.userStopped.add(role);
-    if (!def.model) return { status: 'exited', message: `${role}: no model configured to unload` };
+    if (!def.model) {
+      log.info(`Stop ${role}: runtime=host -> no model configured, idle timer cleared`);
+      return { status: 'exited', message: `${role}: no model configured to unload` };
+    }
+    log.info(`Stop ${role}: runtime=host -> ollamaUnload ${def.model} (host=${state.hostOllamaHost}:${def.port})`);
     const ok = await ollamaUnload(def.port, def.model, role);
     return ok
       ? { status: 'exited', message: `host Ollama unloaded ${def.model} for ${role} — VRAM freed (auto-load suppressed until next Acquire)` }
@@ -587,7 +802,7 @@ export async function handleStop(role?: string): Promise<Record<string, unknown>
   } else {
     clearAllIdleTimers();
   }
-  log.info(`Manual stop requested: ${containerName}`);
+  log.info(`Stop ${role || 'legacy'}: runtime=docker -> dockerStop ${containerName}`);
 
   const cs = await getContainerState(containerName);
   if (cs.status === 'exited' || !cs.exists || cs.status === 'not_found') {

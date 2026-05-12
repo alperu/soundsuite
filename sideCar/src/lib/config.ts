@@ -95,6 +95,15 @@ export function loadSavedConfig(): Record<string, unknown> | null {
         }
         log.info('Loaded saved registry overrides');
       }
+      // Master-pushed hostOs override (persists across container restart).
+      // Apply with the highest-precedence confidence so applySetupOverrides()
+      // — which runs after loadSavedConfig() in instrumentation.ts — does NOT
+      // clobber it with a stale /setup-wizard choice.
+      if (data.hostOsOverride === 'darwin' || data.hostOsOverride === 'win32' || data.hostOsOverride === 'linux') {
+        state.hostOs = data.hostOsOverride;
+        state.hostOsConfidence = 'master-override';
+        log.info(`Loaded saved master hostOsOverride: ${data.hostOsOverride}`);
+      }
       // Migrate stale OCR model name (community model requires namespace prefix)
       if (state.registry.ocr?.model === 'olmocr2:7b-q8') {
         state.registry.ocr.model = 'richardyoung/olmocr2:7b-q8';
@@ -165,6 +174,13 @@ export function saveConfig(): void {
       return entry;
     });
     const firstUrl = masters.length > 0 ? masters[0].serverUrl : null;
+    // Only persist hostOsOverride when it was set by a master push — operator-
+    // local /setup overrides live in sidecar.config.json (managed by
+    // setup-overrides.ts). Keeps the two persistence channels distinct.
+    const hostOsOverride =
+      state.hostOsConfidence === 'master-override' && state.hostOs !== 'unknown'
+        ? state.hostOs
+        : null;
     const data = {
       // Canonical multi-master field
       masters,
@@ -177,6 +193,10 @@ export function saveConfig(): void {
       registry: Object.fromEntries(
         Object.entries(state.registry).map(([role, def]) => [role, { model: def.model, port: def.port }]),
       ),
+      // Master-pushed OS pin. null/missing = master never pushed an override
+      // (or pushed null = "Auto"). Higher precedence than env hint and
+      // auto-detect; lower than nothing because nothing else can override it.
+      hostOsOverride,
     };
     // Atomic write: write-temp-then-rename so a crash/kill during write
     // produces either the OLD valid file or the NEW valid file — never a

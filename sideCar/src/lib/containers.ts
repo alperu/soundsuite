@@ -10,11 +10,12 @@ import { createLogger } from './logger';
 import { tasks } from './task-tracker';
 
 /**
- * Build a synthetic "running" ContainerState for a host-runtime role. The
- * sidecar doesn't manage a Docker container for these — Ollama runs natively
- * on the Docker host. Returning a running state keeps the master's existing
- * `containerStatus === 'running'` routing logic working without a master-side
- * enum change.
+ * Build a synthetic ContainerState for a host-runtime role. The sidecar
+ * doesn't manage a Docker container for these — Ollama runs natively on
+ * the Docker host. Initially synthesized with `status: 'running'` so the
+ * downstream ollama-block in getAllContainerStates fires and populates
+ * `loadedModels` / `modelOnDisk`; status is then rewritten in-place by
+ * `refineHostOllamaStatus` based on observable Ollama state.
  */
 export function syntheticHostOllamaState(role: string, def: ContainerDef): ContainerState {
   return {
@@ -25,6 +26,39 @@ export function syntheticHostOllamaState(role: string, def: ContainerDef): Conta
     role,
     ports: [{ host: def.port, container: def.port }],
   } as ContainerState;
+}
+
+/**
+ * Rewrite a host-runtime role's synthetic `status` from observable Ollama
+ * state, after `loadedModels` / `modelOnDisk` have been populated.
+ *
+ *   `running`    — model is keep_alive'd in VRAM, serving traffic
+ *   `unloaded`   — model is on disk but not loaded in VRAM
+ *   `not_pulled` — model is not on disk yet (needs `ollama pull`)
+ *
+ * The master's UI badge and fleet-router both tolerate the new values:
+ * fleet-router skips routing to anything that isn't strictly `running`,
+ * and the admin UI falls through to a neutral badge for unknown statuses.
+ *
+ * Roles with no configured model stay at `running` (the operator opted
+ * out of model-level lifecycle; nothing to verify).
+ */
+function refineHostOllamaStatus(s: ContainerState, def: ContainerDef): void {
+  if (!def.model) return;
+  const loaded = (s.loadedModels?.length ?? 0) > 0;
+  if (loaded) {
+    s.status = 'running';
+    return;
+  }
+  if (s.modelOnDisk === true) {
+    s.status = 'unloaded';
+    return;
+  }
+  // Either modelOnDisk is explicitly false, or it was never set (tag fetch
+  // failed / cache miss right after boot). In both cases the operator's
+  // truthful next action is "pull". The heartbeat's own ollamaList call
+  // will reconcile on the next cycle if it was just a transient miss.
+  s.status = 'not_pulled';
 }
 
 /** Synthetic "running" state for a Docker Model Runner role. Identical
@@ -545,6 +579,15 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
       } catch {
         // Non-critical — leave loadedModels undefined
       }
+    }
+
+    // Host-runtime post-processing: rewrite the synthetic `status` from
+    // `'running'` to one of `running`/`unloaded`/`not_pulled` based on the
+    // loadedModels / modelOnDisk fields the ollama-block just populated.
+    // The synthesizer has to lie initially because the gate above keys on
+    // `status === 'running'` to trigger that population — chicken-and-egg.
+    if (def.runtime === 'host') {
+      refineHostOllamaStatus(states[role], def);
     }
   }
   return states;

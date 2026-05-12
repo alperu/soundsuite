@@ -382,7 +382,13 @@ export const state = {
   // Detected OS of the Docker host ('darwin' | 'win32' | 'linux' | 'unknown').
   // Populated by host-os.ts at startup.
   hostOs: 'unknown' as 'darwin' | 'win32' | 'linux' | 'unknown',
-  hostOsConfidence: 'low' as 'env' | 'docker-info' | 'low' | 'override',
+  // Precedence order (highest first):
+  //   'master-override' — pushed via /config from master (UI: /admin/host-provisioning)
+  //   'override'        — operator picked via local /setup wizard
+  //   'env'             — HOST_OS env at container launch
+  //   'docker-info'     — auto-detected from Docker /info
+  //   'low'             — no signal yet
+  hostOsConfidence: 'low' as 'env' | 'docker-info' | 'low' | 'override' | 'master-override',
   hostOsDockerDesktop: false,
 
   // ─── Docker Model Runner mode ──────────────────────────────────────────
