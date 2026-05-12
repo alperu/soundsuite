@@ -335,13 +335,18 @@ model SidecarCommand {
 // keys by `mode` string instead of a RoleType FK.
 
 model HostProvisioning {
-  id               String   @id @default(cuid())
-  sidecarUrl       String   @unique
-  hostOsOverride   String?
-  masterUrlForHost String?
-  notes            String?
-  updatedAt        DateTime @updatedAt
-  createdAt        DateTime @default(now())
+  id                  String   @id @default(cuid())
+  sidecarUrl          String   @unique
+  hostOsOverride      String?
+  masterUrlForHost    String?
+  // Optional override of the master's WebSocket relay port for this host.
+  // Sidecars connect to <masterHost>:<masterWsPortForHost>/sidecar — default
+  // is 3002 (GPU_WS_PORT on the master). Override per host when this master
+  // accepts WS upgrades on a different port (e.g. Fantom MCP at 3848).
+  masterWsPortForHost Int?
+  notes               String?
+  updatedAt           DateTime @updatedAt
+  createdAt           DateTime @default(now())
 
   @@index([sidecarUrl])
 }

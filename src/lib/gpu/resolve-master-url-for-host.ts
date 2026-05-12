@@ -1,28 +1,39 @@
 /**
- * Resolve the master URL THIS sidecar should call HOME to.
+ * Resolve the master URL + WS port THIS sidecar should call HOME to.
  *
- * Fallback chain:
- *   1. HostProvisioning.masterUrlForHost (per-sidecar override from /admin/host-provisioning)
- *   2. SOUND_SUITE_MASTER_URL env
- *   3. Config DB key `master.url` (settable from /admin)
- *   4. Derived-from-recent-request cache (Host header on inbound HTTP hits)
- *
- * Returns null when nothing is known.
+ * Per-host ONLY — no global fallback. Operator must explicitly assign a
+ * master URL per host on /admin/host-provisioning. When no per-host record
+ * exists, returns null and callers MUST NOT push anything to the sidecar
+ * (sidecar keeps using whatever URL it already has, typically the one it
+ * was registered with).
  */
 
 import { getProvisioning } from '@/lib/db/host-provisioning';
-import { getCanonicalMasterUrl } from '@/lib/gpu/master-identity';
 
 export async function resolveMasterUrlForHost(
   sidecarUrl: string | null | undefined,
 ): Promise<string | null> {
-  if (sidecarUrl) {
-    try {
-      const prov = await getProvisioning(sidecarUrl);
-      if (prov?.masterUrlForHost) return prov.masterUrlForHost;
-    } catch {
-      // fall through to global
-    }
+  if (!sidecarUrl) return null;
+  try {
+    const prov = await getProvisioning(sidecarUrl);
+    return prov?.masterUrlForHost ?? null;
+  } catch {
+    return null;
   }
-  return getCanonicalMasterUrl();
+}
+
+export async function resolveMasterEndpointForHost(
+  sidecarUrl: string | null | undefined,
+): Promise<{ url: string; wsPort: number | null } | null> {
+  if (!sidecarUrl) return null;
+  try {
+    const prov = await getProvisioning(sidecarUrl);
+    if (!prov?.masterUrlForHost) return null;
+    return {
+      url: prov.masterUrlForHost,
+      wsPort: prov.masterWsPortForHost ?? null,
+    };
+  } catch {
+    return null;
+  }
 }

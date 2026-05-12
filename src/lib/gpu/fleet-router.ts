@@ -19,6 +19,7 @@ import {
   getEffectiveMinOnline,
   getEffectiveIdleTimeoutsMs,
   getRuntimesForHost,
+  listAllAssignments,
 } from '@/lib/db/role-registry';
 import { resolveModelFromConfig, type ModeName } from '@/lib/gpu/mode-catalog';
 import { seedAssignmentsForHost } from '@/lib/db/role-registry-seed';
@@ -992,70 +993,87 @@ export function stopMinOnlineEnforcement(): void {
 /** Core enforcement: ensure minimum running containers per role across fleet. */
 async function enforceMinOnline(): Promise<void> {
   const config = await getConfig();
-  const mins: MinOnlineConfig = {
-    embedding: config.gpuMinEmbedding,
-    completion: config.gpuMinCompletion,
-    ocr: config.gpuMinOcr,
-    reranker: config.gpuMinReranker,
+  const globalMins: Record<string, number> = {
+    embedding: config.gpuMinEmbedding ?? 0,
+    completion: config.gpuMinCompletion ?? 0,
+    ocr: config.gpuMinOcr ?? 0,
+    reranker: config.gpuMinReranker ?? 0,
   };
 
-  // Skip if all zeros
-  if (Object.values(mins).every(v => v === 0)) return;
+  // VRAM requirements for roles that need GPU
+  const ROLE_VRAM_NEEDS: Record<string, number> = {
+    completion: 10000,
+    reranker: 7000,
+    embedding: 1200,
+    ocr: 8000,
+  };
+
+  // BUG 2 FIX: iterate per-host assignments (not global × all reachable).
+  // Only consider rows the operator has actually enabled. Group by sidecar
+  // so we issue at most one /acquire per (host, role) per tick.
+  const allAssignments = await listAllAssignments();
+  const enabled = allAssignments.filter(a => a.enabled === true);
+  if (enabled.length === 0) return;
 
   const fleet = await getFleetStatus();
-  const reachable = fleet.sidecars.filter(s => s.status === 'connected');
-  if (reachable.length === 0) return;
+  const reachableUrls = new Set(
+    fleet.sidecars.filter(s => s.status === 'connected').map(s => s.url),
+  );
+  if (reachableUrls.size === 0) return;
 
-  for (const role of ['embedding', 'completion', 'ocr', 'reranker'] as const) {
-    const minRequired = mins[role];
-    if (minRequired <= 0) continue;
+  for (const assignment of enabled) {
+    const role = assignment.mode.replace(/^ss-/, '');
+    if (!['embedding', 'completion', 'ocr', 'reranker'].includes(role)) continue;
 
-    // Count from status cache — no outbound push needed
-    let runningCount = 0;
-    const idleSidecars: string[] = [];
+    // Operator opt-out wins: if per-host minOnline=0, the sidecar's HARD
+    // disabled-policy will reject /acquire anyway — don't generate noise.
+    if (assignment.minOnline <= 0) continue;
 
-    // VRAM requirements for roles that need GPU
-    const ROLE_VRAM_NEEDS: Record<string, number> = {
-      completion: 10000,
-      reranker: 7000,
-      embedding: 1200,
-      ocr: 8000,
-    };
+    const globalMin = globalMins[role] ?? 0;
+    const effectiveMin = Math.max(globalMin, assignment.minOnline);
+    if (effectiveMin <= 0) continue;
 
-    for (const sidecar of reachable) {
-      const cached = statusCache.getSidecarStatus(sidecar.url);
-      if (!cached) continue;
-      const containerStatus = cached.containers?.[role]?.status;
-      if (containerStatus === 'running') {
-        runningCount++;
-      } else if (containerStatus === 'exited' || cached.containers?.[role]?.exists) {
-        // Only consider this sidecar if it has enough free VRAM for the role
-        const vramNeeded = ROLE_VRAM_NEEDS[role] || 0;
-        const freeVram = cached.freeVram ?? Infinity; // no data = assume ok
-        if (freeVram >= vramNeeded * 0.5) {
-          idleSidecars.push(sidecar.url);
-        } else {
-          logger.info(`min-online: skipping ${sidecar.url} for ${role} — need ${vramNeeded}MB but only ${freeVram}MB free VRAM`);
-        }
-      }
+    const sidecarUrl = assignment.sidecarUrl;
+    if (!reachableUrls.has(sidecarUrl)) continue;
+
+    const cached = statusCache.getSidecarStatus(sidecarUrl);
+    if (!cached) continue;
+
+    // BUG 1 FIX: host-runtime synthetic 'running' lies — the sidecar reports
+    // status:'running' for host-ollama regardless of whether the model is
+    // actually keep_alive'd in Ollama. Require vram.perRole[role].loaded===true
+    // before treating a host-ollama role as satisfied.
+    const container = cached.containers?.[role];
+    const containerStatus = container?.status;
+    const isHostRuntime = container?.image === 'host-ollama';
+    const vramLoaded = cached.vram?.perRole?.[role]?.loaded === true;
+
+    const reallyRunning =
+      containerStatus === 'running' && (!isHostRuntime || vramLoaded);
+
+    if (reallyRunning) continue; // satisfied for this (host, role)
+
+    // VRAM safety: don't try to acquire if the host clearly can't fit the role.
+    const vramNeeded = ROLE_VRAM_NEEDS[role] || 0;
+    const freeVram = cached.freeVram ?? Infinity; // no data = assume ok
+    if (vramNeeded > 0 && freeVram < vramNeeded * 0.5) {
+      logger.info(
+        `min-online: skipping ${sidecarUrl} for ${role} — need ${vramNeeded}MB but only ${freeVram}MB free VRAM`,
+      );
+      continue;
     }
 
-    if (runningCount >= minRequired) continue;
+    logger.info(
+      `Enforce min-online: deficit role=${role} host=${sidecarUrl} effectiveMin=${effectiveMin} containerStatus=${containerStatus ?? 'none'} hostRuntime=${isHostRuntime} loaded=${vramLoaded}`,
+    );
 
-    const deficit = minRequired - runningCount;
-    const toAcquire = idleSidecars.slice(0, deficit);
-
-    if (toAcquire.length < deficit) {
-      logger.warn(`min-online: need ${deficit} more ${role} container(s) but only ${toAcquire.length} sidecar(s) with sufficient VRAM`);
-    }
-
-    for (const url of toAcquire) {
-      try {
-        await sendToSidecar(url, '/acquire', { role });
-        logger.info(`min-online: acquired ${role} on ${url}`);
-      } catch (err) {
-        logger.warn(`min-online: failed to acquire ${role} on ${url}`, { error: (err as Error).message });
-      }
+    try {
+      await sendToSidecar(sidecarUrl, '/acquire', { role });
+      logger.info(`min-online: acquired ${role} on ${sidecarUrl}`);
+    } catch (err) {
+      logger.warn(`min-online: failed to acquire ${role} on ${sidecarUrl}`, {
+        error: (err as Error).message,
+      });
     }
   }
 }

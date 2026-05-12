@@ -1,6 +1,6 @@
 import { state, dockerSupportsGpu, type ContainerDef } from './state';
 import { getContainerState, startContainer, stopContainer, removeContainer, pullImage, createContainer, dockerRequest, buildExpectedConfig, detectConfigDrift, type ContainerState } from './docker';
-import { ollamaPs, ollamaList, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama, ollamaIsReady } from './ollama-api';
+import { ollamaPs, ollamaList, ollamaPsCached, ollamaListCached, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama, ollamaIsReady } from './ollama-api';
 import { dmrIsReady, dmrListModels } from './dmr-api';
 import { snapshotVram } from './vram-accountant';
 import { planEviction, type EvictionStep } from './eviction-planner';
@@ -324,10 +324,32 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
     }
     states[role].config = { image: def.image, model: def.model, port: def.port, vram: def.vram, type: def.type, gpuOnly: def.gpuOnly };
 
-    // Fetch loaded models for running Ollama containers via HTTP API
+    // Fetch loaded models for running Ollama containers via HTTP API.
+    // Host-runtime roles share a single native Ollama endpoint on the host
+    // (e.g. host.docker.internal:11434), so /api/ps and /api/tags return
+    // EVERY model on that host — not just this role's. Filter to def.model
+    // (exact tag or untagged base) so each role's loadedModels and
+    // modelOnDisk reflect only its own model. Without this, completion's
+    // status borrows embedding's loaded models and falsely reports
+    // modelOnDisk=true. Cached helpers coalesce parallel per-role calls
+    // to the same endpoint into one HTTP request per 30s.
     if (def.type === 'ollama' && states[role].status === 'running') {
+      const isHostRuntime = def.runtime === 'host';
+      const modelBase = def.model ? def.model.split(':')[0] : '';
+      const matchesDefModel = (name: string): boolean => {
+        if (!def.model) return false;
+        if (name === def.model) return true;
+        if (name === modelBase) return true;
+        // Tolerate Ollama's habit of appending ":latest" or stripping it.
+        if (modelBase && (name === `${modelBase}:latest` || `${modelBase}:latest` === def.model && name === modelBase)) return true;
+        return false;
+      };
       try {
-        const psModels = await ollamaPs(def.port, role);
+        const psFetcher = isHostRuntime ? ollamaPsCached : ollamaPs;
+        const psModelsRaw = await psFetcher(def.port, role);
+        const psModels = isHostRuntime
+          ? psModelsRaw.filter((m) => matchesDefModel(m.name))
+          : psModelsRaw;
         const models = psModels.map(m => ({
           name: m.name,
           size: m.size ? `${Math.round(m.size / 1e9)}GB` : '?',
@@ -338,6 +360,12 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
           until: m.until || '',
         }));
         states[role].loadedModels = models;
+        // For host-runtime with no configured model, refuse to lie:
+        // surface an empty list rather than the host-wide snapshot.
+        if (isHostRuntime && !def.model) {
+          states[role].loadedModels = [];
+          states[role].modelOnDisk = false;
+        }
 
         // Compute gpuReady for gpuOnly roles. Default true; flipped false if
         // any loaded model on this endpoint is partially on CPU.
@@ -386,12 +414,20 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
           }
         }
 
-        // Check if configured model is on disk (for UI status display)
+        // Check if configured model is on disk (for UI status display).
+        // Host-runtime: STRICT match (exact tag or untagged base, with the
+        // implicit ":latest" tolerance Ollama applies). Substring matching
+        // here would let `qwen3-embedding:0.6b` satisfy a `qwen3.5:14b`
+        // check whenever the embedding model is the only thing on disk.
         if (def.model) {
           try {
-            const diskModelsForCheck = await ollamaList(def.port, role);
-            const modelBase = def.model.split(':')[0];
-            states[role].modelOnDisk = diskModelsForCheck.some(m => m.includes(modelBase));
+            const listFetcher = isHostRuntime ? ollamaListCached : ollamaList;
+            const diskModelsForCheck = await listFetcher(def.port, role);
+            if (isHostRuntime) {
+              states[role].modelOnDisk = diskModelsForCheck.some(matchesDefModel);
+            } else {
+              states[role].modelOnDisk = diskModelsForCheck.some(m => m.includes(modelBase));
+            }
           } catch { /* non-critical */ }
         }
 

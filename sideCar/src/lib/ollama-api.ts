@@ -79,6 +79,85 @@ export async function ollamaList(port: number, role?: string): Promise<string[]>
 }
 
 /**
+ * Cached snapshots of /api/tags and /api/ps, keyed by `host:port`. Multiple
+ * host-runtime roles typically share the same native Ollama endpoint
+ * (e.g. `host.docker.internal:11434`); without a cache, each refresh cycle
+ * fires N parallel HTTP requests to the same endpoint for the same data.
+ *
+ * 30-second TTL: long enough to coalesce a single status sweep across all
+ * roles (refresh cadence is typically 5–10s), short enough that operator
+ * actions (pulling a model, loading via the master) show up within a cycle.
+ *
+ * Errors are not cached — a transient failure shouldn't lock us out for 30s.
+ */
+const TAGS_TTL_MS = 30_000;
+const PS_TTL_MS = 30_000;
+
+interface CacheEntry<T> {
+  at: number;
+  value: T;
+}
+
+const tagsCache = new Map<string, CacheEntry<string[]>>();
+const tagsInflight = new Map<string, Promise<string[]>>();
+const psCache = new Map<string, CacheEntry<LoadedModel[]>>();
+const psInflight = new Map<string, Promise<LoadedModel[]>>();
+
+function cacheKey(role: string | undefined, port: number): string {
+  // Lazy import to avoid a circular dependency (docker.ts imports nothing
+  // from ollama-api at module-load time, but importing getDockerHost
+  // statically at the top of this file is already done).
+  return `${getDockerHost(role)}:${port}`;
+}
+
+/** Cached wrapper around `ollamaList` (GET /api/tags). 30s TTL. */
+export async function ollamaListCached(port: number, role?: string): Promise<string[]> {
+  const key = cacheKey(role, port);
+  const hit = tagsCache.get(key);
+  if (hit && Date.now() - hit.at < TAGS_TTL_MS) return hit.value;
+  const inflight = tagsInflight.get(key);
+  if (inflight) return inflight;
+  const p = ollamaList(port, role)
+    .then((value) => {
+      tagsCache.set(key, { at: Date.now(), value });
+      return value;
+    })
+    .finally(() => {
+      tagsInflight.delete(key);
+    });
+  tagsInflight.set(key, p);
+  return p;
+}
+
+/** Cached wrapper around `ollamaPs` (GET /api/ps). 30s TTL. */
+export async function ollamaPsCached(port: number, role?: string): Promise<LoadedModel[]> {
+  const key = cacheKey(role, port);
+  const hit = psCache.get(key);
+  if (hit && Date.now() - hit.at < PS_TTL_MS) return hit.value;
+  const inflight = psInflight.get(key);
+  if (inflight) return inflight;
+  const p = ollamaPs(port, role)
+    .then((value) => {
+      psCache.set(key, { at: Date.now(), value });
+      return value;
+    })
+    .finally(() => {
+      psInflight.delete(key);
+    });
+  psInflight.set(key, p);
+  return p;
+}
+
+/** Invalidate cached /api/tags + /api/ps for a given host:port. Call after
+ *  a successful pull/load/unload so callers see the change without waiting
+ *  out the TTL. */
+export function invalidateOllamaCache(port: number, role?: string): void {
+  const key = cacheKey(role, port);
+  tagsCache.delete(key);
+  psCache.delete(key);
+}
+
+/**
  * Authoritative check that a specific model exists on disk.
  * POST /api/show {name} → 200 if present, 404 if missing. Use this when /api/tags
  * gives a false negative (Ollama can return an empty list right after container
@@ -226,6 +305,7 @@ export async function ollamaPull(
           } else if (!sawSuccess) {
             reject(new Error(`ollamaPull ${model} stream ended without success status (${lineCount} lines received)`));
           } else {
+            invalidateOllamaCache(port, opts?.role);
             resolve();
           }
         });
@@ -375,6 +455,7 @@ export async function ollamaLoad(
       }
     }
 
+    invalidateOllamaCache(port, role);
     return true;
   } catch (err) {
     log.error(`ollamaLoad: failed to load ${model} on port ${port}: ${(err as Error).message}`);
@@ -399,6 +480,7 @@ export async function ollamaUnload(port: number, model: string, role?: string): 
     );
     if (result.status === 200) {
       log.info(`ollamaUnload: ${model} unloaded on port ${port}`);
+      invalidateOllamaCache(port, role);
       return true;
     }
     // 404 = model not found / not pulled — treat as success (already unloaded,

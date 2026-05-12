@@ -122,7 +122,23 @@ export async function setAssignment(input: AssignmentInput): Promise<AssignmentR
       sidecarUrl: url,
       mode: input.mode,
       enabled: input.enabled ?? true,
-      minOnline: input.minOnline ?? 0,
+      // Default minOnline by enabled-state:
+      //   enabled=true  → 1 (auto-start: operator turned this role on so they
+      //                  expect the sidecar to pull+load the model).
+      //   enabled=false → 0 (operator opted out).
+      // The sidecar treats `minOnline=0` as a HARD "never auto-start" policy
+      // (handlers.ts:346, ws-client.ts:205) so defaulting newly-enabled rows
+      // to 0 means clicking the checkbox in /admin/roleassign persists in the
+      // DB but the sidecar refuses to act on the next /config push:
+      //   handleAcquire → "Role X is disabled (minOnline=0)" → no ollamaPull,
+      //   no container start, no model load. This was the BASWS34 / mcpserver
+      //   regression observed 2026-05-12.
+      minOnline:
+        input.minOnline != null
+          ? input.minOnline
+          : (input.enabled ?? true)
+          ? 1
+          : 0,
       idleTimeoutMin: input.idleTimeoutMin ?? 5,
       modelOverride: input.modelOverride ?? null,
       runtime: input.runtime ?? 'docker-ollama',

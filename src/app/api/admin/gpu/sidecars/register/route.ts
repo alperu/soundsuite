@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getConfig, setConfigValue } from '@/lib/db/config';
-import {
-  MASTER_URL_HEADER,
-  deriveOriginFromHeaders,
-  noteRequestOrigin,
-} from '@/lib/gpu/master-identity';
+import { MASTER_URL_HEADER } from '@/lib/gpu/master-identity';
 import { resolveMasterUrlForHost } from '@/lib/gpu/resolve-master-url-for-host';
 
 interface SidecarEntry {
@@ -28,8 +24,6 @@ interface SidecarEntry {
  */
 export async function POST(request: NextRequest) {
   try {
-    noteRequestOrigin(deriveOriginFromHeaders(request.headers));
-
     const body = await request.json();
     const { agentUrl, hostname, containers } = body;
 

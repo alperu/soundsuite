@@ -1,21 +1,22 @@
 'use client';
 
 /**
- * AdminHostProvisioning — per-sidecar master URL and OS overrides.
+ * AdminHostProvisioning — per-sidecar master URL, WS port, and OS overrides.
  *
  * Why this exists:
  *   The same fleet may have sidecars on different subnets (home LAN, lab
  *   subnet, VPN). Each sidecar may need a different master URL to phone
  *   home (different IPs from different networks). The same sidecar can
- *   also serve a second master app entirely (e.g. Fantom MCP at :3300).
+ *   also serve a second master app entirely (e.g. Fantom MCP at :3300
+ *   with its own WS port like 3848).
  *
- *   A single global "Master URL" is wrong for that fleet; this page
- *   manages per-host overrides instead.
+ *   Per-host ONLY — no global fallback. If a host has no row here, the
+ *   master pushes nothing and the sidecar keeps whatever URL it has.
  *
  * Backend contract:
  *   GET    /api/admin/host-provisioning
- *     → { provisioning: HostProvisioningRecord[], globalMasterUrl, globalMasterUrlSource }
- *   PUT    /api/admin/host-provisioning  { sidecarUrl, hostOsOverride?, masterUrlForHost?, notes? }
+ *     → { provisioning: HostProvisioningRecord[], defaultWsPort: number }
+ *   PUT    /api/admin/host-provisioning  { sidecarUrl, hostOsOverride?, masterUrlForHost?, masterWsPortForHost?, notes? }
  *   DELETE /api/admin/host-provisioning?sidecarUrl=...
  */
 
@@ -27,13 +28,13 @@ interface HostProvisioningRecord {
   sidecarUrl: string;
   hostOsOverride: HostOs | null;
   masterUrlForHost: string | null;
+  masterWsPortForHost: number | null;
   notes: string | null;
 }
 
 interface ProvisioningResponse {
   provisioning: HostProvisioningRecord[];
-  globalMasterUrl: string | null;
-  globalMasterUrlSource: 'env' | 'config' | 'derived' | 'none';
+  defaultWsPort: number;
 }
 
 interface FleetSidecar {
@@ -66,7 +67,13 @@ function osOptionLabel(v: HostOs | '') {
 }
 
 function emptyRecord(sidecarUrl: string): HostProvisioningRecord {
-  return { sidecarUrl, hostOsOverride: null, masterUrlForHost: null, notes: null };
+  return {
+    sidecarUrl,
+    hostOsOverride: null,
+    masterUrlForHost: null,
+    masterWsPortForHost: null,
+    notes: null,
+  };
 }
 
 function secondsSince(iso?: string): string {
@@ -95,8 +102,7 @@ function connLabel(s: FleetSidecar): string {
 
 export default function AdminHostProvisioning() {
   const [fleet, setFleet] = useState<FleetSidecar[]>([]);
-  const [globalMasterUrl, setGlobalMasterUrl] = useState<string | null>(null);
-  const [globalMasterUrlSource, setGlobalMasterUrlSource] = useState<ProvisioningResponse['globalMasterUrlSource']>('none');
+  const [defaultWsPort, setDefaultWsPort] = useState<number>(3002);
   const [recordsByUrl, setRecordsByUrl] = useState<Record<string, HostProvisioningRecord>>({});
   const [draftByUrl, setDraftByUrl] = useState<Record<string, HostProvisioningRecord>>({});
   const [savingUrl, setSavingUrl] = useState<string | null>(null);
@@ -149,8 +155,6 @@ export default function AdminHostProvisioning() {
       if (res.status === 404) {
         setBackendMissing(true);
         setRecordsByUrl({});
-        setGlobalMasterUrl(null);
-        setGlobalMasterUrlSource('none');
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -162,12 +166,12 @@ export default function AdminHostProvisioning() {
           sidecarUrl: r.sidecarUrl,
           hostOsOverride: (r.hostOsOverride ?? null) as HostOs | null,
           masterUrlForHost: r.masterUrlForHost ?? null,
+          masterWsPortForHost: r.masterWsPortForHost ?? null,
           notes: r.notes ?? null,
         };
       }
       setRecordsByUrl(map);
-      setGlobalMasterUrl(data.globalMasterUrl ?? null);
-      setGlobalMasterUrlSource(data.globalMasterUrlSource ?? 'none');
+      if (typeof data.defaultWsPort === 'number') setDefaultWsPort(data.defaultWsPort);
     } catch (e: any) {
       setError(e?.message || String(e));
     }
@@ -214,6 +218,7 @@ export default function AdminHostProvisioning() {
     return (
       (d.hostOsOverride ?? null) !== (r.hostOsOverride ?? null) ||
       (d.masterUrlForHost ?? '') !== (r.masterUrlForHost ?? '') ||
+      (d.masterWsPortForHost ?? null) !== (r.masterWsPortForHost ?? null) ||
       (d.notes ?? '') !== (r.notes ?? '')
     );
   }, [draftByUrl, recordsByUrl]);
@@ -224,6 +229,7 @@ export default function AdminHostProvisioning() {
       sidecarUrl,
       hostOsOverride: d.hostOsOverride ?? null,
       masterUrlForHost: d.masterUrlForHost?.trim() ? d.masterUrlForHost.trim() : null,
+      masterWsPortForHost: d.masterWsPortForHost ?? null,
       notes: d.notes?.trim() ? d.notes.trim() : null,
     };
 
@@ -294,16 +300,6 @@ export default function AdminHostProvisioning() {
     return [...fleet].sort((a, b) => (a.hostname || a.url).localeCompare(b.hostname || b.url));
   }, [fleet]);
 
-  const globalSourceLabel = useMemo(() => {
-    switch (globalMasterUrlSource) {
-      case 'env': return 'from SOUND_SUITE_MASTER_URL env var';
-      case 'config': return 'from Config DB';
-      case 'derived': return 'derived from current request host';
-      case 'none':
-      default: return 'not configured';
-    }
-  }, [globalMasterUrlSource]);
-
   return (
     <div className="space-y-4">
       {toast && (
@@ -321,24 +317,25 @@ export default function AdminHostProvisioning() {
       {/* Header / context block */}
       <div className="bg-blue-50 border border-blue-200 rounded-md p-3 text-sm text-blue-900 space-y-2">
         <p>
-          Each sidecar can override the master URL it uses to call home, plus
-          pin its OS type. Leave a field blank to inherit the global default.
+          Assign each sidecar the master URL it should call home to, plus
+          (optionally) the master&apos;s WebSocket port and the host OS type.
+          These overrides are <strong>per-host only</strong> — there is no
+          global fallback. A sidecar without a row here keeps whatever URL
+          it already has and the master pushes nothing.
         </p>
         <p className="text-blue-800">
           <strong>Why per-host?</strong> Sidecars may sit on different subnets
           (home LAN, lab subnet, VPN) and reach this master at different IPs.
-          A single global URL can&apos;t cover all of them. The same physical
-          sidecar can also serve another master app (e.g.{' '}
-          <em>Fantom MCP</em> on a different port) — its master list keeps
-          both side by side.
+          The same physical sidecar can also serve another master app (e.g.{' '}
+          <em>Fantom MCP</em> on a different port like <code>:3848</code>) —
+          its master list keeps both side by side.
         </p>
-        <div className="flex flex-wrap items-center gap-2 pt-1">
-          <span className="text-xs uppercase tracking-wide text-blue-700">Global fallback:</span>
-          <code className="px-1.5 py-0.5 bg-white rounded border border-blue-200 text-gray-800 font-mono text-xs">
-            {globalMasterUrl || '(unset)'}
-          </code>
-          <span className="text-[11px] text-blue-700">({globalSourceLabel})</span>
-        </div>
+        <p className="text-blue-800 text-[12px]">
+          Default WebSocket port for this master:{' '}
+          <code className="font-mono">{defaultWsPort}</code> (from{' '}
+          <code className="font-mono">GPU_WS_PORT</code>). Override per host when
+          this master accepts WS upgrades on a different port.
+        </p>
       </div>
 
       {backendMissing && (
@@ -368,7 +365,7 @@ export default function AdminHostProvisioning() {
             const saved = recordsByUrl[s.url];
             const dirty = isDirty(s.url);
             const detectedOs = s.sidecarStatus?.host?.os;
-            const placeholderMasterUrl = globalMasterUrl || 'http://master:3000';
+            const placeholderMasterUrl = 'http://master:3000';
             const infoDismissed = !!dismissedInfo[s.url];
 
             return (
@@ -410,7 +407,7 @@ export default function AdminHostProvisioning() {
 
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-start">
                   {/* OS override */}
-                  <div className="md:col-span-3">
+                  <div className="md:col-span-2">
                     <label className="block text-[11px] uppercase tracking-wide text-gray-500 mb-1">
                       OS (override)
                     </label>
@@ -430,7 +427,7 @@ export default function AdminHostProvisioning() {
                   </div>
 
                   {/* Master URL */}
-                  <div className="md:col-span-6">
+                  <div className="md:col-span-5">
                     <label className="block text-[11px] uppercase tracking-wide text-gray-500 mb-1">
                       Master URL (per-host)
                     </label>
@@ -438,7 +435,31 @@ export default function AdminHostProvisioning() {
                       type="text"
                       value={d.masterUrlForHost ?? ''}
                       onChange={(e) => setDraftField(s.url, { masterUrlForHost: e.target.value })}
-                      placeholder={`inherit global — ${placeholderMasterUrl}`}
+                      placeholder={placeholderMasterUrl}
+                      className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
+                    />
+                  </div>
+
+                  {/* WS Port */}
+                  <div className="md:col-span-2">
+                    <label className="block text-[11px] uppercase tracking-wide text-gray-500 mb-1">
+                      WS Port
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={65535}
+                      value={d.masterWsPortForHost ?? ''}
+                      onChange={(e) => {
+                        const raw = e.target.value.trim();
+                        if (raw === '') {
+                          setDraftField(s.url, { masterWsPortForHost: null });
+                          return;
+                        }
+                        const n = parseInt(raw, 10);
+                        if (Number.isFinite(n)) setDraftField(s.url, { masterWsPortForHost: n });
+                      }}
+                      placeholder={`${defaultWsPort} (default)`}
                       className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
                     />
                   </div>

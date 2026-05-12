@@ -1,9 +1,11 @@
 /**
- * HostProvisioning DAO — per-sidecar overrides for OS detection and the
- * master URL THIS host should use to call HOME.
+ * HostProvisioning DAO — per-sidecar overrides for OS detection, the master
+ * URL THIS host should use to call HOME, and the WebSocket port it should
+ * use to connect to that master.
  *
- * NULL / undefined fields mean "fall back to the global default" (env var,
- * Config DB key, or derived-from-request — see master-identity.ts).
+ * Per-host ONLY: when `masterUrlForHost` is null, the master DOES NOT push
+ * any identity to this sidecar — there is no global fallback. Operator must
+ * explicitly assign one on /admin/host-provisioning.
  */
 
 import { prisma } from './prisma';
@@ -14,6 +16,7 @@ export interface HostProvisioningRecord {
   sidecarUrl: string;
   hostOsOverride: HostOsOverride | null;
   masterUrlForHost: string | null;
+  masterWsPortForHost: number | null;
   notes: string | null;
 }
 
@@ -33,16 +36,22 @@ export function isValidHostOs(v: unknown): v is HostOsOverride {
   return v === 'darwin' || v === 'win32' || v === 'linux';
 }
 
+export function isValidWsPort(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v > 0 && v < 65536;
+}
+
 function toRecord(row: {
   sidecarUrl: string;
   hostOsOverride: string | null;
   masterUrlForHost: string | null;
+  masterWsPortForHost: number | null;
   notes: string | null;
 }): HostProvisioningRecord {
   return {
     sidecarUrl: row.sidecarUrl,
     hostOsOverride: isValidHostOs(row.hostOsOverride) ? row.hostOsOverride : null,
     masterUrlForHost: row.masterUrlForHost,
+    masterWsPortForHost: isValidWsPort(row.masterWsPortForHost) ? row.masterWsPortForHost : null,
     notes: row.notes,
   };
 }
@@ -68,6 +77,7 @@ export async function upsertProvisioning(
   if (!key) throw new Error('sidecarUrl is required');
   const hostOsOverride = isValidHostOs(input.hostOsOverride) ? input.hostOsOverride : null;
   const masterUrlForHost = normalizeMasterUrl(input.masterUrlForHost);
+  const masterWsPortForHost = isValidWsPort(input.masterWsPortForHost) ? input.masterWsPortForHost : null;
   const notes = input.notes && input.notes.trim() ? input.notes : null;
 
   const row = await prisma.hostProvisioning.upsert({
@@ -76,11 +86,13 @@ export async function upsertProvisioning(
       sidecarUrl: key,
       hostOsOverride,
       masterUrlForHost,
+      masterWsPortForHost,
       notes,
     },
     update: {
       hostOsOverride,
       masterUrlForHost,
+      masterWsPortForHost,
       notes,
     },
   });

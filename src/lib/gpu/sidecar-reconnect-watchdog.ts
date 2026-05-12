@@ -18,7 +18,7 @@
 
 import { createLogger } from '@/lib/logger';
 import { getConfig } from '@/lib/db/config';
-import { getCanonicalMasterUrl } from '@/lib/gpu/master-identity';
+import { resolveMasterUrlForHost } from '@/lib/gpu/resolve-master-url-for-host';
 
 const logger = createLogger('SidecarReconnectWatchdog');
 
@@ -131,15 +131,6 @@ async function reassertOn(entry: SidecarEntry, masterUrl: string): Promise<void>
 }
 
 async function tick(): Promise<void> {
-  let masterUrl: string | null = null;
-  try {
-    masterUrl = await getCanonicalMasterUrl();
-  } catch { /* ignore */ }
-  if (!masterUrl) {
-    // Nothing to push. Skip silently — env/Config not yet set.
-    return;
-  }
-
   let sidecars: SidecarEntry[] = [];
   try {
     const cfg = await getConfig();
@@ -153,10 +144,12 @@ async function tick(): Promise<void> {
   for (const entry of sidecars) {
     const last = entry.lastSeenAt
       ?? (entry.lastSeen ? Date.parse(entry.lastSeen) : 0);
-    if (!last || now - last >= STALE_MS) {
-      // Fire-and-forget. Each reassertOn handles its own errors.
-      void reassertOn(entry, masterUrl);
-    }
+    if (last && now - last < STALE_MS) continue;
+    // Per-host URL only — no global fallback. Skip silently if operator
+    // hasn't configured this host on /admin/host-provisioning.
+    const masterUrl = await resolveMasterUrlForHost(entry.url).catch(() => null);
+    if (!masterUrl) continue;
+    void reassertOn(entry, masterUrl);
   }
 }
 

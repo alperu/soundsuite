@@ -2,12 +2,15 @@
  * Per-sidecar host provisioning overrides.
  *
  *  GET    /api/admin/host-provisioning
- *           → { provisioning: HostProvisioningRecord[], globalMasterUrl: string|null }
+ *           → { provisioning: HostProvisioningRecord[], defaultWsPort: number }
  *  PUT    /api/admin/host-provisioning
- *           body { sidecarUrl, hostOsOverride?, masterUrlForHost?, notes? }
+ *           body { sidecarUrl, hostOsOverride?, masterUrlForHost?, masterWsPortForHost?, notes? }
  *           Upserts. Returns saved record.
  *  DELETE /api/admin/host-provisioning?sidecarUrl=...
- *           Clears the row → host falls back to global default.
+ *           Clears the row → master will no longer push identity to this host.
+ *
+ * Per-host ONLY. No global master URL fallback — operator must explicitly
+ * assign one per host or the master pushes nothing.
  *
  * Auth: matches /api/admin/gpu-fleet — none (admin-only Next routes; UI is
  * gated at the page layer).
@@ -18,20 +21,18 @@ import {
   HostProvisioningRecord,
   deleteProvisioning,
   isValidHostOs,
+  isValidWsPort,
   listProvisioning,
   normalizeMasterUrl,
   normalizeSidecarUrl,
   upsertProvisioning,
 } from '@/lib/db/host-provisioning';
-import { getCanonicalMasterUrl } from '@/lib/gpu/master-identity';
 
 export async function GET() {
   try {
-    const [provisioning, globalMasterUrl] = await Promise.all([
-      listProvisioning(),
-      getCanonicalMasterUrl(),
-    ]);
-    return NextResponse.json({ provisioning, globalMasterUrl });
+    const provisioning = await listProvisioning();
+    const defaultWsPort = parseInt(process.env.GPU_WS_PORT || '3002', 10);
+    return NextResponse.json({ provisioning, defaultWsPort });
   } catch (error: any) {
     return NextResponse.json(
       { error: (error?.message || String(error)).slice(0, 300) },
@@ -73,12 +74,28 @@ export async function PUT(request: NextRequest) {
       masterUrlForHost = candidate;
     }
 
+    // Validate masterWsPortForHost — positive 16-bit int when present.
+    let masterWsPortForHost: number | null = null;
+    if (body?.masterWsPortForHost != null && body.masterWsPortForHost !== '') {
+      const n = typeof body.masterWsPortForHost === 'number'
+        ? body.masterWsPortForHost
+        : parseInt(String(body.masterWsPortForHost), 10);
+      if (!isValidWsPort(n)) {
+        return NextResponse.json(
+          { error: 'masterWsPortForHost must be an integer 1–65535 or empty' },
+          { status: 400 },
+        );
+      }
+      masterWsPortForHost = n;
+    }
+
     const notes = body?.notes != null ? String(body.notes) : null;
 
     const saved = await upsertProvisioning({
       sidecarUrl,
       hostOsOverride,
       masterUrlForHost,
+      masterWsPortForHost,
       notes,
     });
     return NextResponse.json(saved);
