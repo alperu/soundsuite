@@ -100,6 +100,14 @@ export interface CachedSidecarStatus {
   freeVram?: number;   // total free GPU memory in MB
   totalVram?: number;  // total GPU memory in MB
   /**
+   * Sidecar's Docker connection state, as reported by getDockerMode() on the
+   * sidecar (sideCar/src/lib/docker.ts). One of 'socket', 'tcp', 'none'.
+   * Used by master enforcer + RerankerLifecycle to skip /acquire on sidecars
+   * with no Docker access (saving log spam — the acquire would just throw
+   * with "Sidecar lacks /var/run/docker.sock").
+   */
+  dockerMode?: 'socket' | 'tcp' | 'none' | string;
+  /**
    * Host-level memory/inference stats for non-NVIDIA-container sidecars
    * (Mac Apple Silicon, Windows Docker Desktop without an nvidia-smi helper).
    * Populated by the sidecar's host-stats collector. Mac sidecars typically

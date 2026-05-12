@@ -59,6 +59,11 @@ export async function POST(request: NextRequest) {
       masters: body.masters,
       lastConfigPushAt: body.lastConfigPushAt,
       vram: body.vram,
+      // dockerMode is at the TOP level of /api/status (sibling of containers,
+      // vram, etc.) — used by enforcer + RerankerLifecycle to skip /acquire on
+      // sidecars with no Docker access. Sidecar heartbeat must propagate it
+      // verbatim so the master can short-circuit before calling /acquire.
+      dockerMode: body.dockerMode,
     });
 
     // Update legacy sidecar registry in Config DB

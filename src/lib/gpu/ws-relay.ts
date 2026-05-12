@@ -188,6 +188,9 @@ export function startWsRelay(): WebSocketServer {
             masters: msg.statusData?.masters,
             lastConfigPushAt: msg.statusData?.lastConfigPushAt,
             vram: msg.statusData?.vram,
+            // dockerMode at top level of sidecar /api/status — needed by the
+            // enforcer + RerankerLifecycle dockerMode='none' skip guards.
+            dockerMode: msg.statusData?.dockerMode,
           });
 
           // Sidecar reset detection on WS path: empty masters[] means the
