@@ -1,4 +1,4 @@
-import { state, HOST_STATS_TTL_MS } from './state';
+import { state, HOST_STATS_TTL_MS, ensureSet } from './state';
 import { getContainerState, startContainer, stopContainer, removeContainer, createContainer, pullImage, getDockerMode, buildExpectedConfig, detectConfigDrift, isPortConflict, findContainerOnPort, dockerRequest } from './docker';
 import { ollamaList, ollamaShow, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama } from './ollama-api';
 import { loadGpuOnly, ensureContainerForRole } from './containers';
@@ -202,7 +202,7 @@ async function ensureOllamaModel(role: string): Promise<void> {
 
 /** Fire-and-forget load a model into VRAM with duplicate-prevention guard and VRAM check. */
 function fireAndForgetLoad(role: string, port: number, model: string, attempt = 1): void {
-  if (state.modelLoading.has(role)) {
+  if (ensureSet('modelLoading').has(role)) {
     log.info(`fireAndForgetLoad: ${role} already loading, skipping`);
     return;
   }
@@ -229,7 +229,7 @@ function fireAndForgetLoad(role: string, port: number, model: string, attempt = 
   }
 
   log.info(`fireAndForgetLoad: loading ${model} for ${role} on port ${port} (attempt ${attempt}/${MAX_ATTEMPTS})${def?.gpuOnly ? ' [gpuOnly: evict + force GPU]' : ''}${def?.runtime === 'host' ? ' [host-runtime]' : ''}`);
-  state.modelLoading.add(role);
+  ensureSet('modelLoading').add(role);
   const loadTaskId = tasks.start('model-load', `Load ${model} into VRAM`, role);
   const loadPromise = def?.gpuOnly
     ? loadGpuOnly(role)
@@ -263,7 +263,7 @@ function fireAndForgetLoad(role: string, port: number, model: string, attempt = 
       setTimeout(() => fireAndForgetLoad(role, port, model, attempt + 1), RETRY_DELAY);
     }
   }).finally(() => {
-    state.modelLoading.delete(role);
+    ensureSet('modelLoading').delete(role);
   });
 }
 
@@ -343,7 +343,7 @@ export async function handlePullModel(role: string, andLoad: boolean): Promise<R
 
   // Manual Pull clears user-stopped intent — the operator is asking us to
   // load this role's model, so the heartbeat may re-engage afterwards.
-  state.userStopped.delete(role);
+  ensureSet('userStopped').delete(role);
 
   if (def.runtime === 'docker-model-runner') {
     log.info(`Pull ${role}: runtime=docker-model-runner -> no-op (operator must run "docker model pull ${def.model}" on host)`);
@@ -438,7 +438,7 @@ export async function handleLoadModel(role: string): Promise<Record<string, unkn
   }
 
   // Manual Load clears user-stopped intent.
-  state.userStopped.delete(role);
+  ensureSet('userStopped').delete(role);
 
   if (def.runtime === 'docker-model-runner') {
     log.info(`Load ${role}: runtime=docker-model-runner -> no-op (DMR lazy-loads on first inference)`);
@@ -584,7 +584,7 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
     clearIdleTimerForRole(role);
     // Manual Acquire clears any prior user-stopped intent — the operator
     // is asking us to use this role again, so the heartbeat may re-engage.
-    state.userStopped.delete(role);
+    ensureSet('userStopped').delete(role);
     r.lastAcquire = new Date().toISOString();
     recordDemandSample(role);
     log.info(`Acquire ${role} (active: ${r.activeRequests})${def.runtime === 'host' ? ' [host-runtime]' : def.runtime === 'docker-model-runner' ? ' [dmr]' : ''}`);
@@ -743,7 +743,7 @@ export async function handleStart(role?: string): Promise<Record<string, unknown
   if (role) {
     clearIdleTimerForRole(role);
     // Manual Start clears the user-stopped intent — symmetric with Acquire.
-    state.userStopped.delete(role);
+    ensureSet('userStopped').delete(role);
   } else {
     clearAllIdleTimers();
   }
@@ -817,7 +817,7 @@ export async function handleStop(role?: string): Promise<Record<string, unknown>
   // DMR exposes an unload endpoint.
   if (role && state.registry[role]?.runtime === 'docker-model-runner') {
     clearIdleTimerForRole(role);
-    state.userStopped.add(role);
+    ensureSet('userStopped').add(role);
     log.info(`Stop ${role}: runtime=docker-model-runner -> no unload API (DMR manages eviction); idle timer cleared`);
     return { status: 'exited', message: `${role} on DMR — no unload API; idle timer cleared (DMR manages its own lifecycle)` };
   }
@@ -829,7 +829,7 @@ export async function handleStop(role?: string): Promise<Record<string, unknown>
   if (role && state.registry[role]?.runtime === 'host') {
     const def = state.registry[role];
     clearIdleTimerForRole(role);
-    state.userStopped.add(role);
+    ensureSet('userStopped').add(role);
     if (!def.model) {
       log.info(`Stop ${role}: runtime=host -> no model configured, idle timer cleared`);
       return { status: 'exited', message: `${role}: no model configured to unload` };
@@ -847,7 +847,7 @@ export async function handleStop(role?: string): Promise<Record<string, unknown>
     // Same user-stopped intent for Docker-runtime roles. Even though the
     // container being `exited` already gates the heartbeat, recording the
     // intent makes the policy uniform across runtimes.
-    state.userStopped.add(role);
+    ensureSet('userStopped').add(role);
   } else {
     clearAllIdleTimers();
   }

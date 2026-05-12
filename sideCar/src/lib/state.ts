@@ -407,6 +407,39 @@ export const state = {
 };
 
 /**
+ * Defensive accessor for Set-typed runtime fields on `state`.
+ *
+ * Background: `state.modelLoading` and `state.userStopped` are initialized as
+ * `new Set<string>()` in this module, but any code path that accidentally
+ * round-trips them through JSON (e.g. Object.assign from a parsed config) can
+ * turn them into plain objects, which have no `.add` / `.delete` / `.has`.
+ * That manifested as "Cannot read properties of undefined (reading 'delete')"
+ * bubbling out of `/acquire` and other Set-touching handlers.
+ *
+ * Call this everywhere instead of touching the field directly: it lazily
+ * re-initializes the field to a fresh Set if it isn't one, and returns the
+ * (now guaranteed) Set so the caller can `.add` / `.delete` / `.has` freely.
+ */
+export function ensureSet(field: 'userStopped' | 'modelLoading' | 'dmrRoles'): Set<string> {
+  const current = (state as Record<string, unknown>)[field];
+  if (!(current instanceof Set)) {
+    const seeded = new Set<string>();
+    // Best-effort migration: if the stale value was an array or array-like,
+    // preserve its members so we don't silently drop state on the first call.
+    if (Array.isArray(current)) {
+      for (const v of current) if (typeof v === 'string') seeded.add(v);
+    } else if (current && typeof current === 'object') {
+      for (const v of Object.values(current as Record<string, unknown>)) {
+        if (typeof v === 'string') seeded.add(v);
+      }
+    }
+    (state as Record<string, unknown>)[field] = seeded;
+    return seeded;
+  }
+  return current;
+}
+
+/**
  * If no fresh host-stats POST has been received within this window, the
  * sidecar considers the helper offline and falls back to docker /info.
  * Mirrored as state.HOST_STATS_TTL_MS for back-compat; exported separately

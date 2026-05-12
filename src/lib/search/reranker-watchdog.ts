@@ -27,6 +27,7 @@
 import { createLogger } from '@/lib/logger';
 import { getConfig } from '@/lib/db/config';
 import { getFleetStatus, sendToSidecar } from '@/lib/gpu/fleet-router';
+import { listAllAssignments } from '@/lib/db/role-registry';
 
 const logger = createLogger('reranker-watchdog');
 
@@ -39,6 +40,8 @@ const RESTART_WAIT_AFTER_STOP_MS = 5_000;
 const RESTART_WAIT_AFTER_START_MS = 60_000;
 const CHRONIC_WINDOW_MS = 24 * 60 * 60 * 1000;
 const CHRONIC_RESTART_THRESHOLD = 3; // > 3 → chronic
+const VRAM_BACKOFF_MS = 5 * 60_000; // 5 min soft-skip after a VRAM-pressure start failure
+const VRAM_PRESSURE_RE = /Need\s+\d+\s*MB\s+VRAM/i;
 
 export type HealthState =
   | 'healthy'
@@ -59,7 +62,12 @@ interface HostRecord {
   lastError?: string;
   cooldownUntil: number;
   restarts: number[];         // ms timestamps within last 24h
+  vramBackoffUntil: number;   // suppress restart attempts until this ts (A)
 }
+
+// Active-passive: which sidecar is the designated reranker primary.
+// `null` means no primary picked yet (or last primary was demoted).
+let primarySidecarUrl: string | null = null;
 
 const hosts = new Map<string, HostRecord>();
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
@@ -174,9 +182,25 @@ async function restartHost(rec: HostRecord): Promise<{ ok: boolean; error?: stri
   try {
     await sendToSidecar(rec.sidecarUrl, '/start', { role: 'reranker' }, 'POST', 30_000);
   } catch (err) {
+    const msg = (err as Error).message;
+    rec.lastError = `start failed: ${msg}`;
+    // (A) VRAM soft-skip — capacity decision, not a fault. Demote primary,
+    // apply 5-min backoff, log once at INFO instead of WARN.
+    if (VRAM_PRESSURE_RE.test(msg)) {
+      rec.state = 'cooldown';
+      rec.vramBackoffUntil = Date.now() + VRAM_BACKOFF_MS;
+      rec.cooldownUntil = rec.vramBackoffUntil;
+      if (primarySidecarUrl === rec.sidecarUrl) {
+        primarySidecarUrl = null; // allow another host to be picked as primary
+      }
+      logger.info(
+        `Reranker has VRAM pressure on ${rec.hostname} — holding as standby for ${Math.round(VRAM_BACKOFF_MS / 60_000)}m`,
+        { sidecar: rec.sidecarUrl, detail: msg }
+      );
+      return { ok: false, error: 'vram-pressure: held as standby' };
+    }
     rec.state = 'unhealthy';
-    rec.lastError = `start failed: ${(err as Error).message}`;
-    logger.warn(`start failed on ${rec.hostname}`, { error: (err as Error).message });
+    logger.warn(`start failed on ${rec.hostname}`, { error: msg });
     return { ok: false, error: rec.lastError };
   }
 
@@ -191,7 +215,14 @@ async function restartHost(rec: HostRecord): Promise<{ ok: boolean; error?: stri
   return { ok: true };
 }
 
-/** Discover currently-eligible reranker hosts from the fleet. */
+/**
+ * Discover currently-eligible reranker hosts from the fleet.
+ *
+ * Filters to sidecars where `ss-reranker` is enabled in HostRoleAssignment —
+ * a sidecar with a stale/leftover reranker container but no role assignment
+ * MUST NOT be probed or restarted by this watchdog. Operator removed it from
+ * the role registry for a reason (e.g. VRAM contention with other roles).
+ */
 async function discoverHosts(): Promise<HostRecord[]> {
   const fleet = await getFleetStatus().catch((err) => {
     logger.warn('fleet discovery failed', { error: (err as Error).message });
@@ -199,9 +230,27 @@ async function discoverHosts(): Promise<HostRecord[]> {
   });
   if (!fleet) return [];
 
+  // Build set of sidecar URLs that have ss-reranker enabled in DB.
+  let assigned: Set<string>;
+  try {
+    const rows = await listAllAssignments();
+    assigned = new Set(
+      rows
+        .filter(r => r.mode === 'ss-reranker' && r.enabled)
+        .map(r => r.sidecarUrl.replace(/\/$/, ''))
+    );
+  } catch (err) {
+    logger.warn('role-assignment lookup failed; falling back to fleet-only discovery', {
+      error: (err as Error).message,
+    });
+    assigned = new Set(); // empty → no host eligible (fail-safe: don't restart anything)
+  }
+
   const found: HostRecord[] = [];
   for (const s of fleet.sidecars) {
     if (s.status !== 'connected') continue;
+    const normalizedUrl = s.url.replace(/\/$/, '');
+    if (!assigned.has(normalizedUrl)) continue; // (B) only hosts with ss-reranker assigned
     const cs = (s.sidecarStatus as { containers?: Record<string, { status?: string; image?: string }> } | undefined)
       ?.containers?.reranker;
     if (!cs) continue;
@@ -226,6 +275,7 @@ async function discoverHosts(): Promise<HostRecord[]> {
         lastSuccessAt: null,
         cooldownUntil: 0,
         restarts: [],
+        vramBackoffUntil: 0,
       };
       hosts.set(s.url, rec);
     } else {
@@ -238,12 +288,14 @@ async function discoverHosts(): Promise<HostRecord[]> {
   return found;
 }
 
-async function probeAndHandle(rec: HostRecord, model: string): Promise<void> {
+async function probeAndHandle(rec: HostRecord, model: string, opts: { allowRestart: boolean }): Promise<void> {
   // Skip while restart in flight — restartHost manages its own state.
   if (rec.state === 'restarting') return;
   // While in chronic-unhealthy, still probe to detect recovery, but never restart.
   // While in cooldown, only probe after cooldownUntil.
   if (rec.state === 'cooldown' && Date.now() < rec.cooldownUntil) return;
+  // VRAM-pressure backoff: skip entirely until backoff expires.
+  if (rec.vramBackoffUntil && Date.now() < rec.vramBackoffUntil) return;
 
   rec.lastProbeAt = Date.now();
   const result = await deepProbe(rec.rerankUrl, model);
@@ -275,6 +327,13 @@ async function probeAndHandle(rec: HostRecord, model: string): Promise<void> {
 
   if (rec.consecutiveFails >= UNHEALTHY_THRESHOLD) {
     rec.state = 'unhealthy';
+    if (!opts.allowRestart) {
+      // Active-passive: this host is not the primary. Don't restart — the
+      // primary is serving, and reviving a secondary would cost VRAM for no
+      // benefit. Stay unhealthy; if the primary later fails, runTick will
+      // promote this host and restart() it then.
+      return;
+    }
     // Dispatch restart (don't await — but we DO want to know when it's done
     // before the next tick; restartHost handles state transitions atomically).
     await restartHost(rec).catch(err => {
@@ -283,6 +342,60 @@ async function probeAndHandle(rec: HostRecord, model: string): Promise<void> {
   } else if (rec.consecutiveFails >= SUSPECT_THRESHOLD) {
     rec.state = 'suspect';
   }
+}
+
+/**
+ * Decide which sidecar should be the reranker primary this tick.
+ *
+ * Active-passive policy: if the existing primary is in {healthy, suspect,
+ * cooldown, restarting} keep it. If it's unhealthy/chronic/vram-pressure or
+ * no longer in the candidate set, promote the first eligible candidate
+ * (preferring already-healthy ones). Returns the chosen primary's sidecarUrl,
+ * or null if no candidate exists.
+ */
+function selectPrimary(candidates: HostRecord[]): string | null {
+  const candidateUrls = new Set(candidates.map(c => c.sidecarUrl));
+
+  if (primarySidecarUrl && candidateUrls.has(primarySidecarUrl)) {
+    const cur = hosts.get(primarySidecarUrl);
+    if (cur && cur.state !== 'unhealthy' && cur.state !== 'chronic-unhealthy') {
+      const inBackoff = cur.vramBackoffUntil && Date.now() < cur.vramBackoffUntil;
+      if (!inBackoff) return primarySidecarUrl;
+    }
+  }
+
+  // Promote: prefer healthy > suspect > cooldown > anything not in VRAM backoff.
+  const now = Date.now();
+  const usable = candidates.filter(c => !(c.vramBackoffUntil && now < c.vramBackoffUntil));
+  const ranked = [...usable].sort((a, b) => {
+    const order: Record<HealthState, number> = {
+      healthy: 0,
+      suspect: 1,
+      cooldown: 2,
+      restarting: 3,
+      unhealthy: 4,
+      'chronic-unhealthy': 5,
+    };
+    return (order[a.state] ?? 9) - (order[b.state] ?? 9);
+  });
+  const chosen = ranked[0]?.sidecarUrl ?? null;
+  if (chosen !== primarySidecarUrl) {
+    if (chosen) {
+      const standby = candidates
+        .filter(c => c.sidecarUrl !== chosen)
+        .map(c => c.hostname)
+        .join(', ');
+      logger.info(
+        `Reranker primary: ${hosts.get(chosen)?.hostname ?? chosen}` +
+          (standby ? `; standby: ${standby}` : ''),
+        { primary: chosen }
+      );
+    } else if (primarySidecarUrl) {
+      logger.info('Reranker primary demoted — no eligible candidate', { prior: primarySidecarUrl });
+    }
+    primarySidecarUrl = chosen;
+  }
+  return primarySidecarUrl;
 }
 
 async function runTick(opts: { fastTrackUnhealthy?: boolean } = {}): Promise<void> {
@@ -299,18 +412,26 @@ async function runTick(opts: { fastTrackUnhealthy?: boolean } = {}): Promise<voi
   const active = await discoverHosts();
   if (active.length === 0) return;
 
+  // Pick primary BEFORE probing, so we know who's allowed to be restarted on
+  // a probe failure. If primary becomes unhealthy after probing, the next
+  // tick will re-evaluate and promote a different host.
+  const primary = selectPrimary(active);
+
   // Run probes in parallel — a deadlocked host can't slow the others down.
-  await Promise.all(active.map(rec => probeAndHandle(rec, model).catch(err => {
+  await Promise.all(active.map(rec => probeAndHandle(rec, model, {
+    allowRestart: rec.sidecarUrl === primary,
+  }).catch(err => {
     logger.warn(`probe error on ${rec.hostname}`, { error: (err as Error).message });
   })));
 
   if (opts.fastTrackUnhealthy) {
-    // Boot-time pass: anything already unhealthy gets restarted now without
-    // waiting for the next 60s tick. probeAndHandle above already triggers
-    // restartHost when it crosses UNHEALTHY_THRESHOLD in one shot only if
-    // consecutiveFails accumulates — so on boot we may have just 1 fail
-    // recorded. Treat boot-time as a hard signal: if probe failed, restart.
+    // Boot-time pass: only the primary gets fast-tracked. A secondary that's
+    // unhealthy at boot stays unhealthy — promotion happens lazily if primary
+    // fails. This is the change that prevents spam from a stale reranker
+    // container on a non-primary host.
     for (const rec of active) {
+      if (rec.sidecarUrl !== primary) continue;
+      if (rec.vramBackoffUntil && Date.now() < rec.vramBackoffUntil) continue;
       if (rec.state === 'suspect' || rec.state === 'unhealthy') {
         logger.warn(`boot-time fast-track restart of ${rec.hostname} (state=${rec.state})`, {
           sidecar: rec.sidecarUrl,

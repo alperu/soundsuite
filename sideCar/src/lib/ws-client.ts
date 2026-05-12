@@ -19,7 +19,7 @@ import os from 'os';
 import http from 'http';
 import https from 'https';
 import WebSocket from 'ws';
-import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, type MasterConnection } from './state';
+import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, ensureSet, type MasterConnection } from './state';
 import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, handlePullModel, handleLoadModel, getTotalActiveRequests } from './handlers';
 import { switchMode, provisionContainers, getAllContainerStates, containersForMode } from './containers';
 import { discoverGpus } from './gpu';
@@ -290,7 +290,7 @@ async function executeCommand(
           if (active > 0) continue;
           // Mark user-stopped so the heartbeat auto-loader doesn't reload
           // within the next cycle.
-          state.userStopped.add(role);
+          ensureSet('userStopped').add(role);
           try {
             if (def.runtime === 'host') {
               // Host-runtime: model lives in native Ollama's VRAM with
@@ -447,8 +447,8 @@ async function executeCommand(
               delete state.peakDemand[r];
               delete state.pullFailCount[r];
               delete state.lastModelAttempt[r];
-              state.modelLoading.delete(r);
-              state.userStopped.delete(r);
+              ensureSet('modelLoading').delete(r);
+              ensureSet('userStopped').delete(r);
             }
           }
           if (enabledRoles.size === 0) {
@@ -808,8 +808,8 @@ async function autoProvision(): Promise<void> {
             log.info(`${role}: model ${def.model} already on disk`);
           }
 
-          if (!state.modelLoading.has(role)) {
-            state.modelLoading.add(role);
+          if (!ensureSet('modelLoading').has(role)) {
+            ensureSet('modelLoading').add(role);
             const loadTaskId = tasks.start('model-load', `Load ${def.model} into VRAM`, role);
             ollamaLoad(def.port, def.model, {
               onProgress: (detail) => {
@@ -821,7 +821,7 @@ async function autoProvision(): Promise<void> {
             }).catch((err) => {
               tasks.fail(loadTaskId, (err as Error).message);
             }).finally(() => {
-              state.modelLoading.delete(role);
+              ensureSet('modelLoading').delete(role);
             });
           }
         } catch (pullErr) {
