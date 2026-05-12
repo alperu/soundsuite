@@ -77,11 +77,43 @@ export async function register() {
       log.info(`Resuming with saved agentUrl: ${state.savedAgentUrl}`);
     }
 
+    // Always start the gossip client. Its watchdog (30s loop) will pick up
+    // any masters added later — either by discovery (below) or operator UI.
+    // When state.masters is empty, connectAllMasters() is a no-op and the
+    // watchdog idles cheaply.
     if (state.masters.size > 0) {
       log.info(`Starting gossip client → ${state.masters.size} master(s)`);
-      startGossipClient().catch(err => {
-        log.error(`Gossip client startup failed: ${(err as Error).message}`);
-      });
+    } else {
+      log.info('Starting gossip client → no masters yet (discovery will run in background)');
+    }
+    startGossipClient().catch(err => {
+      log.error(`Gossip client startup failed: ${(err as Error).message}`);
+    });
+
+    // Boot-time discovery: if no masters were loaded from persisted config or
+    // env, sweep likely locations (recent-masters.json hint file, host.docker.internal,
+    // default gateway, SIDECAR_MASTER_HOSTS). Fire-and-forget — never blocks boot.
+    if (state.masters.size === 0) {
+      (async () => {
+        try {
+          const { discoverMasters } = await import('./lib/config');
+          const { connectMaster } = await import('./lib/ws-client');
+          const found = await discoverMasters();
+          if (found.length === 0) return;
+          // Kick the watchdog by directly connecting newly-found masters; the
+          // watchdog would catch them within 30s anyway, but this is snappier.
+          for (const url of found) {
+            const m = state.masters.get(url);
+            if (m && m.connectionMode === 'disconnected') {
+              try { connectMaster(m); } catch (err) {
+                log.warn(`connectMaster failed for discovered ${url}: ${(err as Error).message}`);
+              }
+            }
+          }
+        } catch (err) {
+          log.warn(`boot-time master discovery failed: ${(err as Error).message}`);
+        }
+      })();
     }
   }
 }

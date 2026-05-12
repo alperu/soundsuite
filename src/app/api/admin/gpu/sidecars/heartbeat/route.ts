@@ -2,8 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getConfig, setConfigValue } from '@/lib/db/config';
 import { updateSidecarStatus } from '@/lib/gpu/status-cache';
 import { fetchPendingCommands } from '@/lib/gpu/command-queue';
-import { MASTER_URL_HEADER } from '@/lib/gpu/master-identity';
+import { MASTER_URL_HEADER, deriveOriginFromHeaders } from '@/lib/gpu/master-identity';
 import { resolveMasterUrlForHost } from '@/lib/gpu/resolve-master-url-for-host';
+import { triggerReassertNow } from '@/lib/gpu/sidecar-reconnect-watchdog';
+import { createLogger } from '@/lib/logger';
+
+const logger = createLogger('SidecarHeartbeat');
 
 interface SidecarEntry {
   url: string;
@@ -25,6 +29,10 @@ interface SidecarEntry {
  *
  * Response includes `X-Sound-Suite-Master-Url` header so HTTP-only sidecars
  * can persist the canonical master URL and survive config-volume loss.
+ *
+ * When the sidecar reports an empty `masters[]` array (config lost on reboot
+ * or fresh container), this route fires an immediate reverse-poll to push
+ * the master URL back instead of waiting for the watchdog tick.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -95,11 +103,34 @@ export async function POST(request: NextRequest) {
     // Piggyback: return any pending commands for this sidecar
     const commands = await fetchPendingCommands(agentUrl);
 
+    // Resolve the master URL the sidecar should use. Priority:
+    //   1. explicit per-host provisioning   (HostProvisioning.masterUrlForHost)
+    //   2. request-scoped bootstrap         (derived from Host hdr - NOT persisted)
+    // The bootstrap path covers the case where a freshly-rebooted sidecar at
+    // a never-before-seen IP successfully reached us; we know that URL works.
     const headers: Record<string, string> = {};
-    const masterUrl = await resolveMasterUrlForHost(agentUrl);
-    if (masterUrl) headers[MASTER_URL_HEADER] = masterUrl;
+    const provisioned = await resolveMasterUrlForHost(agentUrl);
+    const bootstrap = provisioned ? null : deriveOriginFromHeaders(request.headers);
+    const effectiveMasterUrl = provisioned ?? bootstrap;
+    if (effectiveMasterUrl) headers[MASTER_URL_HEADER] = effectiveMasterUrl;
 
-    return NextResponse.json({ ok: true, commands, masterUrl: masterUrl || undefined }, { headers });
+    // Sidecar reset detection: empty masters[] in heartbeat means it lost
+    // its config. Fire an immediate reverse-poll instead of waiting for the
+    // watchdog tick. Fire-and-forget; we still return the header above.
+    if (Array.isArray(body.masters) && body.masters.length === 0) {
+      logger.warn(
+        `Sidecar boot detected with empty master list: ${agentUrl} — reasserting URL`,
+        { agentUrl, effectiveMasterUrl, bootstrap: !provisioned },
+      );
+      // effectiveMasterUrl is undefined if neither path produced one - in that
+      // case triggerReassertNow correctly no-ops.
+      void triggerReassertNow(agentUrl, effectiveMasterUrl ?? null).catch(() => {});
+    }
+
+    return NextResponse.json(
+      { ok: true, commands, masterUrl: effectiveMasterUrl || undefined },
+      { headers },
+    );
   } catch (error: any) {
     return NextResponse.json(
       { error: (error?.message || String(error)).slice(0, 300) },

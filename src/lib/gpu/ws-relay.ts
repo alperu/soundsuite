@@ -189,6 +189,22 @@ export function startWsRelay(): WebSocketServer {
             lastConfigPushAt: msg.statusData?.lastConfigPushAt,
             vram: msg.statusData?.vram,
           });
+
+          // Sidecar reset detection on WS path: empty masters[] means the
+          // sidecar lost its config. Fire an immediate reverse-poll on the
+          // admin HTTP port (POST /api/masters) so the URL is back in place
+          // even if the watchdog tick hasn't run yet.
+          const masters = msg.statusData?.masters;
+          if (Array.isArray(masters) && masters.length === 0) {
+            logger.warn(
+              `Sidecar boot detected with empty master list: ${registeredUrl} — reasserting URL`,
+              { agentUrl: registeredUrl },
+            );
+            const url = registeredUrl;
+            import('@/lib/gpu/sidecar-reconnect-watchdog').then(
+              ({ triggerReassertNow }) => triggerReassertNow(url).catch(() => {}),
+            ).catch(() => {});
+          }
         }
       }
 

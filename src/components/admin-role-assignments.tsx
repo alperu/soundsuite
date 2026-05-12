@@ -141,12 +141,26 @@ const RESET_DEFAULTS: Record<string, { minOnline: number; idleTimeoutMin: number
 
 /* ─────────────────────────── Helpers ─────────────────────────── */
 
-function inferOs(hostname: string | undefined, declared: string | undefined): ModeOs {
+function inferOs(
+  hostname: string | undefined,
+  declared: string | undefined,
+  override?: string | null,
+): ModeOs {
+  // Operator override from /admin/host-provisioning wins over everything.
+  if (override === 'linux' || override === 'darwin' || override === 'win32') return override;
   if (declared === 'linux' || declared === 'darwin' || declared === 'win32') return declared;
   const h = (hostname || '').toLowerCase();
   if (h.includes('mac') || h.endsWith('.local')) return 'darwin';
   if (h.includes('win') || h.includes('wsl')) return 'win32';
   return 'linux';
+}
+
+/** Friendly OS labels — same convention as /admin/host-provisioning. */
+function osDisplayLabel(os: ModeOs | string | undefined): string {
+  if (os === 'darwin') return 'macOS';
+  if (os === 'win32') return 'Windows';
+  if (os === 'linux') return 'Linux';
+  return 'Unknown';
 }
 
 function normalizeAssignment(raw: any): RoleAssignment | null {
@@ -196,12 +210,27 @@ export default function AdminRoleAssignments() {
 
   const loadFleet = useCallback(async (): Promise<SidecarSummary[]> => {
     try {
-      const res = await fetch('/api/admin/gpu-fleet');
-      if (!res.ok) throw new Error(`gpu-fleet HTTP ${res.status}`);
-      const data = await res.json();
+      // Fetch host-provisioning overrides in parallel — operator's pinned OS
+      // takes precedence over auto-detection from Docker /info.
+      const [fleetRes, provRes] = await Promise.all([
+        fetch('/api/admin/gpu-fleet'),
+        fetch('/api/admin/host-provisioning').catch(() => null),
+      ]);
+      if (!fleetRes.ok) throw new Error(`gpu-fleet HTTP ${fleetRes.status}`);
+      const data = await fleetRes.json();
+      const overrideByUrl: Record<string, string | null> = {};
+      if (provRes && provRes.ok) {
+        try {
+          const provData = await provRes.json();
+          for (const p of provData?.provisioning || []) {
+            if (p?.sidecarUrl) overrideByUrl[p.sidecarUrl] = p.hostOsOverride ?? null;
+          }
+        } catch { /* ignore */ }
+      }
       const list: SidecarSummary[] = (data.sidecars || []).map((s: any) => {
         const cached = s.sidecarStatus || {};
-        const os = inferOs(s.hostname || s.url, cached.host?.os);
+        const override = overrideByUrl[s.url] ?? null;
+        const os = inferOs(s.hostname || s.url, cached.host?.os, override);
         const gpus: any[] = Array.isArray(cached.gpus) ? cached.gpus : [];
         const hasNvidia = gpus.some((g) => /nvidia/i.test(g?.name || ''));
         const gpuSummary = gpus.length > 0
@@ -590,8 +619,11 @@ export default function AdminRoleAssignments() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className={`inline-block w-1.5 h-1.5 rounded-full ${sidecar.status === 'connected' ? 'bg-green-500' : 'bg-gray-300'}`} />
                     <span className="text-sm font-semibold text-gray-900">{sidecar.hostname}</span>
-                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 border border-gray-200">
-                      {sidecar.os}
+                    <span
+                      className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 border border-gray-200"
+                      title={`os=${sidecar.os}`}
+                    >
+                      {osDisplayLabel(sidecar.os)}
                     </span>
                     {sidecar.gpuSummary && (
                       <span className="text-[11px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-800 border border-purple-200">

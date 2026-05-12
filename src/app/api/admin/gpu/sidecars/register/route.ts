@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getConfig, setConfigValue } from '@/lib/db/config';
-import { MASTER_URL_HEADER } from '@/lib/gpu/master-identity';
+import { MASTER_URL_HEADER, deriveOriginFromHeaders } from '@/lib/gpu/master-identity';
 import { resolveMasterUrlForHost } from '@/lib/gpu/resolve-master-url-for-host';
+import { triggerReassertNow } from '@/lib/gpu/sidecar-reconnect-watchdog';
+import { createLogger } from '@/lib/logger';
+
+const logger = createLogger('SidecarRegister');
 
 interface SidecarEntry {
   url: string;
@@ -21,6 +25,9 @@ interface SidecarEntry {
  *
  * Response includes `X-Sound-Suite-Master-Url` so the sidecar can persist
  * the canonical master URL (re-asserting in case the operator dropped it).
+ *
+ * Bootstrap fallback: when no per-host record exists, we use the request's
+ * Host header as a one-time URL push. NOT persisted to HostProvisioning.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -64,12 +71,26 @@ export async function POST(request: NextRequest) {
 
     await setConfigValue('gpu.sidecars', JSON.stringify(sidecars));
 
+    // Per-host provisioning takes precedence; request Host header is a
+    // one-time bootstrap (not persisted).
     const headers: Record<string, string> = {};
-    const masterUrl = await resolveMasterUrlForHost(agentUrl);
-    if (masterUrl) headers[MASTER_URL_HEADER] = masterUrl;
+    const provisioned = await resolveMasterUrlForHost(agentUrl);
+    const bootstrap = provisioned ? null : deriveOriginFromHeaders(request.headers);
+    const effectiveMasterUrl = provisioned ?? bootstrap;
+    if (effectiveMasterUrl) headers[MASTER_URL_HEADER] = effectiveMasterUrl;
+
+    // Register is by definition "first contact" - if the sidecar is calling
+    // /register, treat it like an empty-masters reset and fire an immediate
+    // reverse-poll so /api/masters is populated without waiting 30s.
+    if (effectiveMasterUrl) {
+      logger.info('Sidecar registered via HTTP - firing immediate reassert', {
+        agentUrl, effectiveMasterUrl, bootstrap: !provisioned,
+      });
+      void triggerReassertNow(agentUrl, effectiveMasterUrl).catch(() => {});
+    }
 
     return NextResponse.json(
-      { ok: true, registered: entry, masterUrl: masterUrl || undefined },
+      { ok: true, registered: entry, masterUrl: effectiveMasterUrl || undefined },
       { headers },
     );
   } catch (error: any) {
