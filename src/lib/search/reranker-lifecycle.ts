@@ -78,26 +78,27 @@ class RerankerLifecycle {
     this.resolveAgentBase(host);
     if (!this.agentBase) return;
 
-    // Short-circuit when the target sidecar has no docker.sock mount: it
-    // can't manage containers, so /acquire would just throw. But the rerank
-    // traffic itself goes direct to host:8099 (independent of the sidecar's
-    // container management), so an orphan vLLM container can still serve.
-    // Probe health and accept that as "running" — the sidecar's container
-    // accounting is offline but the endpoint is alive.
-    if (await this.sidecarHasNoDocker()) {
+    // Generic short-circuit: if the master's status cache already shows
+    // the reranker container as running on this sidecar, /acquire is
+    // gratuitous — the vLLM endpoint is up and ready to serve. Skip
+    // /acquire (which would also try to "ensure container running" + bump
+    // activeRequests) and verify health directly. This works regardless
+    // of why /acquire might fail — missing docker.sock, sidecar
+    // restarting, transient network blip, etc. — because the rerank
+    // traffic itself is independent of /acquire.
+    if (await this.rerankerAlreadyRunning()) {
       logger.info(
-        'Sidecar dockerMode=none — skipping /acquire and going direct to endpoint health check ' +
-        '(reranker container is unmanaged by this sidecar but may be serving as an orphan)',
+        `Reranker container already running on ${this.agentBase} — skipping /acquire, probing endpoint health directly`,
       );
       if (await this.isHealthy(host)) {
         this.state = 'ready';
         return;
       }
-      throw new Error(
-        `Sidecar ${this.agentBase} lacks /var/run/docker.sock mount AND the reranker endpoint ` +
-        `at ${host} is unreachable. Recreate the sidecar container with ` +
-        `-v /var/run/docker.sock:/var/run/docker.sock OR ensure the vLLM reranker is running ` +
-        `independently on this host.`,
+      // Container "running" per the sidecar's report but endpoint isn't
+      // responding — fall through to the normal acquire path which will
+      // restart it. Honest signal that something's actually wrong.
+      logger.warn(
+        `Reranker container reported running but ${host} health probe failed — falling through to /acquire`,
       );
     }
 
@@ -265,23 +266,31 @@ class RerankerLifecycle {
   }
 
   /**
-   * Returns true when the target sidecar reports `host.dockerMode === 'none'`,
-   * meaning it has no `/var/run/docker.sock` mount and cannot manage docker
-   * containers. In that case the rerank traffic still works (direct hit to
-   * the vLLM endpoint via the orphan container) but /acquire would just
-   * throw — so we skip it.
+   * Returns true when the master's status cache shows the reranker
+   * container as already `status: 'running'` on this sidecar. When that's
+   * the case, /acquire would just confirm what we already know AND
+   * increment activeRequests — gratuitous work, with the downside that
+   * any /acquire failure (no docker.sock, restarting sidecar, transient
+   * blip) generates a noisy WARN+ERROR pair even though the rerank
+   * endpoint itself works fine.
    *
-   * Uses the master's status cache (fed by sidecar heartbeats); falls back
-   * to false if status isn't cached yet (let the normal /acquire path run).
+   * Generic over the failure mode: we don't care WHY /acquire might fail.
+   * If the container is up, skip /acquire and probe the endpoint directly.
+   *
+   * Uses the master's status cache (fed by sidecar heartbeats). Falls
+   * back to false when no cache entry is available yet — first contact
+   * lets /acquire run normally to warm things up.
    */
-  private async sidecarHasNoDocker(): Promise<boolean> {
+  private async rerankerAlreadyRunning(): Promise<boolean> {
     if (!this.agentBase) return false;
     try {
       const { getSidecarStatus } = await import('@/lib/gpu/status-cache');
       const cached = getSidecarStatus(this.agentBase);
-      // dockerMode is at the TOP level of /api/status (not nested under `host`).
-      const dockerMode = (cached as { dockerMode?: string } | null | undefined)?.dockerMode;
-      return dockerMode === 'none';
+      const container = cached?.containers?.reranker;
+      if (!container) return false;
+      // 'running' means vLLM is serving — exactly the condition where
+      // /acquire's "ensure container running" goal is already met.
+      return container.status === 'running';
     } catch {
       return false;
     }
