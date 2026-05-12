@@ -279,7 +279,8 @@ class RerankerLifecycle {
     try {
       const { getSidecarStatus } = await import('@/lib/gpu/status-cache');
       const cached = getSidecarStatus(this.agentBase);
-      const dockerMode = (cached?.host as { dockerMode?: string } | undefined)?.dockerMode;
+      // dockerMode is at the TOP level of /api/status (not nested under `host`).
+      const dockerMode = (cached as { dockerMode?: string } | null | undefined)?.dockerMode;
       return dockerMode === 'none';
     } catch {
       return false;

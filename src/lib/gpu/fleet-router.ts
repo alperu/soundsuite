@@ -1170,7 +1170,9 @@ async function enforceMinOnline(): Promise<void> {
     // firing it every 30s just spams the master log. Detection: sidecar
     // reports host.dockerMode === 'none'. Host-runtime roles aren't affected
     // (they don't need Docker access at all).
-    const dockerMode = (cached.host as { dockerMode?: string } | undefined)?.dockerMode;
+    // dockerMode is at the TOP level of /api/status (not nested under `host`).
+    // Sidecar reports 'socket' / 'tcp' / 'none' from getDockerMode().
+    const dockerMode = (cached as { dockerMode?: string }).dockerMode;
     if (dockerMode === 'none' && !isHostRuntime) {
       logDockerModeNoneSkip(sidecarUrl, role);
       continue;
