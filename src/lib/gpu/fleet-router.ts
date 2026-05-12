@@ -98,6 +98,22 @@ function maybeLogAcquireSkip(sidecarUrl: string, role: string): void {
   );
 }
 
+// ─── dockerMode=none skip log throttling ─────────────────────────────────────
+// Throttle to once per (sidecar, role) per hour. Operator only needs the
+// "fix this sidecar" hint once, not every 30s tick.
+const dockerModeNoneLogged = new Map<string, number>();
+function logDockerModeNoneSkip(sidecarUrl: string, role: string): void {
+  const k = `${sidecarUrl}::${role}`;
+  const now = Date.now();
+  const last = dockerModeNoneLogged.get(k) ?? 0;
+  if (now - last < 60 * 60_000) return;
+  dockerModeNoneLogged.set(k, now);
+  logger.warn(
+    `min-online: skipping ${role} on ${sidecarUrl} — sidecar reports dockerMode=none (no /var/run/docker.sock mount). ` +
+    `Recreate the sidecar container with -v /var/run/docker.sock:/var/run/docker.sock to enable docker-runtime roles.`,
+  );
+}
+
 // ─── hostOs=unknown skip log throttling (Task #36) ───────────────────────────
 const unknownHostOsLogged = new Set<string>();
 function logUnknownHostOsSkipOnce(role: string): void {
@@ -1147,6 +1163,18 @@ async function enforceMinOnline(): Promise<void> {
       containerStatus === 'running' && (!isHostRuntime || vramLoaded);
 
     if (reallyRunning) continue; // satisfied for this (host, role)
+
+    // Skip /acquire for docker-runtime roles when the sidecar can't talk to
+    // Docker at all (no /var/run/docker.sock mount). The sidecar's preflight
+    // would reject every attempt with "Sidecar lacks /var/run/docker.sock" —
+    // firing it every 30s just spams the master log. Detection: sidecar
+    // reports host.dockerMode === 'none'. Host-runtime roles aren't affected
+    // (they don't need Docker access at all).
+    const dockerMode = (cached.host as { dockerMode?: string } | undefined)?.dockerMode;
+    if (dockerMode === 'none' && !isHostRuntime) {
+      logDockerModeNoneSkip(sidecarUrl, role);
+      continue;
+    }
 
     // VRAM safety: don't try to acquire if the host clearly can't fit the role.
     const vramNeeded = ROLE_VRAM_NEEDS[role] || 0;
