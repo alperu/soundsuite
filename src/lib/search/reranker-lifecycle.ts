@@ -78,6 +78,29 @@ class RerankerLifecycle {
     this.resolveAgentBase(host);
     if (!this.agentBase) return;
 
+    // Short-circuit when the target sidecar has no docker.sock mount: it
+    // can't manage containers, so /acquire would just throw. But the rerank
+    // traffic itself goes direct to host:8099 (independent of the sidecar's
+    // container management), so an orphan vLLM container can still serve.
+    // Probe health and accept that as "running" — the sidecar's container
+    // accounting is offline but the endpoint is alive.
+    if (await this.sidecarHasNoDocker()) {
+      logger.info(
+        'Sidecar dockerMode=none — skipping /acquire and going direct to endpoint health check ' +
+        '(reranker container is unmanaged by this sidecar but may be serving as an orphan)',
+      );
+      if (await this.isHealthy(host)) {
+        this.state = 'ready';
+        return;
+      }
+      throw new Error(
+        `Sidecar ${this.agentBase} lacks /var/run/docker.sock mount AND the reranker endpoint ` +
+        `at ${host} is unreachable. Recreate the sidecar container with ` +
+        `-v /var/run/docker.sock:/var/run/docker.sock OR ensure the vLLM reranker is running ` +
+        `independently on this host.`,
+      );
+    }
+
     // Push config to agent on first call (or after changes)
     if (!this.configPushed) {
       await this.pushConfig();
@@ -238,6 +261,28 @@ class RerankerLifecycle {
     } catch (err) {
       // Not critical — agent has defaults
       logger.warn('Failed to push config to agent', { error: (err as Error).message });
+    }
+  }
+
+  /**
+   * Returns true when the target sidecar reports `host.dockerMode === 'none'`,
+   * meaning it has no `/var/run/docker.sock` mount and cannot manage docker
+   * containers. In that case the rerank traffic still works (direct hit to
+   * the vLLM endpoint via the orphan container) but /acquire would just
+   * throw — so we skip it.
+   *
+   * Uses the master's status cache (fed by sidecar heartbeats); falls back
+   * to false if status isn't cached yet (let the normal /acquire path run).
+   */
+  private async sidecarHasNoDocker(): Promise<boolean> {
+    if (!this.agentBase) return false;
+    try {
+      const { getSidecarStatus } = await import('@/lib/gpu/status-cache');
+      const cached = getSidecarStatus(this.agentBase);
+      const dockerMode = (cached?.host as { dockerMode?: string } | undefined)?.dockerMode;
+      return dockerMode === 'none';
+    } catch {
+      return false;
     }
   }
 
