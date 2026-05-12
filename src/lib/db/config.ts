@@ -190,7 +190,7 @@ export async function getConfig(): Promise<AppConfig> {
     rerankScoreValidation: configMap.get('rerank.scoreValidation') !== 'false', // default: true
     rerankFallbackModel: configMap.get('rerank.fallbackModel') || '',
     rerankTimeoutMs: parseInt(configMap.get('rerank.timeoutMs') || '90000', 10),
-    rerankMaxDocChars: parseInt(configMap.get('rerank.maxDocChars') || '30000', 10),
+    rerankMaxDocChars: parseInt(configMap.get('rerank.maxDocChars') || '18000', 10),
     // Per-model GPU idle timeouts
     gpuIdleEmbeddingMin: parseInt(configMap.get('gpu.idle.embedding') || '0', 10),
     gpuIdleCompletionMin: parseInt(configMap.get('gpu.idle.completion') || '10', 10),

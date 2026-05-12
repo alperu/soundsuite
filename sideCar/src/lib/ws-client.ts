@@ -175,6 +175,12 @@ async function buildFullStatus(): Promise<Record<string, unknown>> {
     wsConnected: anyWs,
     containerNames: getRegisteredContainers(),
     tasks: tasks.getAll(),
+    // Critical: forward dockerMode to the master so the master's
+    // RerankerLifecycle + min-online enforcer can short-circuit /acquire
+    // when this sidecar can't talk to Docker (dockerMode === 'none').
+    // Without this field on the heartbeat, the master never learns that
+    // /acquire will be rejected and fires it on every tick → log spam.
+    dockerMode: status.dockerMode,
   };
 }
 

@@ -206,6 +206,12 @@ export function updateSidecarStatus(agentUrl: string, status: Partial<CachedSide
     tasks: status.tasks || existing?.tasks || [],
     vram: status.vram ?? existing?.vram,
     host: status.host ?? existing?.host,
+    // Sidecar's docker connection state ('socket' | 'tcp' | 'none').
+    // Read by RerankerLifecycle.sidecarHasNoDocker() and the fleet enforcer
+    // to skip /acquire on sidecars with no Docker access. The heartbeat
+    // receiver forwards body.dockerMode / msg.statusData.dockerMode into
+    // this update; without the merge below the field is dropped here.
+    dockerMode: status.dockerMode ?? existing?.dockerMode,
     lastSeen: Date.now(),
   });
 }

@@ -47,6 +47,7 @@ function relativeTime(dateStr: string): string {
 function DocumentCard({
   doc,
   onClick,
+  onContextMenu,
   isRetrying,
   isSelected,
   isPartial,
@@ -54,6 +55,7 @@ function DocumentCard({
 }: {
   doc: Document;
   onClick: (e: React.MouseEvent) => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
   isRetrying: boolean;
   isSelected: boolean;
   isPartial?: boolean;
@@ -86,6 +88,7 @@ function DocumentCard({
   return (
     <div
       onClick={onClick}
+      onContextMenu={onContextMenu}
       className={`
         ${bgColors[doc.status]}
         border-2 rounded-lg p-4 cursor-pointer
@@ -187,8 +190,23 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
   const [stopIndexInProgress, setStopIndexInProgress] = useState(false);
   const [removeFromQueueInProgress, setRemoveFromQueueInProgress] = useState(false);
   const [removeStoppedInProgress, setRemoveStoppedInProgress] = useState(false);
+  const [refreshFolderInProgress, setRefreshFolderInProgress] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; docId: string } | null>(null);
+  const [refreshingPathIds, setRefreshingPathIds] = useState<Set<string>>(new Set());
   const lastClickedRef = useRef<string | null>(null);
   const partialSet = new Set(partialDocumentIds || []);
+
+  // Close context menu on any document click
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [contextMenu]);
 
   // Reset selection when case changes (polling effect handles fresh data fetch)
   useEffect(() => {
@@ -441,6 +459,62 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
     }
   };
 
+  const handleRefreshFolder = async () => {
+    setRefreshFolderInProgress(true);
+    try {
+      const res = await fetch(`/api/cases/${caseId}/rescan`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Refresh failed');
+      // Re-fetch documents to reflect any path / status changes
+      try {
+        const r = await fetch(`/api/documents?caseId=${caseId}`);
+        if (r.ok) {
+          const d = await r.json();
+          setDocuments(d.documents);
+          onDocumentsUpdate?.(d.documents);
+        }
+      } catch {}
+      console.info(`Folder refreshed: scanned ${data.scannedFiles ?? 0} files, marked ${data.markedMissing ?? 0} missing`);
+    } catch (err) {
+      console.error('Refresh folder failed:', err);
+    } finally {
+      setRefreshFolderInProgress(false);
+    }
+  };
+
+  const handleCardContextMenu = (doc: Document, e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY, docId: doc.id });
+  };
+
+  const handleUpdateFilePath = async (docId: string) => {
+    setContextMenu(null);
+    setRefreshingPathIds((prev) => new Set(prev).add(docId));
+    try {
+      const res = await fetch(`/api/documents/${docId}/refresh-path`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Refresh path failed');
+      // Refetch
+      try {
+        const r = await fetch(`/api/documents?caseId=${caseId}`);
+        if (r.ok) {
+          const d = await r.json();
+          setDocuments(d.documents);
+          onDocumentsUpdate?.(d.documents);
+        }
+      } catch {}
+      console.info(`Update file path: ${data.action}`);
+    } catch (err) {
+      console.error('Update file path failed:', err);
+    } finally {
+      setRefreshingPathIds((prev) => {
+        const next = new Set(prev);
+        next.delete(docId);
+        return next;
+      });
+    }
+  };
+
   const handleDeselectAll = () => {
     setSelectedIds(new Set());
     lastClickedRef.current = null;
@@ -471,6 +545,21 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
 
   return (
     <div className="flex-1 h-full flex flex-col overflow-hidden">
+      {/* Always-visible toolbar */}
+      <div className="flex-none bg-white border-b border-gray-200 px-6 py-2 flex items-center justify-end gap-2">
+        <button
+          onClick={handleRefreshFolder}
+          disabled={refreshFolderInProgress}
+          className="text-sm px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white rounded-md transition-colors disabled:opacity-50 flex items-center gap-1.5"
+          title="Rescan the case folder for renames or new files"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          {refreshFolderInProgress ? 'Refreshing...' : 'Refresh folder'}
+        </button>
+      </div>
+
       {/* Selection action bar */}
       {selectedIds.size > 0 && (
         <div className="flex-none bg-blue-50 border-b border-blue-200 px-6 py-3 flex items-center justify-between">
@@ -589,6 +678,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
                     key={doc.id}
                     doc={doc}
                     onClick={(e) => handleCardClick(doc, e)}
+                    onContextMenu={(e) => handleCardContextMenu(doc, e)}
                     isRetrying={false}
                     isSelected={selectedIds.has(doc.id)}
                     isPartial={partialSet.has(doc.id)}
@@ -623,6 +713,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
                     key={doc.id}
                     doc={doc}
                     onClick={(e) => handleCardClick(doc, e)}
+                    onContextMenu={(e) => handleCardContextMenu(doc, e)}
                     isRetrying={false}
                     isSelected={selectedIds.has(doc.id)}
                   />
@@ -668,6 +759,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
                     key={doc.id}
                     doc={doc}
                     onClick={(e) => handleCardClick(doc, e)}
+                    onContextMenu={(e) => handleCardContextMenu(doc, e)}
                     isRetrying={false}
                     isSelected={selectedIds.has(doc.id)}
                   />
@@ -711,6 +803,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
                     key={doc.id}
                     doc={doc}
                     onClick={(e) => handleCardClick(doc, e)}
+                    onContextMenu={(e) => handleCardContextMenu(doc, e)}
                     isRetrying={retrying.has(doc.id)}
                     isSelected={selectedIds.has(doc.id)}
                     onRetry={() => handleRetry(doc.id)}
@@ -721,6 +814,27 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
           </div>
         </div>
       </div>
+
+      {/* Right-click context menu */}
+      {contextMenu && (
+        <div
+          className="fixed z-50 bg-white border border-gray-200 rounded-md shadow-lg py-1 text-sm min-w-[180px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <button
+            onClick={() => handleUpdateFilePath(contextMenu.docId)}
+            disabled={refreshingPathIds.has(contextMenu.docId)}
+            className="w-full text-left px-3 py-1.5 hover:bg-gray-100 disabled:opacity-50 flex items-center gap-2"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            {refreshingPathIds.has(contextMenu.docId) ? 'Updating...' : 'Update file path'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

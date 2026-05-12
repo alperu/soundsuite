@@ -168,15 +168,28 @@ export async function rerank<T extends RerankableResult>(
   // any single (query, doc) pair over that is rejected with HTTP 400 and aborts
   // the whole batch. Keep in sync with sideCar/src/lib/docker.ts buildVllmCmd.
   const MAX_MODEL_TOKENS = 8192;
-  const SAFETY_MARGIN_TOKENS = 256;
-  const CHARS_PER_TOKEN = 3.0; // conservative for English legal prose
-  const queryTokensEstimate = Math.ceil((query?.length ?? 0) / CHARS_PER_TOKEN);
+  // Tightened from 256 — dense legal prose tokenizes worse than the 3 char/tok
+  // estimate (Qwen tokenizer often produces 2.5–2.7 chars/tok). 512 gives a
+  // proper buffer against estimate drift.
+  const SAFETY_MARGIN_TOKENS = 512;
+  // Lowered from 3.0 — more realistic for English legal prose with the Qwen
+  // tokenizer (citations, statute numbers, etc. fragment heavily).
+  const CHARS_PER_TOKEN = 2.7;
+  // Hard cap the query itself — without this, a long-form question (>3000
+  // chars) eats the entire token budget and the doc gets clamped to nothing,
+  // OR if the estimate undercounts, the pair overflows 8192. 1500 chars ≈
+  // 555 tokens, leaving ~7100 tokens for the doc.
+  const QUERY_MAX_CHARS = 1500;
+  const safeQuery = query && query.length > QUERY_MAX_CHARS
+    ? query.slice(0, QUERY_MAX_CHARS - 4) + ' …'
+    : (query ?? '');
+  const queryTokensEstimate = Math.ceil(safeQuery.length / CHARS_PER_TOKEN);
   const perDocTokenBudget = Math.max(
     256,
     MAX_MODEL_TOKENS - queryTokensEstimate - SAFETY_MARGIN_TOKENS,
   );
   const perDocCharBudget = Math.floor(perDocTokenBudget * CHARS_PER_TOKEN);
-  const maxDocChars = Math.min(config.rerankMaxDocChars ?? 30_000, perDocCharBudget);
+  const maxDocChars = Math.min(config.rerankMaxDocChars ?? 18_000, perDocCharBudget);
 
   // Configure lifecycle (idle timeout config)
   rerankerLifecycle.setEnabled(config.rerankAutoManage);
@@ -240,14 +253,14 @@ export async function rerank<T extends RerankableResult>(
     }
     try {
       const out = await serializeRerank(() =>
-        rerankViaVllmWithRetry(query, results, config.rerankModel, host, effectiveTopN, timeoutMs, maxDocChars),
+        rerankViaVllmWithRetry(safeQuery, results, config.rerankModel, host, effectiveTopN, timeoutMs, maxDocChars),
       );
       return { items: out.items, tokens: out.totalTokens, model: config.rerankModel };
     } catch (primaryErr) {
       if (config.rerankFallbackModel) {
         try {
           const fb = await serializeRerank(() =>
-            rerankViaVllmWithRetry(query, results, config.rerankFallbackModel, host, effectiveTopN, timeoutMs, maxDocChars),
+            rerankViaVllmWithRetry(safeQuery, results, config.rerankFallbackModel, host, effectiveTopN, timeoutMs, maxDocChars),
           );
           return { items: fb.items, tokens: fb.totalTokens, model: config.rerankFallbackModel };
         } catch (fbErr) {

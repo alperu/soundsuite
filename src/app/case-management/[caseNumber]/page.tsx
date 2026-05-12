@@ -138,6 +138,7 @@ export default function CaseDetailPage() {
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [filesLoading, setFilesLoading] = useState(false);
   const [parseLoading, setParseLoading] = useState(false);
+  const [refreshFolderLoading, setRefreshFolderLoading] = useState(false);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
@@ -958,6 +959,39 @@ export default function CaseDetailPage() {
 
   const handleSelectAll = () => setSelectedFiles(new Set(flatFilesRef.current));
 
+  /**
+   * Rescan the case folder — invalidates the folder cache + restarts the
+   * FileWatcher so renames/moves are picked up without restarting the master.
+   * After completion, reload the file tree so the UI reflects the new layout.
+   */
+  const handleRefreshFolder = async () => {
+    if (!caseRecord) return;
+    const logId = addLog('Refresh folder', caseRecord.path);
+    setRefreshFolderLoading(true);
+    try {
+      const res = await fetch(`/api/cases/${caseRecord.id}/rescan`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        updateLog(logId, 'error', data?.error || `HTTP ${res.status}`);
+        return;
+      }
+      const parts: string[] = [];
+      if (typeof data.scannedFiles === 'number') parts.push(`${data.scannedFiles} files`);
+      if (typeof data.relocated === 'number' && data.relocated > 0) parts.push(`${data.relocated} relocated`);
+      if (typeof data.markedMissing === 'number' && data.markedMissing > 0) parts.push(`${data.markedMissing} marked missing`);
+      if (data.restartedWatcher) parts.push('watcher restarted');
+      updateLog(logId, 'success', parts.join(' · ') || 'ok');
+      // Refetch the file tree so the UI shows the renamed folders.
+      try {
+        await loadFiles(caseRecord.id);
+      } catch { /* tree refresh best-effort */ }
+    } catch (err) {
+      updateLog(logId, 'error', (err as Error).message);
+    } finally {
+      setRefreshFolderLoading(false);
+    }
+  };
+
   // Filing queue polling
   const filingQueuePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -1301,6 +1335,35 @@ export default function CaseDetailPage() {
       },
       { label: '', onClick: () => {}, separator: true },
       {
+        label: 'Update file path',
+        icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" /></svg>,
+        onClick: async () => {
+          if (!tracked) return;
+          const logId = addLog('Update file path', filePath);
+          try {
+            const res = await fetch(`/api/documents/${tracked.documentId}/refresh-path`, { method: 'POST' });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+              updateLog(logId, 'error', data?.error || `HTTP ${res.status}`);
+              return;
+            }
+            const action = data.action || 'updated';
+            const msg = action === 'path_updated' ? `relocated → ${data.newPath}`
+              : action === 'path_still_valid' ? 'path still valid — no change'
+              : action === 'marked_error' ? 'file not found in case tree'
+              : action;
+            updateLog(logId, 'success', msg);
+            if (caseRecord) {
+              try { await loadFiles(caseRecord.id); } catch { /* best-effort */ }
+            }
+          } catch (err) {
+            updateLog(logId, 'error', (err as Error).message);
+          }
+        },
+        disabled: !tracked,
+      },
+      { label: '', onClick: () => {}, separator: true },
+      {
         label: 'Edit Name',
         icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>,
         onClick: () => {
@@ -1453,6 +1516,14 @@ export default function CaseDetailPage() {
             )}
             <button onClick={handleSelectAll} className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded">Select All</button>
             <button onClick={handleDeselectAll} className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded">Deselect All</button>
+            <button onClick={handleRefreshFolder} disabled={refreshFolderLoading}
+              className="px-3 py-1.5 bg-slate-600 text-white text-sm rounded-lg hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+              title="Re-scan the case folder for renames or new files">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              {refreshFolderLoading ? 'Refreshing...' : 'Refresh folder'}
+            </button>
             <button onClick={handleParseSelected} disabled={selectedFiles.size === 0 || parseLoading}
               className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
               {parseLoading ? 'Parsing...' : `Parse Selected (${selectedFiles.size})`}
