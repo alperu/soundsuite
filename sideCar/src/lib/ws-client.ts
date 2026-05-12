@@ -571,6 +571,21 @@ async function executeCommand(
         log.warn(`[${m.serverUrl}] startHostOllamaWatchdog after config push failed: ${(err as Error).message}`);
       }
       saveConfig();
+      // Orphan sweep: stop any ss-* docker container whose name doesn't
+      // appear in the post-push registry. When the operator unchecks a role
+      // in /admin/roleassign, the live container would otherwise keep
+      // running and holding VRAM because the sidecar no longer iterates it.
+      // We STOP (not REMOVE) so re-enabling the role is a fast `docker
+      // start` — image + config preserved. Fire-and-forget; errors are
+      // logged but don't fail the push.
+      try {
+        const { stopOrphanContainers } = await import('./containers');
+        void stopOrphanContainers().catch((err) => {
+          log.warn(`[${m.serverUrl}] orphan sweep failed: ${(err as Error).message}`);
+        });
+      } catch (err) {
+        log.warn(`[${m.serverUrl}] orphan sweep import failed: ${(err as Error).message}`);
+      }
       if (modelChangedRoles.length > 0) {
         log.info(`Config push changed models for: ${modelChangedRoles.join(', ')} — triggering ensureOllamaModel`);
         for (const r of modelChangedRoles) {

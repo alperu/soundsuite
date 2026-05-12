@@ -1055,5 +1055,17 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
     // observing a change in this value and reset their seenBootSeq high-water-mark
     // so the fresh boot trace renders instead of being filtered as "already seen".
     bootEpoch: getBootEpoch(),
+    // Orphan containers: ss-* docker containers not in current registry.
+    // The orphan sweep on every /config push stops running ones; this lets
+    // the master surface their existence so operator can re-assign the role
+    // or `docker rm` for disk reclaim.
+    orphanContainers: await (async () => {
+      try {
+        const { listOrphanContainers } = await import('./containers');
+        return await listOrphanContainers();
+      } catch {
+        return [];
+      }
+    })(),
   };
 }

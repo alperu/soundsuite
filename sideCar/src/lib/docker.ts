@@ -385,6 +385,41 @@ export async function stopContainer(containerName?: string): Promise<string> {
   return result;
 }
 
+/**
+ * List all containers (running + stopped) whose name starts with the given
+ * prefix. Used by the orphan-sweep path to find ss-* containers the sidecar
+ * no longer manages.
+ */
+export interface ContainerListItem {
+  name: string;
+  image: string;
+  state: string;   // "running" | "exited" | "created" | ...
+  status: string;  // free-form "Up 2 hours", "Exited (0) 5 min ago", etc.
+}
+export async function listContainersByPrefix(prefix: string): Promise<ContainerListItem[]> {
+  try {
+    const { status, body } = await dockerRequest('GET', '/containers/json?all=true');
+    if (status !== 200) return [];
+    const raw: Array<{
+      Names: string[];
+      Image: string;
+      State: string;
+      Status: string;
+    }> = JSON.parse(body);
+    const out: ContainerListItem[] = [];
+    for (const c of raw) {
+      const name = c.Names?.[0]?.replace(/^\//, '') ?? '';
+      if (name && name.startsWith(prefix)) {
+        out.push({ name, image: c.Image || '', state: c.State || '', status: c.Status || '' });
+      }
+    }
+    return out;
+  } catch (err) {
+    log.warn(`listContainersByPrefix(${prefix}): ${(err as Error).message}`);
+    return [];
+  }
+}
+
 export async function removeContainer(containerName: string): Promise<string> {
   log.info(`Removing container ${containerName}`);
   const { status, body } = await dockerRequest('DELETE', `/containers/${containerName}?force=true`);

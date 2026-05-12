@@ -1,5 +1,5 @@
-import { state, dockerSupportsGpu, type ContainerDef } from './state';
-import { getContainerState, startContainer, stopContainer, removeContainer, pullImage, createContainer, dockerRequest, buildExpectedConfig, detectConfigDrift, type ContainerState } from './docker';
+import { state, dockerSupportsGpu, CONTAINER_PREFIX, type ContainerDef } from './state';
+import { getContainerState, startContainer, stopContainer, removeContainer, pullImage, createContainer, dockerRequest, buildExpectedConfig, detectConfigDrift, listContainersByPrefix, type ContainerState } from './docker';
 import { ollamaPs, ollamaList, ollamaPsCached, ollamaListCached, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama, ollamaIsReady } from './ollama-api';
 import { dmrIsReady, dmrListModels } from './dmr-api';
 import { snapshotVram } from './vram-accountant';
@@ -729,4 +729,93 @@ export async function provisionContainers(): Promise<Record<string, Record<strin
     }
   }
   return results;
+}
+
+/**
+ * Stop (NOT remove) any ss-* docker container whose name doesn't match an
+ * entry in the current registry. Called after every config push that updates
+ * state.registry — when an operator removes a role from a host on
+ * /admin/roleassign, the live docker container would otherwise keep running
+ * (and keep holding VRAM) because the sidecar no longer iterates it.
+ *
+ * We STOP rather than REMOVE: preserves the container's config + pulled
+ * image so a future re-assignment can `docker start` it back up quickly
+ * without re-pulling. Operator can `docker rm` manually if they really
+ * want the disk space.
+ *
+ * Returns the list of containers that were stopped this sweep (for logging
+ * + /api/status surfacing).
+ */
+export interface OrphanInfo {
+  name: string;
+  image: string;
+  previousState: string; // "running" before we stopped it
+}
+export async function stopOrphanContainers(): Promise<OrphanInfo[]> {
+  if (!dockerSupportsGpu() && state.hostOs !== 'linux' && state.hostOs !== 'windows-docker-wsl2') {
+    // Host runtimes (mac-docker-ollama) don't manage docker containers for
+    // model roles; there's nothing to sweep. Linux + WSL2 always sweep.
+    return [];
+  }
+  let candidates;
+  try {
+    candidates = await listContainersByPrefix(CONTAINER_PREFIX);
+  } catch (err) {
+    log.warn(`stopOrphanContainers: list failed: ${(err as Error).message}`);
+    return [];
+  }
+  // Names the sidecar still claims, plus the sidecar's own container so we
+  // never accidentally stop ourselves.
+  const claimed = new Set<string>();
+  for (const def of Object.values(state.registry)) {
+    if (def.containerName) claimed.add(def.containerName);
+  }
+  claimed.add(`${CONTAINER_PREFIX}sidecar`);
+  claimed.add(state.CONTAINER_NAME);
+
+  const stopped: OrphanInfo[] = [];
+  for (const c of candidates) {
+    if (claimed.has(c.name)) continue;
+    if (c.state !== 'running') continue;
+    log.info(`Orphan sweep: stopping unassigned container ${c.name} (image=${c.image}, was ${c.state})`);
+    try {
+      await stopContainer(c.name);
+      stopped.push({ name: c.name, image: c.image, previousState: c.state });
+    } catch (err) {
+      log.warn(`Orphan sweep: failed to stop ${c.name}: ${(err as Error).message}`);
+    }
+  }
+  if (stopped.length > 0) {
+    log.info(`Orphan sweep: stopped ${stopped.length} container(s) not in current registry`);
+  }
+  return stopped;
+}
+
+/**
+ * Snapshot of orphan containers for /api/status — every ss-* container the
+ * sidecar doesn't claim, regardless of state. Lets the master surface them
+ * in /admin/gpu so the operator can choose to re-assign the role (and the
+ * container restarts) or manually `docker rm` to reclaim disk.
+ */
+export async function listOrphanContainers(): Promise<Array<{
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+}>> {
+  let candidates;
+  try {
+    candidates = await listContainersByPrefix(CONTAINER_PREFIX);
+  } catch {
+    return [];
+  }
+  const claimed = new Set<string>();
+  for (const def of Object.values(state.registry)) {
+    if (def.containerName) claimed.add(def.containerName);
+  }
+  claimed.add(`${CONTAINER_PREFIX}sidecar`);
+  claimed.add(state.CONTAINER_NAME);
+  return candidates
+    .filter((c) => !claimed.has(c.name))
+    .map((c) => ({ name: c.name, image: c.image, state: c.state, status: c.status }));
 }
