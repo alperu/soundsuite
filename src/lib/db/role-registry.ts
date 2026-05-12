@@ -219,10 +219,16 @@ export function isRuntimeChoice(s: unknown): s is RuntimeChoice {
  */
 export function defaultRuntimeFor(
   mode: string,
-  hostOs: 'linux' | 'darwin' | 'win32' | 'unknown',
+  hostOs: 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2' | 'unknown',
 ): RuntimeChoice {
-  if (mode === 'ss-reranker') return hostOs === 'linux' ? 'docker-vllm' : 'host';
-  if (hostOs === 'linux') return 'docker-ollama';
+  if (mode === 'ss-reranker') {
+    // Linux + windows-docker-wsl2 both run the vLLM reranker in Docker with
+    // GPU passthrough. mac-docker-ollama has no supported reranker path; fall
+    // back to 'host' so the UI shows "inherit" rather than auto-selecting
+    // docker-vllm.
+    return hostOs === 'linux' || hostOs === 'windows-docker-wsl2' ? 'docker-vllm' : 'host';
+  }
+  if (hostOs === 'linux' || hostOs === 'windows-docker-wsl2') return 'docker-ollama';
   return 'host';
 }
 
@@ -234,7 +240,7 @@ export function defaultRuntimeFor(
  */
 export async function getRuntimesForHost(
   sidecarUrl: string,
-  hostOs: 'linux' | 'darwin' | 'win32' | 'unknown',
+  hostOs: 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2' | 'unknown',
 ): Promise<Record<string, RuntimeChoice>> {
   const rows = await getEnabledAssignmentsForHost(sidecarUrl);
   const out: Record<string, RuntimeChoice> = {};

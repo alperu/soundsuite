@@ -27,6 +27,87 @@ import { getProvisioning } from '@/lib/db/host-provisioning';
 
 const logger = createLogger('FleetRouter');
 
+// ─── Per-(sidecar, role) acquire back-off (Task #31) ─────────────────────────
+//
+// enforceMinOnline ticks every ~5s. Without back-off, a persistent /acquire
+// failure (network blip, sidecar handleAcquire bug, host-Ollama unloaded
+// model) produces a log storm and amplifies downstream bugs. Schedule:
+//   1st & 2nd consecutive failure → no delay (transient blips not penalized)
+//   3rd → 30s   4th → 60s   5th → 120s   6th+ → 300s (cap)
+// A success resets the counter.
+
+interface AcquireBackoffState {
+  consecutiveFailures: number;
+  nextAttemptAt: number; // epoch ms
+  lastSuccessAt: number; // 0 if never
+  lastSkipLogAt: number; // for INFO log throttling (once per minute)
+}
+
+const acquireBackoff = new Map<string, AcquireBackoffState>();
+
+function backoffKey(sidecarUrl: string, role: string): string {
+  return `${sidecarUrl}::${role}`;
+}
+
+function shouldSkipAcquire(sidecarUrl: string, role: string): boolean {
+  const st = acquireBackoff.get(backoffKey(sidecarUrl, role));
+  if (!st) return false;
+  return Date.now() < st.nextAttemptAt;
+}
+
+function recordAcquireSuccess(sidecarUrl: string, role: string): void {
+  const k = backoffKey(sidecarUrl, role);
+  acquireBackoff.set(k, {
+    consecutiveFailures: 0,
+    nextAttemptAt: 0,
+    lastSuccessAt: Date.now(),
+    lastSkipLogAt: 0,
+  });
+}
+
+function recordAcquireFailure(sidecarUrl: string, role: string): void {
+  const k = backoffKey(sidecarUrl, role);
+  const prev = acquireBackoff.get(k) ?? {
+    consecutiveFailures: 0,
+    nextAttemptAt: 0,
+    lastSuccessAt: 0,
+    lastSkipLogAt: 0,
+  };
+  const n = prev.consecutiveFailures + 1;
+  // index = clamped failure count; values for n=1,2 → 0 (immediate retry).
+  const delaysMs = [0, 0, 0, 30_000, 60_000, 120_000, 300_000];
+  const delay = delaysMs[Math.min(n, delaysMs.length - 1)];
+  acquireBackoff.set(k, {
+    consecutiveFailures: n,
+    nextAttemptAt: Date.now() + delay,
+    lastSuccessAt: prev.lastSuccessAt,
+    lastSkipLogAt: prev.lastSkipLogAt,
+  });
+}
+
+function maybeLogAcquireSkip(sidecarUrl: string, role: string): void {
+  const k = backoffKey(sidecarUrl, role);
+  const st = acquireBackoff.get(k);
+  if (!st) return;
+  const now = Date.now();
+  if (now - st.lastSkipLogAt < 60_000) return;
+  st.lastSkipLogAt = now;
+  const remainingMs = Math.max(0, st.nextAttemptAt - now);
+  logger.info(
+    `min-online: backing off /acquire for ${role} on ${sidecarUrl} — ${st.consecutiveFailures} consecutive failures, next attempt in ${Math.round(remainingMs / 1000)}s`,
+  );
+}
+
+// ─── hostOs=unknown skip log throttling (Task #36) ───────────────────────────
+const unknownHostOsLogged = new Set<string>();
+function logUnknownHostOsSkipOnce(role: string): void {
+  if (unknownHostOsLogged.has(role)) return;
+  unknownHostOsLogged.add(role);
+  logger.info(
+    `Skipping registry entry for role=${role}: hostOs unknown, awaiting detection`,
+  );
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface SidecarEntry {
@@ -362,20 +443,20 @@ export async function pushIdleTimeouts(agentUrl: string, timeouts: IdleTimeouts)
  * 'unknown' when the sidecar has not yet reported a host block.
  *
  * Windows hosts with WSL2 + NVIDIA Container Toolkit behave like Linux for
- * Docker-GPU purposes (`docker run --gpus` works against the WSL2 VM). When
- * the sidecar reports `host.hasNvidia === true` on win32 we treat the host
- * as linux so the legacy registry ships docker-runtime entries (with real
- * image names) instead of host-runtime stubs that the sidecar can't fulfil
- * without a native Ollama install. Operators who don't want this coercion
- * can leave their helper-script off — without `hasNvidia` we keep treating
- * win32 as a Mac-style Docker Desktop host.
+ * Docker-GPU purposes (`docker run --gpus` works against the WSL2 VM). After
+ * the windows-docker-wsl2 rename, every windows-docker-wsl2 sidecar
+ * unconditionally gets the linux-style docker registry — the hasNvidiaSmi
+ * gate is gone. Legacy values (`win32`/`darwin`) reported by old sidecars
+ * are migrated on the fly to their new identifiers.
  */
-function detectHostOs(agentUrl: string): 'linux' | 'darwin' | 'win32' | 'unknown' {
+function detectHostOs(agentUrl: string): 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2' | 'unknown' {
   const cached = statusCache.getSidecarStatus(agentUrl);
   const os = cached?.host?.os;
-  const hasNvidia = cached?.host?.hasNvidia === true;
-  if (os === 'win32' && hasNvidia) return 'linux';
-  if (os === 'linux' || os === 'darwin' || os === 'win32') return os;
+  if (os === 'linux') return 'linux';
+  if (os === 'mac-docker-ollama') return 'mac-docker-ollama';
+  if (os === 'windows-docker-wsl2') return 'windows-docker-wsl2';
+  if (os === 'win32') return 'windows-docker-wsl2';
+  if (os === 'darwin') return 'mac-docker-ollama';
   return 'unknown';
 }
 
@@ -386,38 +467,52 @@ function detectHostOs(agentUrl: string): 'linux' | 'darwin' | 'win32' | 'unknown
  * understand the legacy shape still get a coherent definition.
  *
  * Skips modes that are unavailable on the given OS (e.g. ss-reranker on
- * darwin/win32). Returns short role keys (`embedding`, `completion`, ...)
+ * mac-docker-ollama). Returns short role keys (`embedding`, `completion`, ...)
  * matching the sidecar's internal registry keys.
  */
 function buildLegacyRegistry(
   enabledModes: string[],
   effectiveModelFor: (mode: string) => string,
-  hostOs: 'linux' | 'darwin' | 'win32' | 'unknown',
+  hostOs: 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2' | 'unknown',
 ): Record<string, Record<string, unknown>> {
   const out: Record<string, Record<string, unknown>> = {};
-  const isLinux = hostOs === 'linux';
+  // windows-docker-wsl2 ships the same docker-runtime registry as linux —
+  // Docker WSL2 has native NVIDIA passthrough.
+  const isLinux = hostOs === 'linux' || hostOs === 'windows-docker-wsl2';
   for (const mode of enabledModes) {
     const role = mode.replace(/^ss-/, '');
+    // Task #36: when hostOs is 'unknown' (low confidence / detection not yet
+    // settled), skip the registry entry entirely. The next push will retry
+    // once detection completes — otherwise we'd misclassify unknown as Mac
+    // (host-runtime) and stamp a definitive runtime decision on shaky ground.
+    if (hostOs === 'unknown') {
+      logUnknownHostOsSkipOnce(role);
+      continue;
+    }
     const model = effectiveModelFor(mode);
     const containerName = `ss-${role}`;
+    // Task #34 (Option A): for host-runtime (Mac) modes, stamp image:'host-ollama'
+    // rather than ''. Any downstream code that accidentally tries to pull will
+    // short-circuit on the sidecar's pullImage('') guard, and the host-runtime
+    // detection (image === 'host-ollama') keeps working at every layer.
     switch (mode) {
       case 'ss-embedding':
         out[role] = isLinux
           ? { image: 'ollama/ollama', model, port: 11434, vram: 1200, type: 'ollama', modes: ['indexing', 'searching'], containerName, priority: 'high' }
-          : { image: '', model, port: 11434, vram: 1200, type: 'ollama', modes: ['indexing', 'searching'], containerName, priority: 'high', runtime: 'host' };
+          : { image: 'host-ollama', model, port: 11434, vram: 1200, type: 'ollama', modes: ['indexing', 'searching'], containerName, priority: 'high', runtime: 'host' };
         break;
       case 'ss-completion':
         out[role] = isLinux
           ? { image: 'ollama/ollama', model, port: 11435, vram: 10000, type: 'ollama', modes: ['searching'], containerName, priority: 'normal' }
-          : { image: '', model, port: 11434, vram: 10000, type: 'ollama', modes: ['searching'], containerName, priority: 'normal', runtime: 'host' };
+          : { image: 'host-ollama', model, port: 11434, vram: 10000, type: 'ollama', modes: ['searching'], containerName, priority: 'normal', runtime: 'host' };
         break;
       case 'ss-ocr':
         out[role] = isLinux
           ? { image: 'ollama/ollama', model, port: 11436, vram: 8000, type: 'ollama', modes: ['indexing'], containerName, gpuOnly: true, priority: 'critical' }
-          : { image: '', model, port: 11434, vram: 8000, type: 'ollama', modes: ['indexing'], containerName, priority: 'critical', runtime: 'host' };
+          : { image: 'host-ollama', model, port: 11434, vram: 8000, type: 'ollama', modes: ['indexing'], containerName, priority: 'critical', runtime: 'host' };
         break;
       case 'ss-reranker':
-        if (!isLinux) break; // unavailable on darwin/win32
+        if (!isLinux) break; // unavailable on mac-docker-ollama
         out[role] = { image: 'vllm/vllm-openai', model, port: 8099, vram: 7000, type: 'vllm', modes: ['searching'], containerName, priority: 'normal' };
         break;
     }
@@ -1063,14 +1158,33 @@ async function enforceMinOnline(): Promise<void> {
       continue;
     }
 
+    // Task #31: per-(sidecar, role) back-off. After repeated failures, skip
+    // silently (with throttled INFO log) rather than hammering /acquire every
+    // 5s tick.
+    if (shouldSkipAcquire(sidecarUrl, role)) {
+      maybeLogAcquireSkip(sidecarUrl, role);
+      continue;
+    }
+
     logger.info(
       `Enforce min-online: deficit role=${role} host=${sidecarUrl} effectiveMin=${effectiveMin} containerStatus=${containerStatus ?? 'none'} hostRuntime=${isHostRuntime} loaded=${vramLoaded}`,
     );
 
     try {
-      await sendToSidecar(sidecarUrl, '/acquire', { role });
-      logger.info(`min-online: acquired ${role} on ${sidecarUrl}`);
+      const result = await sendToSidecar(sidecarUrl, '/acquire', { role });
+      // Treat explicit ok:false as failure for back-off purposes (matches the
+      // pattern used elsewhere in this file — see acquireForRole callers).
+      if (result && typeof result === 'object' && 'ok' in result && (result as { ok?: unknown }).ok === false) {
+        recordAcquireFailure(sidecarUrl, role);
+        logger.warn(`min-online: /acquire returned ok:false for ${role} on ${sidecarUrl}`, {
+          result,
+        });
+      } else {
+        recordAcquireSuccess(sidecarUrl, role);
+        logger.info(`min-online: acquired ${role} on ${sidecarUrl}`);
+      }
     } catch (err) {
+      recordAcquireFailure(sidecarUrl, role);
       logger.warn(`min-online: failed to acquire ${role} on ${sidecarUrl}`, {
         error: (err as Error).message,
       });

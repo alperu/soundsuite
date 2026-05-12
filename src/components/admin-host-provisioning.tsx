@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-type HostOs = 'darwin' | 'win32' | 'linux';
+type HostOs = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux';
 
 interface HostProvisioningRecord {
   sidecarUrl: string;
@@ -56,8 +56,8 @@ interface FleetResponse {
 type Toast = { type: 'success' | 'error'; text: string } | null;
 
 const OS_LABEL: Record<HostOs, string> = {
-  darwin: 'macOS',
-  win32: 'Windows',
+  'mac-docker-ollama': 'Mac Docker (Ollama)',
+  'windows-docker-wsl2': 'Windows Docker (WSL2)',
   linux: 'Linux',
 };
 
@@ -420,8 +420,8 @@ export default function AdminHostProvisioning() {
                       className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                     >
                       <option value="">{osOptionLabel('')}{detectedOs ? ` (detected: ${detectedOs})` : ''}</option>
-                      <option value="darwin">macOS</option>
-                      <option value="win32">Windows</option>
+                      <option value="mac-docker-ollama">Mac Docker (Ollama)</option>
+                      <option value="windows-docker-wsl2">Windows Docker (WSL2)</option>
                       <option value="linux">Linux</option>
                     </select>
                   </div>

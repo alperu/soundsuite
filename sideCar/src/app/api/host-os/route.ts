@@ -8,9 +8,9 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const os = body?.os;
-    if (os !== 'darwin' && os !== 'win32' && os !== 'linux') {
+    if (os !== 'mac-docker-ollama' && os !== 'windows-docker-wsl2' && os !== 'linux') {
       return NextResponse.json(
-        { error: "os must be one of 'darwin' | 'win32' | 'linux'" },
+        { error: "os must be one of 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux'" },
         { status: 400, headers: cors },
       );
     }

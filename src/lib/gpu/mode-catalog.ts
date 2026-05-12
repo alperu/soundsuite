@@ -24,13 +24,14 @@
  * work without pulling in Prisma.
  *
  * Availability map (where the mode can actually run):
- *   ss-reranker is linux-only because vllm-metal lacks cross-encoder support
+ *   ss-reranker runs on linux and win32 (WSL2+NVIDIA). darwin is excluded
+ *   because vllm-metal lacks cross-encoder support
  *   (see https://github.com/vllm-project/vllm-metal/issues/361). The other
- *   three modes work on linux/darwin/win32 via Ollama (host or container).
+ *   three modes work on linux/mac-docker-ollama/windows-docker-wsl2 via Ollama (host or container).
  */
 
 export type ModeName = 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker';
-export type HostOs = 'linux' | 'darwin' | 'win32';
+export type HostOs = 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2';
 
 export const ALL_MODES: readonly ModeName[] = [
   'ss-embedding',
@@ -58,29 +59,29 @@ export const MODE_METADATA: ModeMetadata[] = [
   {
     name: 'ss-embedding',
     label: 'Embedding',
-    availableOn: ['linux', 'darwin', 'win32'],
+    availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
     description:
       'Document and query embedding via Ollama. Lightweight (~1.2 GB VRAM); used in both indexing and search.',
   },
   {
     name: 'ss-completion',
     label: 'Completion',
-    availableOn: ['linux', 'darwin', 'win32'],
+    availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
     description: 'Chat completion via Ollama. ~10 GB VRAM; used at search time.',
   },
   {
     name: 'ss-ocr',
     label: 'OCR',
-    availableOn: ['linux', 'darwin', 'win32'],
+    availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
     description:
       'Visual OCR for low-density PDF pages and exhibit images. ~5 GB VRAM; used during indexing.',
   },
   {
     name: 'ss-reranker',
     label: 'Reranker (cross-encoder)',
-    availableOn: ['linux'],
+    availableOn: ['linux', 'windows-docker-wsl2'],
     description:
-      'vLLM cross-encoder reranker. Currently linux-only — vllm-metal lacks cross-encoder support (see vllm-metal#361).',
+      'vLLM cross-encoder reranker. Linux native or Windows Docker (WSL2) with NVIDIA GPU passthrough. Mac unsupported — vllm-metal lacks cross-encoder support (see vllm-metal#361).',
   },
 ];
 

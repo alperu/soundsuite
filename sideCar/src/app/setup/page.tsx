@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 
-type HostOs = 'darwin' | 'win32' | 'linux' | 'unknown';
+type HostOs = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | 'unknown';
 type Confidence = 'env' | 'docker-info' | 'low' | 'override';
 
 interface Health {
@@ -72,18 +72,23 @@ const RUNTIME_COLUMNS: Array<{ key: RuntimeChoice; label: string }> = [
   { key: 'docker-vllm', label: 'Docker vLLM' },
 ];
 
-/** Mode catalog mirroring the master's. ss-reranker is linux-only. */
+/** Mode catalog mirroring the master's. ss-reranker runs on linux + windows-docker-wsl2. */
 const MODE_CATALOG: Array<{ role: string; mode: string; availableOn: HostOs[] }> = [
-  { role: 'embedding', mode: 'ss-embedding', availableOn: ['darwin', 'linux', 'win32'] },
-  { role: 'completion', mode: 'ss-completion', availableOn: ['darwin', 'linux', 'win32'] },
-  { role: 'ocr', mode: 'ss-ocr', availableOn: ['darwin', 'linux', 'win32'] },
-  { role: 'reranker', mode: 'ss-reranker', availableOn: ['linux'] },
+  { role: 'embedding', mode: 'ss-embedding', availableOn: ['mac-docker-ollama', 'linux', 'windows-docker-wsl2'] },
+  { role: 'completion', mode: 'ss-completion', availableOn: ['mac-docker-ollama', 'linux', 'windows-docker-wsl2'] },
+  { role: 'ocr', mode: 'ss-ocr', availableOn: ['mac-docker-ollama', 'linux', 'windows-docker-wsl2'] },
+  { role: 'reranker', mode: 'ss-reranker', availableOn: ['linux', 'windows-docker-wsl2'] },
 ];
 
-/** macOS Docker Desktop has no GPU passthrough for plain ollama/ollama
- *  containers — so docker-ollama is unavailable; DMR/vllm-metal still works. */
+/** mac-docker-ollama: Docker Desktop on Mac has no GPU passthrough for plain
+ *  ollama/ollama containers — so docker-ollama is unavailable. Native Ollama
+ *  (host) and DMR/vllm-metal (docker-vllm) still work.
+ *  windows-docker-wsl2: Docker Desktop with WSL2 backend has native GPU
+ *  passthrough — docker-ollama and docker-vllm both work; native Ollama on
+ *  Windows is unsupported (always go through Docker WSL2). */
 function availableRuntimesForOs(os: HostOs): Record<RuntimeChoice, boolean> {
-  if (os === 'darwin') return { host: true, 'docker-ollama': false, 'docker-vllm': true };
+  if (os === 'mac-docker-ollama') return { host: true, 'docker-ollama': false, 'docker-vllm': true };
+  if (os === 'windows-docker-wsl2') return { host: false, 'docker-ollama': true, 'docker-vllm': true };
   return { host: true, 'docker-ollama': true, 'docker-vllm': true };
 }
 
@@ -110,8 +115,8 @@ function inferRuntime(
 }
 
 function osLabel(os: HostOs): string {
-  if (os === 'darwin') return 'macOS';
-  if (os === 'win32') return 'Windows';
+  if (os === 'mac-docker-ollama') return 'Mac Docker (Ollama)';
+  if (os === 'windows-docker-wsl2') return 'Windows Docker (WSL2)';
   if (os === 'linux') return 'Linux';
   return 'Unknown';
 }
@@ -507,7 +512,7 @@ export default function SetupPage() {
     }
   }, [fetchSidecarStatus]);
 
-  const saveHostOs = async (os: 'darwin' | 'win32' | 'linux') => {
+  const saveHostOs = async (os: 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux') => {
     setSavingOs(true);
     try {
       const res = await fetch('/api/host-os', {
@@ -756,7 +761,7 @@ export default function SetupPage() {
               </p>
             )}
             <div className="flex flex-wrap gap-2">
-              {(['darwin', 'win32', 'linux'] as const).map((os) => (
+              {(['mac-docker-ollama', 'windows-docker-wsl2', 'linux'] as const).map((os) => (
                 <button
                   key={os}
                   disabled={savingOs}
@@ -851,8 +856,8 @@ export default function SetupPage() {
                             : `${m.mode} cannot run on ${col.label}.`;
                       } else if (!osAvailable[col.key]) {
                         tooltip =
-                          host.os === 'darwin'
-                            ? 'macOS Docker Desktop has no GPU passthrough for plain Ollama containers — use native Ollama or Docker vLLM.'
+                          host.os === 'mac-docker-ollama'
+                            ? 'Mac Docker Desktop has no GPU passthrough for plain Ollama containers — use native Ollama or Docker vLLM.'
                             : 'Not available on this host.';
                       } else {
                         tooltip = `Run ${m.mode} via ${col.label}`;

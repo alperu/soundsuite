@@ -21,7 +21,7 @@ import { settingsPageForMode } from '@/lib/gpu/mode-catalog';
 
 /* ─────────────────────────── Public types ─────────────────────────── */
 
-export type ModeOs = 'linux' | 'darwin' | 'win32';
+export type ModeOs = 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2';
 
 export interface ModeCatalogEntry {
   name: string;
@@ -55,37 +55,37 @@ const FALLBACK_CATALOG_NO_DEFAULTS: ModeCatalogEntry[] = [
   {
     name: 'ss-embedding',
     label: 'Embedding',
-    availableOn: ['linux', 'darwin', 'win32'],
+    availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
     defaultModel: {},
     description: 'Document and query embedding via Ollama. Lightweight; used in both indexing and search.',
   },
   {
     name: 'ss-completion',
     label: 'Completion',
-    availableOn: ['linux', 'darwin', 'win32'],
+    availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
     defaultModel: {},
     description: 'Chat completion via Ollama. Used at search time.',
   },
   {
     name: 'ss-ocr',
     label: 'OCR',
-    availableOn: ['linux', 'darwin', 'win32'],
+    availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
     defaultModel: {},
     description: 'Visual OCR for low-density PDF pages and exhibit images.',
   },
   {
     name: 'ss-reranker',
     label: 'Reranker (cross-encoder)',
-    availableOn: ['linux'],
+    availableOn: ['linux', 'windows-docker-wsl2'],
     defaultModel: {},
-    description: "vLLM cross-encoder reranker. Linux-only — vllm-metal lacks cross-encoder support.",
+    description: "vLLM cross-encoder reranker. Linux native or Windows Docker (WSL2). Mac unsupported — vllm-metal lacks cross-encoder support.",
   },
 ];
 
 const OS_LABEL: Record<ModeOs, string> = {
   linux: 'Linux',
-  darwin: 'macOS',
-  win32: 'Windows',
+  'mac-docker-ollama': 'Mac Docker (Ollama)',
+  'windows-docker-wsl2': 'Windows Docker (WSL2)',
 };
 
 /* ─────────────────────────── Component ─────────────────────────── */
@@ -187,7 +187,7 @@ export default function AdminRoleTypes() {
               </thead>
               <tbody>
                 {catalog.map((m) => {
-                  const allOses: ModeOs[] = ['linux', 'darwin', 'win32'];
+                  const allOses: ModeOs[] = ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'];
                   const onlyLinux = m.availableOn.length === 1 && m.availableOn[0] === 'linux';
                   const source = settingsPageForMode(m.name);
                   // Collapse per-OS values when they're all identical — most

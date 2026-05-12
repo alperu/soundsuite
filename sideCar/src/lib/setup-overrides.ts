@@ -20,18 +20,42 @@ const log = createLogger('setup-overrides');
  *  Call once at boot after detectHostOs() + loadSavedConfig(). Idempotent. */
 export function applySetupOverrides(): void {
   const cfg = loadSidecarConfig();
-  if (!cfg) return;
+  if (!cfg) {
+    // No persisted /setup choices, but env-driven host-runtime config still
+    // needs re-application after a master config push (which may have
+    // overwritten registry def.runtime). Without this, a Mac sidecar that
+    // boots with SS_HOST_OLLAMA=1 but no /setup config file silently loses
+    // runtime='host' on every master push, and the watchdog's
+    // pickHostRuntimeRole() returns null → no probe → lastHealth.at stays 0.
+    //
+    // Only reapply when env says host-runtime is in play — otherwise we'd
+    // clobber a master-pushed runtime='host' (from mode-templates for
+    // mac-docker-ollama) back to 'docker'. See state.applyHostOllamaOverrides
+    // line 542: when ollamaRequested is false, runtime='host' is reverted.
+    if (state.hostOllamaEnabled || state.dmrEnabled) {
+      applyHostOllamaOverrides();
+    }
+    return;
+  }
 
-  if (cfg.hostOsOverride && (cfg.hostOsOverride === 'darwin' || cfg.hostOsOverride === 'win32' || cfg.hostOsOverride === 'linux')) {
-    // Master-pushed override (from config.json) takes precedence — don't
-    // clobber it with a stale /setup-wizard choice. The operator's latest
-    // intent on /admin/host-provisioning wins over an earlier local choice.
-    if (state.hostOsConfidence === 'master-override') {
-      log.info(`Skipping local hostOs override (${cfg.hostOsOverride}) — master-pushed override (${state.hostOs}) takes precedence`);
-    } else {
-      state.hostOs = cfg.hostOsOverride;
-      state.hostOsConfidence = 'override';
-      log.info(`Applied hostOs override: ${cfg.hostOsOverride}`);
+  {
+    // Accept new identifiers; migrate legacy persisted values for back-compat.
+    const raw = cfg.hostOsOverride as string | undefined;
+    let mapped: 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | null = null;
+    if (raw === 'mac-docker-ollama' || raw === 'windows-docker-wsl2' || raw === 'linux') mapped = raw;
+    else if (raw === 'darwin') mapped = 'mac-docker-ollama';
+    else if (raw === 'win32') mapped = 'windows-docker-wsl2';
+    if (mapped) {
+      // Master-pushed override (from config.json) takes precedence — don't
+      // clobber it with a stale /setup-wizard choice. The operator's latest
+      // intent on /admin/host-provisioning wins over an earlier local choice.
+      if (state.hostOsConfidence === 'master-override') {
+        log.info(`Skipping local hostOs override (${raw}) — master-pushed override (${state.hostOs}) takes precedence`);
+      } else {
+        state.hostOs = mapped;
+        state.hostOsConfidence = 'override';
+        log.info(`Applied hostOs override: ${raw}${raw !== mapped ? ` (migrated → ${mapped})` : ''}`);
+      }
     }
   }
 

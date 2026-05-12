@@ -24,7 +24,7 @@ const log = createLogger('role-registry-seed');
 
 interface SidecarEntry {
   url: string;
-  hostOs?: 'linux' | 'darwin' | 'win32' | 'unknown';
+  hostOs?: 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2' | 'unknown';
 }
 
 const COMMON_MODES = ['ss-embedding', 'ss-completion', 'ss-ocr'] as const;

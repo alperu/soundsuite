@@ -53,22 +53,12 @@ function shouldSkipCudaProbe(): { skip: boolean; reason?: string } {
   if (state.hostOllamaEnabled) {
     return { skip: true, reason: 'host-ollama mode (Ollama runs natively, no nvidia-smi needed)' };
   }
-  if (state.hostOs === 'darwin') {
-    return { skip: true, reason: 'host is macOS (no NVIDIA runtime in Docker Desktop)' };
+  if (state.hostOs === 'mac-docker-ollama') {
+    return { skip: true, reason: 'host is Mac (no NVIDIA runtime in Docker Desktop)' };
   }
-  if (state.hostOs === 'win32') {
-    // Windows Docker Desktop can technically pass NVIDIA GPUs through to
-    // Linux containers when the operator has installed the NVIDIA CUDA on
-    // WSL2 drivers AND configured Docker Desktop's WSL2 backend with the
-    // NVIDIA runtime. Most installs skip that, so the container-side probe
-    // fails with "failed to discover GPU vendor from CDI: no known GPU
-    // vendor found". For Windows we prefer the host-side companion script
-    // path — it works regardless of WSL passthrough — and skip the probe.
-    // If `state.hasNvidiaSmi` is true (set when the companion script has
-    // confirmed nvidia-smi.exe), `gpuCache` is already populated by
-    // /api/host-stats and downstream code uses it transparently.
-    return { skip: true, reason: 'host is Windows (use companion script via /api/host-stats)' };
-  }
+  // windows-docker-wsl2: Docker Desktop with the WSL2 backend ships native
+  // NVIDIA GPU passthrough, so the in-container nvidia-smi probe via ss-cuda
+  // works the same as on native Linux. Fall through.
   return { skip: false };
 }
 

@@ -503,7 +503,7 @@ export default function GpuFleetPanel() {
 
 
 
-  const handleControlRole = async (url: string, action: 'start' | 'stop' | 'pullModel' | 'loadModel', role: string) => {
+  const handleControlRole = async (url: string, action: 'start' | 'stop' | 'pullModel' | 'pullModelOnly' | 'loadModel', role: string) => {
     setPendingAction(`${action}-${role}`);
     const result = await doAction(action, { url, role });
     if (result) {
@@ -1030,26 +1030,60 @@ export default function GpuFleetPanel() {
                               <td className="py-2 px-3 text-xs font-mono">{c.vram ? `${c.vram} MB` : c.config?.vram ? `${c.config.vram} MB` : '-'}</td>
                               <td className="py-2 px-3 text-xs">{roleInfo?.activeRequests ?? '-'}</td>
                               <td className="py-2 px-3 text-right space-x-1">
-                                <button onClick={() => handleControlRole(selectedSidecar.url, 'start', role)}
-                                  disabled={actionLoading !== null || pendingAction !== null}
-                                  className="text-xs px-2 py-1 rounded bg-green-50 hover:bg-green-100 text-green-700 disabled:opacity-50">Start</button>
-                                <button onClick={() => handleControlRole(selectedSidecar.url, 'stop', role)}
-                                  disabled={actionLoading !== null || pendingAction !== null}
-                                  className="text-xs px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 disabled:opacity-50">Stop</button>
-                                {(c.type === 'ollama' || c.config?.type === 'ollama') && (
-                                  <>
-                                    <button onClick={() => handleControlRole(selectedSidecar.url, 'pullModel', role)}
-                                      disabled={actionLoading !== null || pendingAction !== null}
+                                {(() => {
+                                  const isHostOllamaRow = c.image === 'host-ollama';
+                                  const disabled = actionLoading !== null || pendingAction !== null;
+                                  const btnStart = (
+                                    <button key="start" onClick={() => handleControlRole(selectedSidecar.url, 'start', role)}
+                                      disabled={disabled}
+                                      className="text-xs px-2 py-1 rounded bg-green-50 hover:bg-green-100 text-green-700 disabled:opacity-50">Start</button>
+                                  );
+                                  const btnStop = (
+                                    <button key="stop" onClick={() => handleControlRole(selectedSidecar.url, 'stop', role)}
+                                      disabled={disabled}
+                                      className="text-xs px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 disabled:opacity-50">Stop</button>
+                                  );
+                                  const btnPull = (
+                                    <button key="pull" onClick={() => handleControlRole(selectedSidecar.url, 'pullModelOnly', role)}
+                                      disabled={disabled}
+                                      className="text-xs px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 disabled:opacity-50">
+                                      {pendingAction === `pullModelOnly-${role}` ? 'Pulling...' : 'Pull'}
+                                    </button>
+                                  );
+                                  const btnPullAndLoad = (
+                                    <button key="pullload" onClick={() => handleControlRole(selectedSidecar.url, 'pullModel', role)}
+                                      disabled={disabled}
                                       className="text-xs px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 disabled:opacity-50">
                                       {pendingAction === `pullModel-${role}` ? 'Pulling...' : 'Pull & Load'}
                                     </button>
-                                    {c.status === 'running' && (!c.loadedModels || c.loadedModels.length === 0) && (
-                                      <button onClick={() => handleControlRole(selectedSidecar.url, 'loadModel', role)}
-                                        disabled={actionLoading !== null || pendingAction !== null}
-                                        className="text-xs px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-700 disabled:opacity-50">
-                                        {pendingAction === `loadModel-${role}` ? 'Loading...' : 'Load'}
-                                      </button>
-                                    )}
+                                  );
+                                  const btnLoad = (
+                                    <button key="load" onClick={() => handleControlRole(selectedSidecar.url, 'loadModel', role)}
+                                      disabled={disabled}
+                                      className="text-xs px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-700 disabled:opacity-50">
+                                      {pendingAction === `loadModel-${role}` ? 'Loading...' : 'Load'}
+                                    </button>
+                                  );
+                                  // Host-Ollama: status-aware button set
+                                  if (isHostOllamaRow) {
+                                    if (c.status === 'running') return btnStop;
+                                    if (c.status === 'not_pulled') return <>{btnPull}{btnPullAndLoad}</>;
+                                    // unloaded (or anything else not running)
+                                    return <>{btnLoad}{btnPullAndLoad}</>;
+                                  }
+                                  // Docker / vllm: preserve existing behavior
+                                  const isOllamaType = c.type === 'ollama' || c.config?.type === 'ollama';
+                                  return (
+                                    <>
+                                      {btnStart}
+                                      {btnStop}
+                                      {isOllamaType && btnPullAndLoad}
+                                      {isOllamaType && c.status === 'running' && (!c.loadedModels || c.loadedModels.length === 0) && btnLoad}
+                                    </>
+                                  );
+                                })()}
+                                {false && (
+                                  <>
                                   </>
                                 )}
                                 {(c.type === 'vllm' || c.config?.type === 'vllm') && (
@@ -1463,7 +1497,7 @@ function HostMemoryPanel({ cached }: { cached: CachedStatus }) {
   } else if (hasInfer && infer) {
     const usedMb = infer.usedMb ?? 0;
     const budgetMb = infer.budgetMb ?? 0;
-    const isMac = host?.os === 'darwin';
+    const isMac = host?.os === 'mac-docker-ollama' || host?.os === 'darwin';
     headerLine = (
       <>
         <span className="font-medium">{isMac ? 'Apple Silicon' : 'Host'}</span>

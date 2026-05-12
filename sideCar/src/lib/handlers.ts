@@ -7,11 +7,34 @@ import { getAllContainerStates } from './containers';
 import { createLogger } from './logger';
 import { recordDemandSample, getPeakDemand } from './demand-tracker';
 import { tasks } from './task-tracker';
+import { getBootEvents, getBootEpoch } from './boot-events';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
 const log = createLogger('handlers');
+
+/**
+ * Pre-flight check: refuse to attempt docker operations when the sidecar
+ * has no working Docker connection. Returns a descriptive error string the
+ * caller can surface to the master/UI, or null when Docker is reachable.
+ *
+ * Without this guard a docker-runtime start would bubble up "connect ENOENT
+ * /var/run/docker.sock" or similar, which the master forwards as an opaque
+ * 502 to the dashboard. Operators on BASWS34 saw this when the sidecar
+ * container was run without `-v /var/run/docker.sock:/var/run/docker.sock`.
+ */
+function preflightDockerError(role: string | undefined): string | null {
+  if (getDockerMode() === 'none') {
+    return (
+      `Sidecar lacks /var/run/docker.sock mount — host Docker is unreachable` +
+      (role ? ` (role: ${role})` : '') + `. ` +
+      `Recreate the sidecar container with: ` +
+      `docker run ... -v /var/run/docker.sock:/var/run/docker.sock soundsuite-sidecar:<version>`
+    );
+  }
+  return null;
+}
 
 // Get primary non-loopback IPv4 address
 function getPrimaryIp(): string {
@@ -566,12 +589,14 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
     recordDemandSample(role);
     log.info(`Acquire ${role} (active: ${r.activeRequests})${def.runtime === 'host' ? ' [host-runtime]' : def.runtime === 'docker-model-runner' ? ' [dmr]' : ''}`);
 
-    // Host-runtime: no container to start. ensureContainer() probed Ollama
-    // reachability; if it didn't throw, the native Ollama is up. Kick off
-    // model pull/load asynchronously and report ready.
+    // Host-runtime: no container to start. ensureContainerForRole() probes
+    // native Ollama reachability — the local docker-only ensureContainer()
+    // would call pullImage(def.image='') and throw with
+    // "Failed to pull image : Pull  failed (500): no Host in request URL".
+    // See containers.ts:ensureContainerForRole for the runtime-aware branch.
     if (def.runtime === 'host') {
       try {
-        await ensureContainer(role); // probes; throws if unreachable
+        await ensureContainerForRole(role); // probes host Ollama; throws if unreachable
       } catch (err) {
         r.activeRequests = Math.max(0, r.activeRequests - 1);
         return { error: (err as Error).message };
@@ -591,6 +616,18 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
         return { error: (err as Error).message };
       }
       return { action: 'docker-model-runner', role, activeRequests: r.activeRequests };
+    }
+
+    // Same docker-socket preflight as handleStart — return a clear error
+    // instead of a deep connect-ENOENT trace when the sidecar wasn't run
+    // with -v /var/run/docker.sock:/var/run/docker.sock.
+    {
+      const pf = preflightDockerError(role);
+      if (pf) {
+        r.activeRequests = Math.max(0, r.activeRequests - 1);
+        log.error(`handleAcquire preflight: ${pf}`);
+        return { error: pf };
+      }
     }
 
     const containerName = await ensureContainer(role);
@@ -741,6 +778,18 @@ export async function handleStart(role?: string): Promise<Record<string, unknown
       return { error: (err as Error).message };
     }
     return { status: 'running', message: `Docker Model Runner ready for ${role} at ${state.dmrHost}:${state.dmrPort}` };
+  }
+
+  // Docker-runtime roles need a reachable Docker daemon. Fail fast with a
+  // descriptive message when the socket isn't mounted, instead of letting
+  // ensureContainer surface a low-level connect-ENOENT through the master
+  // as a generic 502/500.
+  {
+    const pf = preflightDockerError(role);
+    if (pf) {
+      log.error(`handleStart preflight: ${pf}`);
+      return { error: pf };
+    }
   }
 
   // Auto-provision if role is known and container doesn't exist
@@ -998,5 +1047,13 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
     connectionStatus: state.connectionStatus,
     vram,
     gpus,
+    // Boot event ring buffer — emitted ONCE per boot per event. Consumers
+    // dedupe by `seq` (monotonic) and render `ts` / `message` on the
+    // Activity Log. Capped at 100 entries; never grows after boot finishes.
+    bootLog: getBootEvents(),
+    // Stable per-process boot epoch (ms). UI/master detect sidecar restarts by
+    // observing a change in this value and reset their seenBootSeq high-water-mark
+    // so the fresh boot trace renders instead of being filtered as "already seen".
+    bootEpoch: getBootEpoch(),
   };
 }

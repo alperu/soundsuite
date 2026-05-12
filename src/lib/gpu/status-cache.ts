@@ -107,7 +107,7 @@ export interface CachedSidecarStatus {
    * omit it. Windows-with-helper may have both `gpus[]` and `host.stats`.
    */
   host?: {
-    os?: 'darwin' | 'linux' | 'win32' | string;
+    os?: 'mac-docker-ollama' | 'linux' | 'windows-docker-wsl2' | string;
     osConfidence?: string;
     dockerDesktop?: boolean;
     /** Sticky: set true once the host helper has reported nvidia-smi presence. */

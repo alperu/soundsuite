@@ -5,6 +5,7 @@ import path from 'path';
 import { state, ensureMaster, syncLegacyServerUrl } from './state';
 import { createLogger } from './logger';
 import { loadSidecarConfig, saveSidecarConfig } from './sidecar-config';
+import { emitBootEvent } from './boot-events';
 
 const log = createLogger('config');
 
@@ -99,10 +100,20 @@ export function loadSavedConfig(): Record<string, unknown> | null {
       // Apply with the highest-precedence confidence so applySetupOverrides()
       // — which runs after loadSavedConfig() in instrumentation.ts — does NOT
       // clobber it with a stale /setup-wizard choice.
-      if (data.hostOsOverride === 'darwin' || data.hostOsOverride === 'win32' || data.hostOsOverride === 'linux') {
-        state.hostOs = data.hostOsOverride;
-        state.hostOsConfidence = 'master-override';
-        log.info(`Loaded saved master hostOsOverride: ${data.hostOsOverride}`);
+      {
+        // Accept the new identifiers and migrate legacy persisted values
+        // (darwin → mac-docker-ollama; win32 → windows-docker-wsl2) so a
+        // sidecar that saved config under the pre-rename names still loads.
+        const raw = data.hostOsOverride;
+        let mapped: 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | null = null;
+        if (raw === 'mac-docker-ollama' || raw === 'windows-docker-wsl2' || raw === 'linux') mapped = raw;
+        else if (raw === 'darwin') mapped = 'mac-docker-ollama';
+        else if (raw === 'win32') mapped = 'windows-docker-wsl2';
+        if (mapped) {
+          state.hostOs = mapped;
+          state.hostOsConfidence = 'master-override';
+          log.info(`Loaded saved master hostOsOverride: ${raw}${raw !== mapped ? ` (migrated → ${mapped})` : ''}`);
+        }
       }
       // Migrate stale OCR model name (community model requires namespace prefix)
       if (state.registry.ocr?.model === 'olmocr2:7b-q8') {
@@ -154,8 +165,14 @@ export function loadSavedConfig(): Record<string, unknown> | null {
 
   if (state.masters.size === 0) {
     log.info('No masters configured (config.json, sidecar.config.json, SIDECAR_MASTERS, SOUND_SUITE_MASTER_URL/SERVER_URL all empty) — fresh start');
+    emitBootEvent('Master discovery: no persisted/env masters — will probe network');
   } else {
     log.info(`Configured masters: ${[...state.masters.keys()].join(', ')}`);
+    const urls = [...state.masters.keys()];
+    emitBootEvent(
+      `Master discovery: loaded ${urls.length} master(s) from persisted config/env: ${urls.join(', ')}`,
+      { urls },
+    );
   }
 
   return data;
@@ -216,6 +233,9 @@ export function saveConfig(): void {
     }
     fs.renameSync(tmp, CONFIG_PATH);
     log.info(`Config saved to ${CONFIG_PATH} (masters=${masters.length}, first=${firstUrl}, agentUrl=${data.agentUrl})`);
+    if (firstUrl) {
+      emitBootEvent(`Master URL persisted to ${CONFIG_PATH}`, { path: CONFIG_PATH, firstUrl, count: masters.length });
+    }
 
     // Mirror first master URL into sidecar.config.json for back-compat.
     if (firstUrl) {
@@ -474,6 +494,12 @@ export async function discoverMasters(): Promise<string[]> {
   }
 
   log.info(`discoverMasters: probing ${deduped.length} candidate(s) (sources: ${[...new Set(deduped.map(c => c.source))].join(', ')})`);
+  // Surface each channel attempted (deduped by source) — one event per channel,
+  // not per-URL, to keep the Activity Log readable.
+  const channels = [...new Set(deduped.map(c => c.source))];
+  for (const channel of channels) {
+    emitBootEvent(`Master discovery: trying channel ${channel}`, { channel });
+  }
 
   // Probe all candidates in parallel — bounded by PROBE_TIMEOUT_MS * 2 (health + fleet).
   const probes = deduped.map(async (c) => {
@@ -495,6 +521,7 @@ export async function discoverMasters(): Promise<string[]> {
       ensureMaster(c.baseUrl, {});
       found.push(c.baseUrl);
       log.info(`Master discovered via ${c.source}: ${c.baseUrl}`);
+      emitBootEvent(`Master discovered via ${c.source}: ${c.baseUrl}`, { channel: c.source, url: c.baseUrl });
     } catch (err) {
       log.warn(`ensureMaster failed for discovered "${c.baseUrl}": ${(err as Error).message}`);
     }

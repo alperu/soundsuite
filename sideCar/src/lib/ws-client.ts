@@ -29,8 +29,13 @@ import { saveConfig } from './config';
 import { createLogger } from './logger';
 import { checkForUpdate, performUpdate } from './self-update';
 import { tasks } from './task-tracker';
+import { emitBootEvent } from './boot-events';
 
 const log = createLogger('gossip');
+
+// Per-master "first successful connect" flag. Emits the boot event once per
+// boot per master, not on every reconnect / heartbeat cycle.
+const firstConnectEmitted = new Set<string>();
 
 // Update-check is a process-wide concern, not per-master. Run it once against
 // the first master only — the binary doesn't need N parallel update probes.
@@ -256,7 +261,7 @@ async function executeCommand(
       // hostOs. Idempotent: same value pushed twice = no-op. Persists via
       // saveConfig() at the end of this handler so it survives reboot.
       const pushedOs = payload.hostOsOverride;
-      if (pushedOs === 'darwin' || pushedOs === 'win32' || pushedOs === 'linux') {
+      if (pushedOs === 'mac-docker-ollama' || pushedOs === 'windows-docker-wsl2' || pushedOs === 'linux') {
         if (state.hostOs !== pushedOs || state.hostOsConfidence !== 'master-override') {
           log.info(`[${m.serverUrl}] Master pushed hostOsOverride: ${state.hostOs} (${state.hostOsConfidence}) -> ${pushedOs} (master-override)`);
           state.hostOs = pushedOs;
@@ -403,7 +408,7 @@ async function executeCommand(
         //      at least one resolved on this OS).
         //   2. validNameCount > 0 BUT enabledRoles is empty (master asked
         //      for valid mode names that are all unavailable on this OS,
-        //      e.g. ss-reranker on darwin/win32). That's an intentional
+        //      e.g. ss-reranker on mac-docker-ollama). That's an intentional
         //      "this host should run nothing besides utility" signal —
         //      previously skipping the trim left the boot-default 5-role
         //      registry intact, so the master and the sidecar disagreed
@@ -429,7 +434,7 @@ async function executeCommand(
           log.warn(
             `[${m.serverUrl}] hostOs="unknown" and no GPU evidence yet — ` +
             `skipping trim of ${validNameCount} requested mode(s). ` +
-            `Set HOST_OS=linux|darwin|win32 env (or POST /api/host-os) to pin.`,
+            `Set HOST_OS=linux|mac-docker-ollama|windows-docker-wsl2 env (or POST /api/host-os) to pin.`,
           );
         }
         if (shouldTrim) {
@@ -463,7 +468,7 @@ async function executeCommand(
         // Do NOT call applyHostOllamaOverrides() here — resolveMode() already
         // encodes the host/docker choice based on hostOs. The legacy env-driven
         // override would revert runtime='host' to 'docker' when SS_HOST_OLLAMA
-        // is unset, breaking darwin/win32 (which need runtime='host' and have
+        // is unset, breaking mac-docker-ollama (which needs runtime='host' and has
         // image=''). The mode catalog is the authoritative source for runtime.
         //
         // We still call applySetupOverrides for /setup-persisted operator
@@ -545,6 +550,25 @@ async function executeCommand(
           const { applySetupOverrides } = await import('./setup-overrides');
           applySetupOverrides();
         } catch { /* not present in older sidecars; safe to skip */ }
+      }
+      // Kick the host-runtime watchdog if a master push (or setup override)
+      // enabled host-Ollama / DMR mode AFTER boot. Without this, a sidecar
+      // that booted with hostOllama disabled (no env) and was flipped on
+      // by a master config push never starts probing — state.hostOllamaLastHealth
+      // stays {at:0, ok:false} forever, the master never sees the role as
+      // "really running", and /acquire fires every tick. Idempotent —
+      // startHostOllamaWatchdog() early-returns if the timer is already set.
+      // Lives OUTSIDE the if/else above so it fires in both the modern
+      // (enabledModes) and legacy (payload.registry) config-push paths.
+      // Always invoke startHostOllamaWatchdog — its own gate now also fires
+      // on registry-resident runtime='host' roles, catching the
+      // mac-docker-ollama path where SS_HOST_OLLAMA env wasn't set in the
+      // container but mode-templates resolved roles to runtime='host'.
+      try {
+        const { startHostOllamaWatchdog } = await import('./host-ollama-watchdog');
+        startHostOllamaWatchdog();
+      } catch (err) {
+        log.warn(`[${m.serverUrl}] startHostOllamaWatchdog after config push failed: ${(err as Error).message}`);
       }
       saveConfig();
       if (modelChangedRoles.length > 0) {
@@ -973,6 +997,10 @@ export function connectMaster(m: MasterConnection): void {
       m.ws = ws;
       m.connectionMode = 'websocket';
       m.connectionStatus = 'Connected via WebSocket';
+      if (!firstConnectEmitted.has(m.serverUrl)) {
+        firstConnectEmitted.add(m.serverUrl);
+        emitBootEvent(`Connected to master ${m.serverUrl} via ws`, { url: m.serverUrl, transport: 'ws' });
+      }
       // Aggregate connectionStatus is "best-of" the masters
       state.connectionStatus = 'Connected via WebSocket';
       stopHttpHeartbeat(m);
@@ -1124,6 +1152,10 @@ async function fallbackToHttp(m: MasterConnection): Promise<void> {
   startHttpHeartbeat(m);
   startUpdateChecks();
   log.info(`[${m.serverUrl}] Running in HTTP gossip mode (heartbeat + poll)`);
+  if (!firstConnectEmitted.has(m.serverUrl)) {
+    firstConnectEmitted.add(m.serverUrl);
+    emitBootEvent(`Connected to master ${m.serverUrl} via http`, { url: m.serverUrl, transport: 'http' });
+  }
   scheduleReconnect(m);
 }
 

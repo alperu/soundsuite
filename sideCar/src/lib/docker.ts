@@ -276,6 +276,14 @@ export interface ContainerState {
   image?: string;
   cmd?: string[];
   env?: string[];
+  // HostConfig fields used by drift detection. Populated by getContainerState
+  // from /containers/{id}/json. Used to detect containers created BEFORE the
+  // sidecar started adding GPU DeviceRequests or Init=true (e.g. stale
+  // pre-rename containers on BASWS34 that exit immediately on start because
+  // Ollama can't find a GPU). detectConfigDrift compares these against the
+  // ExpectedConfig and triggers a remove+recreate.
+  hasGpuDeviceRequest?: boolean;
+  hasInit?: boolean;
   role?: string;
   config?: { image: string; model: string | null; port: number; vram: number; type: string; gpuOnly?: boolean };
   loadedModels?: Array<{ name: string; size: string; sizeBytes?: number; sizeVram?: number; gpuPercent?: number; processor: string; until: string }>;
@@ -293,6 +301,11 @@ export async function getContainerState(containerName?: string): Promise<Contain
     if (status === 404) return { exists: false, status: 'not_found', name };
     if (status !== 200) return { exists: false, status: 'error', name };
     const data = JSON.parse(body);
+    const hc = data.HostConfig || {};
+    const dr: Array<{ Capabilities?: string[][] }> | undefined = hc.DeviceRequests;
+    const hasGpuDeviceRequest = Array.isArray(dr) && dr.some(
+      r => Array.isArray(r.Capabilities) && r.Capabilities.some(caps => Array.isArray(caps) && caps.includes('gpu'))
+    );
     return {
       exists: true,
       name,
@@ -302,6 +315,8 @@ export async function getContainerState(containerName?: string): Promise<Contain
       image: data.Config?.Image,
       cmd: data.Config?.Cmd || undefined,
       env: data.Config?.Env || undefined,
+      hasGpuDeviceRequest,
+      hasInit: hc.Init === true,
     };
   } catch (err) {
     return { exists: false, status: 'error', name, error: (err as Error).message };
@@ -385,6 +400,14 @@ export interface ExpectedConfig {
   Image: string;
   Cmd?: string[];
   Env?: string[];
+  // True when the role needs Docker GPU passthrough (DeviceRequests with
+  // 'gpu' capability). Drift-detected so stale containers created before the
+  // GPU flag was added get recreated instead of silently exiting on start.
+  RequiresGpu?: boolean;
+  // True when the container should have HostConfig.Init=true (tini as PID-1).
+  // Added 2026-05-11 after BASWS34 needed manual `docker rm -f` to recover
+  // from a wedged vLLM worker. Drift-detected to upgrade older containers.
+  RequiresInit?: boolean;
 }
 
 export function buildExpectedConfig(role: string): ExpectedConfig {
@@ -399,6 +422,17 @@ export function buildExpectedConfig(role: string): ExpectedConfig {
 
   if (def.type === 'vllm' && def.model) {
     config.Cmd = buildVllmCmd(def.model, def.port);
+  }
+
+  // Only docker-runtime roles need GPU/Init drift checks. host and
+  // docker-model-runner roles have no Docker container under our control.
+  if (def.runtime !== 'host' && def.runtime !== 'docker-model-runner') {
+    // GPU passthrough is required for any docker-runtime role on a host
+    // where Docker can actually do it (linux, windows-docker-wsl2). On
+    // GPU-less hosts ensureContainerForRole refuses earlier, so we never
+    // reach createContainer there — flagging RequiresGpu here is safe.
+    config.RequiresGpu = state.hostOs === 'linux' || state.hostOs === 'windows-docker-wsl2';
+    config.RequiresInit = true;
   }
 
   return config;
@@ -470,6 +504,20 @@ export function detectConfigDrift(
     if (missing.length > 0) {
       drifts.push(`env missing: ${missing.join(', ')}`);
     }
+  }
+
+  // GPU DeviceRequest comparison. Pre-rename / pre-WSL2-GPU containers were
+  // created without HostConfig.DeviceRequests, so on start Ollama can't see
+  // the GPU and the container exits within seconds. Detect and recreate so
+  // a fresh container picks up the current createContainer() DeviceRequests.
+  if (expected.RequiresGpu && actual.hasGpuDeviceRequest === false) {
+    drifts.push('hostConfig.DeviceRequests missing (GPU passthrough not configured)');
+  }
+
+  // Init drift — same reasoning. Containers created before Init=true was
+  // added get upgraded on the next ensureContainerForRole.
+  if (expected.RequiresInit && actual.hasInit === false) {
+    drifts.push('hostConfig.Init missing (tini PID-1 not configured)');
   }
 
   return { hasDrift: drifts.length > 0, drifts };
@@ -684,6 +732,12 @@ export async function pullImage(
   image: string,
   opts?: { onProgress?: (progress: number, detail: string) => void },
 ): Promise<boolean> {
+  if (!image || image.trim() === '' || image === 'host-ollama' || image === 'dmr') {
+    throw new Error(
+      `pullImage called with image="${image}" — host-runtime role leaked into docker pull path. ` +
+      `Check def.runtime branching in handleAcquire/handleStart/handlePull.`,
+    );
+  }
   assertDockerAvailable();
 
   // Split image:tag — Docker API requires separate fromImage and tag params.

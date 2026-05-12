@@ -53,26 +53,25 @@ const RUNTIME_COLUMNS: Array<{ key: RuntimeChoice; short: string; label: string 
 ];
 
 /**
- * Per-OS runtime availability. `hasNvidia` only affects win32 — Windows
- * Docker Desktop without WSL2+NVIDIA has no GPU passthrough so the docker
- * columns are greyed out.
+ * Per-OS runtime availability. windows-docker-wsl2 runs Docker via WSL2 with
+ * native NVIDIA passthrough — Docker Ollama and Docker vLLM both work; native
+ * Ollama on Windows is not supported (operators always go through Docker).
+ * mac-docker-ollama: Docker Desktop on Mac lacks GPU passthrough for plain
+ * ollama containers, so docker-ollama is unavailable; native Ollama (host)
+ * and DMR/vllm-metal (docker-vllm) still work.
  */
 function availableRuntimesForOs(
   os: ModeOs | string | undefined,
-  hasNvidia: boolean,
+  _hasNvidia: boolean,
 ): Record<RuntimeChoice, boolean> {
-  if (os === 'darwin') {
-    return { host: true, 'docker-ollama': false, 'docker-vllm': false };
+  if (os === 'mac-docker-ollama') {
+    return { host: true, 'docker-ollama': false, 'docker-vllm': true };
   }
   if (os === 'linux') {
     return { host: true, 'docker-ollama': true, 'docker-vllm': true };
   }
-  if (os === 'win32') {
-    return {
-      host: true,
-      'docker-ollama': hasNvidia,
-      'docker-vllm': hasNvidia,
-    };
+  if (os === 'windows-docker-wsl2') {
+    return { host: false, 'docker-ollama': true, 'docker-vllm': true };
   }
   // Unknown OS — be permissive.
   return { host: true, 'docker-ollama': true, 'docker-vllm': true };
@@ -97,16 +96,16 @@ function defaultRuntimeForRow(
   hasNvidia: boolean,
 ): RuntimeChoice {
   if (modeName === 'ss-reranker') return 'docker-vllm';
-  if (os === 'darwin') return 'host';
-  if (os === 'win32') return hasNvidia ? 'docker-ollama' : 'host';
+  if (os === 'mac-docker-ollama') return 'host';
+  if (os === 'windows-docker-wsl2') return 'docker-ollama';
   return 'docker-ollama';
 }
 
 /**
  * Back-compat default: rows persisted before the `runtime` column existed
- * come back with `runtime === null`. We treat that as 'host' on darwin and
- * 'docker-ollama' elsewhere — matches what fleet behavior was already doing
- * implicitly.
+ * come back with `runtime === null`. We treat that as 'host' on
+ * mac-docker-ollama and 'docker-ollama' elsewhere — matches what fleet
+ * behavior was already doing implicitly.
  */
 function resolveRuntime(
   assignment: RoleAssignment | undefined,
@@ -114,7 +113,7 @@ function resolveRuntime(
 ): RuntimeChoice | null {
   if (!assignment?.enabled) return null;
   if (assignment.runtime) return assignment.runtime;
-  return os === 'darwin' ? 'host' : 'docker-ollama';
+  return os === 'mac-docker-ollama' ? 'host' : 'docker-ollama';
 }
 
 type Toast = { type: 'success' | 'error' | 'warning'; text: string } | null;
@@ -126,10 +125,10 @@ type Toast = { type: 'success' | 'error' | 'warning'; text: string } | null;
 // the settings pages, so the "inherit (<model>)" hint would lie. When
 // offline we show "inherit" with no model + a "backend offline" badge.
 const FALLBACK_MODES: ModeCatalogEntry[] = [
-  { name: 'ss-embedding', label: 'Embedding', availableOn: ['linux', 'darwin', 'win32'], defaultModel: {} },
-  { name: 'ss-completion', label: 'Completion', availableOn: ['linux', 'darwin', 'win32'], defaultModel: {} },
-  { name: 'ss-ocr', label: 'OCR', availableOn: ['linux', 'darwin', 'win32'], defaultModel: {} },
-  { name: 'ss-reranker', label: 'Reranker', availableOn: ['linux'], defaultModel: {} },
+  { name: 'ss-embedding', label: 'Embedding', availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'], defaultModel: {} },
+  { name: 'ss-completion', label: 'Completion', availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'], defaultModel: {} },
+  { name: 'ss-ocr', label: 'OCR', availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'], defaultModel: {} },
+  { name: 'ss-reranker', label: 'Reranker', availableOn: ['linux', 'windows-docker-wsl2'], defaultModel: {} },
 ];
 
 const RESET_DEFAULTS: Record<string, { minOnline: number; idleTimeoutMin: number }> = {
@@ -147,18 +146,22 @@ function inferOs(
   override?: string | null,
 ): ModeOs {
   // Operator override from /admin/host-provisioning wins over everything.
-  if (override === 'linux' || override === 'darwin' || override === 'win32') return override;
-  if (declared === 'linux' || declared === 'darwin' || declared === 'win32') return declared;
+  if (override === 'linux' || override === 'mac-docker-ollama' || override === 'windows-docker-wsl2') return override;
+  if (declared === 'linux' || declared === 'mac-docker-ollama' || declared === 'windows-docker-wsl2') return declared;
+  // Tolerate legacy declared values from older sidecars that still report
+  // os: 'darwin' | 'win32' over the wire.
+  if (declared === 'darwin') return 'mac-docker-ollama';
+  if (declared === 'win32') return 'windows-docker-wsl2';
   const h = (hostname || '').toLowerCase();
-  if (h.includes('mac') || h.endsWith('.local')) return 'darwin';
-  if (h.includes('win') || h.includes('wsl')) return 'win32';
+  if (h.includes('mac') || h.endsWith('.local')) return 'mac-docker-ollama';
+  if (h.includes('win') || h.includes('wsl')) return 'windows-docker-wsl2';
   return 'linux';
 }
 
 /** Friendly OS labels — same convention as /admin/host-provisioning. */
 function osDisplayLabel(os: ModeOs | string | undefined): string {
-  if (os === 'darwin') return 'macOS';
-  if (os === 'win32') return 'Windows';
+  if (os === 'mac-docker-ollama') return 'Mac Docker (Ollama)';
+  if (os === 'windows-docker-wsl2') return 'Windows Docker (WSL2)';
   if (os === 'linux') return 'Linux';
   return 'Unknown';
 }
@@ -705,11 +708,9 @@ export default function AdminRoleAssignments() {
                                       mode.name === 'ss-reranker' ? 'Docker vLLM' : 'Ollama runtimes'
                                     } supported).`;
                                   } else if (!osAvailable[col.key]) {
-                                    tooltip = sidecar.os === 'darwin'
-                                      ? 'macOS Docker Desktop has no GPU passthrough — only native Ollama works.'
-                                      : sidecar.os === 'win32'
-                                        ? 'Windows without WSL2+NVIDIA has no GPU passthrough in Docker Desktop.'
-                                        : 'Not available on this host.';
+                                    tooltip = sidecar.os === 'mac-docker-ollama'
+                                      ? 'Mac Docker Desktop has no GPU passthrough for plain Ollama/vLLM containers — use host Ollama (or DMR/vllm-metal).'
+                                      : 'Not available on this host.';
                                   } else {
                                     tooltip = `Run ${mode.name} via ${col.label}`;
                                   }

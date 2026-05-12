@@ -8,7 +8,7 @@ const log = createLogger('sidecar-config');
 const SIDECAR_CONFIG_PATH = process.env.SIDECAR_CONFIG_PATH ||
   path.join(path.dirname(process.argv[1] || __filename), 'config', 'sidecar.config.json');
 
-export type HostOsValue = 'darwin' | 'win32' | 'linux';
+export type HostOsValue = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux';
 
 interface SidecarConfig {
   serverUrl: string | null;

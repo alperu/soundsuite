@@ -66,6 +66,18 @@ interface StatusData {
   tasks?: TaskInfo[];
   connectionStatus?: string;
   vram?: VramSnapshot | null;
+  /**
+   * Boot-event ring buffer — sidecar's own emit log for the boot sequence.
+   * Surfaced on the Activity Log via seq-based dedup so events show up once
+   * per boot, not on every 3s poll.
+   */
+  bootLog?: Array<{ seq: number; ts: number; message: string; meta?: Record<string, unknown> }>;
+  /**
+   * Stable per-process boot epoch (ms) of the sidecar. Changes on each sidecar
+   * restart; UI resets `seenBootSeqRef` when this changes so post-restart boot
+   * events aren't filtered as "already seen" against the pre-restart seq.
+   */
+  bootEpoch?: number;
 }
 
 interface LogEntry {
@@ -89,6 +101,14 @@ export default function Home() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const prevStatusRef = useRef<StatusData | null>(null);
+  // Highest boot-event seq we've surfaced on the Activity Log. Boot events are
+  // emitted ONCE per boot by the sidecar, but the dashboard polls /api/status
+  // every 3s — dedupe by monotonic seq to render each event exactly once.
+  const seenBootSeqRef = useRef(0);
+  // Sidecar's stable per-process boot epoch. When this changes we know the
+  // sidecar restarted (nextSeq reset to 1 on its side) — reset our high-water
+  // mark so the fresh boot trace renders instead of being filtered out.
+  const seenBootEpochRef = useRef<number>(0);
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<'idle' | 'checking' | 'updating' | 'rebooting'>('idle');
   const [editingTimeouts, setEditingTimeouts] = useState<Record<string, string>>({});
@@ -97,8 +117,8 @@ export default function Home() {
   const updateStateRef = useRef(updateState);
   useEffect(() => { updateStateRef.current = updateState; }, [updateState]);
 
-  const addLog = useCallback((message: string) => {
-    const now = new Date();
+  const addLog = useCallback((message: string, atMs?: number) => {
+    const now = atMs !== undefined ? new Date(atMs) : new Date();
     const time = now.toLocaleTimeString('en-US', { hour12: false });
     setLogs((prev) => [...prev.slice(-200), { time, message }]);
   }, []);
@@ -112,6 +132,21 @@ export default function Home() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: StatusData = await res.json();
         if (!active) return;
+
+        // Surface NEW boot events (seq > seenBootSeq) on the Activity Log.
+        // Events fire once per boot on the sidecar — dedupe by monotonic seq
+        // so a fresh page load also catches the full boot trace from /api/status.
+        if (typeof data.bootEpoch === 'number' && data.bootEpoch !== seenBootEpochRef.current) {
+          seenBootEpochRef.current = data.bootEpoch;
+          seenBootSeqRef.current = 0; // fresh boot — re-display all bootLog entries
+        }
+        if (Array.isArray(data.bootLog) && data.bootLog.length > 0) {
+          const fresh = data.bootLog.filter((e) => e.seq > seenBootSeqRef.current);
+          if (fresh.length > 0) {
+            for (const ev of fresh) addLog(ev.message, ev.ts);
+            seenBootSeqRef.current = fresh[fresh.length - 1].seq;
+          }
+        }
 
         // Log meaningful changes
         const prev = prevStatusRef.current;
@@ -287,80 +322,42 @@ export default function Home() {
   // handleModeChange removed — legacy. Use the master's /admin/roleassign
   // page to enable/disable roles per host.
 
-  const handleContainerStart = async (role: string) => {
+  /**
+   * POST a container action and surface a meaningful Activity-Log entry.
+   * The sidecar's /api/containers now returns HTTP 200 with `{ok: false, error}`
+   * on handler errors (mirroring the master's /api/admin/gpu-fleet pattern from
+   * task #37) — so we read the body and check `ok` instead of just `res.ok`.
+   * This is what makes "Start failed: HTTP 502" become "Start failed: Recreate
+   * with -v /var/run/docker.sock:..." in the operator's log.
+   */
+  const postAction = async (
+    label: string,
+    action: string,
+    role: string,
+    okMsg: string,
+  ) => {
     try {
-      addLog(`Starting container: ${role}`);
+      addLog(`${label}: ${role}`);
       const res = await fetch('/api/containers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'start', role }),
+        body: JSON.stringify({ action, role }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      addLog(`Start command sent for ${role}`);
+      const body = await res.json().catch(() => ({} as { ok?: boolean; error?: string }));
+      if (!res.ok || body.ok === false) {
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      addLog(`${okMsg} ${role}`);
     } catch (err) {
-      addLog(`Start failed for ${role}: ${(err as Error).message}`);
+      addLog(`${label} failed for ${role}: ${(err as Error).message}`);
     }
   };
 
-  const handleContainerStop = async (role: string) => {
-    try {
-      addLog(`Stopping container: ${role}`);
-      const res = await fetch('/api/containers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', role }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      addLog(`Stop command sent for ${role}`);
-    } catch (err) {
-      addLog(`Stop failed for ${role}: ${(err as Error).message}`);
-    }
-  };
-
-  const handleContainerLoad = async (role: string) => {
-    try {
-      addLog(`Loading model into VRAM: ${role}`);
-      const res = await fetch('/api/containers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'loadModel', role }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      addLog(`Load command sent for ${role}`);
-    } catch (err) {
-      addLog(`Load failed for ${role}: ${(err as Error).message}`);
-    }
-  };
-
-  const handleContainerPull = async (role: string) => {
-    try {
-      addLog(`Pulling model for ${role}...`);
-      const res = await fetch('/api/containers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'pullModel', role }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      addLog(`Pull started for ${role}`);
-    } catch (err) {
-      addLog(`Pull failed for ${role}: ${(err as Error).message}`);
-    }
-  };
-
-  const handleContainerPullAndLoad = async (role: string) => {
-    try {
-      addLog(`Pulling + loading model for ${role}...`);
-      const res = await fetch('/api/containers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'pullAndLoad', role }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      addLog(`Pull + load started for ${role}`);
-    } catch (err) {
-      addLog(`Pull + load failed for ${role}: ${(err as Error).message}`);
-    }
-  };
+  const handleContainerStart = (role: string) => postAction('Starting container', 'start', role, 'Start command sent for');
+  const handleContainerStop = (role: string) => postAction('Stopping container', 'stop', role, 'Stop command sent for');
+  const handleContainerLoad = (role: string) => postAction('Loading model into VRAM', 'loadModel', role, 'Load command sent for');
+  const handleContainerPull = (role: string) => postAction('Pulling model for', 'pullModel', role, 'Pull started for');
+  const handleContainerPullAndLoad = (role: string) => postAction('Pulling + loading model for', 'pullAndLoad', role, 'Pull + load started for');
 
   // Check for updates periodically
   useEffect(() => {

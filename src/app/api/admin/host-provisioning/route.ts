@@ -54,7 +54,7 @@ export async function PUT(request: NextRequest) {
     if (body?.hostOsOverride != null && body.hostOsOverride !== '') {
       if (!isValidHostOs(body.hostOsOverride)) {
         return NextResponse.json(
-          { error: "hostOsOverride must be 'darwin', 'win32', 'linux', or empty" },
+          { error: "hostOsOverride must be 'mac-docker-ollama', 'windows-docker-wsl2', 'linux', or empty" },
           { status: 400 },
         );
       }

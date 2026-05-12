@@ -10,7 +10,7 @@
 
 import { prisma } from './prisma';
 
-export type HostOsOverride = 'darwin' | 'win32' | 'linux';
+export type HostOsOverride = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux';
 
 export interface HostProvisioningRecord {
   sidecarUrl: string;
@@ -33,7 +33,7 @@ export function normalizeMasterUrl(u: string | null | undefined): string | null 
 }
 
 export function isValidHostOs(v: unknown): v is HostOsOverride {
-  return v === 'darwin' || v === 'win32' || v === 'linux';
+  return v === 'mac-docker-ollama' || v === 'windows-docker-wsl2' || v === 'linux';
 }
 
 export function isValidWsPort(v: unknown): v is number {

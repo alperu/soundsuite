@@ -22,10 +22,46 @@ interface LoadedModel {
 interface ContainerInfo {
   name: string;
   status: string;
+  image?: string;
   config: ContainerConfig;
   loadedModels?: LoadedModel[];
   modelOnDisk?: boolean;
   apiReady?: boolean;
+}
+
+/**
+ * Display label for the runtime a container/role is using. Image-derived when
+ * a container exists; falls back to a regex on the configured image when the
+ * container hasn't been created yet. Mirrors the master's admin-gpu-fleet
+ * implementation so both UIs stay consistent.
+ */
+type RuntimeLabel = 'Ollama (native)' | 'Docker Ollama' | 'Docker vLLM' | 'Docker Model Runner' | '—';
+
+function runtimeLabel(image: string | undefined, assignmentRuntime?: string | null): RuntimeLabel {
+  if (image === 'host-ollama') return 'Ollama (native)';
+  if (image === 'dmr') return 'Docker Model Runner';
+  if (image) {
+    if (/(^|\/)vllm/i.test(image)) return 'Docker vLLM';
+    if (/(^|\/)ollama/i.test(image)) return 'Docker Ollama';
+  }
+  if (assignmentRuntime === 'host') return 'Ollama (native)';
+  if (assignmentRuntime === 'docker-vllm') return 'Docker vLLM';
+  if (assignmentRuntime === 'docker-ollama') return 'Docker Ollama';
+  return '—';
+}
+
+function RuntimeChip({ label }: { label: RuntimeLabel }) {
+  const cls =
+    label === 'Ollama (native)' ? 'bg-slate-50 text-slate-700 border-slate-200'
+    : label === 'Docker Ollama' ? 'bg-blue-50 text-blue-700 border-blue-200'
+    : label === 'Docker vLLM' ? 'bg-purple-50 text-purple-700 border-purple-200'
+    : label === 'Docker Model Runner' ? 'bg-amber-50 text-amber-700 border-amber-200'
+    : 'bg-gray-100 text-gray-500 border-gray-200';
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium border ${cls}`}>
+      {label}
+    </span>
+  );
 }
 
 interface ContainerTableProps {
@@ -187,6 +223,7 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
               <tr className="border-b border-slate-200 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
                 <th className="pb-2 pr-4">Role</th>
                 <th className="pb-2 pr-4">Container</th>
+                <th className="pb-2 pr-4">Running On</th>
                 <th className="pb-2 pr-4">Model</th>
                 <th className="pb-2 pr-4">PS</th>
                 <th className="pb-2 pr-4">Status</th>
@@ -194,7 +231,10 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
               </tr>
             </thead>
             <tbody>
-              {entries.map(([role, container]) => (
+              {entries.map(([role, container]) => {
+                const imageForRuntime = container.image || container.config?.image;
+                const rtLabel = runtimeLabel(imageForRuntime);
+                return (
                 <tr key={role} className="border-b border-slate-100 last:border-0">
                   <td className="py-3 pr-4 font-medium text-slate-700">{role}</td>
                   <td className="py-3 pr-4 text-slate-500 font-mono text-xs">
@@ -208,6 +248,7 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
                       {container.name}
                     </span>
                   </td>
+                  <td className="py-3 pr-4"><RuntimeChip label={rtLabel} /></td>
                   <td className="py-3 pr-4 text-slate-500 font-mono text-xs">
                     {container.config?.model || <span className="text-slate-300 italic">none</span>}
                   </td>
@@ -218,54 +259,62 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
                     <StatusBadge status={container.status} />
                   </td>
                   <td className="py-3 space-x-1">
-                    {container.status === 'running' ? (
-                      <>
-                        <button
-                          onClick={() => onStop(role)}
-                          className="bg-red-500 hover:bg-red-600 text-white rounded-md px-2 py-1 text-xs font-medium"
-                        >
-                          Stop
-                        </button>
-                        {container.config?.type === 'ollama' && container.config?.model && (
+                    {(() => {
+                      // Status-aware action buttons. Mirrors the master's
+                      // /admin/gpu admin-gpu-fleet panel (task #25) so the
+                      // sidecar's own dashboard exposes the same controls
+                      // operators are used to: Pull, Pull & Load, Load on
+                      // host-runtime rows; Start on docker rows.
+                      const isHostOllama = (container.image || container.config?.image) === 'host-ollama';
+                      const isOllamaType = container.config?.type === 'ollama';
+                      const btnStart = (
+                        <button key="start" onClick={() => onStart(role)}
+                          className="bg-blue-500 hover:bg-blue-600 text-white rounded-md px-2 py-1 text-xs font-medium">Start</button>
+                      );
+                      const btnStop = (
+                        <button key="stop" onClick={() => onStop(role)}
+                          className="bg-red-500 hover:bg-red-600 text-white rounded-md px-2 py-1 text-xs font-medium">Stop</button>
+                      );
+                      const btnPull = onPull && (
+                        <button key="pull" onClick={() => onPull(role)}
+                          className="bg-purple-500 hover:bg-purple-600 text-white rounded-md px-2 py-1 text-xs font-medium">Pull</button>
+                      );
+                      const btnPullLoad = onPullAndLoad && (
+                        <button key="pullload" onClick={() => onPullAndLoad(role)}
+                          className="bg-indigo-500 hover:bg-indigo-600 text-white rounded-md px-2 py-1 text-xs font-medium">Pull &amp; Load</button>
+                      );
+                      const btnLoad = onLoad && (
+                        <button key="load" onClick={() => onLoad(role)}
+                          className="bg-amber-500 hover:bg-amber-600 text-white rounded-md px-2 py-1 text-xs font-medium">Load</button>
+                      );
+
+                      // Host-Ollama runtime: no docker container to start/stop;
+                      // model lifecycle is pull -> load -> running.
+                      if (isHostOllama) {
+                        if (container.status === 'running') return btnStop;
+                        if (container.status === 'not_pulled') return <>{btnPull}{btnPullLoad}</>;
+                        // 'unloaded' or any other non-running host state
+                        return <>{btnLoad}{btnPullLoad}</>;
+                      }
+
+                      // Docker runtime: Start handles created/exited/not_found
+                      // (drift detection from task #37 auto-recreates). Pull &
+                      // Load is offered for ollama-type while running.
+                      if (container.status === 'running') {
+                        return (
                           <>
-                            {onPull && (
-                              <button
-                                onClick={() => onPull(role)}
-                                className="bg-purple-500 hover:bg-purple-600 text-white rounded-md px-2 py-1 text-xs font-medium"
-                              >
-                                Pull
-                              </button>
-                            )}
-                            {onPullAndLoad && (
-                              <button
-                                onClick={() => onPullAndLoad(role)}
-                                className="bg-indigo-500 hover:bg-indigo-600 text-white rounded-md px-2 py-1 text-xs font-medium"
-                              >
-                                Pull &amp; Load
-                              </button>
-                            )}
-                            {onLoad && (!container.loadedModels || container.loadedModels.length === 0) && (
-                              <button
-                                onClick={() => onLoad(role)}
-                                className="bg-amber-500 hover:bg-amber-600 text-white rounded-md px-2 py-1 text-xs font-medium"
-                              >
-                                Load
-                              </button>
-                            )}
+                            {btnStop}
+                            {isOllamaType && container.config?.model && btnPullLoad}
+                            {isOllamaType && container.config?.model && (!container.loadedModels || container.loadedModels.length === 0) && btnLoad}
                           </>
-                        )}
-                      </>
-                    ) : (
-                      <button
-                        onClick={() => onStart(role)}
-                        className="bg-blue-500 hover:bg-blue-600 text-white rounded-md px-2 py-1 text-xs font-medium"
-                      >
-                        Start
-                      </button>
-                    )}
+                        );
+                      }
+                      return btnStart;
+                    })()}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

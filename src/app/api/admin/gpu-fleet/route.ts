@@ -110,8 +110,27 @@ export async function POST(request: NextRequest) {
       case 'stop': {
         const { url, role } = body;
         if (!url) return NextResponse.json({ error: 'URL is required' }, { status: 400 });
-        const result = await controlContainer(url, action, role);
-        return NextResponse.json(result);
+        // Wrap the sidecar call so transport errors (downstream 502, fetch
+        // ECONNRESET, sidecar process throw) come back to the dashboard as
+        // HTTP 200 with a structured { ok: false, error } body. The UI can
+        // then render the sidecar's own error message instead of a generic
+        // gateway error. Operators reported a bare 502 on BASWS34 when
+        // their sidecar's handleStart threw — this restores visibility.
+        try {
+          const result = await controlContainer(url, action, role);
+          // Sidecar may itself return { error: ... } at HTTP 200 — surface
+          // it with ok=false so the dashboard treats both shapes the same.
+          if (result && typeof result === 'object' && 'error' in result && (result as any).error) {
+            return NextResponse.json(
+              { ok: false, action, role, error: String((result as any).error).slice(0, 600), result },
+              { status: 200 },
+            );
+          }
+          return NextResponse.json({ ok: true, action, role, result });
+        } catch (err: any) {
+          const msg = err?.message ? String(err.message).slice(0, 600) : 'Unknown sidecar transport error';
+          return NextResponse.json({ ok: false, action, role, error: msg }, { status: 200 });
+        }
       }
 
       case 'config': {
@@ -235,6 +254,16 @@ export async function POST(request: NextRequest) {
         const { url, role } = body;
         if (!url || !role) return NextResponse.json({ error: 'URL and role are required' }, { status: 400 });
         const result = await sendToSidecar(url, '/pullModel', { role }, 'POST', 300_000);
+        return NextResponse.json(result);
+      }
+
+      case 'pullModelOnly': {
+        // Pull without auto-load. Sidecar's pullModel handler honors
+        // payload.andLoad=false. Used by the host-Ollama "Pull" button
+        // when the operator wants to fetch weights without VRAM load.
+        const { url, role } = body;
+        if (!url || !role) return NextResponse.json({ error: 'URL and role are required' }, { status: 400 });
+        const result = await sendToSidecar(url, '/pullModel', { role, andLoad: false }, 'POST', 300_000);
         return NextResponse.json(result);
       }
 

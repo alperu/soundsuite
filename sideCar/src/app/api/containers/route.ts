@@ -21,18 +21,23 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { action, role } = body;
 
+    // All action handlers below return structured `{ok, error?}` results.
+    // Per task #37 pattern (mirrors master's /api/admin/gpu-fleet), surface
+    // handler errors as HTTP 200 with `{ok: false, error}` so the dashboard
+    // Activity Log shows the actual error message ("Recreate with -v ...",
+    // "model not found", etc.) instead of an opaque "HTTP 502". Only true
+    // 4xx conditions (missing role, unknown action) keep non-200 status.
     if (action === 'start') {
       const result = await handleStart(role);
-      // 404 = unknown role; 502 = provisioning failed (pull/create/probe)
-      const isNotFound = result.error && (/^unknown role:/i.test(String(result.error)) || /not found/i.test(String(result.error)));
-      const status = result.error ? (isNotFound ? 404 : 502) : 200;
+      const isNotFound = result.error && (/^unknown role:/i.test(String(result.error)));
+      const status = result.error && isNotFound ? 404 : 200;
       return NextResponse.json(result, { status, headers: cors });
     }
 
     if (action === 'stop') {
       const result = await handleStop(role);
-      const isNotFound = result.error && (/^unknown role:/i.test(String(result.error)) || /not found/i.test(String(result.error)));
-      const status = result.error ? (isNotFound ? 404 : 502) : 200;
+      const isNotFound = result.error && (/^unknown role:/i.test(String(result.error)));
+      const status = result.error && isNotFound ? 404 : 200;
       return NextResponse.json(result, { status, headers: cors });
     }
 
@@ -40,7 +45,7 @@ export async function POST(request: NextRequest) {
       if (!role) return NextResponse.json({ error: 'role is required' }, { status: 400, headers: cors });
       const result = await handleLoadModel(role);
       const isNotFound = result.error && /^unknown role:/i.test(String(result.error));
-      const status = result.error ? (isNotFound ? 404 : 500) : 200;
+      const status = result.error && isNotFound ? 404 : 200;
       return NextResponse.json(result, { status, headers: cors });
     }
 
@@ -49,15 +54,17 @@ export async function POST(request: NextRequest) {
       const andLoad = action === 'pullAndLoad';
       const result = await handlePullModel(role, andLoad);
       const isNotFound = result.error && /^unknown role:/i.test(String(result.error));
-      const status = result.error ? (isNotFound ? 404 : 500) : 200;
+      const status = result.error && isNotFound ? 404 : 200;
       return NextResponse.json(result, { status, headers: cors });
     }
 
     return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400, headers: cors });
   } catch (err) {
+    // Caught exception (unexpected) — still return 200 with structured error
+    // so the dashboard surfaces the message. Real 500 would mask it.
     return NextResponse.json(
-      { error: (err as Error).message },
-      { status: 500, headers: cors },
+      { ok: false, error: (err as Error).message },
+      { status: 200, headers: cors },
     );
   }
 }

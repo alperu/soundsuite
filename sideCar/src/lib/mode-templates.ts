@@ -18,7 +18,7 @@
  * ContainerDef to log/show.
  *
  * Returns `null` when a mode is unavailable on the given OS (e.g.
- * `ss-reranker` on `darwin` — vllm-metal lacks cross-encoder support).
+ * `ss-reranker` on `mac-docker-ollama` — vllm-metal lacks cross-encoder support).
  *
  * Internal registry keys remain the short role name (`embedding`,
  * `completion`, `ocr`, `reranker`) for back-compat with state.idleTimeouts,
@@ -29,7 +29,7 @@ import { CONTAINER_PREFIX, dockerSupportsGpu, state, type ContainerDef } from '.
 
 export type ModeName = 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker';
 export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker'];
-export type HostOs = 'darwin' | 'win32' | 'linux' | 'unknown';
+export type HostOs = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | 'unknown';
 export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner';
 
 /** Strip "ss-" prefix → registry/state key. */
@@ -70,8 +70,10 @@ export function resolveMode(
     return resolveModeForRuntime(mode, hostOs, runtime, containerName);
   }
 
-  // win32 currently behaves like darwin for defaults (host-Ollama).
-  // WSL2+NVIDIA could later resolve to the linux entry; out of scope here.
+  // windows-docker-wsl2: Docker Desktop with WSL2 backend ships native NVIDIA
+  // GPU passthrough. Routes every docker-runtime mode to the linux ContainerDef
+  // (same Ollama/vLLM images, same ports). mac-docker-ollama keeps the
+  // host-runtime variant (host.docker.internal:11434).
   //
   // When hostOs is "unknown" (Docker /info didn't classify the host — most
   // commonly a native Linux server where /info returned a distro name we
@@ -84,7 +86,10 @@ export function resolveMode(
     hostOs === 'unknown' &&
     Array.isArray(state.gpuCache) &&
     state.gpuCache.length > 0;
-  const isLinux = hostOs === 'linux' || looksLikeLinuxFromGpu;
+  const isLinux =
+    hostOs === 'linux' ||
+    hostOs === 'windows-docker-wsl2' ||
+    looksLikeLinuxFromGpu;
 
   switch (mode) {
     case 'ss-embedding':
@@ -101,7 +106,7 @@ export function resolveMode(
             runtime: 'docker',
           }
         : {
-            image: '',
+            image: 'host-ollama',
             model: 'qwen3-embedding:0.6b',
             port: 11434,
             vram: 1200,
@@ -126,7 +131,7 @@ export function resolveMode(
             runtime: 'docker',
           }
         : {
-            image: '',
+            image: 'host-ollama',
             model: 'qwen3.5:9b',
             port: 11434, // shared native Ollama port
             vram: 10000,
@@ -152,7 +157,7 @@ export function resolveMode(
             runtime: 'docker',
           }
         : {
-            image: '',
+            image: 'host-ollama',
             model: 'minicpm-v:latest',
             port: 11434, // shared native Ollama port
             vram: 5000,
@@ -165,9 +170,10 @@ export function resolveMode(
 
     case 'ss-reranker':
       // vllm-metal lacks cross-encoder / Qwen3ForSequenceClassification
-      // support on Apple Silicon. See vllm-metal#361. Windows defaults to
-      // the same Mac path (host-Ollama) unless WSL2+NVIDIA is detected —
-      // also unavailable in that default.
+      // support on Apple Silicon (see vllm-metal#361), so mac-docker-ollama
+      // stays excluded. Linux native and windows-docker-wsl2 both run the
+      // same vLLM container with GPU passthrough (windows-docker-wsl2 is
+      // already covered by isLinux above).
       if (!isLinux) return null;
       return {
         image: 'vllm/vllm-openai',
@@ -216,7 +222,7 @@ function resolveModeForRuntime(
     switch (mode) {
       case 'ss-embedding':
         return {
-          image: '',
+          image: 'host-ollama',
           model: 'qwen3-embedding:0.6b',
           port: 11434,
           vram: 1200,
@@ -228,7 +234,7 @@ function resolveModeForRuntime(
         };
       case 'ss-completion':
         return {
-          image: '',
+          image: 'host-ollama',
           model: 'qwen3.5:9b',
           port: 11434,
           vram: 10000,
@@ -240,7 +246,7 @@ function resolveModeForRuntime(
         };
       case 'ss-ocr':
         return {
-          image: '',
+          image: 'host-ollama',
           model: 'minicpm-v:latest',
           port: 11434,
           vram: 5000,
@@ -259,8 +265,8 @@ function resolveModeForRuntime(
   if (runtime === 'docker-ollama') {
     // Ollama Docker containers need GPU passthrough on this host to actually
     // serve models at usable speed. The hostOs gate is captured in
-    // dockerSupportsGpu() (darwin → false; win32 → true only when the
-    // host-helper has reported nvidia-smi presence; linux → true).
+    // dockerSupportsGpu() (mac-docker-ollama → false; windows-docker-wsl2 →
+    // true unconditionally (Docker WSL2 native passthrough); linux → true).
     if (!dockerSupportsGpu()) return null;
     switch (mode) {
       case 'ss-embedding':

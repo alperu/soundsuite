@@ -147,7 +147,7 @@ export interface HostStats {
   /** Reporter version string for forward-compat */
   agent?: string;
   /** Host OS as reported by the script (cross-check against state.hostOs) */
-  os?: 'darwin' | 'win32' | 'linux' | string;
+  os?: 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | string;
   cpu?: {
     /** Percent 0-100, instantaneous or short-window average */
     percent?: number;
@@ -344,7 +344,7 @@ export const state = {
   // UI render "Windows NVIDIA host without companion script" hint when
   // we KNOW there's an NVIDIA card but data is stale.
   hasNvidiaSmi: false as boolean,
-  // True once the win32-WSL2-passthrough probe has been tried. Single-shot.
+  // True once the windows-docker-wsl2 passthrough probe has been tried. Single-shot.
   wslGpuProbed: false as boolean,
 
   // ─── Multi-master connections ──────────────────────────────────────────
@@ -379,9 +379,9 @@ export const state = {
   hostOllamaBudgetMb: HOST_OLLAMA_BUDGET_MB,
   // Last health probe result, updated by host-ollama-watchdog.
   hostOllamaLastHealth: { at: 0, ok: false } as HostOllamaHealth,
-  // Detected OS of the Docker host ('darwin' | 'win32' | 'linux' | 'unknown').
+  // Detected OS of the Docker host ('mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | 'unknown').
   // Populated by host-os.ts at startup.
-  hostOs: 'unknown' as 'darwin' | 'win32' | 'linux' | 'unknown',
+  hostOs: 'unknown' as 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | 'unknown',
   // Precedence order (highest first):
   //   'master-override' — pushed via /config from master (UI: /admin/host-provisioning)
   //   'override'        — operator picked via local /setup wizard
@@ -499,6 +499,10 @@ export function applyHostOllamaOverrides(): void {
       // Override port to DMR's TCP port so downstream HTTP helpers
       // (getDockerHost + def.port) reach the right endpoint.
       def.port = state.dmrPort;
+      // Stable synthetic image marker — keeps def.image truthy and prevents
+      // any code path that tries to `docker pull` it from doing real work
+      // (pullImage() fast-fails on 'dmr').
+      def.image = 'dmr';
       continue;
     }
 
@@ -530,6 +534,10 @@ export function applyHostOllamaOverrides(): void {
 
     if (ollamaRequested) {
       def.runtime = 'host';
+      // Stable synthetic image marker. pullImage('host-ollama') fast-fails,
+      // and master's `isHostRuntime = container?.image === 'host-ollama'`
+      // check stays truthy independent of the synthesizer in containers.ts.
+      def.image = 'host-ollama';
       // CRITICAL: all host-runtime Ollama roles share ONE native Ollama
       // process on the host, listening on a SINGLE port (default 11434).
       // The registry's per-role ports (11435 for completion, 11436 for ocr)
@@ -541,9 +549,25 @@ export function applyHostOllamaOverrides(): void {
       def.port = HOST_OLLAMA_PORT;
     } else if (def.runtime === 'host' || def.runtime === 'docker-model-runner') {
       // Revert if mode was turned off or role removed from the set.
-      def.runtime = 'docker';
+      // BUT: on mac-docker-ollama, the mode catalog is the authoritative
+      // source of runtime='host' (no SS_HOST_OLLAMA env required), so reverting
+      // here would break the watchdog and routing for Mac sidecars whose
+      // master pushes a raw registry (legacy path) instead of enabledModes.
+      // Without this guard, lastHealth stays {at:0, ok:false} because
+      // pickHostRuntimeRole() finds nothing after every config push.
+      if (state.hostOs !== 'mac-docker-ollama') {
+        def.runtime = 'docker';
+      }
     } else if (!def.runtime) {
-      def.runtime = 'docker';
+      // Default runtime depends on host class: Mac native Ollama lives on the
+      // host; everywhere else, Docker is the default.
+      def.runtime = state.hostOs === 'mac-docker-ollama' && def.type === 'ollama' ? 'host' : 'docker';
+      if (def.runtime === 'host') {
+        // Same port normalization as the explicit host-Ollama path: all host
+        // Ollama roles share the single native port (11434).
+        def.port = HOST_OLLAMA_PORT;
+        def.image = 'host-ollama';
+      }
     }
   }
 }
@@ -570,14 +594,11 @@ export function dockerSupportsGpu(): boolean {
   // got back at least one GPU. That proves Docker GPU passthrough is
   // working on this host regardless of how we classified hostOs.
   if (Array.isArray(state.gpuCache) && state.gpuCache.length > 0) return true;
-  if (state.hostOs === 'darwin') return false;
-  if (state.hostOs === 'win32') {
-    // WSL2+NVIDIA passthrough works when nvidia-smi.exe is reachable on the
-    // Windows host. The operator opted in by installing the host-helper
-    // script that POSTs /api/host-stats with hasNvidia=true. Without that
-    // signal we have no evidence GPU passthrough actually works on this
-    // box, so refuse — same as darwin.
-    return state.hasNvidiaSmi === true;
+  if (state.hostOs === 'mac-docker-ollama') return false;
+  if (state.hostOs === 'windows-docker-wsl2') {
+    // Docker Desktop with the WSL2 backend has native NVIDIA GPU passthrough
+    // — no host-helper script required. Unconditionally yes.
+    return true;
   }
   if (state.hostOs === 'linux') return true;
   // Unknown host on Docker Desktop is almost certainly Mac/Win — refuse too.

@@ -1012,6 +1012,7 @@ function OCRProviderPanel({ initialConfig }: { initialConfig: AppConfig }) {
 
 const OLLAMA_COMPLETION_MODELS = [
   { id: 'qwen3.5:9b', label: 'Qwen 3.5 9B — Recommended (8GB VRAM)', context: '256K', vram: '~6GB', desc: 'Best balance of speed and quality. Latest generation Qwen multimodal, 256K context, fast inference, excellent legal analysis.' },
+  { id: 'qwen3.5:14b', label: 'Qwen 3.5 14B (12GB VRAM)', context: '256K', vram: '~10GB', desc: 'Latest-gen model with bigger headroom for nuanced legal reasoning. Slightly slower than 9B but higher quality on long context tasks.' },
   { id: 'qwen3.5:4b', label: 'Qwen 3.5 4B (4GB VRAM)', context: '256K', vram: '~3GB', desc: 'Ultra-lightweight latest-gen model. Good for low-end GPUs.' },
   { id: 'qwen3.5:27b', label: 'Qwen 3.5 27B (20GB VRAM)', context: '256K', vram: '~17GB', desc: 'High quality latest-gen model. Excellent legal analysis for GPUs with 24GB+ VRAM.' },
   { id: 'qwen2.5:14b', label: 'Qwen 2.5 14B (12GB VRAM)', context: '128K', vram: '~10GB', desc: 'Previous generation. Good balance of speed and quality. 128K context, fast inference.' },
@@ -1026,6 +1027,9 @@ const OLLAMA_COMPLETION_MODELS = [
 function LocalAIPanel() {
   const [host, setHost] = useState('');
   const [completionModel, setCompletionModel] = useState('');
+  // Saved (persisted) baseline for the model selector. Edits to
+  // `completionModel` are draft until the user clicks Save in the bottom bar.
+  const [savedCompletionModel, setSavedCompletionModel] = useState('');
   const [completionUseOrchestrator, setCompletionUseOrchestrator] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1033,6 +1037,10 @@ function LocalAIPanel() {
   const [testResult, setTestResult] = useState<{ valid: boolean; error?: string } | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [configured, setConfigured] = useState(false);
+  const [modelSaving, setModelSaving] = useState(false);
+  const [modelSavedAt, setModelSavedAt] = useState<number | null>(null);
+  const [modelSaveError, setModelSaveError] = useState<string | null>(null);
+  const [, setTick] = useState(0); // forces "Saved Ns ago" re-render
 
   const loadConfig = useCallback(async () => {
     setLoading(true);
@@ -1043,12 +1051,66 @@ function LocalAIPanel() {
         const completionHost = config.ollamaCompletionHost || '';
         if (completionHost) setHost(completionHost);
         setConfigured(!!completionHost);
-        if (config.ollamaCompletionModel) setCompletionModel(config.ollamaCompletionModel);
+        const m = config.ollamaCompletionModel || '';
+        if (m) setCompletionModel(m);
+        setSavedCompletionModel(m);
         setCompletionUseOrchestrator(!!config.completionUseOrchestrator);
       }
     } catch { /* silent */ }
     setLoading(false);
   }, []);
+
+  // tick every 5s so the "Saved Ns ago" label stays accurate
+  useEffect(() => {
+    if (!modelSavedAt) return;
+    const id = setInterval(() => setTick(t => t + 1), 5000);
+    return () => clearInterval(id);
+  }, [modelSavedAt]);
+
+  const modelDirty = completionModel !== savedCompletionModel;
+
+  const handleSaveModel = async () => {
+    if (!modelDirty || modelSaving) return;
+    setModelSaving(true);
+    setModelSaveError(null);
+    const previous = savedCompletionModel;
+    try {
+      // Read current config and overlay the new completion model so we don't
+      // clobber unrelated keys (POST /api/config replaces by key set).
+      const configRes = await fetch('/api/config');
+      const config = configRes.ok ? await configRes.json() : {};
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...config,
+          ollamaCompletionModel: completionModel,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // Optimistic: bump baseline so dirty flag clears.
+      setSavedCompletionModel(completionModel);
+      setModelSavedAt(Date.now());
+    } catch (e) {
+      // Revert draft on failure so UI matches the DB.
+      setCompletionModel(previous);
+      setModelSaveError(e instanceof Error ? e.message : 'Save failed');
+    }
+    setModelSaving(false);
+  };
+
+  const handleDiscardModel = () => {
+    setCompletionModel(savedCompletionModel);
+    setModelSaveError(null);
+  };
+
+  const savedAgoLabel = (() => {
+    if (modelDirty || !modelSavedAt) return null;
+    const secs = Math.max(1, Math.floor((Date.now() - modelSavedAt) / 1000));
+    if (secs < 60) return `Saved ${secs}s ago`;
+    const mins = Math.floor(secs / 60);
+    return `Saved ${mins}m ago`;
+  })();
 
   useEffect(() => { loadConfig(); }, [loadConfig]);
 
@@ -1084,7 +1146,9 @@ function LocalAIPanel() {
           body: JSON.stringify({
             ...config,
             ollamaCompletionHost: host || config.ollamaCompletionHost,
-            ollamaCompletionModel: completionModel,
+            // Model is save-gated by the sticky bar at panel bottom — use the
+            // last-saved baseline here so Host Save doesn't commit a draft.
+            ollamaCompletionModel: savedCompletionModel,
             completionUseOrchestrator,
           }),
         });
@@ -1205,6 +1269,17 @@ function LocalAIPanel() {
           onChange={e => setCompletionModel(e.target.value)}
           className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
+          {/*
+            If the DB has a value that isn't in the canned list, surface it
+            as a synthetic "(custom)" option so the operator sees what's
+            actually saved. Without this, the <select> silently shows the
+            first option as selected while `completionModel` state holds the
+            real DB value — making /admin/localai disagree with /admin/gpu
+            and /admin/roleassign (which read the same Config key).
+          */}
+          {completionModel && !OLLAMA_COMPLETION_MODELS.some(m => m.id === completionModel) && (
+            <option key={completionModel} value={completionModel}>{completionModel} (custom)</option>
+          )}
           {OLLAMA_COMPLETION_MODELS.map(m => (
             <option key={m.id} value={m.id}>{m.label}</option>
           ))}
@@ -1260,6 +1335,48 @@ function LocalAIPanel() {
             <div className="text-sm font-medium text-gray-800 mb-1">GPU-Accelerated</div>
             <div className="text-xs text-gray-500">Runs on your NVIDIA GPU for fast inference. A6000 48GB handles 70B models easily.</div>
           </div>
+        </div>
+      </div>
+
+      {/* Sticky save bar — completion model is draft until saved here. */}
+      <div className="sticky bottom-0 z-10 -mx-1 mt-2 bg-slate-50 border border-slate-200 rounded-lg shadow-sm px-4 py-3 flex items-center justify-between">
+        <div className="text-xs">
+          {modelSaveError ? (
+            <span className="text-red-600 font-medium">Save failed: {modelSaveError}</span>
+          ) : modelDirty ? (
+            <span className="text-slate-700">
+              Unsaved change:{' '}
+              <span className="font-mono text-slate-900">{savedCompletionModel || '(none)'}</span>
+              {' → '}
+              <span className="font-mono text-blue-700">{completionModel || '(none)'}</span>
+            </span>
+          ) : savedAgoLabel ? (
+            <span className="text-green-700">{savedAgoLabel} — sidecars notified</span>
+          ) : (
+            <span className="text-slate-500">No changes</span>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={handleDiscardModel}
+            disabled={!modelDirty || modelSaving}
+            className="px-3 py-1.5 border border-gray-300 text-gray-700 text-sm rounded-md hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Discard
+          </button>
+          <button
+            onClick={handleSaveModel}
+            disabled={!modelDirty || modelSaving}
+            className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed inline-flex items-center gap-2"
+          >
+            {modelSaving && (
+              <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+              </svg>
+            )}
+            {modelSaving ? 'Saving…' : 'Save changes'}
+          </button>
         </div>
       </div>
     </div>
