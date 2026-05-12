@@ -109,11 +109,31 @@ export async function setAssignment(input: AssignmentInput): Promise<AssignmentR
   // The UI sometimes sends those fields as null when the operator didn't touch
   // them — treat null AS undefined ("don't change") rather than passing it
   // through. modelOverride is nullable so null is meaningful there (= clear).
+  //
+  // Stale-row repair: rows created before the create-branch default fix
+  // landed have minOnline=0 even when enabled. The UI's toggle/runtime edits
+  // hit this update branch (not create), so the stale 0 never gets corrected.
+  // When the caller is enabling the row AND didn't explicitly set minOnline,
+  // bump 0 → 1 so the sidecar's HARD `minOnline=0` gate releases.
+  const existing = await prisma.hostRoleAssignment.findUnique({
+    where: { sidecarUrl_mode: { sidecarUrl: url, mode: input.mode } },
+  });
+  const isEnabledAfter = input.enabled != null ? input.enabled : existing?.enabled ?? true;
+  const shouldRepairMinOnline =
+    input.minOnline == null &&
+    isEnabledAfter &&
+    existing != null &&
+    existing.minOnline === 0;
+
   return prisma.hostRoleAssignment.upsert({
     where: { sidecarUrl_mode: { sidecarUrl: url, mode: input.mode } },
     update: {
       ...(input.enabled != null ? { enabled: input.enabled } : {}),
-      ...(input.minOnline != null ? { minOnline: input.minOnline } : {}),
+      ...(input.minOnline != null
+        ? { minOnline: input.minOnline }
+        : shouldRepairMinOnline
+        ? { minOnline: 1 }
+        : {}),
       ...(input.idleTimeoutMin != null ? { idleTimeoutMin: input.idleTimeoutMin } : {}),
       ...(input.modelOverride !== undefined ? { modelOverride: input.modelOverride } : {}),
       ...(input.runtime != null ? { runtime: input.runtime } : {}),

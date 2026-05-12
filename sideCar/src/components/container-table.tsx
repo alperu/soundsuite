@@ -298,18 +298,34 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
                       }
 
                       // Docker runtime: Start handles created/exited/not_found
-                      // (drift detection from task #37 auto-recreates). Pull &
-                      // Load is offered for ollama-type while running.
+                      // (drift detection from task #37 auto-recreates). Pull
+                      // & Load are also offered for ollama-type rows
+                      // regardless of running state so the operator can
+                      // pull/load a model on demand — sidecar handlers will
+                      // auto-start the container if needed before invoking
+                      // `ollama pull`/`ollama run` inside it.
+                      const hasModel = isOllamaType && !!container.config?.model;
                       if (container.status === 'running') {
                         return (
                           <>
                             {btnStop}
-                            {isOllamaType && container.config?.model && btnPullLoad}
-                            {isOllamaType && container.config?.model && (!container.loadedModels || container.loadedModels.length === 0) && btnLoad}
+                            {hasModel && btnPull}
+                            {hasModel && btnPullLoad}
+                            {hasModel && (!container.loadedModels || container.loadedModels.length === 0) && btnLoad}
                           </>
                         );
                       }
-                      return btnStart;
+                      // Not running (created / exited / not_found):
+                      // Start the container; for ollama-type rows, also let
+                      // operator pull the model directly (handler boots the
+                      // container first).
+                      return (
+                        <>
+                          {btnStart}
+                          {hasModel && btnPull}
+                          {hasModel && btnPullLoad}
+                        </>
+                      );
                     })()}
                   </td>
                 </tr>
