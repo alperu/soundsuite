@@ -25,13 +25,16 @@ export async function POST(request: NextRequest) {
 
     if (action === 'start') {
       const result = await handleStart(role);
-      const status = result.error ? 404 : 200;
+      // 404 = unknown role; 502 = provisioning failed (pull/create/probe)
+      const isNotFound = result.error && (/^unknown role:/i.test(String(result.error)) || /not found/i.test(String(result.error)));
+      const status = result.error ? (isNotFound ? 404 : 502) : 200;
       return NextResponse.json(result, { status, headers: cors });
     }
 
     if (action === 'stop') {
       const result = await handleStop(role);
-      const status = result.error ? 404 : 200;
+      const isNotFound = result.error && (/^unknown role:/i.test(String(result.error)) || /not found/i.test(String(result.error)));
+      const status = result.error ? (isNotFound ? 404 : 502) : 200;
       return NextResponse.json(result, { status, headers: cors });
     }
 

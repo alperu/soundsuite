@@ -110,6 +110,8 @@ export interface CachedSidecarStatus {
     os?: 'darwin' | 'linux' | 'win32' | string;
     osConfidence?: string;
     dockerDesktop?: boolean;
+    /** Sticky: set true once the host helper has reported nvidia-smi presence. */
+    hasNvidia?: boolean;
     stats?: {
       at?: number;
       ageMs?: number;

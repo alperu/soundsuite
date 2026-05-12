@@ -31,8 +31,11 @@ interface SidecarSummary {
   status: 'connected' | 'disconnected';
   os?: ModeOs | string;
   gpuSummary?: string;
+  hasNvidia?: boolean;
   containers?: Record<string, { loadedModels?: Array<{ name: string; size?: number }> }>;
 }
+
+type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm';
 
 interface RoleAssignment {
   mode: string;
@@ -40,6 +43,78 @@ interface RoleAssignment {
   minOnline?: number | null;
   idleTimeoutMin?: number | null;
   modelOverride?: string | null;
+  runtime?: RuntimeChoice | null;
+}
+
+const RUNTIME_COLUMNS: Array<{ key: RuntimeChoice; short: string; label: string }> = [
+  { key: 'host', short: 'host', label: 'Ollama (native)' },
+  { key: 'docker-ollama', short: 'docker', label: 'Docker Ollama' },
+  { key: 'docker-vllm', short: 'vllm', label: 'Docker vLLM' },
+];
+
+/**
+ * Per-OS runtime availability. `hasNvidia` only affects win32 — Windows
+ * Docker Desktop without WSL2+NVIDIA has no GPU passthrough so the docker
+ * columns are greyed out.
+ */
+function availableRuntimesForOs(
+  os: ModeOs | string | undefined,
+  hasNvidia: boolean,
+): Record<RuntimeChoice, boolean> {
+  if (os === 'darwin') {
+    return { host: true, 'docker-ollama': false, 'docker-vllm': false };
+  }
+  if (os === 'linux') {
+    return { host: true, 'docker-ollama': true, 'docker-vllm': true };
+  }
+  if (os === 'win32') {
+    return {
+      host: true,
+      'docker-ollama': hasNvidia,
+      'docker-vllm': hasNvidia,
+    };
+  }
+  // Unknown OS — be permissive.
+  return { host: true, 'docker-ollama': true, 'docker-vllm': true };
+}
+
+/**
+ * Per-mode runtime applicability. ss-reranker today only runs via vLLM
+ * (vllm/vllm-openai cross-encoder). The other three modes can run on any
+ * of the three runtimes.
+ */
+function runtimesForMode(modeName: string): Record<RuntimeChoice, boolean> {
+  if (modeName === 'ss-reranker') {
+    return { host: false, 'docker-ollama': false, 'docker-vllm': true };
+  }
+  return { host: true, 'docker-ollama': true, 'docker-vllm': true };
+}
+
+/** OS-aware default runtime for the "Reset to defaults" path. */
+function defaultRuntimeForRow(
+  modeName: string,
+  os: ModeOs | string | undefined,
+  hasNvidia: boolean,
+): RuntimeChoice {
+  if (modeName === 'ss-reranker') return 'docker-vllm';
+  if (os === 'darwin') return 'host';
+  if (os === 'win32') return hasNvidia ? 'docker-ollama' : 'host';
+  return 'docker-ollama';
+}
+
+/**
+ * Back-compat default: rows persisted before the `runtime` column existed
+ * come back with `runtime === null`. We treat that as 'host' on darwin and
+ * 'docker-ollama' elsewhere — matches what fleet behavior was already doing
+ * implicitly.
+ */
+function resolveRuntime(
+  assignment: RoleAssignment | undefined,
+  os: ModeOs | string | undefined,
+): RuntimeChoice | null {
+  if (!assignment?.enabled) return null;
+  if (assignment.runtime) return assignment.runtime;
+  return os === 'darwin' ? 'host' : 'docker-ollama';
 }
 
 type Toast = { type: 'success' | 'error' | 'warning'; text: string } | null;
@@ -77,12 +152,16 @@ function inferOs(hostname: string | undefined, declared: string | undefined): Mo
 function normalizeAssignment(raw: any): RoleAssignment | null {
   const mode = raw?.mode || raw?.roleType?.name || raw?.roleTypeName;
   if (!mode) return null;
+  const rt = typeof raw.runtime === 'string' ? raw.runtime : null;
+  const runtime: RuntimeChoice | null =
+    rt === 'host' || rt === 'docker-ollama' || rt === 'docker-vllm' ? rt : null;
   return {
     mode,
     enabled: raw.enabled !== false,
     minOnline: raw.minOnline ?? null,
     idleTimeoutMin: raw.idleTimeoutMin ?? null,
     modelOverride: raw.modelOverride ?? null,
+    runtime,
   };
 }
 
@@ -124,6 +203,7 @@ export default function AdminRoleAssignments() {
         const cached = s.sidecarStatus || {};
         const os = inferOs(s.hostname || s.url, cached.host?.os);
         const gpus: any[] = Array.isArray(cached.gpus) ? cached.gpus : [];
+        const hasNvidia = gpus.some((g) => /nvidia/i.test(g?.name || ''));
         const gpuSummary = gpus.length > 0
           ? `${gpus[0].name?.replace(/^NVIDIA\s+/i, '') || 'GPU'} ${gpus[0].memoryTotal ? `${Math.round(gpus[0].memoryTotal / 1024)} GB` : ''}`.trim()
           : cached.host?.stats?.totalMb
@@ -135,6 +215,7 @@ export default function AdminRoleAssignments() {
           status: s.status,
           os,
           gpuSummary,
+          hasNvidia,
           containers: cached.containers || {},
         };
       });
@@ -231,7 +312,7 @@ export default function AdminRoleAssignments() {
       // sync filters to enabled — disabled rows don't affect the wire payload.
       const stable = rows
         .filter((r) => r.enabled !== false)
-        .map((r) => `${r.mode}|on=${r.enabled ?? true}|min=${r.minOnline ?? ''}|idle=${r.idleTimeoutMin ?? ''}|m=${r.modelOverride ?? ''}`)
+        .map((r) => `${r.mode}|on=${r.enabled ?? true}|min=${r.minOnline ?? ''}|idle=${r.idleTimeoutMin ?? ''}|m=${r.modelOverride ?? ''}|rt=${r.runtime ?? ''}`)
         .sort()
         .join(';');
       return stable;
@@ -342,6 +423,7 @@ export default function AdminRoleAssignments() {
         minOnline: patch.minOnline ?? current?.minOnline ?? null,
         idleTimeoutMin: patch.idleTimeoutMin ?? current?.idleTimeoutMin ?? null,
         modelOverride: patch.modelOverride ?? current?.modelOverride ?? null,
+        runtime: patch.runtime ?? current?.runtime ?? null,
       };
       try {
         const res = await fetch('/api/admin/role-assignments', {
@@ -403,25 +485,6 @@ export default function AdminRoleAssignments() {
     [upsertAssignment],
   );
 
-  const toggleMode = (sidecar: SidecarSummary, mode: ModeCatalogEntry) => {
-    const current = (assignmentsByUrl[sidecar.url] || []).find((a) => a.mode === mode.name);
-    const nextEnabled = !current?.enabled;
-    const available = mode.availableOn.includes(sidecar.os as ModeOs);
-
-    if (nextEnabled && !available) {
-      showToast({
-        type: 'warning',
-        text: `${mode.name} isn't supported on this host (${sidecar.os}). The sidecar will refuse to start it. Use a Linux+NVIDIA sidecar for reranking.`,
-      });
-    }
-
-    if (!nextEnabled && current) {
-      deleteAssignment(sidecar.url, mode.name);
-    } else {
-      upsertAssignment(sidecar.url, mode.name, { enabled: true });
-    }
-  };
-
   const handleResetDefaults = async () => {
     if (!confirmReset) return;
     const sidecar = confirmReset;
@@ -453,6 +516,7 @@ export default function AdminRoleAssignments() {
             minOnline: d.minOnline,
             idleTimeoutMin: d.idleTimeoutMin,
             modelOverride: null,
+            runtime: defaultRuntimeForRow(m.name, sidecar.os, !!sidecar.hasNvidia),
           }),
         });
       }
@@ -552,69 +616,124 @@ export default function AdminRoleAssignments() {
                   </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  {catalog.map((mode) => {
-                    const assignment = assigns.find((a) => a.mode === mode.name);
-                    const enabled = !!assignment?.enabled;
-                    const available = mode.availableOn.includes(sidecar.os as ModeOs);
-                    const misconfigured = enabled && !available;
-                    const panelKey = `${sidecar.url}::${mode.name}`;
-                    const panelOpen = openPanel === panelKey;
+                {(() => {
+                  const osAvailable = availableRuntimesForOs(sidecar.os, !!sidecar.hasNvidia);
+                  return (
+                    <div className="overflow-x-auto">
+                      <table className="text-xs w-full border-separate" style={{ borderSpacing: 0 }}>
+                        <thead>
+                          <tr className="text-[11px] text-gray-500">
+                            <th className="text-left font-medium py-1 pr-3">Role</th>
+                            {RUNTIME_COLUMNS.map((col) => {
+                              const colAvail = osAvailable[col.key];
+                              return (
+                                <th
+                                  key={col.key}
+                                  className={`text-center font-medium py-1 px-2 ${colAvail ? '' : 'text-gray-300'}`}
+                                  title={colAvail ? col.label : 'No GPU passthrough in Docker Desktop on this host'}
+                                >
+                                  {col.label}
+                                </th>
+                              );
+                            })}
+                            <th className="text-center font-medium py-1 px-2">Off</th>
+                            <th className="py-1"></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {catalog.map((mode) => {
+                            const assignment = assigns.find((a) => a.mode === mode.name);
+                            const selectedRuntime = resolveRuntime(assignment, sidecar.os);
+                            const modeRuntimes = runtimesForMode(mode.name);
+                            const modeAvailableOnHost = mode.availableOn.includes(sidecar.os as ModeOs);
+                            const panelKey = `${sidecar.url}::${mode.name}`;
+                            const panelOpen = openPanel === panelKey;
+                            const enabled = !!assignment?.enabled;
 
-                    let className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition select-none ';
-                    if (misconfigured) {
-                      className += 'bg-green-50 text-green-800 border-green-300 ring-2 ring-amber-300';
-                    } else if (enabled) {
-                      className += 'bg-green-100 text-green-800 border-green-300';
-                    } else if (!available) {
-                      className += 'bg-gray-50 text-gray-400 border-gray-200 opacity-60';
-                    } else {
-                      className += 'bg-gray-100 text-gray-600 border-gray-300 hover:bg-gray-200';
-                    }
-
-                    const tooltip = !available
-                      ? `${mode.name} is not available on ${sidecar.os} — vllm-metal doesn't support cross-encoders. Use a Linux+NVIDIA sidecar for reranking.`
-                      : enabled
-                        ? `Click to disable ${mode.name}`
-                        : `Click to enable ${mode.name}`;
-
-                    return (
-                      <div key={mode.name} className="inline-flex items-center">
-                        <button
-                          type="button"
-                          onClick={() => toggleMode(sidecar, mode)}
-                          title={tooltip}
-                          className={className}
-                        >
-                          <span>{enabled ? '✓' : '✗'}</span>
-                          <span>{mode.name}</span>
-                          {!available && <span className="text-amber-500" title={tooltip}>ⓘ</span>}
-                        </button>
-                        {enabled && (
-                          <button
-                            type="button"
-                            onClick={() => setOpenPanel(panelOpen ? null : panelKey)}
-                            title="Advanced settings"
-                            className="ml-0.5 text-gray-400 hover:text-gray-700 text-sm leading-none px-1"
-                          >
-                            ⚙
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Per-host unavailable warnings */}
-                {catalog
-                  .filter((m) => !m.availableOn.includes(sidecar.os as ModeOs))
-                  .map((m) => (
-                    <p key={`warn-${m.name}`} className="mt-2 text-[11px] text-gray-500">
-                      <span className="text-amber-500">ⓘ</span> {m.name} is not
-                      available on {sidecar.os} — vllm-metal doesn't support
-                      cross-encoders. Use a Linux+NVIDIA sidecar for reranking.
-                    </p>
-                  ))}
+                            return (
+                              <tr key={mode.name} className="border-t border-gray-100">
+                                <td className="py-1.5 pr-3">
+                                  <span className="font-mono text-gray-800">{mode.name}</span>
+                                  {!modeAvailableOnHost && (
+                                    <span
+                                      className="ml-1 text-amber-500"
+                                      title={`${mode.name} is not supported on ${sidecar.os} — vllm-metal lacks cross-encoder support. Use a Linux+NVIDIA sidecar for reranking.`}
+                                    >
+                                      ⓘ
+                                    </span>
+                                  )}
+                                </td>
+                                {RUNTIME_COLUMNS.map((col) => {
+                                  const colAvail = osAvailable[col.key] && modeRuntimes[col.key] && modeAvailableOnHost;
+                                  const checked = enabled && selectedRuntime === col.key;
+                                  const inputId = `${sidecar.url}::${mode.name}::${col.key}`;
+                                  let tooltip: string;
+                                  if (!modeRuntimes[col.key]) {
+                                    tooltip = `${mode.name} cannot run on ${col.label} (only ${
+                                      mode.name === 'ss-reranker' ? 'Docker vLLM' : 'Ollama runtimes'
+                                    } supported).`;
+                                  } else if (!osAvailable[col.key]) {
+                                    tooltip = sidecar.os === 'darwin'
+                                      ? 'macOS Docker Desktop has no GPU passthrough — only native Ollama works.'
+                                      : sidecar.os === 'win32'
+                                        ? 'Windows without WSL2+NVIDIA has no GPU passthrough in Docker Desktop.'
+                                        : 'Not available on this host.';
+                                  } else {
+                                    tooltip = `Run ${mode.name} via ${col.label}`;
+                                  }
+                                  return (
+                                    <td key={col.key} className="text-center py-1.5 px-2">
+                                      <input
+                                        id={inputId}
+                                        type="radio"
+                                        name={`rt-${sidecar.url}-${mode.name}`}
+                                        disabled={!colAvail}
+                                        checked={checked}
+                                        onChange={() => {
+                                          if (!colAvail) return;
+                                          upsertAssignment(sidecar.url, mode.name, {
+                                            enabled: true,
+                                            runtime: col.key,
+                                          });
+                                        }}
+                                        title={tooltip}
+                                        className={`accent-green-600 ${colAvail ? 'cursor-pointer' : 'cursor-not-allowed opacity-30'}`}
+                                      />
+                                    </td>
+                                  );
+                                })}
+                                <td className="text-center py-1.5 px-2">
+                                  <input
+                                    type="radio"
+                                    name={`rt-${sidecar.url}-${mode.name}`}
+                                    checked={!enabled}
+                                    onChange={() => {
+                                      if (assignment) deleteAssignment(sidecar.url, mode.name);
+                                    }}
+                                    title={`Disable ${mode.name} on this sidecar`}
+                                    className="accent-gray-400 cursor-pointer"
+                                  />
+                                </td>
+                                <td className="py-1.5 pl-2 text-right">
+                                  {enabled && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setOpenPanel(panelOpen ? null : panelKey)}
+                                      title="Advanced settings"
+                                      className="text-gray-400 hover:text-gray-700 text-sm leading-none px-1"
+                                    >
+                                      ⚙
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })()}
 
                 {/* Loaded-on-host hint — deduplicated across containers since
                     host Ollama exposes the same model list to every role. Lets

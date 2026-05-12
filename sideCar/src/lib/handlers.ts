@@ -1,7 +1,7 @@
 import { state, HOST_STATS_TTL_MS } from './state';
 import { getContainerState, startContainer, stopContainer, removeContainer, createContainer, pullImage, getDockerMode, buildExpectedConfig, detectConfigDrift, isPortConflict, findContainerOnPort, dockerRequest } from './docker';
 import { ollamaList, ollamaShow, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama } from './ollama-api';
-import { loadGpuOnly } from './containers';
+import { loadGpuOnly, ensureContainerForRole } from './containers';
 import { clearIdleTimerForRole, clearAllIdleTimers, startIdleTimerForRole, startIdleTimer } from './idle-timers';
 import { getAllContainerStates } from './containers';
 import { createLogger } from './logger';
@@ -503,10 +503,18 @@ export async function handleStart(role?: string): Promise<Record<string, unknown
   }
 
   // Host-runtime: "start" means probe + load model. No Docker.
+  // IMPORTANT: route through ensureContainerForRole (containers.ts), not the
+  // local docker-only ensureContainer. The local helper blindly calls
+  // pullImage(def.image) + createContainer, which on host-runtime roles
+  // means pullImage('') (def.image is empty) and a guaranteed throw —
+  // exactly the bug that produced "HTTP 404 / 500" on win32 hosts before
+  // the master started shipping docker-runtime registry entries for
+  // WSL2+NVIDIA. ensureContainerForRole knows about runtimes and probes
+  // native Ollama instead.
   if (role && state.registry[role]?.runtime === 'host') {
     const def = state.registry[role];
     try {
-      await ensureContainer(role);
+      await ensureContainerForRole(role);
     } catch (err) {
       return { error: (err as Error).message };
     }
@@ -515,10 +523,11 @@ export async function handleStart(role?: string): Promise<Record<string, unknown
   }
 
   // Docker Model Runner: probe only. No model load — DMR lazy-starts on
-  // first inference request.
+  // first inference request. Same reasoning as host-runtime above: the
+  // local ensureContainer cannot handle non-docker runtimes.
   if (role && state.registry[role]?.runtime === 'docker-model-runner') {
     try {
-      await ensureContainer(role);
+      await ensureContainerForRole(role);
     } catch (err) {
       return { error: (err as Error).message };
     }

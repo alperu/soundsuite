@@ -121,6 +121,30 @@ export function startWsRelay(): WebSocketServer {
         // Acknowledge registration
         ws.send(JSON.stringify({ type: 'registered', ok: true }));
 
+        // Push canonical master URL so the sidecar persists it and survives
+        // container recreation without operator re-config. Fire-and-forget.
+        import('@/lib/gpu/master-identity').then(async ({ buildMasterIdentityFrame }) => {
+          try {
+            const frame = await buildMasterIdentityFrame();
+            if (frame && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify(frame));
+              logger.info('Pushed master-identity frame to sidecar', {
+                agentUrl: msg.agentUrl,
+                canonicalUrl: frame.canonicalUrl,
+              });
+            } else if (!frame) {
+              logger.warn('Skipped master-identity push: canonical URL unknown', {
+                agentUrl: msg.agentUrl,
+              });
+            }
+          } catch (err) {
+            logger.warn('Failed to push master-identity frame', {
+              agentUrl: msg.agentUrl,
+              error: (err as Error).message,
+            });
+          }
+        }).catch(() => {});
+
         // Auto-push model registry + idle timeouts so the sidecar knows which models to pull.
         // Fire-and-forget — don't block registration on config push.
         import('@/lib/gpu/fleet-router').then(async ({ pushFullConfig }) => {

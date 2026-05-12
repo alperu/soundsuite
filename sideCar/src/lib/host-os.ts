@@ -51,6 +51,7 @@ async function fromDockerInfo(): Promise<{ os: HostOs; confidence: 'docker-info'
     const architecture = info.Architecture || '';
     const kernelVersion = info.KernelVersion || '';
     const name = info.Name || '';
+    const osType = (info.OSType || '').toLowerCase();
     // Detect Docker Desktop via any reliable signal. Different Docker
     // Desktop versions report `OperatingSystem` differently: "Docker
     // Desktop", "Docker Desktop 4.X", or sometimes just the Linux distro
@@ -63,9 +64,15 @@ async function fromDockerInfo(): Promise<{ os: HostOs; confidence: 'docker-info'
     log.info(
       `Docker /info: OperatingSystem="${operatingSystem.slice(0, 60)}" ` +
       `Architecture="${architecture}" KernelVersion="${kernelVersion.slice(0, 60)}" ` +
-      `Name="${name}" isDesktop=${isDesktop}`,
+      `Name="${name}" OSType="${osType}" isDesktop=${isDesktop}`,
     );
     if (!isDesktop) return { os: 'linux', confidence: 'docker-info', dockerDesktop: false };
+    // Desktop variant on linux host (some rare configs report linux OSType
+    // under "Docker Desktop"). Treat as linux when OSType is linux and no
+    // linuxkit marker is present.
+    if (osType === 'linux' && !/linuxkit/i.test(kernelVersion)) {
+      return { os: 'linux', confidence: 'docker-info', dockerDesktop: false };
+    }
     if (architecture === 'aarch64' || architecture === 'arm64') {
       return { os: 'darwin', confidence: 'docker-info', dockerDesktop: true };
     }

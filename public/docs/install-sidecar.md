@@ -620,6 +620,28 @@ Updates are pushed from the master. When a new sidecar version is published at *
 
 The container's `/app/config/` directory (or `./sidecar/config/` for native installs) is preserved across updates. Even if the volume is wiped completely, the `SOUND_SUITE_MASTER_URL` env var or the saved `serverUrl` in `sidecar.config.json` lets the sidecar reconnect on next boot.
 
+### Migrating from an anonymous volume
+
+Older installs (sidecar < 2.3.11) ran `docker run` without `-v ss-sidecar-config:/app/config`, so Docker created an **anonymous** volume. That volume survives `docker restart` but is garbage-collected the moment the container is removed (`docker rm`, which `install.sh` and many "restart" flows do under the covers). The new launcher scripts always mount the **named** volume `ss-sidecar-config`, which survives container removal and persists until you explicitly run `docker volume rm`.
+
+If you previously installed without `-v`, export your existing config before recreating the container so you don't lose your master list:
+
+```bash
+docker exec ss-sidecar cat /app/config/config.json > sidecar-config-backup.json
+docker stop ss-sidecar && docker rm ss-sidecar
+# then re-run start.sh (or install.sh) — it will recreate with the named volume
+./sidecar/start.sh {{MASTER_URL}}
+# restore by editing in the dashboard, or:
+docker cp sidecar-config-backup.json ss-sidecar:/app/config/config.json
+docker restart ss-sidecar
+```
+
+You can also always recover from total volume loss by passing the masters at start:
+
+```bash
+docker run ... -e SIDECAR_MASTERS="http://master-a:3000,http://master-b:3000|3002" ...
+```
+
 To re-run the installer manually (e.g. for a major version bump):
 
 ```bash

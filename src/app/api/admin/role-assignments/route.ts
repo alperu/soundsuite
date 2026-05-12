@@ -24,6 +24,7 @@ export async function GET(req: NextRequest) {
           minOnline: r.minOnline,
           idleTimeoutMin: r.idleTimeoutMin,
           modelOverride: r.modelOverride,
+          runtime: (r as { runtime?: string | null }).runtime ?? null,
         })),
       });
     }

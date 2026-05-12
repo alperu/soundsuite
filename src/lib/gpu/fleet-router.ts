@@ -18,6 +18,7 @@ import {
   getModelOverridesForHost,
   getEffectiveMinOnline,
   getEffectiveIdleTimeoutsMs,
+  getRuntimesForHost,
 } from '@/lib/db/role-registry';
 import { resolveModelFromConfig, type ModeName } from '@/lib/gpu/mode-catalog';
 import { seedAssignmentsForHost } from '@/lib/db/role-registry-seed';
@@ -357,10 +358,21 @@ export async function pushIdleTimeouts(agentUrl: string, timeouts: IdleTimeouts)
 /**
  * Detect the sidecar's reported hostOs from the status cache. Returns
  * 'unknown' when the sidecar has not yet reported a host block.
+ *
+ * Windows hosts with WSL2 + NVIDIA Container Toolkit behave like Linux for
+ * Docker-GPU purposes (`docker run --gpus` works against the WSL2 VM). When
+ * the sidecar reports `host.hasNvidia === true` on win32 we treat the host
+ * as linux so the legacy registry ships docker-runtime entries (with real
+ * image names) instead of host-runtime stubs that the sidecar can't fulfil
+ * without a native Ollama install. Operators who don't want this coercion
+ * can leave their helper-script off — without `hasNvidia` we keep treating
+ * win32 as a Mac-style Docker Desktop host.
  */
 function detectHostOs(agentUrl: string): 'linux' | 'darwin' | 'win32' | 'unknown' {
   const cached = statusCache.getSidecarStatus(agentUrl);
   const os = cached?.host?.os;
+  const hasNvidia = cached?.host?.hasNvidia === true;
+  if (os === 'win32' && hasNvidia) return 'linux';
   if (os === 'linux' || os === 'darwin' || os === 'win32') return os;
   return 'unknown';
 }
@@ -470,6 +482,7 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
 
   const enabledModes = await getEnabledModesForHost(agentUrl);
   const perHostOverrides = await getModelOverridesForHost(agentUrl);
+  const runtimes = await getRuntimesForHost(agentUrl, hostOs);
   const cfg = await getConfig();
   // Master is now authoritative for default models: fold the operator-set
   // value from /admin/* into modelOverrides for every enabled mode that
@@ -497,6 +510,7 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
   const result = await sendToSidecar(agentUrl, '/config', {
     enabledModes,
     modelOverrides: effectiveModels,
+    runtimes,
     registry,
     minOnline: dbMin,
     idleTimeouts: dbIdle,
@@ -524,6 +538,7 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
 
   const enabledModes = await getEnabledModesForHost(agentUrl);
   const perHostOverrides = await getModelOverridesForHost(agentUrl);
+  const runtimes = await getRuntimesForHost(agentUrl, hostOs);
   const cfg = await getConfig();
   const effectiveModels = buildEffectiveModelMap(enabledModes, perHostOverrides, cfg);
   const registry = buildLegacyRegistry(enabledModes, (m) => effectiveModels[m], hostOs);
@@ -552,6 +567,7 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
     minOnline,
     enabledModes,
     modelOverrides: effectiveModels,
+    runtimes,
     registry,
   });
   markSelfConfigPush(agentUrl);

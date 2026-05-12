@@ -429,6 +429,15 @@ async function startCoreServicesIfNeeded(
     } catch (err) {
       logger.warn('Failed to start min-online enforcement', { error: (err as Error).message });
     }
+
+    // --- Sidecar Reconnect Watchdog (reverse-pushes canonical master URL to stale sidecars) ---
+    try {
+      const { startSidecarReconnectWatchdog } = await import('@/lib/gpu/sidecar-reconnect-watchdog');
+      startSidecarReconnectWatchdog();
+      logger.info('Sidecar reconnect watchdog started');
+    } catch (err) {
+      logger.warn('Failed to start sidecar reconnect watchdog', { error: (err as Error).message });
+    }
   } catch (err) {
     logger.error('Failed to start core services', err);
     coreServicesStarted = false; // allow retry on next worker init

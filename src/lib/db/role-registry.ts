@@ -49,6 +49,15 @@ export {
 };
 export type { ModeName, ModeCatalogEntry, HostOs };
 
+/**
+ * Allowed runtime values for a HostRoleAssignment row. Mirrors the sidecar's
+ * `RuntimeChoice` in mode-templates.ts.
+ *   'host'         — native Ollama via host.docker.internal:11434 (Mac primary)
+ *   'docker-ollama' — sidecar runs `ollama/ollama` container w/ GPU passthrough
+ *   'docker-vllm'  — sidecar runs `vllm/vllm-openai` container (CUDA only)
+ */
+export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm';
+
 export interface AssignmentInput {
   sidecarUrl: string;
   mode: string;
@@ -56,6 +65,15 @@ export interface AssignmentInput {
   minOnline?: number;
   idleTimeoutMin?: number;
   modelOverride?: string | null;
+  /**
+   * Where the role runs on the sidecar:
+   *   'host'         — native Ollama via host.docker.internal:11434 (Mac primary)
+   *   'docker-ollama' — sidecar runs `ollama/ollama` container w/ GPU passthrough
+   *   'docker-vllm'  — sidecar runs `vllm/vllm-openai` container (CUDA only)
+   * Backward-compat: rows pre-dating this field default to 'docker-ollama'
+   * on linux/win32 and 'host' on darwin (resolved client-side).
+   */
+  runtime?: RuntimeChoice;
 }
 
 export type AssignmentRow = HostRoleAssignment;
@@ -98,6 +116,7 @@ export async function setAssignment(input: AssignmentInput): Promise<AssignmentR
       ...(input.minOnline != null ? { minOnline: input.minOnline } : {}),
       ...(input.idleTimeoutMin != null ? { idleTimeoutMin: input.idleTimeoutMin } : {}),
       ...(input.modelOverride !== undefined ? { modelOverride: input.modelOverride } : {}),
+      ...(input.runtime != null ? { runtime: input.runtime } : {}),
     },
     create: {
       sidecarUrl: url,
@@ -106,6 +125,7 @@ export async function setAssignment(input: AssignmentInput): Promise<AssignmentR
       minOnline: input.minOnline ?? 0,
       idleTimeoutMin: input.idleTimeoutMin ?? 5,
       modelOverride: input.modelOverride ?? null,
+      runtime: input.runtime ?? 'docker-ollama',
     },
   });
 }
@@ -167,5 +187,45 @@ export async function getEffectiveIdleTimeoutsMs(
   const rows = await getEnabledAssignmentsForHost(sidecarUrl);
   const out: Record<string, number> = {};
   for (const r of rows) out[r.mode.replace(/^ss-/, '')] = r.idleTimeoutMin * 60_000;
+  return out;
+}
+
+const RUNTIME_VALUES: RuntimeChoice[] = ['host', 'docker-ollama', 'docker-vllm'];
+
+export function isRuntimeChoice(s: unknown): s is RuntimeChoice {
+  return typeof s === 'string' && (RUNTIME_VALUES as string[]).includes(s);
+}
+
+/**
+ * Default runtime for a (mode, hostOs) pair when the DB row has no explicit
+ * `runtime` set. Mirrors today's OS-derived behavior so unmigrated rows
+ * push the same containers the master always pushed for that host.
+ */
+export function defaultRuntimeFor(
+  mode: string,
+  hostOs: 'linux' | 'darwin' | 'win32' | 'unknown',
+): RuntimeChoice {
+  if (mode === 'ss-reranker') return hostOs === 'linux' ? 'docker-vllm' : 'host';
+  if (hostOs === 'linux') return 'docker-ollama';
+  return 'host';
+}
+
+/**
+ * Map of mode → runtime for enabled assignments. Falls back to the OS
+ * default when the DB row has runtime=null. Keyed by the FULL mode name
+ * (`ss-embedding`, not `embedding`) — that's what the sidecar's config
+ * handler keys runtimes by.
+ */
+export async function getRuntimesForHost(
+  sidecarUrl: string,
+  hostOs: 'linux' | 'darwin' | 'win32' | 'unknown',
+): Promise<Record<string, RuntimeChoice>> {
+  const rows = await getEnabledAssignmentsForHost(sidecarUrl);
+  const out: Record<string, RuntimeChoice> = {};
+  for (const r of rows) {
+    out[r.mode] = isRuntimeChoice(r.runtime)
+      ? r.runtime
+      : defaultRuntimeFor(r.mode, hostOs);
+  }
   return out;
 }

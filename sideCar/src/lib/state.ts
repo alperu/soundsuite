@@ -560,10 +560,23 @@ applyHostOllamaOverrides();
  * platforms where they cannot work, instead of failing in a retry loop.
  */
 export function dockerSupportsGpu(): boolean {
-  if (state.hostOs === 'darwin' || state.hostOs === 'win32') return false;
+  // Strongest signal: we successfully ran nvidia-smi inside ss-cuda and
+  // got back at least one GPU. That proves Docker GPU passthrough is
+  // working on this host regardless of how we classified hostOs.
+  if (Array.isArray(state.gpuCache) && state.gpuCache.length > 0) return true;
+  if (state.hostOs === 'darwin') return false;
+  if (state.hostOs === 'win32') {
+    // WSL2+NVIDIA passthrough works when nvidia-smi.exe is reachable on the
+    // Windows host. The operator opted in by installing the host-helper
+    // script that POSTs /api/host-stats with hasNvidia=true. Without that
+    // signal we have no evidence GPU passthrough actually works on this
+    // box, so refuse — same as darwin.
+    return state.hasNvidiaSmi === true;
+  }
+  if (state.hostOs === 'linux') return true;
   // Unknown host on Docker Desktop is almost certainly Mac/Win — refuse too.
   if (state.hostOs === 'unknown' && state.hostOsDockerDesktop) return false;
-  return true;
+  return false;
 }
 
 // ─── Multi-master types & helpers ────────────────────────────────────────

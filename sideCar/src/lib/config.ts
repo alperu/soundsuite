@@ -36,6 +36,13 @@ export function loadSavedConfig(): Record<string, unknown> | null {
   log.info(`Config path: ${CONFIG_PATH} (exists: ${fs.existsSync(CONFIG_PATH)})`);
   let data: Record<string, unknown> | null = null;
 
+  // Boot-time priority: config.json → sidecar.config.json → SIDECAR_MASTERS env.
+  // Whichever source the master most recently pushed via `master-identity` (WS),
+  // `X-Sound-Suite-Master-Url` (HTTP), or POST /api/masters (reverse-poll) is the
+  // highest-priority anchor: it lives in config.json (written by saveConfig()).
+  // All pushed URLs are merged additively — an operator can still manually add
+  // entries via the UI, and old masters that never push an identity continue to
+  // work via the legacy fallback chain.
   // Collect master URLs from all sources, deduped (insertion order = priority).
   const collected = new Map<string, MasterEntry>();
   const addMaster = (e: MasterEntry) => {
@@ -166,7 +173,23 @@ export function saveConfig(): void {
         Object.entries(state.registry).map(([role, def]) => [role, { model: def.model, port: def.port }]),
       ),
     };
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(data, null, 2));
+    // Atomic write: write-temp-then-rename so a crash/kill during write
+    // produces either the OLD valid file or the NEW valid file — never a
+    // 0-byte corrupted config that would wipe masters on next boot.
+    // rename(2) is atomic within the same filesystem on POSIX. On Windows
+    // it's effectively atomic for our purposes (single-writer, no readers
+    // racing). We fsync the temp file before rename to survive a kernel
+    // panic / power loss between write() and the on-disk flush.
+    const tmp = `${CONFIG_PATH}.tmp.${process.pid}`;
+    const payload = JSON.stringify(data, null, 2);
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeSync(fd, payload);
+      try { fs.fsyncSync(fd); } catch { /* fsync not supported on some FS — best effort */ }
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, CONFIG_PATH);
     log.info(`Config saved to ${CONFIG_PATH} (masters=${masters.length}, first=${firstUrl}, agentUrl=${data.agentUrl})`);
 
     // Mirror first master URL into sidecar.config.json for back-compat.
@@ -179,6 +202,11 @@ export function saveConfig(): void {
     }
   } catch (err) {
     log.error(`Failed to save config to ${CONFIG_PATH}: ${(err as Error).message}`);
+    // Best-effort cleanup of orphaned temp file from a failed atomic write.
+    try {
+      const tmp = `${CONFIG_PATH}.tmp.${process.pid}`;
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    } catch { /* ignore */ }
   }
 }
 

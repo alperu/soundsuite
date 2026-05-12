@@ -25,11 +25,12 @@
  * state.minOnline, state.perRole, containerName, etc. The `ss-` prefix is
  * the wire/API identifier; `modeToRole()` strips it.
  */
-import { CONTAINER_PREFIX, type ContainerDef } from './state';
+import { CONTAINER_PREFIX, dockerSupportsGpu, state, type ContainerDef } from './state';
 
 export type ModeName = 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker';
 export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker'];
 export type HostOs = 'darwin' | 'win32' | 'linux' | 'unknown';
+export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner';
 
 /** Strip "ss-" prefix → registry/state key. */
 export function modeToRole(mode: ModeName): string {
@@ -53,13 +54,37 @@ export function isModeName(s: string): s is ModeName {
  * The `containerName` uses the short role name (no double prefix), so
  * "ss-embedding" → containerName "ss-embedding" (CONTAINER_PREFIX + "embedding").
  */
-export function resolveMode(mode: ModeName, hostOs: HostOs): ContainerDef | null {
+export function resolveMode(
+  mode: ModeName,
+  hostOs: HostOs,
+  runtime?: RuntimeChoice,
+): ContainerDef | null {
   const role = modeToRole(mode);
   const containerName = `${CONTAINER_PREFIX}${role}`;
 
+  // When the master explicitly picked a runtime, honor it (subject to compat
+  // checks against the host's actual capabilities). Falls through to the
+  // legacy OS-derived selection when no runtime is supplied — keeps older
+  // masters working during rollout.
+  if (runtime) {
+    return resolveModeForRuntime(mode, hostOs, runtime, containerName);
+  }
+
   // win32 currently behaves like darwin for defaults (host-Ollama).
   // WSL2+NVIDIA could later resolve to the linux entry; out of scope here.
-  const isLinux = hostOs === 'linux';
+  //
+  // When hostOs is "unknown" (Docker /info didn't classify the host — most
+  // commonly a native Linux server where /info returned a distro name we
+  // didn't recognize, or the probe timed out) AND we have positive evidence
+  // of GPU passthrough (state.gpuCache populated by discoverGpus → ss-cuda
+  // → nvidia-smi), treat the host as linux. This fail-open path keeps the
+  // reranker/CUDA resolutions reachable on real Linux+NVIDIA hosts whose
+  // /info classifier missed.
+  const looksLikeLinuxFromGpu =
+    hostOs === 'unknown' &&
+    Array.isArray(state.gpuCache) &&
+    state.gpuCache.length > 0;
+  const isLinux = hostOs === 'linux' || looksLikeLinuxFromGpu;
 
   switch (mode) {
     case 'ss-embedding':
@@ -159,4 +184,145 @@ export function resolveMode(mode: ModeName, hostOs: HostOs): ContainerDef | null
     default:
       return null;
   }
+}
+
+/**
+ * Build a ContainerDef for an explicit (mode, hostOs, runtime) triple.
+ *
+ * Compat rules:
+ *   - `host` is always allowed for the 3 Ollama-backed modes (embedding,
+ *     completion, ocr). Returns the host-Ollama ContainerDef regardless of
+ *     hostOs. Refuses for ss-reranker (no host-vLLM today).
+ *   - `docker-ollama` requires the host's Docker daemon to support GPU
+ *     passthrough for GPU-only modes (currently ss-ocr). For other Ollama
+ *     modes Docker is allowed CPU-side, but we still refuse on hosts where
+ *     `dockerSupportsGpu()` is false to keep behavior simple and consistent.
+ *   - `docker-vllm` only makes sense for ss-reranker today and requires GPU.
+ *   - `docker-model-runner` is reserved (DMR — Apple Silicon vllm-metal);
+ *     refuse here, callers fall through to other runtimes.
+ *
+ * Returns null when the chosen runtime is not satisfiable on this host —
+ * caller should log WARN and skip the mode.
+ */
+function resolveModeForRuntime(
+  mode: ModeName,
+  hostOs: HostOs,
+  runtime: RuntimeChoice,
+  containerName: string,
+): ContainerDef | null {
+  void hostOs; // host/docker GPU compat is captured by dockerSupportsGpu()
+
+  if (runtime === 'host') {
+    switch (mode) {
+      case 'ss-embedding':
+        return {
+          image: '',
+          model: 'qwen3-embedding:0.6b',
+          port: 11434,
+          vram: 1200,
+          type: 'ollama',
+          modes: ['indexing', 'searching'],
+          containerName,
+          priority: 'high',
+          runtime: 'host',
+        };
+      case 'ss-completion':
+        return {
+          image: '',
+          model: 'qwen3.5:9b',
+          port: 11434,
+          vram: 10000,
+          type: 'ollama',
+          modes: ['searching'],
+          containerName,
+          priority: 'normal',
+          runtime: 'host',
+        };
+      case 'ss-ocr':
+        return {
+          image: '',
+          model: 'minicpm-v:latest',
+          port: 11434,
+          vram: 5000,
+          type: 'ollama',
+          modes: ['indexing'],
+          containerName,
+          priority: 'critical',
+          runtime: 'host',
+        };
+      case 'ss-reranker':
+        // No host-vLLM path today.
+        return null;
+    }
+  }
+
+  if (runtime === 'docker-ollama') {
+    // Ollama Docker containers need GPU passthrough on this host to actually
+    // serve models at usable speed. The hostOs gate is captured in
+    // dockerSupportsGpu() (darwin → false; win32 → true only when the
+    // host-helper has reported nvidia-smi presence; linux → true).
+    if (!dockerSupportsGpu()) return null;
+    switch (mode) {
+      case 'ss-embedding':
+        return {
+          image: 'ollama/ollama',
+          model: 'qwen3-embedding:0.6b',
+          port: 11434,
+          vram: 1200,
+          type: 'ollama',
+          modes: ['indexing', 'searching'],
+          containerName,
+          priority: 'high',
+          runtime: 'docker',
+        };
+      case 'ss-completion':
+        return {
+          image: 'ollama/ollama',
+          model: 'qwen3.5:9b',
+          port: 11435,
+          vram: 10000,
+          type: 'ollama',
+          modes: ['searching'],
+          containerName,
+          priority: 'normal',
+          runtime: 'docker',
+        };
+      case 'ss-ocr':
+        return {
+          image: 'ollama/ollama',
+          model: 'minicpm-v:latest',
+          port: 11436,
+          vram: 5000,
+          type: 'ollama',
+          modes: ['indexing'],
+          containerName,
+          gpuOnly: true,
+          priority: 'critical',
+          runtime: 'docker',
+        };
+      case 'ss-reranker':
+        // vLLM, not Ollama, runs the reranker.
+        return null;
+    }
+  }
+
+  if (runtime === 'docker-vllm') {
+    if (!dockerSupportsGpu()) return null;
+    if (mode !== 'ss-reranker') return null;
+    return {
+      image: 'vllm/vllm-openai',
+      model: 'Qwen/Qwen3-Reranker-8B',
+      port: 8099,
+      vram: 7000,
+      type: 'vllm',
+      modes: ['searching'],
+      containerName,
+      priority: 'normal',
+      runtime: 'docker',
+    };
+  }
+
+  // docker-model-runner: reserved for forward-compat; not exposed in the
+  // operator UI yet. Refuse here so callers fall through.
+  return null;
 }

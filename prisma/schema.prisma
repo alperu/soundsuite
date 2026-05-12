@@ -342,6 +342,13 @@ model HostRoleAssignment {
   minOnline      Int      @default(0)
   idleTimeoutMin Int      @default(5)
   modelOverride  String?
+  // Where the operator wants this role to run on the sidecar:
+  //   'host'         — native Ollama on the sidecar host (host.docker.internal)
+  //   'docker-ollama' — sidecar runs `ollama/ollama` as a container w/ GPU passthrough
+  //   'docker-vllm'  — sidecar runs `vllm/vllm-openai` as a container (CUDA only)
+  // Defaults to 'docker-ollama' on linux/win32 and 'host' on darwin (handled
+  // in app code; column default is the most-common cross-platform value).
+  runtime        String?  @default("docker-ollama")
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

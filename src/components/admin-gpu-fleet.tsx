@@ -698,7 +698,9 @@ export default function GpuFleetPanel() {
                 <tr className="border-b border-gray-200">
                   <th className="text-left py-2 px-3 font-medium text-gray-600">Hostname</th>
                   <th className="text-left py-2 px-3 font-medium text-gray-600">URL</th>
-                  <th className="text-left py-2 px-3 font-medium text-gray-600">Mode</th>
+                  {/* Legacy "Mode" column (indexing/searching) removed —
+                      per-host roles are now managed via /admin/roleassign tags. */}
+                  <th className="text-left py-2 px-3 font-medium text-gray-600">Conn</th>
                   <th className="text-left py-2 px-3 font-medium text-gray-600">Status</th>
                   <th className="text-left py-2 px-3 font-medium text-gray-600">Last Seen</th>
                   <th className="text-left py-2 px-3 font-medium text-gray-600">Note</th>
@@ -750,13 +752,7 @@ export default function GpuFleetPanel() {
                     </td>
                     <td className="py-2 px-3 font-mono text-xs text-gray-600">{s.url}</td>
                     <td className="py-2 px-3">
-                      {/* Operational mode (indexing/searching) */}
-                      {s.sidecarStatus && (
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium mr-1 ${
-                          (s.sidecarStatus as any).mode === 'indexing' ? 'bg-amber-100 text-amber-800' : 'bg-cyan-100 text-cyan-800'
-                        }`}>{(s.sidecarStatus as any).mode || '?'}</span>
-                      )}
-                      {/* Connection mode (WS/direct) */}
+                      {/* Connection mode (WS/direct) — operational mode pill removed. */}
                       <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
                         s.mode === 'websocket' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
                       }`}>{s.mode === 'websocket' ? 'WS' : s.mode}</span>
@@ -843,10 +839,9 @@ export default function GpuFleetPanel() {
             </div>
           ) : (
             <>
-              {/* Stats Grid */}
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+              {/* Stats Grid — "Sidecar Mode" card removed (legacy indexing/searching) */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
                 <StatCard label="Active Requests" value={String(cachedStatus.activeRequests ?? 0)} color="blue" />
-                <StatCard label="Sidecar Mode" value={cachedStatus.mode || '-'} color="blue" />
                 <StatCard label="Agent Uptime" value={cachedStatus.uptime ? formatUptime(cachedStatus.uptime) : '-'} color="purple" />
                 <StatCard label="Version" value={cachedStatus.version || '1.x'} color="gray" />
                 <StatCard label="Total Memory" value={(() => {

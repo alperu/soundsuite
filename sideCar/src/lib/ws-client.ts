@@ -87,7 +87,7 @@ function httpPost(
   url: string,
   body: object,
   authToken?: string,
-): Promise<{ status: number; body: string }> {
+): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
     const parsed = new URL(url);
@@ -108,7 +108,7 @@ function httpPost(
       (res) => {
         let data = '';
         res.on('data', (chunk: Buffer) => (data += chunk));
-        res.on('end', () => resolve({ status: res.statusCode!, body: data }));
+        res.on('end', () => resolve({ status: res.statusCode!, body: data, headers: res.headers }));
       },
     );
     req.on('error', reject);
@@ -116,6 +116,27 @@ function httpPost(
     req.write(payload);
     req.end();
   });
+}
+
+/**
+ * Parse `X-Sound-Suite-Master-Url` header from any master→sidecar response.
+ * Idempotent: only adds when URL is new. Persists via saveConfig() so a
+ * subsequent boot (e.g. after docker volume GC) recovers the master URL
+ * without operator intervention.
+ */
+function absorbMasterUrlHeader(headers: http.IncomingHttpHeaders, sourceLabel: string): void {
+  const raw = headers['x-sound-suite-master-url'];
+  const masterUrl = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof masterUrl !== 'string' || masterUrl.length === 0) return;
+  const normalized = masterUrl.replace(/\/+$/, '');
+  if (state.masters.has(normalized)) return;
+  try {
+    ensureMaster(normalized, {});
+    saveConfig();
+    log.info(`Master self-identified via header (${sourceLabel}): ${normalized}`);
+  } catch (err) {
+    log.warn(`Failed to absorb master URL header "${normalized}": ${(err as Error).message}`);
+  }
 }
 
 // ─── Rich status builder ──────────────────────────────────────────────────
@@ -291,18 +312,35 @@ async function executeCommand(
           (payload.modelOverrides && typeof payload.modelOverrides === 'object'
             ? (payload.modelOverrides as Record<string, unknown>)
             : {}) as Record<string, unknown>;
+        const runtimes =
+          (payload.runtimes && typeof payload.runtimes === 'object'
+            ? (payload.runtimes as Record<string, unknown>)
+            : {}) as Record<string, unknown>;
 
         // Build the per-host effective set of role keys (short names).
         const enabledRoles = new Set<string>();
+        // Track how many modes were valid mode names (separate from how many
+        // resolved successfully). A non-empty list of valid names whose
+        // resolutions ALL returned null is a CLEAR signal: "master asked for
+        // things this OS can't do." That's a legit trim-everything intent —
+        // NOT a malformed payload to defensively ignore.
+        let validNameCount = 0;
         for (const mode of enabled) {
           if (!isModeName(mode)) {
             log.warn(`[${m.serverUrl}] Unknown mode "${mode}" — skipping`);
             continue;
           }
-          const def = resolveMode(mode, state.hostOs);
+          validNameCount++;
+          const rtRaw = runtimes[mode];
+          const runtime =
+            rtRaw === 'host' || rtRaw === 'docker-ollama' ||
+            rtRaw === 'docker-vllm' || rtRaw === 'docker-model-runner'
+              ? rtRaw
+              : undefined;
+          const def = resolveMode(mode, state.hostOs, runtime);
           if (!def) {
             log.warn(
-              `[${m.serverUrl}] Mode "${mode}" unavailable on ${state.hostOs} — skipping (reranker requires linux+NVIDIA)`,
+              `[${m.serverUrl}] Mode "${mode}" runtime "${runtime ?? 'auto'}" not satisfiable on ${state.hostOs} — skipping`,
             );
             continue;
           }
@@ -332,12 +370,42 @@ async function executeCommand(
         }
 
         // TRIM: drop any non-utility role no longer in enabledRoles.
-        // Guard: if EVERY mode in the payload failed to resolve (e.g. all
-        // unknown names, or all unavailable on this OS), `enabledRoles` is
-        // empty even though the master sent a non-empty list. Skip trim
-        // in that case — wiping the registry on a malformed payload is
-        // worse than tolerating drift until the next valid push.
-        if (enabledRoles.size > 0) {
+        //
+        // Two cases to trim:
+        //   1. enabledRoles non-empty (master asked for specific roles and
+        //      at least one resolved on this OS).
+        //   2. validNameCount > 0 BUT enabledRoles is empty (master asked
+        //      for valid mode names that are all unavailable on this OS,
+        //      e.g. ss-reranker on darwin/win32). That's an intentional
+        //      "this host should run nothing besides utility" signal —
+        //      previously skipping the trim left the boot-default 5-role
+        //      registry intact, so the master and the sidecar disagreed
+        //      forever about what's running.
+        //
+        // We still skip when the operator sent ZERO valid names (which
+        // suggests a malformed payload).
+        // Defensive: when hostOs hasn't been classified AND we have no GPU
+        // evidence yet (mode-templates' linux fall-through hasn't kicked in),
+        // a "trim everything" decision is suspicious — it means resolveMode
+        // returned null for every requested mode purely because hostOs was
+        // unknown. Skip the trim and leave the registry intact; the next
+        // config push (or a successful GPU discovery) will reconcile.
+        const hostOsAmbiguous =
+          state.hostOs === 'unknown' &&
+          !(Array.isArray(state.gpuCache) && state.gpuCache.length > 0);
+        const allUnresolvedDueToHostOs =
+          validNameCount > 0 && enabledRoles.size === 0 && hostOsAmbiguous;
+        const shouldTrim =
+          !allUnresolvedDueToHostOs &&
+          (enabledRoles.size > 0 || validNameCount > 0);
+        if (allUnresolvedDueToHostOs) {
+          log.warn(
+            `[${m.serverUrl}] hostOs="unknown" and no GPU evidence yet — ` +
+            `skipping trim of ${validNameCount} requested mode(s). ` +
+            `Set HOST_OS=linux|darwin|win32 env (or POST /api/host-os) to pin.`,
+          );
+        }
+        if (shouldTrim) {
           for (const r of Object.keys(state.registry)) {
             if (state.registry[r].type === 'utility') continue;
             if (!enabledRoles.has(r)) {
@@ -351,9 +419,14 @@ async function executeCommand(
               state.userStopped.delete(r);
             }
           }
+          if (enabledRoles.size === 0) {
+            log.warn(
+              `[${m.serverUrl}] All ${validNameCount} requested mode(s) unavailable on ${state.hostOs} — trimmed registry to utility roles only.`,
+            );
+          }
         } else {
           log.warn(
-            `[${m.serverUrl}] enabledModes resolved to zero roles on ${state.hostOs} — skipping trim (defensive)`,
+            `[${m.serverUrl}] enabledModes had no valid mode names — skipping trim (defensive against malformed payloads)`,
           );
         }
 
@@ -749,11 +822,13 @@ async function autoProvision(): Promise<void> {
 async function sendHttpHeartbeat(m: MasterConnection): Promise<void> {
   try {
     const fullStatus = await buildFullStatus();
-    const { status, body: responseBody } = await httpPost(
+    const { status, body: responseBody, headers: respHeaders } = await httpPost(
       `${m.serverUrl}/api/admin/gpu/sidecars/heartbeat`,
       fullStatus,
       m.authToken,
     );
+
+    absorbMasterUrlHeader(respHeaders, 'heartbeat');
 
     if (status === 200) {
       if (m.httpHeartbeatFailCount > 0) {
@@ -783,11 +858,13 @@ async function pollForCommands(m: MasterConnection): Promise<void> {
   if (m.connectionMode === 'websocket') return;
 
   try {
-    const { status, body: responseBody } = await httpPost(
+    const { status, body: responseBody, headers: respHeaders } = await httpPost(
       `${m.serverUrl}/api/admin/gpu/sidecars/poll`,
       { agentUrl: getAgentUrl() },
       m.authToken,
     );
+
+    absorbMasterUrlHeader(respHeaders, 'poll');
 
     if (status === 200) {
       const response = JSON.parse(responseBody);
@@ -828,11 +905,12 @@ async function reportResult(
   // only HTTP-poll commands need this out-of-band POST.
   if (m.connectionMode !== 'websocket') {
     try {
-      await httpPost(
+      const { headers: respHeaders } = await httpPost(
         `${m.serverUrl}/api/admin/gpu/sidecars/result`,
         { commandId, result: result || {}, error },
         m.authToken,
       );
+      absorbMasterUrlHeader(respHeaders, 'result');
     } catch (err) {
       log.error(`[${m.serverUrl}] Failed to report result for ${commandId}: ${(err as Error).message}`);
     }
@@ -960,6 +1038,34 @@ export function connectMaster(m: MasterConnection): void {
         if (typeof msg.serverVersion === 'string') {
           m.lastSeenServerVersion = msg.serverVersion;
         }
+      } else if (msg.type === 'master-identity') {
+        // Master is announcing its canonical URL (and optional WS port).
+        // Persist so a sidecar reboot — even after docker volume GC — can
+        // recover the master URL without operator intervention. Idempotent:
+        // operating on the same URL twice is a no-op. If only the trailing
+        // slash differs from the current key we rekey the slot in place.
+        const canonical = typeof msg.canonicalUrl === 'string' ? msg.canonicalUrl : null;
+        const wsPort = typeof msg.wsPort === 'number' ? msg.wsPort : undefined;
+        if (canonical) {
+          const normalized = canonical.replace(/\/+$/, '');
+          try {
+            // If the current connection's key differs only after normalization,
+            // re-key this slot rather than creating a 2nd master entry.
+            if (m.serverUrl !== normalized && m.serverUrl.replace(/\/+$/, '') === normalized) {
+              log.info(`[${m.serverUrl}] master-identity rekey → ${normalized}`);
+              rekeyMaster(m.serverUrl, normalized);
+            }
+            const existing = state.masters.get(normalized);
+            const portChanged = wsPort !== undefined && existing?.wsPort !== wsPort;
+            if (!existing || portChanged) {
+              ensureMaster(normalized, wsPort !== undefined ? { wsPort } : {});
+              saveConfig();
+              log.info(`Master identified: ${normalized}${wsPort !== undefined ? ` (wsPort=${wsPort})` : ''}`);
+            }
+          } catch (err) {
+            log.warn(`master-identity handling failed for "${normalized}": ${(err as Error).message}`);
+          }
+        }
       } else if (msg.type === 'command') {
         state.wsCommandCount++;
         const action = msg.action as string;
@@ -1045,7 +1151,11 @@ export function scheduleReconnect(m: MasterConnection): void {
   }, m.wsReconnectDelay);
   m.connectionStatus = `Reconnecting in ${Math.round(m.wsReconnectDelay / 1000)}s...`;
   log.info(`[${m.serverUrl}] WS reconnect in ${m.wsReconnectDelay / 1000}s...`);
-  m.wsReconnectDelay = Math.min(m.wsReconnectDelay * 2, 30_000);
+  // Exponential backoff, capped at 5 min. We never give up — if the master
+  // is down at sidecar boot, this timer keeps firing until it comes back.
+  // Cap raised from 30s to 300s so we're not hammering an offline master
+  // every half-minute forever; ceiling keeps recovery latency bounded.
+  m.wsReconnectDelay = Math.min(m.wsReconnectDelay * 2, 300_000);
 }
 
 export function disconnectMaster(m: MasterConnection): void {

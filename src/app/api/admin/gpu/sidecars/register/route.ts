@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getConfig, setConfigValue } from '@/lib/db/config';
+import {
+  MASTER_URL_HEADER,
+  deriveOriginFromHeaders,
+  getCanonicalMasterUrl,
+  noteRequestOrigin,
+} from '@/lib/gpu/master-identity';
 
 interface SidecarEntry {
   url: string;
@@ -8,15 +14,22 @@ interface SidecarEntry {
   lastSeen: string;
   status: string;
   containers?: string[];
+  lastSeenAt?: number;
+  lastSeenFromIp?: string;
 }
 
 /**
  * POST /api/admin/gpu/sidecars/register
  * Register a sidecar via direct HTTP (for sidecars that can reach the server).
  * Body: { agentUrl: string, hostname: string, containers?: string[] }
+ *
+ * Response includes `X-Sound-Suite-Master-Url` so the sidecar can persist
+ * the canonical master URL (re-asserting in case the operator dropped it).
  */
 export async function POST(request: NextRequest) {
   try {
+    noteRequestOrigin(deriveOriginFromHeaders(request.headers));
+
     const body = await request.json();
     const { agentUrl, hostname, containers } = body;
 
@@ -31,6 +44,11 @@ export async function POST(request: NextRequest) {
     } catch { /* empty */ }
 
     const now = new Date().toISOString();
+    const nowMs = Date.now();
+    const reqIp =
+      request.headers.get('x-forwarded-for')?.split(',')[0].trim() ||
+      request.headers.get('x-real-ip') ||
+      '';
     const existing = sidecars.findIndex(s => s.url === agentUrl);
 
     const entry: SidecarEntry = {
@@ -38,6 +56,8 @@ export async function POST(request: NextRequest) {
       hostname: hostname || 'unknown',
       mode: 'direct',
       lastSeen: now,
+      lastSeenAt: nowMs,
+      lastSeenFromIp: reqIp || undefined,
       status: 'connected',
       containers: containers || [],
     };
@@ -50,7 +70,14 @@ export async function POST(request: NextRequest) {
 
     await setConfigValue('gpu.sidecars', JSON.stringify(sidecars));
 
-    return NextResponse.json({ ok: true, registered: entry });
+    const headers: Record<string, string> = {};
+    const masterUrl = await getCanonicalMasterUrl();
+    if (masterUrl) headers[MASTER_URL_HEADER] = masterUrl;
+
+    return NextResponse.json(
+      { ok: true, registered: entry, masterUrl: masterUrl || undefined },
+      { headers },
+    );
   } catch (error: any) {
     return NextResponse.json(
       { error: (error?.message || String(error)).slice(0, 300) },
