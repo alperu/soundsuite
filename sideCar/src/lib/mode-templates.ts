@@ -3,8 +3,19 @@
  *
  * The master no longer sends full ContainerDef objects. It sends a list of
  * enabled mode names (`ss-embedding`, `ss-completion`, `ss-ocr`,
- * `ss-reranker`) plus optional `modelOverrides`. The sidecar — which knows
- * its own hostOs — resolves each mode to a ContainerDef via `resolveMode()`.
+ * `ss-reranker`) plus `modelOverrides`. The sidecar — which knows its own
+ * hostOs — resolves each mode to a ContainerDef via `resolveMode()`.
+ *
+ * MASTER IS AUTHORITATIVE for the default model. As of 2026-05-12 the
+ * master fills in `modelOverrides[mode]` for every enabled mode using the
+ * value the operator set in the admin settings pages
+ * (/admin/embedding, /admin/localai, /admin/ocr, /admin/reranking). The
+ * hardcoded model strings in `resolveMode()` below are BOOT-TIME ONLY —
+ * the value the sidecar uses before the first /config push from the
+ * master. Once the master pushes, `modelOverrides` wins. Do not rely on
+ * these constants for any long-running behavior; they exist so a freshly
+ * booted sidecar that has never talked to a master still has a coherent
+ * ContainerDef to log/show.
  *
  * Returns `null` when a mode is unavailable on the given OS (e.g.
  * `ss-reranker` on `darwin` — vllm-metal lacks cross-encoder support).
@@ -105,9 +116,9 @@ export function resolveMode(mode: ModeName, hostOs: HostOs): ContainerDef | null
       return isLinux
         ? {
             image: 'ollama/ollama',
-            model: 'richardyoung/olmocr2:7b-q8',
+            model: 'minicpm-v:latest',
             port: 11436,
-            vram: 8000,
+            vram: 5000,
             type: 'ollama',
             modes: ['indexing'],
             containerName,
@@ -117,9 +128,9 @@ export function resolveMode(mode: ModeName, hostOs: HostOs): ContainerDef | null
           }
         : {
             image: '',
-            model: 'richardyoung/olmocr2:7b-q8',
+            model: 'minicpm-v:latest',
             port: 11434, // shared native Ollama port
-            vram: 8000,
+            vram: 5000,
             type: 'ollama',
             modes: ['indexing'],
             containerName,

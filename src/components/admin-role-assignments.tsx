@@ -19,7 +19,9 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import { ConfirmDialog, type ModeCatalogEntry, type ModeOs } from '@/components/admin-role-types';
+import { settingsPageForMode } from '@/lib/gpu/mode-catalog';
 
 /* ─────────────────────────── Types ─────────────────────────── */
 
@@ -29,7 +31,7 @@ interface SidecarSummary {
   status: 'connected' | 'disconnected';
   os?: ModeOs | string;
   gpuSummary?: string;
-  containers?: Record<string, { loadedModels?: Array<{ name: string }> }>;
+  containers?: Record<string, { loadedModels?: Array<{ name: string; size?: number }> }>;
 }
 
 interface RoleAssignment {
@@ -42,11 +44,17 @@ interface RoleAssignment {
 
 type Toast = { type: 'success' | 'error' | 'warning'; text: string } | null;
 
+// Fallback used when /api/admin/mode-catalog is unreachable. Intentionally
+// empty `defaultModel` — the API is the source of truth for live values
+// (it reads from the Config table). If the UI baked in fallback model
+// strings they'd drift from whatever the operator actually configured on
+// the settings pages, so the "inherit (<model>)" hint would lie. When
+// offline we show "inherit" with no model + a "backend offline" badge.
 const FALLBACK_MODES: ModeCatalogEntry[] = [
-  { name: 'ss-embedding', availableOn: ['linux', 'darwin', 'win32'], defaultModel: { linux: 'qwen3-embedding:0.6b', darwin: 'qwen3-embedding:0.6b', win32: 'qwen3-embedding:0.6b' } },
-  { name: 'ss-completion', availableOn: ['linux', 'darwin', 'win32'], defaultModel: { linux: 'qwen3.5:9b', darwin: 'qwen3.5:9b', win32: 'qwen3.5:9b' } },
-  { name: 'ss-ocr', availableOn: ['linux', 'darwin', 'win32'], defaultModel: { linux: 'richardyoung/olmocr2:7b', darwin: 'richardyoung/olmocr2:7b', win32: 'richardyoung/olmocr2:7b' } },
-  { name: 'ss-reranker', availableOn: ['linux'], defaultModel: { linux: 'Qwen/Qwen3-Reranker-8B' } },
+  { name: 'ss-embedding', label: 'Embedding', availableOn: ['linux', 'darwin', 'win32'], defaultModel: {} },
+  { name: 'ss-completion', label: 'Completion', availableOn: ['linux', 'darwin', 'win32'], defaultModel: {} },
+  { name: 'ss-ocr', label: 'OCR', availableOn: ['linux', 'darwin', 'win32'], defaultModel: {} },
+  { name: 'ss-reranker', label: 'Reranker', availableOn: ['linux'], defaultModel: {} },
 ];
 
 const RESET_DEFAULTS: Record<string, { minOnline: number; idleTimeoutMin: number }> = {
@@ -189,6 +197,116 @@ export default function AdminRoleAssignments() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Re-fetch catalog on window focus so changes made on the linked settings
+  // pages (Embedding / AI / OCR / Reranking) are reflected immediately when
+  // the operator tabs back here.
+  useEffect(() => {
+    const onFocus = () => {
+      loadCatalog();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [loadCatalog]);
+
+  /* ─────────────────────────── Periodic auto-sync ─────────────────────────── */
+  // Push each sidecar's role assignments every 30 seconds — but ONLY when
+  // the desired state has actually changed since the last push. The hash
+  // collapses (mode, enabled, minOnline, idleTimeoutMin, modelOverride) for
+  // every enabled row plus the catalog model defaults that resolve to
+  // implicit overrides server-side. Hash match → no network call, no toast,
+  // no spinner. Hash mismatch → silent /sync POST (sync errors go to console;
+  // we don't toast every 30s for a flaky sidecar — manual "Sync now" still
+  // toasts loudly).
+
+  // Last-pushed hash per sidecar URL. Ref, not state, so it doesn't trigger
+  // re-renders.
+  const lastSyncedHashRef = useRef<Record<string, string>>({});
+  // Per-sidecar "auto-syncing now" indicator for the UI.
+  const [autoSyncing, setAutoSyncing] = useState<Record<string, boolean>>({});
+
+  const computeAssignmentHash = useCallback(
+    (rows: RoleAssignment[] | undefined): string => {
+      if (!rows || rows.length === 0) return '∅';
+      // Stable order: sort by mode name. Include only enabled rows because
+      // sync filters to enabled — disabled rows don't affect the wire payload.
+      const stable = rows
+        .filter((r) => r.enabled !== false)
+        .map((r) => `${r.mode}|on=${r.enabled ?? true}|min=${r.minOnline ?? ''}|idle=${r.idleTimeoutMin ?? ''}|m=${r.modelOverride ?? ''}`)
+        .sort()
+        .join(';');
+      return stable;
+    },
+    [],
+  );
+
+  const silentSync = useCallback(
+    async (sidecarUrl: string): Promise<boolean> => {
+      try {
+        const res = await fetch(
+          `/api/admin/role-assignments/sync?sidecarUrl=${encodeURIComponent(sidecarUrl)}`,
+          { method: 'POST' },
+        );
+        if (!res.ok && res.status !== 404) {
+          // Background sync — log to console, don't toast (would spam every 30s
+          // for a single flaky host). The lastSyncedAt indicator stays stale,
+          // which is itself a visible cue something is wrong.
+          // eslint-disable-next-line no-console
+          console.warn(`auto-sync ${sidecarUrl}: HTTP ${res.status}`);
+          return false;
+        }
+        setLastSyncedAt((m) => ({ ...m, [sidecarUrl]: Date.now() }));
+        return true;
+      } catch (e: any) {
+        // eslint-disable-next-line no-console
+        console.warn(`auto-sync ${sidecarUrl} failed:`, e);
+        return false;
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (sidecars.length === 0) return;
+
+    const tick = async () => {
+      // Snapshot current state under closure to avoid stale-state races.
+      const queue = sidecars.map((s) => s.url);
+      for (let i = 0; i < queue.length; i++) {
+        const url = queue[i];
+        const desired = computeAssignmentHash(assignmentsByUrl[url]);
+        const lastPushed = lastSyncedHashRef.current[url];
+        if (desired === lastPushed) continue; // no-op — most ticks land here
+
+        // Stagger pushes 200ms apart so a fleet of N sidecars doesn't burst.
+        if (i > 0) await new Promise((r) => setTimeout(r, 200));
+
+        setAutoSyncing((m) => ({ ...m, [url]: true }));
+        const ok = await silentSync(url);
+        setAutoSyncing((m) => {
+          const next = { ...m };
+          delete next[url];
+          return next;
+        });
+        if (ok) lastSyncedHashRef.current[url] = desired;
+      }
+    };
+
+    // First tick offset by a small jitter so freshly-mounted pages don't all
+    // hit the server at second 0; subsequent ticks are exactly 30s apart.
+    const jitterMs = Math.floor(Math.random() * 4_000);
+    const firstTimer = setTimeout(() => {
+      void tick();
+      // Then steady cadence.
+    }, jitterMs);
+    const interval = setInterval(() => void tick(), 30_000);
+
+    return () => {
+      clearTimeout(firstTimer);
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidecars, assignmentsByUrl, computeAssignmentHash, silentSync]);
+
   /* ─────────────────────────── Mutations ─────────────────────────── */
 
   const triggerSync = useCallback(async (sidecarUrl: string) => {
@@ -202,10 +320,15 @@ export default function AdminRoleAssignments() {
         throw new Error(data.error || `sync HTTP ${res.status}`);
       }
       setLastSyncedAt((m) => ({ ...m, [sidecarUrl]: Date.now() }));
+      // Manual sync also seeds the hash so the next periodic tick can skip
+      // this sidecar until something actually changes.
+      lastSyncedHashRef.current[sidecarUrl] = computeAssignmentHash(
+        assignmentsByUrl[sidecarUrl],
+      );
     } catch (e: any) {
       showToast({ type: 'error', text: `Sync failed: ${e?.message || e}` });
     }
-  }, [showToast]);
+  }, [showToast, assignmentsByUrl, computeAssignmentHash]);
 
   const upsertAssignment = useCallback(
     async (sidecarUrl: string, mode: string, patch: Partial<RoleAssignment>) => {
@@ -493,7 +616,54 @@ export default function AdminRoleAssignments() {
                     </p>
                   ))}
 
-                <p className="text-[11px] text-gray-500 mt-2">Last synced {lastSyncLabel}</p>
+                {/* Loaded-on-host hint — deduplicated across containers since
+                    host Ollama exposes the same model list to every role. Lets
+                    the operator eyeball whether the role's resolved model is
+                    actually installed. */}
+                {(() => {
+                  const all: Array<{ name: string; size?: number }> = [];
+                  const seen = new Set<string>();
+                  for (const c of Object.values(sidecar.containers || {})) {
+                    for (const m of (c?.loadedModels || []) as Array<{ name: string; size?: number }>) {
+                      if (!m?.name || seen.has(m.name)) continue;
+                      seen.add(m.name);
+                      all.push(m);
+                    }
+                  }
+                  if (all.length === 0) return null;
+                  const fmtSize = (b?: number) => {
+                    if (!b || !Number.isFinite(b)) return '';
+                    const gb = b / 1024 ** 3;
+                    return gb >= 0.1 ? ` (${gb.toFixed(1)} GB)` : '';
+                  };
+                  return (
+                    <div className="mt-2 text-[11px] text-gray-600">
+                      <span className="text-gray-500">Currently loaded on {sidecar.hostname}:</span>{' '}
+                      <span className="font-mono">
+                        {all.map((m, i) => (
+                          <span key={m.name}>
+                            {i > 0 && ', '}
+                            {m.name}
+                            {fmtSize(m.size)}
+                          </span>
+                        ))}
+                      </span>
+                    </div>
+                  );
+                })()}
+
+                <p className="text-[11px] text-gray-500 mt-2 flex items-center gap-1.5">
+                  Last synced {lastSyncLabel}
+                  {autoSyncing[sidecar.url] && (
+                    <span
+                      className="inline-flex items-center gap-1 text-blue-600"
+                      title="Auto-sync runs every 30s when assignments change."
+                    >
+                      <span className="inline-block w-1 h-1 rounded-full bg-blue-500 animate-pulse" />
+                      auto-syncing…
+                    </span>
+                  )}
+                </p>
 
                 {/* Advanced panels */}
                 {catalog.map((mode) => {
@@ -557,16 +727,39 @@ function AdvancedPanel({ sidecar, mode, assignment, onClose, onSave }: AdvancedP
   const [idleTimeoutMin, setIdleTimeoutMin] = useState<number>(assignment.idleTimeoutMin ?? 5);
 
   const defaultModel = mode.defaultModel?.[sidecar.os as ModeOs] || '';
-  const loaded = sidecar.containers?.[mode.name]?.loadedModels?.map((m) => m.name).filter(Boolean) ?? [];
+  const source = settingsPageForMode(mode.name);
+  // Loaded models reported by the sidecar for this role's container. Host
+  // Ollama shares one endpoint across roles, so dedupe across all containers
+  // — this is what's actually installed on the host and ready to be picked.
+  const loadedOnHost = useMemo(() => {
+    const all: string[] = [];
+    const containers = sidecar.containers || {};
+    for (const c of Object.values(containers)) {
+      const names = c?.loadedModels?.map((m) => m.name).filter(Boolean) ?? [];
+      all.push(...names);
+    }
+    return Array.from(new Set(all));
+  }, [sidecar.containers]);
   const modelChoices = useMemo(
-    () => Array.from(new Set([...(defaultModel ? [defaultModel] : []), ...loaded])),
-    [defaultModel, loaded],
+    () => Array.from(new Set([...(defaultModel ? [defaultModel] : []), ...loadedOnHost])),
+    [defaultModel, loadedOnHost],
   );
   const listId = `model-list-${sidecar.url.replace(/[^a-z0-9]/gi, '_')}-${mode.name}`;
+  const hasOverride = !!assignment.modelOverride;
 
   const submit = () => {
     onSave({
       modelOverride: modelOverride.trim() ? modelOverride.trim() : null,
+      minOnline,
+      idleTimeoutMin,
+      enabled: true,
+    });
+  };
+
+  const clearOverride = () => {
+    setModelOverride('');
+    onSave({
+      modelOverride: null,
       minOnline,
       idleTimeoutMin,
       enabled: true,
@@ -586,13 +779,25 @@ function AdvancedPanel({ sidecar, mode, assignment, onClose, onSave }: AdvancedP
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
         <label className="flex flex-col gap-1">
-          <span className="text-gray-600">Model override</span>
+          <span className="flex items-center gap-1 text-gray-600">
+            Model override
+            {hasOverride && (
+              <button
+                type="button"
+                onClick={clearOverride}
+                title="Clear override and inherit the catalog default"
+                className="text-[10px] text-red-600 hover:text-red-800 underline"
+              >
+                × clear
+              </button>
+            )}
+          </span>
           <input
             type="text"
             list={listId}
             value={modelOverride}
             onChange={(e) => setModelOverride(e.target.value)}
-            placeholder={defaultModel ? `inherit (${defaultModel})` : 'inherit'}
+            placeholder={defaultModel ? `inherit (${defaultModel})` : 'inherit (backend offline)'}
             className="px-2 py-1 border border-gray-300 rounded text-xs font-mono"
           />
           <datalist id={listId}>
@@ -600,6 +805,61 @@ function AdvancedPanel({ sidecar, mode, assignment, onClose, onSave }: AdvancedP
               <option key={m} value={m} />
             ))}
           </datalist>
+          <span className="text-[10px] text-gray-500">
+            {defaultModel ? (
+              <>
+                Inherits <span className="font-mono">{defaultModel}</span>
+                {source && (
+                  <>
+                    {' '}— configured at{' '}
+                    <Link
+                      href={source.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-600 hover:text-blue-800 underline"
+                    >
+                      {source.label} ↗
+                    </Link>
+                  </>
+                )}
+              </>
+            ) : source ? (
+              <>
+                No catalog default available —{' '}
+                <Link
+                  href={source.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-600 hover:text-blue-800 underline"
+                >
+                  configure at {source.label} ↗
+                </Link>
+              </>
+            ) : (
+              'No catalog default available.'
+            )}
+          </span>
+          {loadedOnHost.length > 0 && (
+            <div className="mt-1 border-t border-gray-200 pt-1">
+              <div className="text-[10px] font-semibold text-gray-600 mb-0.5">
+                Loaded on this host
+              </div>
+              <ul className="space-y-0.5">
+                {loadedOnHost.map((m) => (
+                  <li key={m}>
+                    <button
+                      type="button"
+                      onClick={() => setModelOverride(m)}
+                      className="font-mono text-[11px] text-blue-700 hover:underline text-left"
+                      title="Use this model as the override"
+                    >
+                      {m}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </label>
 
         <label className="flex flex-col gap-1">

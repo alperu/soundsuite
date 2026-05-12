@@ -4,17 +4,20 @@
  * AdminRoleTypes — read-only Mode Types reference.
  *
  * The 4-mode catalog (ss-embedding, ss-completion, ss-ocr, ss-reranker) is
- * server-defined and resolved per-OS by the sidecar. Operators no longer pick
- * image/port/VRAM/priority — they only choose which modes run on which
- * sidecar (see the Role Assignments tab).
+ * server-defined and resolved per-OS by the sidecar. Each mode's default
+ * model is configured on its own dedicated settings page — this table
+ * surfaces a "configured at ↗" chip so the operator can click straight
+ * through to the page that owns the value.
  *
- * Source: GET /api/admin/mode-catalog
- *
- * The `RoleType` type and `ConfirmDialog` component are re-exported because
- * other files still import them; they remain for backwards compatibility.
+ * Source: GET /api/admin/mode-catalog (live values from the Config table).
+ * The fallback catalog used when the API is unreachable has NO default
+ * models — we show "—" + "backend offline" rather than stale baked-in
+ * strings, so the UI never lies about what the sidecar will load.
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
+import { settingsPageForMode } from '@/lib/gpu/mode-catalog';
 
 /* ─────────────────────────── Public types ─────────────────────────── */
 
@@ -43,52 +46,39 @@ export interface RoleType {
   description?: string;
 }
 
-/* ─────────────────────────── Hard-coded fallback ───────────────────────────
- * Used when /api/admin/mode-catalog 404s. Mirrors the spec.
+/* ─────────────────────────── Fallback (no model strings) ───────────────────────────
+ * Intentionally empty `defaultModel` — when /api/admin/mode-catalog is
+ * unreachable we show "—" + a "backend offline" badge rather than baked-in
+ * strings that might disagree with what the operator configured.
  */
-const FALLBACK_CATALOG: ModeCatalogEntry[] = [
+const FALLBACK_CATALOG_NO_DEFAULTS: ModeCatalogEntry[] = [
   {
     name: 'ss-embedding',
     label: 'Embedding',
     availableOn: ['linux', 'darwin', 'win32'],
-    defaultModel: {
-      linux: 'qwen3-embedding:0.6b',
-      darwin: 'qwen3-embedding:0.6b',
-      win32: 'qwen3-embedding:0.6b',
-    },
-    description: 'Document and query embeddings for vector search.',
+    defaultModel: {},
+    description: 'Document and query embedding via Ollama. Lightweight; used in both indexing and search.',
   },
   {
     name: 'ss-completion',
     label: 'Completion',
     availableOn: ['linux', 'darwin', 'win32'],
-    defaultModel: {
-      linux: 'qwen3.5:9b',
-      darwin: 'qwen3.5:9b',
-      win32: 'qwen3.5:9b',
-    },
-    description: 'Chat/completion model for agent calls.',
+    defaultModel: {},
+    description: 'Chat completion via Ollama. Used at search time.',
   },
   {
     name: 'ss-ocr',
     label: 'OCR',
     availableOn: ['linux', 'darwin', 'win32'],
-    defaultModel: {
-      linux: 'richardyoung/olmocr2:7b',
-      darwin: 'richardyoung/olmocr2:7b',
-      win32: 'richardyoung/olmocr2:7b',
-    },
-    description: 'Vision-LLM OCR for scanned PDFs and exhibit images.',
+    defaultModel: {},
+    description: 'Visual OCR for low-density PDF pages and exhibit images.',
   },
   {
     name: 'ss-reranker',
-    label: 'Reranker',
+    label: 'Reranker (cross-encoder)',
     availableOn: ['linux'],
-    defaultModel: {
-      linux: 'Qwen/Qwen3-Reranker-8B',
-    },
-    description:
-      'Cross-encoder reranking. Linux+NVIDIA only — vllm-metal does not support cross-encoders.',
+    defaultModel: {},
+    description: "vLLM cross-encoder reranker. Linux-only — vllm-metal lacks cross-encoder support.",
   },
 ];
 
@@ -101,9 +91,9 @@ const OS_LABEL: Record<ModeOs, string> = {
 /* ─────────────────────────── Component ─────────────────────────── */
 
 export default function AdminRoleTypes() {
-  const [catalog, setCatalog] = useState<ModeCatalogEntry[]>(FALLBACK_CATALOG);
+  const [catalog, setCatalog] = useState<ModeCatalogEntry[]>(FALLBACK_CATALOG_NO_DEFAULTS);
   const [loading, setLoading] = useState(true);
-  const [backendMissing, setBackendMissing] = useState(false);
+  const [backendOffline, setBackendOffline] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -111,20 +101,26 @@ export default function AdminRoleTypes() {
     try {
       const res = await fetch('/api/admin/mode-catalog');
       if (res.status === 404) {
-        setBackendMissing(true);
-        setCatalog(FALLBACK_CATALOG);
+        setBackendOffline(true);
+        setCatalog(FALLBACK_CATALOG_NO_DEFAULTS);
         setError(null);
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const modes: ModeCatalogEntry[] = Array.isArray(data?.modes) ? data.modes : [];
-      setCatalog(modes.length > 0 ? modes : FALLBACK_CATALOG);
-      setBackendMissing(modes.length === 0);
+      if (modes.length > 0) {
+        setCatalog(modes);
+        setBackendOffline(false);
+      } else {
+        setCatalog(FALLBACK_CATALOG_NO_DEFAULTS);
+        setBackendOffline(true);
+      }
       setError(null);
     } catch (e: any) {
       setError(e?.message || String(e));
-      setCatalog(FALLBACK_CATALOG);
+      setCatalog(FALLBACK_CATALOG_NO_DEFAULTS);
+      setBackendOffline(true);
     } finally {
       setLoading(false);
     }
@@ -134,22 +130,33 @@ export default function AdminRoleTypes() {
     load();
   }, [load]);
 
+  // Re-fetch when the tab regains focus — operator may have just edited the
+  // source settings page and tabbed back; the live value should appear
+  // without a manual refresh.
+  useEffect(() => {
+    const onFocus = () => load();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [load]);
+
   return (
     <div className="space-y-4">
       <div className="bg-blue-50 border border-blue-200 rounded-md p-3 text-sm text-blue-900">
-        <strong>Mode Types</strong> are a fixed catalog. Sidecars auto-resolve
-        the underlying image / port / VRAM based on their host OS. To assign
-        modes to hosts, use the <em>Role Assignments</em> tab.
+        <strong>Mode Types</strong> are a fixed catalog. The default model for
+        each mode is configured on its own settings page — click the chip in
+        the table to jump there. Use <em>Role Assignments</em> to override per
+        host.
       </div>
 
-      {backendMissing && (
+      {backendOffline && (
         <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3 text-sm text-yellow-900">
-          Backend endpoint <code>/api/admin/mode-catalog</code> is not deployed
-          yet — showing built-in defaults.
+          <code>/api/admin/mode-catalog</code> unreachable — live default models
+          can&apos;t be shown. Visit the linked settings page directly to view or
+          change the value.
         </div>
       )}
 
-      {error && !backendMissing && (
+      {error && !backendOffline && (
         <div className="bg-red-50 text-red-800 border border-red-200 rounded-md p-3 text-sm">
           {error}{' '}
           <button onClick={load} className="ml-2 underline">
@@ -174,7 +181,7 @@ export default function AdminRoleTypes() {
               <thead>
                 <tr className="border-b border-gray-200">
                   <th className="text-left py-2 px-3 font-medium text-gray-600 w-40">Mode</th>
-                  <th className="text-left py-2 px-3 font-medium text-gray-600">Default model (per OS)</th>
+                  <th className="text-left py-2 px-3 font-medium text-gray-600">Default model</th>
                   <th className="text-left py-2 px-3 font-medium text-gray-600 w-44">Available on</th>
                 </tr>
               </thead>
@@ -182,6 +189,17 @@ export default function AdminRoleTypes() {
                 {catalog.map((m) => {
                   const allOses: ModeOs[] = ['linux', 'darwin', 'win32'];
                   const onlyLinux = m.availableOn.length === 1 && m.availableOn[0] === 'linux';
+                  const source = settingsPageForMode(m.name);
+                  // Collapse per-OS values when they're all identical — most
+                  // modes use the same model on every OS, so a single row is
+                  // less noisy than three.
+                  const availableValues = m.availableOn
+                    .map((os) => m.defaultModel?.[os])
+                    .filter((v): v is string => !!v);
+                  const allSame =
+                    availableValues.length > 0 &&
+                    availableValues.every((v) => v === availableValues[0]);
+
                   return (
                     <tr key={m.name} className="border-b border-gray-100 align-top">
                       <td className="py-3 px-3">
@@ -191,22 +209,65 @@ export default function AdminRoleTypes() {
                         )}
                       </td>
                       <td className="py-3 px-3">
-                        <ul className="space-y-0.5">
-                          {allOses.map((os) => {
-                            const model = m.defaultModel?.[os];
-                            const available = m.availableOn.includes(os);
-                            return (
-                              <li key={os} className="font-mono text-xs">
-                                <span className="inline-block w-14 text-gray-500">{OS_LABEL[os]}:</span>{' '}
-                                {available && model ? (
-                                  <span className="text-gray-800">{model}</span>
-                                ) : (
-                                  <span className="text-gray-400">— not available —</span>
-                                )}
-                              </li>
-                            );
-                          })}
-                        </ul>
+                        {backendOffline ? (
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-xs text-gray-400">—</span>
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-50 text-yellow-800 border border-yellow-200">
+                              backend offline
+                            </span>
+                            {source && (
+                              <Link
+                                href={source.href}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-blue-50 text-blue-800 border border-blue-200 hover:bg-blue-100"
+                              >
+                                {source.label} <span aria-hidden>↗</span>
+                              </Link>
+                            )}
+                          </div>
+                        ) : allSame ? (
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono text-xs text-gray-800">{availableValues[0]}</span>
+                            {source && (
+                              <Link
+                                href={source.href}
+                                title={`Configured at ${source.label} (Config key: ${source.configKey})`}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-blue-50 text-blue-800 border border-blue-200 hover:bg-blue-100"
+                              >
+                                {source.label} <span aria-hidden>↗</span>
+                              </Link>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="space-y-1">
+                            <ul className="space-y-0.5">
+                              {allOses.map((os) => {
+                                const model = m.defaultModel?.[os];
+                                const available = m.availableOn.includes(os);
+                                return (
+                                  <li key={os} className="font-mono text-xs">
+                                    <span className="inline-block w-14 text-gray-500">{OS_LABEL[os]}:</span>{' '}
+                                    {available && model ? (
+                                      <span className="text-gray-800">{model}</span>
+                                    ) : available ? (
+                                      <span className="text-gray-400">—</span>
+                                    ) : (
+                                      <span className="text-gray-400">— not available —</span>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                            {source && (
+                              <Link
+                                href={source.href}
+                                title={`Configured at ${source.label} (Config key: ${source.configKey})`}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-blue-50 text-blue-800 border border-blue-200 hover:bg-blue-100 mt-1"
+                              >
+                                {source.label} <span aria-hidden>↗</span>
+                              </Link>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-3">
                         <div className="flex flex-wrap gap-1">
@@ -238,8 +299,9 @@ export default function AdminRoleTypes() {
         )}
 
         <p className="text-xs text-gray-500 mt-4">
-          Source: <code>/api/admin/mode-catalog</code>. Want a different model?{' '}
-          Override per-host on the <strong>Role Assignments</strong> page.
+          Source: <code>/api/admin/mode-catalog</code> (live Config values).
+          Click a settings-page chip to change a default; per-host overrides
+          live on the <strong>Role Assignments</strong> page.
         </p>
       </div>
     </div>

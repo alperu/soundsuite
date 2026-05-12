@@ -1,13 +1,17 @@
 import { NextResponse } from 'next/server';
-import { MODE_CATALOG } from '@/lib/db/role-registry';
+import { getModeCatalog } from '@/lib/gpu/mode-catalog-server';
 
 /**
  * GET /api/admin/mode-catalog
  *
  * Returns the fixed 4-mode catalog (ss-embedding, ss-completion, ss-ocr,
- * ss-reranker). Per-OS availability and default model are baked in — the
- * sidecar uses these to resolve the underlying image/port/VRAM at runtime.
+ * ss-reranker). Per-OS availability is baked in; the per-mode default
+ * model is READ DYNAMICALLY from the Config DB (set by the existing admin
+ * settings pages — /admin/embedding, /admin/localai, /admin/ocr,
+ * /admin/reranking). The sidecar uses the model the master pushes via
+ * `modelOverrides` to spin up the right container/model at runtime.
  */
 export async function GET() {
-  return NextResponse.json({ modes: MODE_CATALOG });
+  const modes = await getModeCatalog();
+  return NextResponse.json({ modes });
 }

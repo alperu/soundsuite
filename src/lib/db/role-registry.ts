@@ -18,67 +18,36 @@ import { prisma } from './prisma';
 import type { HostRoleAssignment } from '@prisma/client';
 
 // ─── Public types ───────────────────────────────────────────────────────
+//
+// All the static mode-catalog data (defaults, availability, labels) is
+// shared with the UI in src/lib/gpu/mode-catalog.ts. Re-exporting here so
+// existing import paths keep working without each consumer having to know
+// about the new file.
 
-export const ALL_MODES = ['ss-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker'] as const;
-export type ModeName = (typeof ALL_MODES)[number];
-
-export interface ModeCatalogEntry {
-  name: ModeName;
-  label: string;
-  availableOn: Array<'linux' | 'darwin' | 'win32'>;
-  defaultModel: Partial<Record<'linux' | 'darwin' | 'win32', string>>;
-  description: string;
-}
-
-export const MODE_CATALOG: ModeCatalogEntry[] = [
-  {
-    name: 'ss-embedding',
-    label: 'Embedding',
-    availableOn: ['linux', 'darwin', 'win32'],
-    defaultModel: {
-      linux: 'qwen3-embedding:0.6b',
-      darwin: 'qwen3-embedding:0.6b',
-      win32: 'qwen3-embedding:0.6b',
-    },
-    description:
-      'Document and query embedding via Ollama. Lightweight (~1.2 GB VRAM); used in both indexing and search.',
-  },
-  {
-    name: 'ss-completion',
-    label: 'Completion',
-    availableOn: ['linux', 'darwin', 'win32'],
-    defaultModel: {
-      linux: 'qwen3.5:9b',
-      darwin: 'qwen3.5:9b',
-      win32: 'qwen3.5:9b',
-    },
-    description: 'Chat completion via Ollama. ~10 GB VRAM; used at search time.',
-  },
-  {
-    name: 'ss-ocr',
-    label: 'OCR',
-    availableOn: ['linux', 'darwin', 'win32'],
-    defaultModel: {
-      linux: 'richardyoung/olmocr2:7b-q8',
-      darwin: 'richardyoung/olmocr2:7b-q8',
-      win32: 'richardyoung/olmocr2:7b-q8',
-    },
-    description:
-      'Visual OCR for low-density PDF pages. ~8 GB VRAM; used during indexing only.',
-  },
-  {
-    name: 'ss-reranker',
-    label: 'Reranker (cross-encoder)',
-    availableOn: ['linux'],
-    defaultModel: { linux: 'Qwen/Qwen3-Reranker-8B' },
-    description:
-      'vLLM cross-encoder reranker. Currently linux-only — vllm-metal lacks cross-encoder support (see vllm-metal#361).',
-  },
-];
-
-export function isModeName(s: string): s is ModeName {
-  return (ALL_MODES as readonly string[]).includes(s);
-}
+import {
+  ALL_MODES,
+  MODE_CATALOG,
+  isModeName,
+  defaultModelFor,
+  resolveModelFromConfig,
+  type ModeName,
+  type ModeCatalogEntry,
+  type HostOs,
+} from '@/lib/gpu/mode-catalog';
+import {
+  getModeCatalog,
+  defaultModelForAsync,
+} from '@/lib/gpu/mode-catalog-server';
+export {
+  ALL_MODES,
+  MODE_CATALOG,
+  getModeCatalog,
+  isModeName,
+  defaultModelFor,
+  defaultModelForAsync,
+  resolveModelFromConfig,
+};
+export type { ModeName, ModeCatalogEntry, HostOs };
 
 export interface AssignmentInput {
   sidecarUrl: string;

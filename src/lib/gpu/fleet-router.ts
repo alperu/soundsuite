@@ -19,6 +19,7 @@ import {
   getEffectiveMinOnline,
   getEffectiveIdleTimeoutsMs,
 } from '@/lib/db/role-registry';
+import { resolveModelFromConfig, type ModeName } from '@/lib/gpu/mode-catalog';
 import { seedAssignmentsForHost } from '@/lib/db/role-registry-seed';
 
 const logger = createLogger('FleetRouter');
@@ -376,35 +377,66 @@ function detectHostOs(agentUrl: string): 'linux' | 'darwin' | 'win32' | 'unknown
  */
 function buildLegacyRegistry(
   enabledModes: string[],
-  modelOverrides: Record<string, string>,
+  effectiveModelFor: (mode: string) => string,
   hostOs: 'linux' | 'darwin' | 'win32' | 'unknown',
 ): Record<string, Record<string, unknown>> {
   const out: Record<string, Record<string, unknown>> = {};
   const isLinux = hostOs === 'linux';
   for (const mode of enabledModes) {
     const role = mode.replace(/^ss-/, '');
-    const override = modelOverrides[mode];
+    const model = effectiveModelFor(mode);
     const containerName = `ss-${role}`;
     switch (mode) {
       case 'ss-embedding':
         out[role] = isLinux
-          ? { image: 'ollama/ollama', model: override || 'qwen3-embedding:0.6b', port: 11434, vram: 1200, type: 'ollama', modes: ['indexing', 'searching'], containerName, priority: 'high' }
-          : { image: '', model: override || 'qwen3-embedding:0.6b', port: 11434, vram: 1200, type: 'ollama', modes: ['indexing', 'searching'], containerName, priority: 'high', runtime: 'host' };
+          ? { image: 'ollama/ollama', model, port: 11434, vram: 1200, type: 'ollama', modes: ['indexing', 'searching'], containerName, priority: 'high' }
+          : { image: '', model, port: 11434, vram: 1200, type: 'ollama', modes: ['indexing', 'searching'], containerName, priority: 'high', runtime: 'host' };
         break;
       case 'ss-completion':
         out[role] = isLinux
-          ? { image: 'ollama/ollama', model: override || 'qwen3.5:9b', port: 11435, vram: 10000, type: 'ollama', modes: ['searching'], containerName, priority: 'normal' }
-          : { image: '', model: override || 'qwen3.5:9b', port: 11434, vram: 10000, type: 'ollama', modes: ['searching'], containerName, priority: 'normal', runtime: 'host' };
+          ? { image: 'ollama/ollama', model, port: 11435, vram: 10000, type: 'ollama', modes: ['searching'], containerName, priority: 'normal' }
+          : { image: '', model, port: 11434, vram: 10000, type: 'ollama', modes: ['searching'], containerName, priority: 'normal', runtime: 'host' };
         break;
       case 'ss-ocr':
         out[role] = isLinux
-          ? { image: 'ollama/ollama', model: override || 'richardyoung/olmocr2:7b-q8', port: 11436, vram: 8000, type: 'ollama', modes: ['indexing'], containerName, gpuOnly: true, priority: 'critical' }
-          : { image: '', model: override || 'richardyoung/olmocr2:7b-q8', port: 11434, vram: 8000, type: 'ollama', modes: ['indexing'], containerName, priority: 'critical', runtime: 'host' };
+          ? { image: 'ollama/ollama', model, port: 11436, vram: 8000, type: 'ollama', modes: ['indexing'], containerName, gpuOnly: true, priority: 'critical' }
+          : { image: '', model, port: 11434, vram: 8000, type: 'ollama', modes: ['indexing'], containerName, priority: 'critical', runtime: 'host' };
         break;
       case 'ss-reranker':
         if (!isLinux) break; // unavailable on darwin/win32
-        out[role] = { image: 'vllm/vllm-openai', model: override || 'Qwen/Qwen3-Reranker-8B', port: 8099, vram: 7000, type: 'vllm', modes: ['searching'], containerName, priority: 'normal' };
+        out[role] = { image: 'vllm/vllm-openai', model, port: 8099, vram: 7000, type: 'vllm', modes: ['searching'], containerName, priority: 'normal' };
         break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Build the effective `modelOverrides` map pushed to the sidecar. The
+ * master is now authoritative for default models — for every enabled
+ * mode without an explicit per-host override row, we fold in the
+ * operator-set Config value (set via /admin/embedding, /admin/ocr, etc.).
+ *
+ * Older sidecars (pre-2.3.x) that don't understand `enabledModes` still
+ * receive the right model via the legacy `registry` payload built from
+ * the same effective map. Newer sidecars apply `modelOverrides[mode]` on
+ * top of their own resolveMode() boot defaults — and since we send the
+ * effective value for EVERY enabled mode, the sidecar's hardcoded fallback
+ * in mode-templates.ts is only ever the boot-time pre-push state.
+ */
+function buildEffectiveModelMap(
+  enabledModes: string[],
+  perHostOverrides: Record<string, string>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  cfg: any,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const mode of enabledModes) {
+    const explicit = perHostOverrides[mode];
+    if (explicit && explicit.trim()) {
+      out[mode] = explicit.trim();
+    } else {
+      out[mode] = resolveModelFromConfig(mode as ModeName, cfg);
     }
   }
   return out;
@@ -437,8 +469,14 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
   }
 
   const enabledModes = await getEnabledModesForHost(agentUrl);
-  const modelOverrides = await getModelOverridesForHost(agentUrl);
-  const registry = buildLegacyRegistry(enabledModes, modelOverrides, hostOs);
+  const perHostOverrides = await getModelOverridesForHost(agentUrl);
+  const cfg = await getConfig();
+  // Master is now authoritative for default models: fold the operator-set
+  // value from /admin/* into modelOverrides for every enabled mode that
+  // doesn't have an explicit per-host override. Sidecar applies these on
+  // top of its own resolveMode() boot defaults.
+  const effectiveModels = buildEffectiveModelMap(enabledModes, perHostOverrides, cfg);
+  const registry = buildLegacyRegistry(enabledModes, (m) => effectiveModels[m], hostOs);
   // Per-host minOnline + idleTimeouts MUST ride along — the sidecar's
   // /acquire gate (`Role "X" is disabled (minOnline=0)`) reads from
   // state.minOnline, which is only updated by /config payloads that include
@@ -451,13 +489,14 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
     agent: agentUrl,
     hostOs,
     enabledModes,
-    overrides: Object.keys(modelOverrides),
+    perHostOverrides: Object.keys(perHostOverrides),
+    effectiveModels,
     legacyRoles: Object.keys(registry),
     minOnline: dbMin,
   });
   const result = await sendToSidecar(agentUrl, '/config', {
     enabledModes,
-    modelOverrides,
+    modelOverrides: effectiveModels,
     registry,
     minOnline: dbMin,
     idleTimeouts: dbIdle,
@@ -484,11 +523,12 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
   }
 
   const enabledModes = await getEnabledModesForHost(agentUrl);
-  const modelOverrides = await getModelOverridesForHost(agentUrl);
-  const registry = buildLegacyRegistry(enabledModes, modelOverrides, hostOs);
+  const perHostOverrides = await getModelOverridesForHost(agentUrl);
+  const cfg = await getConfig();
+  const effectiveModels = buildEffectiveModelMap(enabledModes, perHostOverrides, cfg);
+  const registry = buildLegacyRegistry(enabledModes, (m) => effectiveModels[m], hostOs);
   const dbIdle = await getEffectiveIdleTimeoutsMs(agentUrl);
   const dbMin = await getEffectiveMinOnline(agentUrl);
-  const cfg = await getConfig();
 
   // Global-config fallback layer (legacy keys, keyed by short role name).
   // Per-host DB values win.
@@ -511,7 +551,7 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
     idleTimeouts,
     minOnline,
     enabledModes,
-    modelOverrides,
+    modelOverrides: effectiveModels,
     registry,
   });
   markSelfConfigPush(agentUrl);

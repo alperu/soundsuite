@@ -212,13 +212,34 @@ function renderPsCell(c: ContainerState): React.ReactNode {
     return <span className="text-gray-300">—</span>;
   }
   if (c.status !== 'running') return <span className="text-gray-300">—</span>;
-  const models = (c.loadedModels ?? []).slice().sort((a, b) => (b.sizeVram || 0) - (a.sizeVram || 0));
+  const allLoaded = (c.loadedModels ?? []).slice().sort((a, b) => (b.sizeVram || 0) - (a.sizeVram || 0));
+
+  // Host-Ollama runtimes: ALL host-runtime roles share ONE Ollama process
+  // (host.docker.internal:11434). Each role's `ollamaPs` therefore returns
+  // the SAME list of models — every loaded model. If we render the full
+  // list under every role row, three rows show identical content, which
+  // makes the per-role attribution unreadable.
+  //
+  // Filter to just the model(s) whose name matches THIS role's def.model.
+  // Other rows' models will appear on their own rows. Use loose matching
+  // because Ollama appends `:latest` and other tags inconsistently.
+  const isHostOllama = c.image === 'host-ollama';
+  const roleModel = c.config?.model;
+  let models = allLoaded;
+  let filtered = false;
+  if (isHostOllama && roleModel) {
+    const base = roleModel.split(':')[0];
+    models = allLoaded.filter(m => m.name === roleModel || m.name.startsWith(`${base}:`) || m.name.includes(base));
+    filtered = models.length < allLoaded.length;
+  }
+
   if (models.length === 0) {
     const gpuOnly = c.config?.gpuOnly === true;
+    const otherLoaded = allLoaded.length > 0;
     return (
       <div className={`flex items-center gap-1 text-[11px] ${gpuOnly ? 'text-red-700' : 'text-orange-600'}`}>
         <span className={`inline-block w-1.5 h-1.5 rounded-full ${gpuOnly ? 'bg-red-600' : 'bg-orange-400'}`} />
-        {gpuOnly ? 'not loaded (GPU required)' : 'not loaded'}
+        {gpuOnly ? 'not loaded (GPU required)' : otherLoaded ? `not loaded (${allLoaded.length} other model${allLoaded.length === 1 ? '' : 's'} on shared Ollama)` : 'not loaded'}
       </div>
     );
   }
@@ -235,6 +256,11 @@ function renderPsCell(c: ContainerState): React.ReactNode {
           </div>
         );
       })}
+      {filtered && (
+        <div className="text-[10px] text-slate-400" title="Host-Ollama serves multiple roles from one process; other roles' models appear on their rows.">
+          + {allLoaded.length - models.length} other model{allLoaded.length - models.length === 1 ? '' : 's'} on shared Ollama
+        </div>
+      )}
     </div>
   );
 }
@@ -243,14 +269,35 @@ function renderPsCell(c: ContainerState): React.ReactNode {
 function PsSummaryLine({ containers }: { containers: Record<string, ContainerState> }) {
   const all: LoadedModel[] = [];
   let anyOllama = false;
+  const runningVllm: string[] = [];
+  // Host-Ollama runtimes share one endpoint — every role sees the same
+  // loadedModels list. Deduplicate by model name so we don't triple-count.
+  const seen = new Set<string>();
   for (const c of Object.values(containers)) {
     const type = c.type || c.config?.type;
     if (type === 'ollama' || type === 'dmr') anyOllama = true;
-    if (c.loadedModels) all.push(...c.loadedModels);
+    if (type === 'vllm' && c.status === 'running') runningVllm.push(c.role || c.name || 'vllm');
+    if (c.loadedModels) {
+      for (const m of c.loadedModels) {
+        if (seen.has(m.name)) continue;
+        seen.add(m.name);
+        all.push(m);
+      }
+    }
   }
-  if (!anyOllama) return null;
+  if (!anyOllama && runningVllm.length === 0) return null;
   if (all.length === 0) {
-    return <div className="mb-2 text-xs text-slate-500">No models loaded in VRAM.</div>;
+    // vLLM holds VRAM at the container level without per-model attribution.
+    // Avoid the misleading "No models loaded" when a running vLLM container
+    // is actually holding tens of GB.
+    if (runningVllm.length > 0) {
+      return (
+        <div className="mb-2 text-xs text-slate-600">
+          <span className="font-semibold">{runningVllm.join(', ')}</span> running on vLLM (no per-model VRAM attribution available — see VRAM panel below for device totals)
+        </div>
+      );
+    }
+    return <div className="mb-2 text-xs text-slate-500">No Ollama models loaded in VRAM.</div>;
   }
   const totalVram = all.reduce((s, m) => s + (m.sizeVram || 0), 0);
   const gpuPctAvg = Math.round(

@@ -269,8 +269,19 @@ export async function snapshotVram(): Promise<VramSnapshot> {
       //      under-estimate when gpu-memory-utilization >> def.vram (e.g.
       //      0.95 of 48GB ≈ 45GB vs def.vram=7000) — that's why "33 GB
       //      unattributed" appeared in production before this fix.
-      if (procVramByRole[role] !== undefined) {
-        actualMb = procVramByRole[role];
+      // vLLM forks worker processes whose PIDs differ from the container's
+      // State.Pid that getRoleHostPids reads. nvidia-smi sees the workers
+      // but the parent-PID match misses them — procVramByRole[role] ends
+      // up at 0 or much smaller than reality. Trust per-process attribution
+      // only when it covers at least half the role's declared budget;
+      // otherwise fall through to the 0.95×total estimate. Truthful values
+      // beat plausible-but-wrong ones in the admin UI.
+      const procAttribMb = procVramByRole[role];
+      const procIsCredible = typeof procAttribMb === 'number'
+        && procAttribMb > 0
+        && (def.vram === 0 || procAttribMb >= def.vram * 0.5);
+      if (procIsCredible) {
+        actualMb = procAttribMb;
       } else if (totalMb > 0) {
         // No per-process attribution available. Make the static fallback
         // truthful: vLLM is launched with --gpu-memory-utilization 0.95
@@ -310,22 +321,38 @@ export async function snapshotVram(): Promise<VramSnapshot> {
   }
 
   // Host-Ollama fallback: when nvidia-smi reports nothing AND operator set a
-  // declared budget, surface that as totalMb so the planner can still gate
-  // loads. usedMb is then sum(attributedMb) from /api/ps which IS accurate
-  // for the host endpoint (Ollama reports size_vram on Metal/CUDA alike).
+  // declared budget, use that as totalMb. CRITICAL: usedMb must include EVERY
+  // loaded model on the host Ollama, even ones whose name doesn't match any
+  // role's def.model. Otherwise a manually-pulled model (e.g. operator did
+  // `ollama pull minicpm-v` directly, but the OCR role's def.model is
+  // `richardyoung/olmocr2:7b-q8`) shows up in `ollama ps` but disappears
+  // from our usedMb calc, making the UI read "1.3 GB used" when actually
+  // 6.1 GB is loaded. The unattributed delta surfaces separately so the
+  // operator can see "model X is loaded but no role claims it."
+  let totalLoadedMb = 0;
+  if (hostOllamaPs) {
+    for (const m of hostOllamaPs) totalLoadedMb += Math.round((m.sizeVram || 0) / (1024 * 1024));
+  }
   if (vramSource === 'unknown' && state.hostOllamaEnabled && state.hostOllamaBudgetMb > 0) {
     totalMb = state.hostOllamaBudgetMb;
-    freeMb = Math.max(0, totalMb - attributedMb);
+    freeMb = Math.max(0, totalMb - totalLoadedMb);
     vramSource = 'host-declared';
   }
-  const usedMb = vramSource === 'host-declared' ? attributedMb : Math.max(0, totalMb - freeMb);
+  const usedMb = vramSource === 'host-declared'
+    ? totalLoadedMb
+    : Math.max(0, totalMb - freeMb);
+  // unattributedMb captures models loaded on the shared Ollama that no role
+  // claims by def.model match — surfaces "stuff loaded that we don't own."
+  const unattributedMb = vramSource === 'host-declared'
+    ? Math.max(0, totalLoadedMb - attributedMb)
+    : Math.max(0, usedMb - attributedMb);
 
   return {
     totalMb,
     freeMb,
     usedMb,
     perRole,
-    unattributedMb: Math.max(0, usedMb - attributedMb),
+    unattributedMb,
     ts: Date.now(),
     vramSource,
   };
