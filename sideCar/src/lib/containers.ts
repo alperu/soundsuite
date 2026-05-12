@@ -515,118 +515,44 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
 }
 
 /**
- * Roles that should run in a given mode.
- *
- * Union of:
- *   1. Roles whose registry definition includes this mode (the original semantic)
- *   2. Roles with minOnline >= 1 (operator override — must run regardless of mode)
- *
- * minOnline=0 takes precedence: switchMode further filters those out so an
- * opt-out wins even when the registry says the role belongs in this mode.
+ * Roles currently assigned to this sidecar. The legacy "indexing vs searching"
+ * mode toggle has been removed — per-host mode tags now live in the master's
+ * HostRoleAssignment table and arrive via the WS /config push. This function
+ * is kept for back-compat with any internal call sites that still expect a
+ * list of active role names; it returns every non-utility role in the
+ * (already-trimmed) registry. The master is the source of truth.
  */
-export function containersForMode(mode: string): string[] {
-  const fromRegistry = Object.entries(state.registry)
-    .filter(([, def]) => def.modes.includes(mode as 'indexing' | 'searching'))
+export function containersForMode(_mode?: string): string[] {
+  // Honor minOnline=0 opt-out so callers don't auto-start opted-out roles.
+  return Object.entries(state.registry)
+    .filter(([role, def]) => def.type !== 'utility' && (state.minOnline?.[role] ?? 1) > 0)
     .map(([role]) => role);
-  const forced = Object.entries(state.minOnline)
-    .filter(([role, n]) => (n ?? 0) > 0 && state.registry[role])
-    .map(([role]) => role);
-  return Array.from(new Set([...fromRegistry, ...forced]));
 }
 
+/**
+ * Legacy mode switch — neutered. The "indexing vs searching" model has been
+ * replaced by per-host role assignments (HostRoleAssignment table on the
+ * master). Old masters and old UI clients may still POST /api/mode; we
+ * accept the call, persist the requested mode label for back-compat
+ * (so /api/status doesn't drift), and otherwise do nothing.
+ *
+ * Real role activation/deactivation now happens via the registry trim in
+ * ws-client.ts when the master pushes its per-host enabledModes set.
+ */
 export async function switchMode(newMode: string): Promise<Record<string, unknown>> {
   if (newMode !== 'indexing' && newMode !== 'searching') {
-    throw new Error(`Invalid mode: ${newMode}`);
+    return { error: `Invalid mode: ${newMode} (legacy field; use /admin/roleassign for per-host role tags instead)` };
   }
-  if (newMode === state.currentMode) return { mode: state.currentMode, message: 'Already in this mode' };
-
-  const oldRoles = containersForMode(state.currentMode);
-  const newRoles = containersForMode(newMode);
-  // A role with minOnline>=1 stays running across mode switches — the operator
-  // policy overrides the mode definition. Only stop roles that are absent from
-  // the new mode AND have no min-online floor.
-  const toStop = oldRoles.filter((r) => !newRoles.includes(r) && (state.minOnline[r] ?? 0) === 0);
-  // Honor master-pushed minOnline=0 — never auto-start a role the operator
-  // has explicitly opted out of. The role can still be started on-demand
-  // via /acquire from a real request; this only suppresses mode-switch starts.
-  const skipped = newRoles.filter((r) => !oldRoles.includes(r) && (state.minOnline[r] ?? 1) === 0);
-  const toStart = newRoles.filter((r) => !oldRoles.includes(r) && (state.minOnline[r] ?? 1) > 0);
-
-  log.info(`Switching mode: ${state.currentMode} -> ${newMode}`);
-  log.info(`Stop: ${toStop.join(', ') || 'none'} | Start: ${toStart.join(', ') || 'none'}${skipped.length ? ` | Skipped (minOnline=0): ${skipped.join(', ')}` : ''}`);
-
-  // Start new containers first
-  const startResults: Record<string, string> = {};
-  for (const role of toStart) {
-    try {
-      await ensureContainerForRole(role);
-      const def = state.registry[role];
-      // Host-runtime roles have no Docker container to inspect/start —
-      // ensureContainerForRole already probed reachability.
-      if (def.runtime === 'host') {
-        startResults[role] = 'host-runtime';
-        continue;
-      }
-      if (def.runtime === 'docker-model-runner') {
-        startResults[role] = 'docker-model-runner';
-        continue;
-      }
-      const cs = await getContainerState(def.containerName);
-      if (cs.status === 'running') {
-        startResults[role] = 'already_running';
-      } else {
-        await startContainer(def.containerName);
-        startResults[role] = 'started';
-      }
-    } catch (err) {
-      startResults[role] = `error: ${(err as Error).message}`;
-    }
-  }
-
-  // Drain containers to stop (wait up to 10s for active requests)
-  const stopResults: Record<string, string> = {};
-  for (const role of toStop) {
-    if (state.perRole[role].activeRequests > 0) {
-      log.info(`Draining ${role} (${state.perRole[role].activeRequests} active requests)...`);
-      const deadline = Date.now() + 10_000;
-      while (state.perRole[role].activeRequests > 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 500));
-      }
-    }
-    try {
-      clearIdleTimerForRole(role);
-      const def = state.registry[role];
-      // Host-runtime: unload the model from host Ollama instead of docker stop.
-      // Other models on the same Ollama (other roles) remain loaded — Ollama's
-      // keep_alive: 0 is keyed by model name.
-      if (def.runtime === 'host') {
-        if (def.model) {
-          await ollamaUnload(def.port, def.model, role);
-          stopResults[role] = 'unloaded';
-        } else {
-          stopResults[role] = 'host-runtime';
-        }
-        continue;
-      }
-      if (def.runtime === 'docker-model-runner') {
-        // DMR has no public unload API. Skip — DMR's scheduler decides
-        // when to evict vllm-metal workers. Logged as a no-op so the
-        // operator sees we tried.
-        log.info(`switchMode stop: ${role} on DMR — no unload API available, model stays resident`);
-        stopResults[role] = 'docker-model-runner (no unload API)';
-        continue;
-      }
-      await stopContainer(def.containerName);
-      stopResults[role] = 'stopped';
-    } catch (err) {
-      stopResults[role] = `error: ${(err as Error).message}`;
-    }
-  }
-
+  const previous = state.currentMode;
   state.currentMode = newMode as 'indexing' | 'searching';
   saveConfig();
-  log.info(`Mode switched to ${newMode}`);
-  return { mode: newMode, started: startResults, stopped: stopResults };
+  log.info(`Mode label set to ${newMode} (legacy no-op — was ${previous}; roles are governed by per-host assignment now)`);
+  return {
+    mode: newMode,
+    started: {},
+    stopped: {},
+    message: 'Mode label persisted but no longer controls roles. Use /admin/roleassign on the master to enable/disable roles per host.',
+  };
 }
 
 export async function provisionContainers(): Promise<Record<string, Record<string, string>>> {

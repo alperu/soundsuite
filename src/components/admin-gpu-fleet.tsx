@@ -831,27 +831,9 @@ export default function GpuFleetPanel() {
                 </div>
               )}
 
-              {/* Mode Selector (for single-GPU machines) */}
-              {cachedStatus.mode && (
-                <div className="mb-6 p-4 bg-gray-50 rounded-lg">
-                  <h3 className="text-sm font-medium text-gray-700 mb-2">Mode (Single-GPU)</h3>
-                  <p className="text-xs text-gray-500 mb-3">Controls which containers are active. Multi-GPU machines can run all concurrently.</p>
-                  <div className="flex gap-2">
-                    {['indexing', 'searching'].map((m) => (
-                      <button key={m} onClick={() => handleModeSwitch(selectedSidecar.url, m)}
-                        disabled={actionLoading !== null || pendingAction !== null}
-                        className={`px-4 py-2 text-sm rounded-md border-2 transition-colors ${
-                          cachedStatus.mode === m
-                            ? 'border-blue-500 bg-blue-50 text-blue-800 font-medium'
-                            : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
-                        } disabled:opacity-50`}>
-                        {pendingAction === `mode-${m}` ? 'Switching...'
-                          : m === 'indexing' ? 'Indexing (Embed+OCR)' : 'Searching (Embed+Completion+Reranker)'}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {/* Legacy "Mode (Single-GPU)" toggle removed — superseded by
+                  per-host tag assignment at /admin/roleassign. Roles can now
+                  be enabled per-host independently regardless of "mode". */}
 
               {/* VRAM accountant — what's actually loaded right now */}
               {cachedStatus.vram && cachedStatus.vram.totalMb > 0 && (() => {

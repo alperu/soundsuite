@@ -439,17 +439,28 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
   const enabledModes = await getEnabledModesForHost(agentUrl);
   const modelOverrides = await getModelOverridesForHost(agentUrl);
   const registry = buildLegacyRegistry(enabledModes, modelOverrides, hostOs);
+  // Per-host minOnline + idleTimeouts MUST ride along — the sidecar's
+  // /acquire gate (`Role "X" is disabled (minOnline=0)`) reads from
+  // state.minOnline, which is only updated by /config payloads that include
+  // the field. Without this, toggling a role on in the admin UI persists in
+  // the master DB but never propagates to the sidecar, so the role refuses
+  // to start with "minOnline=0". See: BASWS34 ss-reranker 2026-05-12.
+  const dbMin = await getEffectiveMinOnline(agentUrl);
+  const dbIdle = await getEffectiveIdleTimeoutsMs(agentUrl);
   logger.info('Pushing per-host mode set to sidecar', {
     agent: agentUrl,
     hostOs,
     enabledModes,
     overrides: Object.keys(modelOverrides),
     legacyRoles: Object.keys(registry),
+    minOnline: dbMin,
   });
   const result = await sendToSidecar(agentUrl, '/config', {
     enabledModes,
     modelOverrides,
     registry,
+    minOnline: dbMin,
+    idleTimeouts: dbIdle,
   });
   markSelfConfigPush(agentUrl);
   return result;

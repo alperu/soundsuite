@@ -2,7 +2,8 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import ServerConnection from '@/components/server-connection';
-import ModeSelector from '@/components/mode-selector';
+// ModeSelector removed — legacy single-GPU concept superseded by per-host
+// role tags on the master's /admin/roleassign page.
 import ContainerTable from '@/components/container-table';
 import StatsGrid from '@/components/stats-grid';
 import ActivityLog from '@/components/activity-log';
@@ -283,20 +284,8 @@ export default function Home() {
     }
   };
 
-  const handleModeChange = async (mode: string) => {
-    try {
-      addLog(`Switching mode to: ${mode}`);
-      const res = await fetch('/api/status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'setMode', mode }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      addLog(`Mode switch to ${mode} initiated`);
-    } catch (err) {
-      addLog(`Mode switch failed: ${(err as Error).message}`);
-    }
-  };
+  // handleModeChange removed — legacy. Use the master's /admin/roleassign
+  // page to enable/disable roles per host.
 
   const handleContainerStart = async (role: string) => {
     try {
@@ -493,10 +482,8 @@ export default function Home() {
         onRemove={handleRemoveMaster}
       />
 
-      <ModeSelector
-        currentMode={status?.mode ?? 'indexing'}
-        onModeChange={handleModeChange}
-      />
+      {/* Legacy mode selector removed — per-host role tags live on the
+          master's /admin/roleassign page. */}
 
       <VramPanel vram={status?.vram} />
 

@@ -118,12 +118,16 @@ export async function setAssignment(input: AssignmentInput): Promise<AssignmentR
     );
   }
   const url = normalizeUrl(input.sidecarUrl);
+  // Prisma rejects null for non-nullable Int columns (minOnline, idleTimeoutMin).
+  // The UI sometimes sends those fields as null when the operator didn't touch
+  // them — treat null AS undefined ("don't change") rather than passing it
+  // through. modelOverride is nullable so null is meaningful there (= clear).
   return prisma.hostRoleAssignment.upsert({
     where: { sidecarUrl_mode: { sidecarUrl: url, mode: input.mode } },
     update: {
-      ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
-      ...(input.minOnline !== undefined ? { minOnline: input.minOnline } : {}),
-      ...(input.idleTimeoutMin !== undefined ? { idleTimeoutMin: input.idleTimeoutMin } : {}),
+      ...(input.enabled != null ? { enabled: input.enabled } : {}),
+      ...(input.minOnline != null ? { minOnline: input.minOnline } : {}),
+      ...(input.idleTimeoutMin != null ? { idleTimeoutMin: input.idleTimeoutMin } : {}),
       ...(input.modelOverride !== undefined ? { modelOverride: input.modelOverride } : {}),
     },
     create: {
