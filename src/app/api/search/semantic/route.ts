@@ -6,6 +6,7 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const query = searchParams.get('query');
     const caseId = searchParams.get('caseId');
+    const chatId = searchParams.get('chatId');
 
     if (!query) {
       return NextResponse.json(
@@ -18,6 +19,7 @@ export async function GET(request: NextRequest) {
     const result = await registry.execute('query_case_knowledge', {
       query,
       ...(caseId && { caseId }),
+      ...(chatId && { chatId }),
       limit: 10,
     });
 

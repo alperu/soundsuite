@@ -102,6 +102,23 @@ model Config {
   updatedAt DateTime @updatedAt
 }
 
+model ChatAttachment {
+  id          String   @id @default(uuid())
+  chatId      String
+  fileName    String
+  hash        String
+  sizeBytes   Int
+  pageCount   Int?
+  chunkCount  Int?
+  status      String   @default("QUEUED")
+  error       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([chatId, hash])
+  @@index([chatId])
+}
+
 model ModelDownload {
   id                String    @id @default(uuid())
   modelName         String    @unique

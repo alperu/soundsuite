@@ -23,6 +23,7 @@ export async function POST(request: NextRequest) {
       provider,
       model,
       caseId,
+      chatId,
       limit = 20,
       searchMode = 'hybrid',
       workflowId,
@@ -36,6 +37,7 @@ export async function POST(request: NextRequest) {
       provider: string;
       model: string;
       caseId?: string;
+      chatId?: string;
       limit?: number;
       searchMode?: 'vector' | 'hybrid' | 'keyword';
       workflowId?: string;
@@ -89,6 +91,7 @@ export async function POST(request: NextRequest) {
           const searchResult = await registry.execute('query_case_knowledge', {
             query: query.trim(),
             ...(caseId ? { caseId } : {}),
+            ...(chatId ? { chatId } : {}),
             limit,
             searchMode,
           });
@@ -134,6 +137,7 @@ export async function POST(request: NextRequest) {
               const patternResult = await registry.execute('scan_for_pattern', {
                 pattern,
                 ...(caseId ? { caseId } : {}),
+            ...(chatId ? { chatId } : {}),
                 limit: 30,
               });
 

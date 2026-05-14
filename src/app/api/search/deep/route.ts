@@ -16,11 +16,12 @@ import { prisma } from '@/lib/db/prisma';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { query, provider, model, caseId, history, workflowIds, thinking, maxTokens, effort, multiPass } = body as {
+    const { query, provider, model, caseId, chatId, history, workflowIds, thinking, maxTokens, effort, multiPass } = body as {
       query: string;
       provider: string;
       model: string;
       caseId?: string;
+      chatId?: string;
       history?: ConversationTurn[];
       workflowIds?: string[];
       thinking?: boolean;
@@ -90,6 +91,7 @@ export async function POST(request: NextRequest) {
             provider,
             model,
             caseId: caseId || undefined,
+            chatId: chatId || undefined,
             onProgress,
             onToken: (text) => send({ type: 'token', text }),
             onThinking: (text) => send({ type: 'thinking', text }),

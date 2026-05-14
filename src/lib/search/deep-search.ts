@@ -60,6 +60,7 @@ export interface DeepSearchOptions {
   provider?: string;
   model?: string;
   caseId?: string;
+  chatId?: string;
   maxDepth?: number;
   onProgress?: (progress: DeepSearchProgress) => void;
   /** Previous conversation turns for follow-up questions */
@@ -218,12 +219,14 @@ export async function executeParallelSearches(
   caseId: string | undefined,
   registry: ToolRegistry,
   pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
+  chatId?: string,
 ): Promise<SubQueryResult[]> {
   const promises = subQueries.map(async (subQuery): Promise<SubQueryResult> => {
     try {
       const searchResult = await registry.execute('query_case_knowledge', {
         query: subQuery,
         ...(caseId ? { caseId } : {}),
+        ...(chatId ? { chatId } : {}),
         limit: 50,
         searchMode: 'hybrid',
       }, pushWarning ? { pushWarning } : undefined);
@@ -849,7 +852,7 @@ export async function deepSearch(
   registry: ToolRegistry,
   options: DeepSearchOptions = {},
 ): Promise<DeepSearchResult> {
-  const { provider, model, caseId, onProgress, history, workflowContext, thinking, maxTokens, effort, signal, onToken, onThinking, multiPass } = options;
+  const { provider, model, caseId, chatId, onProgress, history, workflowContext, thinking, maxTokens, effort, signal, onToken, onThinking, multiPass } = options;
   const emit = onProgress || (() => {});
   const checkAbort = () => {
     if (signal?.aborted) {
@@ -904,6 +907,7 @@ export async function deepSearch(
     caseId,
     registry,
     pushWarning,
+    chatId,
   );
 
   // Step 2b: Supplementary pattern search (regex fallback for vocabulary mismatch)

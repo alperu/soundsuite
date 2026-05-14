@@ -1,5 +1,38 @@
 import { NextRequest, NextResponse } from 'next/server';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import { loadSession, deleteSession } from '@/lib/chat/history-service';
+import { dropChatTable } from '@/lib/chat/chat-vector-store';
+import { prisma } from '@/lib/db/prisma';
+import { logger } from '@/lib/logger';
+
+async function cleanupChatAttachments(chatId: string): Promise<void> {
+  try {
+    await dropChatTable(chatId);
+  } catch (err) {
+    logger.warn('chat-delete: dropChatTable failed', {
+      chatId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  try {
+    const dir = path.join(process.cwd(), 'data', 'chat-attachments', chatId.replace(/[^a-zA-Z0-9_-]/g, '_'));
+    await fs.rm(dir, { recursive: true, force: true });
+  } catch (err) {
+    logger.warn('chat-delete: rm attachments dir failed', {
+      chatId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  try {
+    await prisma.chatAttachment.deleteMany({ where: { chatId } });
+  } catch (err) {
+    logger.warn('chat-delete: chatAttachment rows delete failed', {
+      chatId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 interface Params {
   params: Promise<{ id: string }>;
@@ -30,6 +63,7 @@ export async function DELETE(request: NextRequest, { params }: Params) {
     if (!deleted) {
       return NextResponse.json({ error: 'Session not found' }, { status: 404 });
     }
+    await cleanupChatAttachments(id);
     return NextResponse.json({ ok: true });
   } catch (error) {
     console.error('Failed to delete chat session:', error);

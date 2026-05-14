@@ -17,6 +17,14 @@ Sound Suite (court-lens-mcp) is a local, self-hosted document intelligence platf
 
 Memory of context-mode tool routing: check `~/.claude/projects/-Users-alper-Code-court-lens-mcp/memory/MEMORY.md` for any user-specific preferences before invoking a tool that might have been overridden.
 
+## Troubleshooting the app in a browser
+
+When you need to inspect the running Next.js app (DOM, network, console, navigation), use the **chrome-devtools MCP** — never screenshots.
+
+1. Check if it's already wired up: look for `mcp__chrome-devtools__*` tools in the available tool list, or probe CDP at `http://localhost:9222/json/version`.
+2. If not running, launch it: `./scripts/chromeMcpRun.sh [path]` (e.g. `./scripts/chromeMcpRun.sh /search`). The script registers the MCP server with Claude Code, verifies `:3000` is up, and launches Chrome with `--remote-debugging-port=9222` against a dedicated user-data-dir at `~/.cache/claude-debug-chrome`.
+3. After launching, the chrome-devtools MCP tools attach to that Chrome instance — drive the page from there.
+
 ## Commands
 
 ```bash

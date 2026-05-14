@@ -21,6 +21,7 @@ import { useResizableColumns } from '@/hooks/use-resizable-columns';
 import { AIThinkingLog, type AIProgressEntry } from './search/ai-thinking-log';
 import { WorkflowsPanel } from './search/workflows-panel';
 import { HistoryPanel } from './search/history-panel';
+import { ChatAttachmentsStrip } from './chat-attachments';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -319,6 +320,57 @@ export default function SearchInterface({
   const [streamTokenCount, setStreamTokenCount] = useState(0);
   const [compareSelections, setCompareSelections] = useState<Map<string, string>>(new Map());
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const [attachmentsRefreshKey, setAttachmentsRefreshKey] = useState(0);
+  const [uploadingCount, setUploadingCount] = useState(0);
+  const dragDepthRef = useRef(0);
+
+  const uploadChatPdfs = useCallback(async (files: File[]) => {
+    const pdfs = files.filter((f) => f.name.toLowerCase().endsWith('.pdf'));
+    if (pdfs.length === 0) return;
+    setUploadingCount((n) => n + pdfs.length);
+    try {
+      for (const file of pdfs) {
+        const fd = new FormData();
+        fd.append('chatId', currentSessionId);
+        fd.append('file', file);
+        try {
+          await fetch('/api/search/chat-attachments', { method: 'POST', body: fd });
+        } catch {
+          /* surfaced as ERROR row */
+        }
+      }
+    } finally {
+      setUploadingCount((n) => Math.max(0, n - pdfs.length));
+      setAttachmentsRefreshKey((k) => k + 1);
+    }
+  }, [currentSessionId]);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    e.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDraggingFiles(true);
+  }, []);
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  }, []);
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    e.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setIsDraggingFiles(false);
+  }, []);
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    e.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDraggingFiles(false);
+    const files = Array.from(e.dataTransfer.files);
+    uploadChatPdfs(files);
+  }, [uploadChatPdfs]);
   // Stick-to-bottom: auto-scrolls only when the user is already near the bottom.
   // Reading older content scrolls them up → flag flips off → no autoscroll yank.
   // Default true so the first stream auto-follows.
@@ -549,6 +601,7 @@ export default function SearchInterface({
         provider,
         model,
         caseId: aiCaseId || undefined,
+        chatId: currentSessionId,
         thinking: thinkingMode,
         maxTokens,
         effort,
@@ -643,6 +696,7 @@ export default function SearchInterface({
         provider,
         model,
         caseId: aiCaseId || undefined,
+        chatId: currentSessionId,
         thinking: thinkingMode,
         maxTokens,
         effort,
@@ -1434,11 +1488,30 @@ export default function SearchInterface({
         </div>
 
         {/* Main Content */}
-        <main className={`flex-1 bg-gray-50 ${mode === 'analysis' ? 'flex overflow-hidden' : ''} ${mode === 'ai' ? 'relative flex flex-col overflow-hidden' : ''} ${mode === 'direct' ? 'overflow-auto' : ''}`}>
+        <main
+          className={`flex-1 bg-gray-50 ${mode === 'analysis' ? 'flex overflow-hidden' : ''} ${mode === 'ai' ? 'relative flex flex-col overflow-hidden' : ''} ${mode === 'direct' ? 'overflow-auto' : ''}`}
+          onDragEnter={mode === 'ai' ? handleDragEnter : undefined}
+          onDragOver={mode === 'ai' ? handleDragOver : undefined}
+          onDragLeave={mode === 'ai' ? handleDragLeave : undefined}
+          onDrop={mode === 'ai' ? handleDrop : undefined}
+        >
 
           {/* ---- AI Search Mode — Chat Layout ---- */}
           {mode === 'ai' && (
             <>
+              {isDraggingFiles && (
+                <div className="absolute inset-0 z-30 pointer-events-none flex items-center justify-center bg-blue-500/10 border-4 border-dashed border-blue-400 rounded-lg">
+                  <div className="bg-white px-6 py-4 rounded-lg shadow-lg border border-blue-200">
+                    <div className="text-blue-700 font-medium">Drop PDFs to add to this chat</div>
+                    <div className="text-xs text-blue-500 mt-1">PDF files only · indexed into this chat&apos;s search</div>
+                  </div>
+                </div>
+              )}
+              {uploadingCount > 0 && (
+                <div className="absolute top-2 right-2 z-20 bg-blue-600 text-white text-xs px-2 py-1 rounded shadow">
+                  Uploading {uploadingCount} PDF{uploadingCount === 1 ? '' : 's'}…
+                </div>
+              )}
               {/* Compare provider selection — shown above conversation when in compare mode */}
               {compareMode && (
                 <div className="flex-shrink-0 bg-white border-b border-gray-200 px-6 py-3">
@@ -1658,6 +1731,9 @@ export default function SearchInterface({
                   New content
                 </button>
               )}
+
+              {/* Per-chat attachments strip — appears above the input */}
+              <ChatAttachmentsStrip chatId={currentSessionId} refreshKey={attachmentsRefreshKey} />
 
               {/* Fixed bottom input with drag-resizable top edge */}
               <div className="flex-shrink-0 bg-white">

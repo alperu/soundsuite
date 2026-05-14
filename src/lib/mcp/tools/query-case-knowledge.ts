@@ -10,10 +10,12 @@ import { getCitationFormatter, CitationInput } from '../../citations/citation-fo
 import { detectLineNumbers } from '../../citations/line-number-detector';
 import { QueryPreprocessor } from '../../search/query-preprocessor';
 import { rerank } from '../../search/reranker';
+import { getChatVectorStore } from '../../chat/chat-vector-store';
 
 export interface QueryCaseKnowledgeParams {
   query: string;
   caseId?: string;
+  chatId?: string;
   limit?: number;
   searchMode?: 'vector' | 'hybrid' | 'keyword';
 }
@@ -30,6 +32,8 @@ export interface QueryCaseKnowledgeResult {
     volumeNumber?: number;
     caseNumber?: string;
     annotations?: string;
+    source?: 'docket' | 'chat';
+    chatAttachmentId?: string;
   }>;
 }
 
@@ -55,6 +59,10 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
           caseId: {
             type: 'string',
             description: 'Optional case ID to filter results',
+          },
+          chatId: {
+            type: 'string',
+            description: 'Optional chat session ID — also search per-chat attachments',
           },
           limit: {
             type: 'number',
@@ -84,7 +92,8 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     context: ToolExecutionContext,
     _config: ToolConfigEntry,
   ): Promise<QueryCaseKnowledgeResult> {
-    const { query, caseId, limit = 10, searchMode = 'hybrid' } = params;
+    const { query, caseId, chatId, limit = 10, searchMode = 'hybrid' } = params;
+    const chatHitChunkIds = new Set<string>();
 
     // Over-fetch candidates so the cross-encoder reranker has a larger pool to judge.
     // The reranker is far better at relevance scoring than embedding similarity,
@@ -165,6 +174,29 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
 
     // Perform primary search
     let searchResults = await context.vectorStore.search(searchQuery);
+
+    // Per-chat attachment search — alongside docket results
+    if (chatId) {
+      try {
+        const chatVs = await getChatVectorStore(chatId);
+        const chatQuery: SearchQuery = { limit: retrievalLimit };
+        if (queryEmbedding) chatQuery.vector = queryEmbedding;
+        if (ftsQuery) chatQuery.ftsQuery = ftsQuery;
+        else if (searchMode === 'hybrid' || searchMode === 'keyword') {
+          chatQuery.hybridQuery = query;
+        }
+        const chatResults = await chatVs.search(chatQuery);
+        for (const r of chatResults) {
+          chatHitChunkIds.add(r.chunkId);
+        }
+        searchResults = [...searchResults, ...chatResults];
+      } catch (err) {
+        context.logger.warn?.('Per-chat search failed (non-fatal)', {
+          chatId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // If page references were extracted, run a secondary metadata-filtered search and merge
     if (processed.pageReferences && searchResults.length < retrievalLimit) {
@@ -285,6 +317,28 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     // Enrich results with document names and citations
     const enrichedResults = await Promise.all(
       searchResults.map(async (result) => {
+        const isChatHit = chatHitChunkIds.has(result.chunkId);
+        if (isChatHit) {
+          const attachment = await (context.database as any).chatAttachment?.findUnique({
+            where: { id: result.metadata.documentId },
+            select: { id: true, fileName: true },
+          });
+          const fileName = attachment?.fileName || 'Chat attachment';
+          return {
+            text: result.text,
+            document: fileName,
+            page: result.metadata.pageNumber,
+            score: result.score,
+            citation: `${fileName} p.${result.metadata.pageNumber}`,
+            citationShort: `${fileName} p.${result.metadata.pageNumber}`,
+            filingType: undefined,
+            volumeNumber: undefined,
+            caseNumber: undefined,
+            annotations: result.metadata.annotations || undefined,
+            source: 'chat' as const,
+            chatAttachmentId: attachment?.id || result.metadata.documentId,
+          };
+        }
         const document = await context.database.document.findUnique({
           where: { id: result.metadata.documentId },
           select: { fileName: true, filing: true, case: true, documentType: true },
