@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as fs from 'fs/promises';
-import * as path from 'path';
 import { prisma } from '@/lib/db/prisma';
 import { getChatVectorStore } from '@/lib/chat/chat-vector-store';
+import { chatAttachmentFilePath } from '@/lib/chat/chat-attachment-paths';
 import { logger } from '@/lib/logger';
-
-const ATTACHMENT_ROOT = path.join(process.cwd(), 'data', 'chat-attachments');
 
 export async function DELETE(
   _request: NextRequest,
@@ -27,8 +25,7 @@ export async function DELETE(
     });
   }
 
-  const chatDir = path.join(ATTACHMENT_ROOT, row.chatId.replace(/[^a-zA-Z0-9_-]/g, '_'));
-  const filePath = path.join(chatDir, `${row.hash}.pdf`);
+  const filePath = chatAttachmentFilePath(row);
   try {
     await fs.unlink(filePath);
   } catch {

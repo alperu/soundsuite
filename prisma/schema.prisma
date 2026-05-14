@@ -108,8 +108,12 @@ model ChatAttachment {
   fileName    String
   hash        String
   sizeBytes   Int
+  mimeType    String   @default("application/pdf")
+  kind        String   @default("pdf")
   pageCount   Int?
   chunkCount  Int?
+  imageWidth  Int?
+  imageHeight Int?
   status      String   @default("QUEUED")
   error       String?
   createdAt   DateTime @default(now())

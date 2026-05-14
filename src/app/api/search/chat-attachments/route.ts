@@ -4,9 +4,12 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { prisma } from '@/lib/db/prisma';
 import { ingestChatAttachment } from '@/lib/chat/chat-ingest';
+import { ingestChatImage } from '@/lib/chat/chat-image-ingest';
+import {
+  chatAttachmentDir,
+  mimeTypeForFileName,
+} from '@/lib/chat/chat-attachment-paths';
 import { logger } from '@/lib/logger';
-
-const ATTACHMENT_ROOT = path.join(process.cwd(), 'data', 'chat-attachments');
 
 export async function GET(request: NextRequest) {
   const chatId = request.nextUrl.searchParams.get('chatId');
@@ -25,6 +28,10 @@ export async function GET(request: NextRequest) {
       status: true,
       error: true,
       createdAt: true,
+      mimeType: true,
+      kind: true,
+      imageWidth: true,
+      imageHeight: true,
     },
   });
   return NextResponse.json({ attachments: rows });
@@ -42,9 +49,15 @@ export async function POST(request: NextRequest) {
     if (!file) {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 });
     }
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-      return NextResponse.json({ error: 'Only PDF files are supported' }, { status: 400 });
+
+    const typed = mimeTypeForFileName(file.name);
+    if (!typed) {
+      return NextResponse.json(
+        { error: 'Unsupported file type. Allowed: PDF, PNG, JPEG.' },
+        { status: 400 },
+      );
     }
+    const { mimeType, kind, ext } = typed;
 
     const buffer = Buffer.from(await file.arrayBuffer());
     const hash = crypto.createHash('sha256').update(buffer).digest('hex');
@@ -56,9 +69,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ attachment: existing, duplicate: true });
     }
 
-    const chatDir = path.join(ATTACHMENT_ROOT, chatId.replace(/[^a-zA-Z0-9_-]/g, '_'));
+    const chatDir = chatAttachmentDir(chatId);
     await fs.mkdir(chatDir, { recursive: true });
-    const filePath = path.join(chatDir, `${hash}.pdf`);
+    const filePath = path.join(chatDir, `${hash}.${ext}`);
     await fs.writeFile(filePath, buffer);
 
     const row = await prisma.chatAttachment.create({
@@ -68,18 +81,31 @@ export async function POST(request: NextRequest) {
         hash,
         sizeBytes: buffer.length,
         status: 'QUEUED',
+        mimeType,
+        kind,
       },
     });
 
     // Fire-and-forget ingestion. Status surfaces via GET.
-    ingestChatAttachment({
-      attachmentId: row.id,
-      chatId,
-      filePath,
-      fileName: file.name,
-    }).catch((err) => {
+    const ingestPromise =
+      kind === 'pdf'
+        ? ingestChatAttachment({
+            attachmentId: row.id,
+            chatId,
+            filePath,
+            fileName: file.name,
+          })
+        : ingestChatImage({
+            attachmentId: row.id,
+            chatId,
+            filePath,
+            fileName: file.name,
+          });
+
+    ingestPromise.catch((err) => {
       logger.error('chat-attachment ingestion failed', {
         attachmentId: row.id,
+        kind,
         error: err instanceof Error ? err.message : String(err),
       });
     });

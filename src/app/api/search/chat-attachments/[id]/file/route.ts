@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as fs from 'fs/promises';
-import * as path from 'path';
 import { prisma } from '@/lib/db/prisma';
-
-const ATTACHMENT_ROOT = path.join(process.cwd(), 'data', 'chat-attachments');
+import { chatAttachmentFilePath } from '@/lib/chat/chat-attachment-paths';
 
 export async function GET(
   _request: NextRequest,
@@ -15,8 +13,7 @@ export async function GET(
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
   }
 
-  const chatDir = path.join(ATTACHMENT_ROOT, row.chatId.replace(/[^a-zA-Z0-9_-]/g, '_'));
-  const filePath = path.join(chatDir, `${row.hash}.pdf`);
+  const filePath = chatAttachmentFilePath(row);
 
   let buffer: Buffer;
   try {
@@ -25,9 +22,11 @@ export async function GET(
     return NextResponse.json({ error: 'File missing on disk' }, { status: 410 });
   }
 
+  const contentType = row.mimeType || 'application/pdf';
+
   return new NextResponse(buffer as any, {
     headers: {
-      'Content-Type': 'application/pdf',
+      'Content-Type': contentType,
       'Content-Disposition': `inline; filename="${row.fileName.replace(/"/g, '')}"`,
       'Cache-Control': 'private, max-age=300',
     },
