@@ -1,6 +1,6 @@
 {
   "name": "sound-suite-sidecar",
-  "version": "2.3.54",
+  "version": "2.3.55",
   "private": true,
   "description": "GPU Orchestrator Sidecar Agent — Next.js edition",
   "scripts": {

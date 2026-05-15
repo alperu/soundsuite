@@ -41,6 +41,17 @@ export function startIdleTimerForRole(role: string): void {
       startIdleTimerForRole(role);
       return;
     }
+    // minOnline guard: if operator requires >=1 instance of this role on this
+    // sidecar, never auto-stop. The master's enforceMinOnline loop would just
+    // re-acquire 30s later anyway, eating a cold-start (~30-60s) and breaking
+    // searches during the gap. Honor the operator intent and keep the
+    // container resident. Idle-stop only applies when minOnline=0.
+    const minOnline = state.minOnline?.[role] ?? 0;
+    if (minOnline >= 1) {
+      log.info(`Idle for ${timeoutMs / 1000}s (role: ${role}) — keeping resident (minOnline=${minOnline})`);
+      state.perRole[role].idleTimer = null;
+      return;
+    }
     // Host-runtime: evict the model from native Ollama's VRAM via
     // keep_alive: 0 instead of `docker stop`. The Ollama process keeps
     // running; only this role's model is unloaded. Other host-runtime roles

@@ -811,7 +811,15 @@ export default function GpuFleetPanel() {
                         );
                       })()}
                     </td>
-                    <td className="py-2 px-3 font-mono text-xs text-gray-600">{s.url}</td>
+                    <td className="py-2 px-3 font-mono text-xs text-gray-600">
+                      <a
+                        href={s.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-blue-600 hover:text-blue-800 hover:underline"
+                      >{s.url}</a>
+                    </td>
                     <td className="py-2 px-3">
                       {/* Connection mode (WS/direct) — operational mode pill removed. */}
                       <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${

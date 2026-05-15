@@ -682,6 +682,30 @@ export async function handleRelease(role?: string): Promise<Record<string, unkno
 }
 
 /**
+ * Heartbeat: re-arm the idle timer for a role without bumping activeRequests.
+ * Master calls this every ~60s while it considers the role "actively needed".
+ * Without it, the sidecar's idle timer fires after `idleTimeouts[role]` of
+ * silence and either stops the container (when minOnline=0) or no-ops (when
+ * minOnline>=1, per the guard in idle-timers.ts). Touch is the explicit
+ * "still interested" signal — cheaper than /acquire+/release and safe to
+ * call repeatedly.
+ */
+export async function handleTouch(role?: string): Promise<Record<string, unknown>> {
+  const r = role || 'reranker';
+  if (!state.perRole[r]) {
+    return { ok: false, role: r, error: `unknown role` };
+  }
+  startIdleTimerForRole(r);
+  state.perRole[r].lastRelease = new Date().toISOString();
+  return {
+    ok: true,
+    role: r,
+    activeRequests: state.perRole[r].activeRequests,
+    idleTimerArmed: true,
+  };
+}
+
+/**
  * Reset leaked activeRequests counters.
  * Used to recover from master-side bugs that send more /acquire than /release
  * (the historic failure mode that pinned VRAM at 99% — see

@@ -50,6 +50,12 @@ class RerankerLifecycle {
     ocr: 5 * 60 * 1000,
     reranker: 5 * 60 * 1000,
   };
+  // Heartbeat loop — pings the sidecar's /touch endpoint to re-arm its idle
+  // timer so the reranker container isn't auto-stopped during quiet periods.
+  // Paired with the sidecar's minOnline guard (idle-timers.ts), this means
+  // an operator with minOnline=1 + active master gets zero unexpected stops.
+  private heartbeatHandle: ReturnType<typeof setInterval> | null = null;
+  private static HEARTBEAT_INTERVAL_MS = 60_000;
 
   /**
    * Ensure the reranker container is running and healthy.
@@ -92,6 +98,7 @@ class RerankerLifecycle {
       );
       if (await this.isHealthy(host)) {
         this.state = 'ready';
+        this.startHeartbeat('reranker');
         return;
       }
       // Container "running" per the sidecar's report but endpoint isn't
@@ -111,6 +118,7 @@ class RerankerLifecycle {
     if (this.state === 'ready') {
       if (await this.isHealthy(host)) {
         await this.sendToSidecar('/acquire', 'POST', { role: 'reranker' });
+        this.startHeartbeat('reranker');
         return;
       }
       logger.warn('Container was marked ready but health check failed — restarting');
@@ -215,6 +223,37 @@ class RerankerLifecycle {
   /** Current lifecycle state (for diagnostics / admin UI). */
   getState(): { state: LifecycleState; agentBase: string | null } {
     return { state: this.state, agentBase: this.agentBase };
+  }
+
+  /**
+   * Start the heartbeat loop. Idempotent — calling repeatedly is safe.
+   * Fires immediately, then every HEARTBEAT_INTERVAL_MS until stopped.
+   * Errors are swallowed (heartbeat is best-effort; the sidecar's minOnline
+   * guard is the real safety net).
+   */
+  startHeartbeat(role: string = 'reranker'): void {
+    if (this.heartbeatHandle) return;
+    const tick = () => {
+      if (!this.agentBase) return;
+      this.sendToSidecar('/touch', 'POST', { role }).catch((err) => {
+        logger.debug('heartbeat /touch failed (non-fatal)', { error: (err as Error).message });
+      });
+    };
+    tick();
+    this.heartbeatHandle = setInterval(tick, RerankerLifecycle.HEARTBEAT_INTERVAL_MS);
+    if (typeof this.heartbeatHandle === 'object' && this.heartbeatHandle && 'unref' in this.heartbeatHandle) {
+      (this.heartbeatHandle as unknown as { unref: () => void }).unref();
+    }
+    logger.info('Reranker heartbeat started', { intervalMs: RerankerLifecycle.HEARTBEAT_INTERVAL_MS });
+  }
+
+  /** Stop the heartbeat loop. Safe to call when not running. */
+  stopHeartbeat(): void {
+    if (this.heartbeatHandle) {
+      clearInterval(this.heartbeatHandle);
+      this.heartbeatHandle = null;
+      logger.info('Reranker heartbeat stopped');
+    }
   }
 
   // ─── Internal ─────────────────────────────────────────────────────
@@ -353,6 +392,9 @@ class RerankerLifecycle {
       await this.waitForHealthy(host);
       this.state = 'ready';
       logger.info('Reranker container ready');
+      // Container is up — start the heartbeat so the sidecar's idle watchdog
+      // sees continuous activity and never fires the auto-stop.
+      this.startHeartbeat('reranker');
     } catch (err) {
       this.state = 'stopped';
       logger.error(
