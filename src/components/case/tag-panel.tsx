@@ -469,6 +469,10 @@ function inferPersonMarker(name: string): PersonMarker | undefined {
   if (name === 'judgeRef' || name === 'judgeRefs') return 'judge';
   if (name === 'courtClerkRef' || name === 'courtClerkRefs') return 'courtClerk';
   if (name === 'courtReporterRef' || name === 'courtReporterRefs') return 'courtReporter';
+  // `plaintiffLawyers` / `defendantLawyers` are attorneys, not the parties
+  // themselves — constrain the picker to Person rows carrying the `lawyer`
+  // intrinsic marker so the dropdown doesn't surface clients/witnesses.
+  if (name === 'plaintiffLawyers' || name === 'defendantLawyers') return 'lawyer';
   return undefined;
 }
 

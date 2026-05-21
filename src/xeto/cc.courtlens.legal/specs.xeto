@@ -124,6 +124,8 @@ Case: Dict {
   judgeRefs:          List? <of:Ref>
   plaintiffRefs:      List? <of:Ref>
   defendantRefs:      List? <of:Ref>
+  plaintiffLawyers:   List? <of:Ref>
+  defendantLawyers:   List? <of:Ref>
   respondentRefs:     List? <of:Ref>
   movantRefs:         List? <of:Ref>
   courtClerkRefs:     List? <of:Ref>
