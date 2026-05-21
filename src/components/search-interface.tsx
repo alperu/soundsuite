@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { deepSearchRunner } from '@/lib/search/deep-search-runner';
 import { useRouter } from 'next/navigation';
 import { AI_PROVIDERS, AI_PROVIDER_KEYS, AIProviderKey, AIModelDef } from '@/lib/ai/models';
 import { getPreference, setPreference } from '@/lib/indexed-db';
@@ -324,6 +325,43 @@ export default function SearchInterface({
   const [attachmentsRefreshKey, setAttachmentsRefreshKey] = useState(0);
   const [uploadingCount, setUploadingCount] = useState(0);
   const dragDepthRef = useRef(0);
+
+  // Mirror the singleton deep-search runner into local state. This is what
+  // lets an in-flight deep search survive page navigation: the runner keeps
+  // running outside the React tree, and when this component re-mounts we
+  // hydrate UI from runner.getSnapshot() immediately, then track further
+  // updates via the subscription.
+  useEffect(() => {
+    const sync = () => {
+      const s = deepSearchRunner.getSnapshot();
+      setDeepProgress(s.progress);
+      setStreamingAnswer(s.streamingAnswer);
+      setStreamTokenCount(s.streamTokenCount);
+      setSearchWarnings(s.warnings);
+      setAiProgressLog(s.progressLog.map(p => ({
+        type: 'progress',
+        step: p.step,
+        message: p.message,
+        timestamp: p.timestamp,
+      })) as AIProgressEntry[]);
+      // If the runner is still running, force aiLoading true so the spinner
+      // and stop button reappear when the user navigates back mid-search.
+      if (s.loading) setAiLoading(true);
+      // Mirror completed turns scoped to this chat session.
+      if (s.sessionId === currentSessionId) {
+        const turns = s.turns
+          .filter(t => t.sessionId === currentSessionId && t.result)
+          .map(t => ({
+            query: t.query,
+            result: t.result!,
+            searchTime: Math.max(0, t.completedAt - s.startTime),
+          }));
+        if (turns.length > 0) setDeepTurns(turns);
+      }
+    };
+    sync();
+    return deepSearchRunner.subscribe(sync);
+  }, [currentSessionId]);
 
   const uploadChatFiles = useCallback(async (files: File[]) => {
     const accepted = files.filter((f) => {
@@ -722,108 +760,28 @@ export default function SearchInterface({
     history?: Array<{ role: 'user' | 'assistant'; content: string }>,
   ): Promise<DeepSearchResult> => {
     const q = (query || aiQuery).trim();
-    const signal = aiAbortRef.current?.signal;
-    const res = await fetch('/api/search/deep', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        query: q,
-        provider,
-        model,
-        caseId: aiCaseId || undefined,
-        chatId: currentSessionId,
-        thinking: thinkingMode,
-        maxTokens,
-        effort,
-        multiPass,
-        ...(history && history.length > 0 ? { history } : {}),
-        ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
-      }),
-      signal: aiAbortRef.current?.signal,
+    const result = await deepSearchRunner.start({
+      query: q,
+      provider,
+      model,
+      caseId: aiCaseId || undefined,
+      sessionId: currentSessionId,
+      thinking: thinkingMode,
+      maxTokens,
+      effort,
+      multiPass,
+      ...(history && history.length > 0 ? { history } : {}),
+      ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
     });
-
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || 'Deep search failed');
+    if (!result) {
+      // Runner sets lastError on abort/failure; surface it to the caller so
+      // the existing catch path in handleAISearch fires.
+      const err = deepSearchRunner.getSnapshot().lastError || 'Deep search failed';
+      const e = new Error(err);
+      if (/aborted|stopped/i.test(err)) (e as any).name = 'AbortError';
+      throw e;
     }
-
-    const reader = res.body?.getReader();
-    if (!reader) throw new Error('No response stream');
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let finalResult: DeepSearchResult | null = null;
-
-    while (true) {
-      if (signal?.aborted) {
-        try { await reader.cancel(); } catch { /* noop */ }
-        const err = new Error('aborted');
-        (err as any).name = 'AbortError';
-        throw err;
-      }
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || ''; // keep incomplete line in buffer
-
-      for (const line of lines) {
-        if (signal?.aborted) break;
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line);
-          if (event.type === 'progress') {
-            const p = event as DeepSearchProgress;
-            if (p.warnings && p.warnings.length > 0) {
-              setSearchWarnings(prev => {
-                const next = [...prev];
-                for (const w of p.warnings!) {
-                  const idx = next.findIndex(x => x.source === w.source && x.host === w.host && x.message === w.message);
-                  if (idx >= 0) {
-                    // Server already increments .count and re-emits — overwrite locally.
-                    next[idx] = w;
-                  } else {
-                    next.push(w);
-                  }
-                }
-                return next;
-              });
-            }
-            // Don't replace deepProgress with a 'warning' step — leave the
-            // last real progress step visible so the pipeline keeps moving.
-            if (p.step !== 'warning') setDeepProgress(p);
-          } else if (event.type === 'token') {
-            setStreamingAnswer(prev => (prev ?? '') + event.text);
-            // Heuristic: ~4 chars per token. Cheaper than running a tokenizer
-            // and accurate enough for a progress indicator.
-            setStreamTokenCount(c => c + Math.max(1, Math.round((event.text as string).length / 4)));
-          } else if (event.type === 'thinking') {
-            // Surface thinking deltas as a progress entry — distinct from tokens.
-            setAiProgressLog(prev => [...prev, { step: 'thinking', message: event.text, timestamp: Date.now() } as AIProgressEntry]);
-          } else if (event.type === 'result') {
-            finalResult = event.data as DeepSearchResult;
-          } else if (event.type === 'error') {
-            throw new Error(event.error);
-          }
-        } catch (e) {
-          if (e instanceof Error && e.message !== line) throw e;
-          // Ignore JSON parse errors for partial lines
-        }
-      }
-    }
-
-    // Process remaining buffer
-    if (buffer.trim()) {
-      try {
-        const event = JSON.parse(buffer);
-        if (event.type === 'result') finalResult = event.data as DeepSearchResult;
-        else if (event.type === 'error') throw new Error(event.error);
-      } catch { /* ignore */ }
-    }
-
-    if (!finalResult) throw new Error('Deep search completed without result');
-    return finalResult;
+    return result;
   };
 
   // Auto-scroll chat to bottom (force = always, even if user scrolled up)
@@ -994,14 +952,12 @@ export default function SearchInterface({
           history.push({ role: 'assistant', content: turn.result.report });
         }
 
-        const t0Deep = performance.now();
-        const dr = await doDeepSearch(aiProvider, aiModel, currentQuery, history.length > 0 ? history : undefined);
+        // Runner owns the in-flight + completed state for deep search. The
+        // mirror effect copies runner.turns into local deepTurns, so we don't
+        // append the turn here. The await resolves once the runner records
+        // the completed turn.
+        await doDeepSearch(aiProvider, aiModel, currentQuery, history.length > 0 ? history : undefined);
         setDeepProgress(null);
-        if (isFollowUp) {
-          setDeepTurns(prev => [...prev, { query: currentQuery, result: dr, searchTime: Math.round(performance.now() - t0Deep) }]);
-        } else {
-          setDeepTurns([{ query: currentQuery, result: dr, searchTime: Math.round(performance.now() - t0Deep) }]);
-        }
         scrollChatToBottom();
       } else if (compareMode) {
         const entries = Array.from(compareSelections.entries()).filter(([p]) => configuredProviders[p]);
@@ -1065,9 +1021,11 @@ export default function SearchInterface({
   };
 
   const handleStopAI = useCallback(() => {
-    if (!aiAbortRef.current) return;
     aiStoppedRef.current = true;
-    aiAbortRef.current.abort();
+    if (aiAbortRef.current) aiAbortRef.current.abort();
+    // The deep-search runner lives outside this component (so it can survive
+    // page navigation), so abort it explicitly too.
+    deepSearchRunner.abort();
     setAiStopping(true);
     setAiError('Search stopped');
     setDeepProgress(null);
@@ -1090,7 +1048,9 @@ export default function SearchInterface({
     setAiProgressLog([]);
     setStreamingAnswer(null);
     setAiQuery('');
-    setCurrentSessionId(`session-${Date.now()}`);
+    const nextSession = `session-${Date.now()}`;
+    setCurrentSessionId(nextSession);
+    deepSearchRunner.reset(nextSession);
     aiQueryRef.current?.focus();
   }, []);
 
