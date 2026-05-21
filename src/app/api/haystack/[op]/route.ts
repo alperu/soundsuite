@@ -328,6 +328,13 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
           .where('id' as any, '=', idValue as any)
           .limit(1)
           .execute()
+        // Mirror the commit-path auto-upsert: when the panel reads a Motion
+        // by Filing.id and no Motion row exists yet, materialize one so the
+        // panel sees an empty-but-real record instead of an empty grid.
+        if (rows.length === 0 && table === 'Motion') {
+          const created = await ensureMotionForFiling(idValue)
+          if (created) rows = [created]
+        }
       }
     } else {
       switch (table) {
@@ -432,6 +439,56 @@ function inlineCourt(c: any): any {
 }
 
 /**
+ * Auto-upsert a Motion row mirroring a motion-typed Filing.
+ *
+ * Background: the case-management UI keys filings (events) by `Filing.id`,
+ * but tags live on the XETO entity (Motion / MotionAttachment / etc.). For
+ * motion-typed Filings we adopt the convention `Motion.id === Filing.id`, so
+ * the panel can read/write tags against the Filing id without the caller
+ * needing to know whether a Motion row has been materialized yet.
+ *
+ * Returns the (possibly freshly-created) Motion row, or null if no Filing
+ * exists for `filingId` or the Filing isn't motion-typed.
+ *
+ * Idempotency: races between two concurrent saves can both reach the
+ * `create` call. We catch the unique-violation on the second one and
+ * re-read the row.
+ */
+async function ensureMotionForFiling(filingId: string): Promise<any | null> {
+  const existing = await (prisma as any).motion.findUnique({ where: { id: filingId } })
+  if (existing) return existing
+  const filing = await (prisma as any).filing.findUnique({ where: { id: filingId } })
+  if (!filing) return null
+  if (!/motion/i.test(filing.filingType ?? '')) return null
+  try {
+    return await (prisma as any).motion.create({
+      data: {
+        id: filing.id,
+        filingId: filing.id,
+        caseId: filing.caseId,
+        title: filing.title ?? '',
+        description: filing.description ?? null,
+        // schema requires startPage (Int). Use 1 as a benign default; the
+        // real page range is on the underlying Document, not the Motion
+        // entity-level container.
+        startPage: 1,
+        endPage: null,
+        // XETO Motion spec requires the `motion` marker. Seed it so the
+        // create passes validation; if the caller's patch also sets it
+        // (the common case for the "tag motion=true" panel save), the
+        // tag merge is idempotent.
+        tags: { motion: { _kind: 'marker' } } as any,
+      },
+    })
+  } catch (e: any) {
+    // Likely a unique-violation race — another request created it first.
+    const row = await (prisma as any).motion.findUnique({ where: { id: filingId } })
+    if (row) return row
+    throw e
+  }
+}
+
+/**
  * commit — minimal v1 stub. Accepts `{ id, kind, patch }` (panel shape) or a
  * Haystack-style grid row with `id` + tag fields. Merges `patch` (or the row
  * minus `id`/`kind`) into the target record's `tags` JSON via Prisma.
@@ -481,7 +538,15 @@ async function opCommit(_params: URLSearchParams, body: any): Promise<string> {
   }
 
   try {
-    const existing = await client.findUnique({ where: { id } })
+    let existing = await client.findUnique({ where: { id } })
+    if (!existing && kind === 'motion') {
+      // Auto-upsert: the panel passes a Filing.id for motion-typed filings;
+      // materialize the matching Motion row on the fly so the tag write
+      // succeeds against a record that didn't exist yet.
+      // TODO: extend to brief/response/etc. kinds once they route to
+      // MotionAttachment (needs a motionId to attach to — defer).
+      existing = await ensureMotionForFiling(id)
+    }
     if (!existing) return errGrid(`${kind} ${id} not found`)
 
     // Defensively recover an object from existing.tags. Handles three cases:
