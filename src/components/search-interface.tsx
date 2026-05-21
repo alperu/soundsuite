@@ -23,6 +23,11 @@ import { AIThinkingLog, type AIProgressEntry } from './search/ai-thinking-log';
 import { WorkflowsPanel } from './search/workflows-panel';
 import { HistoryPanel } from './search/history-panel';
 import { ChatAttachmentsStrip } from './chat-attachments';
+import { HaystackFilterInput } from './search/haystack-filter-input';
+import {
+  buildHaystackFilter,
+  type FilterChip,
+} from '@/lib/search/haystack-query-builder';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -325,6 +330,54 @@ export default function SearchInterface({
   const [attachmentsRefreshKey, setAttachmentsRefreshKey] = useState(0);
   const [uploadingCount, setUploadingCount] = useState(0);
   const dragDepthRef = useRef(0);
+
+  // Haystack filter mode — when on, the AI query input becomes a chip-aware
+  // structured filter that drives /api/search/haystack. Default ON; users can
+  // disable for legacy textarea behavior.
+  const [haystackMode, setHaystackMode] = usePersistedState<boolean>('search.haystackMode', true);
+  const [haystackChips, setHaystackChips] = useState<FilterChip[]>([]);
+  const [haystackBusy, setHaystackBusy] = useState(false);
+  const [haystackPreview, setHaystackPreview] = useState<{
+    filter: string;
+    haystackCount?: number;
+    note?: string;
+  } | null>(null);
+
+  // Run the haystack-aware search whenever the user submits while in
+  // structured mode. Sends both the compiled filter and any residual freetext
+  // to /api/search/haystack — the endpoint routes the filter to the Haystack
+  // server and the freetext to the existing semantic pipeline.
+  const runHaystackSearch = useCallback(async () => {
+    const { filter, freetext } = buildHaystackFilter(haystackChips, aiQuery);
+    if (!filter && !freetext) return;
+    setHaystackBusy(true);
+    try {
+      const res = await fetch('/api/search/haystack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filter,
+          freetext,
+          ...(aiCaseId ? { caseId: aiCaseId } : {}),
+        }),
+      });
+      const data = await res.json();
+      setHaystackPreview({
+        filter,
+        haystackCount: Array.isArray(data?.haystack?.results)
+          ? data.haystack.results.length
+          : undefined,
+        note: data?.haystack?.note,
+      });
+    } catch (err) {
+      setHaystackPreview({
+        filter,
+        note: `error: ${(err as Error).message}`,
+      });
+    } finally {
+      setHaystackBusy(false);
+    }
+  }, [haystackChips, aiQuery, aiCaseId]);
 
   // Mirror the singleton deep-search runner into local state. This is what
   // lets an in-flight deep search survive page navigation: the runner keeps
@@ -1758,24 +1811,51 @@ export default function SearchInterface({
                 />
                 <div className="px-6 py-4">
                 <div className="max-w-3xl mx-auto">
-                  <form onSubmit={handleAISearch} className="flex items-end gap-3">
-                    <textarea
-                      id="ai-query"
-                      ref={aiQueryRef}
-                      value={aiQuery}
-                      onChange={e => setAiQuery(e.target.value)}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          if (aiQuery.trim() && !aiLoading) {
-                            handleAISearch(e as unknown as React.FormEvent);
+                  <form onSubmit={e => {
+                    if (haystackMode && (haystackChips.length > 0 || /\w+:/.test(aiQuery))) {
+                      e.preventDefault();
+                      void runHaystackSearch();
+                      return;
+                    }
+                    handleAISearch(e);
+                  }} className="flex items-end gap-3">
+                    {haystackMode ? (
+                      <HaystackFilterInput
+                        chips={haystackChips}
+                        onChipsChange={setHaystackChips}
+                        freetext={aiQuery}
+                        onFreetextChange={setAiQuery}
+                        onSubmit={() => {
+                          if (haystackChips.length > 0) {
+                            void runHaystackSearch();
+                          } else if (aiQuery.trim() && !aiLoading) {
+                            handleAISearch(new Event('submit') as unknown as React.FormEvent);
                           }
-                        }
-                      }}
-                      placeholder={hasConversation ? 'Ask a follow-up...' : 'Ask a question about your legal documents...'}
-                      className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent resize-none overflow-y-auto"
-                      style={{ height: inputHeight }}
-                    />
+                        }}
+                        placeholder={hasConversation ? 'Ask a follow-up… (try judge: hearingDate:)' : 'Filter or ask… (try judge: hearingDate: motionType:)'}
+                        disabled={aiLoading || haystackBusy}
+                        className="flex-1"
+                        style={{ minHeight: inputHeight }}
+                      />
+                    ) : (
+                      <textarea
+                        id="ai-query"
+                        ref={aiQueryRef}
+                        value={aiQuery}
+                        onChange={e => setAiQuery(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            if (aiQuery.trim() && !aiLoading) {
+                              handleAISearch(e as unknown as React.FormEvent);
+                            }
+                          }
+                        }}
+                        placeholder={hasConversation ? 'Ask a follow-up...' : 'Ask a question about your legal documents...'}
+                        className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent resize-none overflow-y-auto"
+                        style={{ height: inputHeight }}
+                      />
+                    )}
                     {aiLoading ? (
                       <button
                         type="button"
@@ -1796,7 +1876,32 @@ export default function SearchInterface({
                       </button>
                     )}
                   </form>
-                  <div className="flex items-center justify-center gap-3 mt-1.5">
+                  <div className="flex items-center justify-center gap-3 mt-1.5 flex-wrap">
+                    <label className="inline-flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={haystackMode}
+                        onChange={e => setHaystackMode(e.target.checked)}
+                        className="w-3 h-3"
+                      />
+                      Use Haystack filters
+                    </label>
+                    {haystackMode && haystackChips.length > 0 && (
+                      <span
+                        className="text-[10px] font-mono text-purple-700 bg-purple-50 border border-purple-200 px-1.5 py-0.5 rounded max-w-md truncate"
+                        title={buildHaystackFilter(haystackChips, aiQuery).filter}
+                      >
+                        {buildHaystackFilter(haystackChips, aiQuery).filter || '(empty)'}
+                      </span>
+                    )}
+                    {haystackPreview && (
+                      <span className="text-[10px] text-gray-500">
+                        {haystackPreview.haystackCount !== undefined
+                          ? `${haystackPreview.haystackCount} record${haystackPreview.haystackCount === 1 ? '' : 's'}`
+                          : ''}
+                        {haystackPreview.note ? ` · ${haystackPreview.note}` : ''}
+                      </span>
+                    )}
                     <p className="text-[10px] text-gray-400">
                       Enter to send, Shift+Enter for new line
                     </p>
