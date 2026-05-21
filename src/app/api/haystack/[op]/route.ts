@@ -20,7 +20,7 @@ import {
   singletonGrid,
   toHayson,
 } from '@/lib/legal/hayson'
-import { tableFromFilter, navHierarchy, findCase, findMotion, findMotionEvent, findMotionAttachment, findPerson, findPersonRole, findHearing } from '@/lib/legal/repo'
+import { tableFromFilter, navHierarchy, findCase, findMotion, findMotionEvent, findMotionAttachment, findPerson, findPersonRole, findHearing, findClerksRecord, findReportersRecord } from '@/lib/legal/repo'
 import { db } from '@/lib/legal/kysely'
 import { prisma } from '@/lib/db/prisma'
 
@@ -198,6 +198,88 @@ function normalizeFilter(filter: string): string {
   return filter.trim()
 }
 
+/**
+ * Synthesize Haystack `*Ref` tags from a row's foreign-key columns so the tag
+ * panel sees them as first-class refs. The Prisma schema stores parent
+ * pointers as columns (`caseId`, `motionId`, `judgeId`, …) but the panel
+ * binds to `record[spec.name]` where `spec.name` is the Haystack tag
+ * (`caseRef`, `motionRef`, `judgeRef`, …). Without this synthesis, refs that
+ * live only in columns (the common case for fresh records that haven't been
+ * tagged yet) show up as blank in the panel — the original bug for Motion.caseRef.
+ *
+ * Returned object uses Haystack-ish ref strings (`@<id>`). Callers layer JSON
+ * `tags` AFTER these so explicit tag values still win.
+ */
+function synthesizeRefsFromColumns(table: string, row: any): Record<string, unknown> {
+  if (!row || typeof row !== 'object') return {}
+  const ref = (id: unknown): string | undefined =>
+    typeof id === 'string' && id.length > 0 ? `@${id}` : undefined
+  const out: Record<string, unknown> = {}
+  switch (table) {
+    case 'Motion':
+      out.caseRef = ref(row.caseId)
+      out.motionRef = ref(row.parentMotionId)
+      out.amends = ref(row.amendsId)
+      out.supersedes = ref(row.supersedesId)
+      out.judgeRef = ref(row.judgeId)
+      out.movantRef = ref(row.movantId)
+      out.respondentRef = ref(row.respondentId)
+      break
+    case 'MotionEvent':
+      out.motionRef = ref(row.motionId)
+      out.caseRef = ref(row.caseId)
+      out.fileRef = ref(row.documentId)
+      out.authoredBy = ref(row.authoredById)
+      out.judgeRef = ref(row.servedOnId == null ? undefined : undefined) // placeholder, see below
+      // (no Motion.judgeId on the event itself — judge on signed/granted comes
+      //  from the Motion record, not the event row; surface what we have.)
+      out.servedOn = ref(row.servedOnId)
+      out.courtClerkRef = ref(row.courtClerkId)
+      out.courtReporterRef = ref(row.courtReporterId)
+      out.hearingRef = ref(row.hearingId)
+      break
+    case 'MotionAttachment':
+      out.motionRef = ref(row.motionId)
+      out.caseRef = ref(row.caseId)
+      out.fileRef = ref(row.documentId)
+      out.amends = ref(row.amendsId)
+      out.supersedes = ref(row.supersedesId)
+      out.authoredBy = ref(row.authoredById)
+      break
+    case 'PersonRole': {
+      out.personRef = ref(row.personId)
+      // Polymorphic scope — synthesize a single scopeRef.
+      const sid = typeof row.scopeId === 'string' ? row.scopeId : undefined
+      if (sid) out.scopeRef = `@${sid}`
+      break
+    }
+    case 'Hearing':
+      out.judgeRef = ref(row.judgeId)
+      out.courtClerkRef = ref(row.courtClerkId)
+      out.courtReporterRef = ref(row.courtReporterId)
+      out.transcriptRef = ref(row.transcriptDocumentId)
+      break
+    case 'Case':
+      // Note: courtRef wiring lands when the Court entity is added (sibling task).
+      out.jurisdictionRef = ref(row.jurisdictionId)
+      break
+    case 'ClerksRecord':
+      out.caseRef = ref(row.caseId)
+      out.documentRef = ref(row.documentId)
+      break
+    case 'ReportersRecord':
+      out.caseRef = ref(row.caseId)
+      out.reporterRef = ref(row.reporterId)
+      out.documentRef = ref(row.documentId)
+      break
+    default:
+      break
+  }
+  // Drop undefineds.
+  for (const k of Object.keys(out)) if (out[k] == null) delete out[k]
+  return out
+}
+
 async function opRead(params: URLSearchParams, body: any): Promise<string> {
   const filter = normalizeFilter(
     params.get('filter') ??
@@ -224,13 +306,22 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
   try {
     let rows: any[]
     if (idValue) {
-      // Read-by-id: skip the filter compiler entirely.
-      rows = await (db as any)
-        .selectFrom(table as any)
-        .selectAll()
-        .where('id' as any, '=', idValue as any)
-        .limit(1)
-        .execute()
+      // Read-by-id: skip the filter compiler entirely. ClerksRecord/ReportersRecord
+      // are not in the Kysely DB type map (yet), so go through Prisma for those.
+      if (table === ('ClerksRecord' as any)) {
+        const row = await (prisma as any).clerksRecord.findUnique({ where: { id: idValue } })
+        rows = row ? [row] : []
+      } else if (table === ('ReportersRecord' as any)) {
+        const row = await (prisma as any).reportersRecord.findUnique({ where: { id: idValue } })
+        rows = row ? [row] : []
+      } else {
+        rows = await (db as any)
+          .selectFrom(table as any)
+          .selectAll()
+          .where('id' as any, '=', idValue as any)
+          .limit(1)
+          .execute()
+      }
     } else {
       switch (table) {
         case 'Motion': rows = await findMotion(filter, limit); break
@@ -240,13 +331,23 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
         case 'PersonRole': rows = await findPersonRole(filter, limit); break
         case 'Hearing': rows = await findHearing(filter, limit); break
         case 'Case': rows = await findCase(filter, limit); break
+        case 'ClerksRecord' as any: rows = await findClerksRecord(filter, limit); break
+        case 'ReportersRecord' as any: rows = await findReportersRecord(filter, limit); break
         default: return errGrid(`entity ${table} not implemented in v1`)
       }
     }
-    // Inline the tags JSON onto each row so the client can read tag values
-    // directly from row.<tag> (the panel binds to record[spec.name]).
+    // Inline the tags JSON + synthesize Haystack refs from FK columns onto
+    // each row. Order matters:
+    //   1. spread the raw row (columns)
+    //   2. layer synthesized refs (e.g. `caseRef: '@' + caseId`) — fallback only
+    //   3. layer the parsed JSON tags — these WIN over column-derived refs
+    //      so legacy/explicit tag values aren't clobbered.
     const inlined = rows.map((r: any) => {
       const out: any = { ...r }
+      const synth = synthesizeRefsFromColumns(table, r)
+      for (const [k, v] of Object.entries(synth)) {
+        if (out[k] == null && v != null) out[k] = v
+      }
       if (typeof r?.tags === 'string') {
         try {
           const parsed = JSON.parse(r.tags)
@@ -255,7 +356,6 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
       } else if (r?.tags && typeof r.tags === 'object') {
         Object.assign(out, r.tags)
       }
-      // Surface displayName-ish fields
       return out
     })
     return encodeGrid(inlined, { table: table as any })
@@ -306,6 +406,8 @@ async function opCommit(_params: URLSearchParams, body: any): Promise<string> {
     hearing: 'hearing',
     person: 'person',
     personRole: 'personRole',
+    clerksRecord: 'clerksRecord',
+    reportersRecord: 'reportersRecord',
   }
   const model = modelMap[kind]
   if (!model) return errGrid(`unknown kind: ${kind}`)
@@ -425,6 +527,8 @@ const NON_TAG_COLUMNS: Record<string, Set<string>> = {
   person: new Set(['id', 'tags', 'displayName', 'email', 'barNumber', 'jurisdictionId', 'createdAt', 'updatedAt']),
   personRole: new Set(['id', 'tags', 'personId', 'scopeKind', 'scopeId', 'appearedOn', 'withdrewOn', 'createdAt', 'updatedAt']),
   hearing: new Set(['id', 'tags', 'judgeId', 'courtReporterId', 'courtClerkId', 'scheduledFor', 'heldOn', 'durationMin', 'location', 'transcriptDocumentId', 'hearingType', 'createdAt', 'updatedAt']),
+  clerksRecord: new Set(['id', 'tags', 'caseId', 'volume', 'filedOn', 'documentId', 'createdAt', 'updatedAt']),
+  reportersRecord: new Set(['id', 'tags', 'caseId', 'reporterId', 'volume', 'hearingDate', 'documentId', 'createdAt', 'updatedAt']),
 }
 
 function filterToTagFields(model: string, patch: any): Record<string, unknown> {

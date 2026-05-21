@@ -13,7 +13,14 @@
  */
 
 export type TagTier = 'marker' | 'ref' | 'refs' | 'value';
-export type EntityKind = 'case' | 'motion' | 'motionEvent' | 'motionAttachment' | 'hearing';
+export type EntityKind =
+  | 'case'
+  | 'motion'
+  | 'motionEvent'
+  | 'motionAttachment'
+  | 'hearing'
+  | 'clerksRecord'
+  | 'reportersRecord';
 
 export interface TagSpec {
   name: string;
@@ -97,16 +104,32 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
 
   motionAttachment: [
     { name: 'attachment', tier: 'marker', doc: 'Marker: attachment to a Motion.', internal: true, valueType: 'bool' },
+    // Attachment-kind markers (mutually-exclusive set; reflects MotionAttachment.attachmentKind).
     { name: 'proposedOrder', tier: 'marker', doc: 'Attachment kind: proposed order.', valueType: 'bool' },
     { name: 'brief', tier: 'marker', doc: 'Attachment kind: brief.', valueType: 'bool' },
+    { name: 'response', tier: 'marker', doc: 'Attachment kind: response (opposition / reply).', valueType: 'bool' },
+    { name: 'email', tier: 'marker', doc: 'Attachment kind: email correspondence.', valueType: 'bool' },
     { name: 'evidence', tier: 'marker', doc: 'Attachment kind: evidence.', valueType: 'bool' },
     { name: 'exhibit', tier: 'marker', doc: 'Attachment kind: exhibit.', valueType: 'bool' },
+    { name: 'supportingDoc', tier: 'marker', doc: 'Attachment kind: supporting document.', valueType: 'bool' },
+    { name: 'order', tier: 'marker', doc: 'Attachment kind: signed order.', valueType: 'bool' },
+    { name: 'transcript', tier: 'marker', doc: 'Attachment kind: transcript (deposition / hearing).', valueType: 'bool' },
     { name: 'affidavit', tier: 'marker', doc: 'Attachment kind: affidavit.', valueType: 'bool' },
+    { name: 'subpoena', tier: 'marker', doc: 'Attachment kind: subpoena.', valueType: 'bool' },
+    { name: 'judgment', tier: 'marker', doc: 'Attachment kind: judgment.', valueType: 'bool' },
+    { name: 'settlement', tier: 'marker', doc: 'Attachment kind: settlement.', valueType: 'bool' },
+    { name: 'notice', tier: 'marker', doc: 'Attachment kind: notice.', valueType: 'bool' },
+    { name: 'rfa', tier: 'marker', doc: 'Attachment kind: request for admissions.', valueType: 'bool' },
+    { name: 'billOfReview', tier: 'marker', doc: 'Attachment kind: bill of review.', valueType: 'bool' },
+    { name: 'petition', tier: 'marker', doc: 'Attachment kind: petition.', valueType: 'bool' },
+    // Refs
     { name: 'motionRef', tier: 'ref', doc: 'Reference to the parent motion.', refTarget: 'motion' },
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
     { name: 'fileRef', tier: 'ref', doc: 'Reference to the document (PDF).', refTarget: 'doc' },
     { name: 'amends', tier: 'ref', doc: 'Attachment this one amends.', refTarget: 'motionAttachment' },
     { name: 'supersedes', tier: 'ref', doc: 'Attachment this one supersedes.', refTarget: 'motionAttachment' },
+    { name: 'authoredBy', tier: 'ref', doc: 'Person who authored this attachment.', refTarget: 'person' },
+    // Values
     { name: 'revisionSeq', tier: 'value', doc: 'Revision sequence number.', valueType: 'number' },
     { name: 'attachmentKind', tier: 'value', doc: 'The attachment-kind value (e.g. "proposedOrder").', valueType: 'text' },
   ],
@@ -126,6 +149,33 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     { name: 'durationMin', tier: 'value', doc: 'Duration in minutes.', valueType: 'number' },
     { name: 'location', tier: 'value', doc: 'Courtroom / location.', valueType: 'text' },
     { name: 'hearingType', tier: 'value', doc: 'Hearing type (e.g. "motion", "trial").', valueType: 'text' },
+  ],
+
+  clerksRecord: [
+    // markers
+    { name: 'clerksRecord', tier: 'marker', doc: "Marker: this record is a Clerk's Record (appellate compilation of trial-court papers).", valueType: 'bool' },
+    { name: 'appellate', tier: 'marker', doc: 'Filed at the appellate level.', valueType: 'bool' },
+    { name: 'supplemental', tier: 'marker', doc: 'Supplemental clerk’s record (added after the original).', valueType: 'bool' },
+    // refs
+    { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
+    { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document.', refTarget: 'doc' },
+    // values
+    { name: 'volume', tier: 'value', doc: 'Volume number of the clerk’s record.', valueType: 'number' },
+    { name: 'filedOn', tier: 'value', doc: 'Date the clerk’s record was filed.', valueType: 'date' },
+  ],
+
+  reportersRecord: [
+    // markers
+    { name: 'reportersRecord', tier: 'marker', doc: "Marker: this record is a Reporter's Record (court-reporter transcript volumes).", valueType: 'bool' },
+    { name: 'appellate', tier: 'marker', doc: 'Filed at the appellate level.', valueType: 'bool' },
+    { name: 'supplemental', tier: 'marker', doc: 'Supplemental reporter’s record.', valueType: 'bool' },
+    // refs
+    { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
+    { name: 'reporterRef', tier: 'ref', doc: 'Court reporter who produced this volume.', refTarget: 'person' },
+    { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document.', refTarget: 'doc' },
+    // values
+    { name: 'volume', tier: 'value', doc: 'Volume number of the reporter’s record.', valueType: 'number' },
+    { name: 'hearingDate', tier: 'value', doc: 'Date of the hearing/proceeding transcribed.', valueType: 'date' },
   ],
 };
 
