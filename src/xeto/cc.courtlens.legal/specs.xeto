@@ -82,11 +82,20 @@ PersonRole: Dict {
 //////////////////////////////////////////////////////////////////////////
 
 // Legal case. Container of motions, hearings, and party records.
+// Case — all slots optional. Real entity identity lives in Prisma columns
+// (name, caseNumber, jurisdiction); the tags JSON is for free-form markers
+// the user adds incrementally via the tag-panel. Requiring fields here
+// would break partial edits and force users to set 4 things at once just
+// to add a single marker. Jurisdiction-specific markers are first-class so
+// the panel's combo picker can offer them as taggable options.
 Case: Dict {
   case
-  site
-  causeNo:            Str
-  jurisdictionRef:    Ref
+  site:               Marker?
+  causeNo:            Str?
+  jurisdictionRef:    Ref?
+  jurisdictionTx:     Marker?
+  jurisdictionCa:     Marker?
+  jurisdictionFed:    Marker?
   courtRef:           Ref?
   judgeRefs:          List? <of:Ref>
   plaintiffRefs:      List? <of:Ref>
@@ -106,16 +115,20 @@ Case: Dict {
 // Motion. Equip-like; nestable via motionRef to model amendment chains
 // ("Motion to Disqualify" → "Amended Motion to Disqualify" → ...).
 // Intersects Amendable from proc.core.
+// Motion — slots optional for incremental tag editing. Identity (caseId,
+// motionType) lives in Prisma columns; tags JSON carries the open-ended
+// marker/ref set the user maintains via the panel.
 Motion: Amendable {
   motion
-  equip
-  caseRef:        Ref
+  equip:          Marker?
+  caseRef:        Ref?
   motionRef:      Ref?
   subMotion:      Marker?
-  motionType:     Str
+  motionType:     Str?
   judgeRef:       Ref?
   movantRef:      Ref?
   respondentRef:  Ref?
+  appellate:      Marker?
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -144,13 +157,15 @@ Mooted:      EventKind { mooted }
 // MotionEvent. Lifecycle as discrete records, not as additive markers
 // on Motion. Each event carries a kind + occurredOn + optional fileRef
 // pointing at the PDF that documents it.
+// MotionEvent — `kind` Choice is the only load-bearing constraint
+// (received xor filed xor signed ...); refs are optional for partial edits.
 MotionEvent: Dict {
   motionEvent
-  point
-  motionRef:          Ref
-  caseRef:            Ref
+  point:              Marker?
+  motionRef:          Ref?
+  caseRef:            Ref?
   kind:               EventKind
-  occurredOn:         DateTime
+  occurredOn:         DateTime?
   courtFilingDate:    DateTime?
   causeNoStamp:       Str?
   fileRef:            Ref?
