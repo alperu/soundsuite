@@ -251,9 +251,48 @@ export function dict(boot: XetoBoot, obj: Record<string, unknown>): Dict {
     if (v === undefined || v === null) continue
     if (v === true) {
       map.set(k, xeto.Marker.val())
-    } else {
-      map.set(k, v)
+      continue
     }
+    // ISO-8601 date / datetime strings → Fantom DateTime. The XETO type
+    // checker rejects a Str where a DateTime is expected; the tag-panel
+    // routinely sends date pickers as plain strings (`'2025-07-09'`).
+    // Without this coercion, `ns.fits()` returns false on every Case
+    // edit that includes `filedOn` (and the analogous slots on
+    // MotionEvent/Hearing/etc.). See task #19.
+    if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) {
+      try {
+        // Normalize "2025-07-09" → "2025-07-09T00:00:00Z UTC" (Fantom's
+        // ISO-with-tz form). If the string already has a time component
+        // but no tz suffix, append " UTC".
+        let s = v
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+          s = s + 'T00:00:00Z UTC'
+        } else if (!/UTC|GMT|\s[A-Z]/.test(s)) {
+          // ISO datetime, possibly trailing 'Z' — Fantom wants " UTC" form
+          s = s.replace(/Z$/, '') + 'Z UTC'
+        }
+        const fantomDt = sys.DateTime.fromStr(s, false)
+        if (fantomDt != null) {
+          map.set(k, fantomDt)
+          continue
+        }
+      } catch {
+        // fall through; some other path may accept the raw string
+      }
+    }
+    if (v instanceof Date) {
+      try {
+        const isoStr = v.toISOString().replace(/Z$/, '') + 'Z UTC'
+        const fantomDt = sys.DateTime.fromStr(isoStr, false)
+        if (fantomDt != null) {
+          map.set(k, fantomDt)
+          continue
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+    map.set(k, v)
   }
   return haystack.Etc.makeDict(map)
 }
@@ -465,20 +504,43 @@ function extractSlotShape(boot: XetoBoot, spec: unknown): {
   const known = new Set<string>()
   const required: string[] = []
   try {
-    const slots = (spec as { slots?: unknown }).slots
+    // XETO Spec exposes `slots` as a *method* on its prototype, not a
+    // property — calling `spec.slots` returns the Fantom function object
+    // (which has no `.each`). Invoke it to obtain the MapSpecMap whose
+    // `each((val, key) => ...)` we iterate. Verified empirically:
+    // `slots()` ctor is `MapSpecMap`, iteration order is `(XetoSpec, name)`.
+    const slotsAccessor = (spec as { slots?: unknown }).slots
+    let slots: unknown = null
+    if (typeof slotsAccessor === 'function') {
+      try {
+        slots = (slotsAccessor as () => unknown).call(spec)
+      } catch {
+        slots = null
+      }
+    } else {
+      slots = slotsAccessor
+    }
     if (!slots) return { known, required }
-    // ns.slots returns a sys::Map keyed by slot name (string) → Spec.
-    // Fantom Maps expose .each((val, key) => ...) — use it if present.
     const each = (slots as { each?: (cb: (v: unknown, k: string) => void) => void }).each
     if (typeof each === 'function') {
       each.call(slots, (slotSpec: unknown, name: string) => {
         known.add(name)
         // A slot is "required" if it isn't tagged as `maybe` (optional)
         // and has no default. Best-effort detection.
-        const meta = (slotSpec as { meta?: unknown }).meta as
-          | { has?: (k: string) => boolean }
-          | undefined
-        const isOptional = !!(meta && meta.has && (meta.has('maybe') || meta.has('default')))
+        let isOptional = false
+        try {
+          const metaAccessor = (slotSpec as { meta?: unknown }).meta
+          const meta =
+            typeof metaAccessor === 'function'
+              ? (metaAccessor as () => unknown).call(slotSpec)
+              : metaAccessor
+          const has = (meta as { has?: (k: string) => boolean } | undefined)?.has
+          if (typeof has === 'function') {
+            isOptional = !!(has.call(meta, 'maybe') || has.call(meta, 'default'))
+          }
+        } catch {
+          /* assume required */
+        }
         if (!isOptional) required.push(name)
       })
     }
