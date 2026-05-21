@@ -314,6 +314,8 @@ const REF_TARGET_TABLE: Record<string, 'Case' | 'Motion' | 'Person' | 'Court' | 
   personRef: 'Person',
   plaintiffRefs: 'Person',
   defendantRefs: 'Person',
+  plaintiffLawyers: 'Person',
+  defendantLawyers: 'Person',
   courtRef: 'Court',
   hearingRef: 'Hearing',
   fileRef: 'Document',
@@ -350,6 +352,77 @@ function cacheSet(key: string, label: string): void {
     if (firstKey !== undefined) LABEL_CACHE.delete(firstKey)
   }
   LABEL_CACHE.set(key, { label, expiresAt: Date.now() + LABEL_CACHE_TTL_MS })
+}
+
+/**
+ * Invalidate any cached labels for the given ids across every known target
+ * table. Called from `commitEntity` after a write so a previously-cached
+ * "(missing)" sentinel can't poison the next read for an id whose target
+ * row was just created/attached. Bus-busts across tables since the caller
+ * doesn't always know which target the id resolves to.
+ */
+function invalidateLabelCache(ids: Iterable<string>): void {
+  const targets = new Set<string>(Object.values(REF_TARGET_TABLE))
+  for (const id of ids) {
+    if (!id) continue
+    for (const target of targets) LABEL_CACHE.delete(`${target}:${id}`)
+  }
+}
+
+/**
+ * Collect every ref-id mentioned in a patch (single or list-valued) so the
+ * commit hook can bust their label-cache entries. Tolerates `string`,
+ * `@<id>`, and `{_kind:'ref', val:'<id>'}` shapes.
+ */
+function collectRefIdsFromPatch(patch: Record<string, unknown>): string[] {
+  const out: string[] = []
+  const push = (v: unknown): void => {
+    if (!v) return
+    if (typeof v === 'string') {
+      const s = v.startsWith('@') ? v.slice(1) : v
+      if (s) out.push(s)
+      return
+    }
+    if (typeof v === 'object') {
+      const o = v as { _kind?: string; val?: unknown }
+      if (o._kind === 'ref' && typeof o.val === 'string') {
+        const s = o.val.startsWith('@') ? o.val.slice(1) : o.val
+        if (s) out.push(s)
+      }
+    }
+  }
+  for (const [k, v] of Object.entries(patch)) {
+    if (!(k in REF_TARGET_TABLE) && k !== 'scopeRef') continue
+    if (Array.isArray(v)) for (const item of v) push(item)
+    else push(v)
+  }
+  return out
+}
+
+/**
+ * Map an EntityKind (commit `kind` param) → the Prisma-table name expected
+ * by `inlineRefLabels`. Used to wrap the commit response with the same
+ * `<refName>Label` arrays the read path produces, so the panel doesn't
+ * fall back to UUID display until the user refreshes. Per-filing-type kinds
+ * (notice/brief/...) all resolve to MotionAttachment.
+ */
+function tableForKind(kind: string): string {
+  switch (kind) {
+    case 'case': return 'Case'
+    case 'motion': return 'Motion'
+    case 'motionEvent': return 'MotionEvent'
+    case 'motionAttachment': return 'MotionAttachment'
+    case 'hearing': return 'Hearing'
+    case 'person': return 'Person'
+    case 'personRole': return 'PersonRole'
+    case 'court': return 'Court'
+    case 'clerksRecord': return 'ClerksRecord'
+    case 'reportersRecord': return 'ReportersRecord'
+    default:
+      // Per-filing-type EntityKinds (notice, brief, letter, ...) all live in
+      // the MotionAttachment table.
+      return 'MotionAttachment'
+  }
 }
 
 function stripAt(v: unknown): string | null {
@@ -1158,7 +1231,13 @@ export async function commitEntity(input: {
     try {
       const created = await client.create({ data: createData })
       if (kind === 'case') await applyCaseSideEffects(null, created)
-      const row = inlineRow(created)
+      // Bust any cached "(missing)" labels for ids the patch attached, so the
+      // resolver below picks up the freshly-created targets instead of stale
+      // negatives.
+      invalidateLabelCache(collectRefIdsFromPatch(patch))
+      // Inline ref labels into the response so the panel can render display
+      // names immediately after save (without forcing a follow-up read).
+      const row = await inlineRefLabels(inlineRow(created), tableForKind(kind))
       return { ok: true, row }
     } catch (e: any) {
       return { ok: false, errGridJson: prismaErrToGrid(e, kind) }
@@ -1206,7 +1285,16 @@ export async function commitEntity(input: {
 
     const updated = await client.update({ where: { id }, data })
     if (kind === 'case') await applyCaseSideEffects(existing, updated)
-    return { ok: true, row: inlineRow(updated) }
+    // Bust label-cache for any ref id the patch touched. The read-side LRU
+    // ages at 60s, but if a previously-empty Person row was just attached
+    // here, an earlier "(missing)" sentinel would still hide the new label
+    // until TTL — fix by dropping the entry before re-resolving.
+    invalidateLabelCache(collectRefIdsFromPatch(patch))
+    // Re-resolve labels on the returned row so the client's `setRecord(rec)`
+    // after `hsCommit` lands rows with `<refName>Label` arrays present — the
+    // bug that made plaintiffRefs render as UUIDs immediately post-save.
+    const row = await inlineRefLabels(inlineRow(updated), tableForKind(kind))
+    return { ok: true, row }
   } catch (e: any) {
     return { ok: false, errGridJson: prismaErrToGrid(e, kind) }
   }

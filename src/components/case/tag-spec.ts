@@ -106,6 +106,8 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     { name: 'judgeRefs', tier: 'refs', doc: 'List of judges assigned to this case (Persons).', refTarget: 'person' },
     { name: 'plaintiffRefs', tier: 'refs', doc: 'List of plaintiffs (Persons or organizations).', refTarget: 'person' },
     { name: 'defendantRefs', tier: 'refs', doc: 'List of defendants (Persons or organizations).', refTarget: 'person' },
+    { name: 'plaintiffLawyers', tier: 'refs', doc: 'Attorneys representing the plaintiff(s).', refTarget: 'person' },
+    { name: 'defendantLawyers', tier: 'refs', doc: 'Attorneys representing the defendant(s).', refTarget: 'person' },
     { name: 'courtClerkRefs', tier: 'refs', doc: 'Court clerks of record.', refTarget: 'person' },
     { name: 'courtReporterRefs', tier: 'refs', doc: 'Court reporters of record.', refTarget: 'person' },
     // values
