@@ -8,6 +8,14 @@ import {
   type EntityKind,
   type TagSpec,
 } from './tag-spec';
+import {
+  read as hsRead,
+  commit as hsCommit,
+  defs as hsDefs,
+  defsToDocMap,
+  firstRow,
+  gridHasError,
+} from '@/lib/haystack-client';
 
 interface Props {
   entityKind: EntityKind | null;
@@ -46,23 +54,14 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
     return baseSpecs.map(s => ({ ...s, doc: serverDefs[s.name] || s.doc }));
   }, [baseSpecs, serverDefs]);
 
-  // Fetch tag defs once
+  // Fetch tag defs once (module-level cached in the haystack client).
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/haystack/defs')
-      .then(r => (r.ok ? r.json() : null))
-      .then(data => {
-        if (cancelled || !data) return;
-        // Accept either { defs: { name: doc } } or array form { defs: [{ name, doc }] }
-        if (data?.defs && !Array.isArray(data.defs)) {
-          setServerDefs(data.defs as Record<string, string>);
-        } else if (Array.isArray(data?.defs)) {
-          const map: Record<string, string> = {};
-          for (const d of data.defs as { name?: string; doc?: string }[]) {
-            if (d?.name) map[d.name] = d.doc || '';
-          }
-          setServerDefs(map);
-        }
+    hsDefs()
+      .then(grid => {
+        if (cancelled) return;
+        const map = defsToDocMap(grid);
+        if (Object.keys(map).length) setServerDefs(map);
       })
       .catch(() => { /* keep stub */ });
     return () => { cancelled = true; };
@@ -79,29 +78,19 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
-    const filter = encodeURIComponent(entityKind);
-    const id = encodeURIComponent(entityId);
-    fetch(`/api/haystack/read?filter=${filter}&id=@${id}`)
-      .then(r => {
-        if (r.status === 404) return { _stub: true };
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then(data => {
+    hsRead({ filter: entityKind, id: entityId })
+      .then(grid => {
         if (cancelled) return;
-        // Accept either { rows: [rec] } or { rec } or just rec
-        let rec: HaystackRecord | null = null;
-        if (data && (data as { _stub?: boolean })._stub) {
-          rec = { id: entityId };
-        } else if (Array.isArray((data as { rows?: unknown }).rows)) {
-          rec = ((data as { rows: HaystackRecord[] }).rows[0]) || { id: entityId };
-        } else if ((data as { rec?: unknown }).rec) {
-          rec = (data as { rec: HaystackRecord }).rec;
-        } else if (data && typeof data === 'object') {
-          rec = data as HaystackRecord;
+        const gridErr = gridHasError(grid);
+        if (gridErr) {
+          setLoadError(gridErr);
+          setRecord({ id: entityId });
+          setDraft({ id: entityId });
+          return;
         }
+        const rec = (firstRow<HaystackRecord>(grid)) || { id: entityId };
         setRecord(rec);
-        setDraft(rec || {});
+        setDraft(rec);
       })
       .catch(err => {
         if (cancelled) return;
@@ -122,22 +111,19 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
     if (!entityKind || !entityId) return;
     setSaving(true);
     try {
-      const res = await fetch('/api/haystack/commit', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: entityId, kind: entityKind, patch: draft }),
-      });
-      if (res.status === 404) {
-        showToast('Save not yet wired');
-      } else if (!res.ok) {
-        showToast(`Save failed: HTTP ${res.status}`);
+      const grid = await hsCommit({ id: entityId, kind: entityKind, patch: draft });
+      const gridErr = gridHasError(grid);
+      if (gridErr) {
+        showToast(`Save failed: ${gridErr}`);
       } else {
         showToast('Saved');
-        setRecord(draft);
+        const rec = firstRow<HaystackRecord>(grid) || draft;
+        setRecord(rec);
+        setDraft(rec);
         setEditMode(false);
       }
-    } catch {
-      showToast('Save not yet wired');
+    } catch (err) {
+      showToast(`Save failed: ${err instanceof Error ? err.message : 'unknown'}`);
     } finally {
       setSaving(false);
     }

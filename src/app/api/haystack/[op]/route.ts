@@ -21,6 +21,8 @@ import {
   toHayson,
 } from '@/lib/legal/hayson'
 import { tableFromFilter, navHierarchy, findCase, findMotion, findMotionEvent, findMotionAttachment, findPerson, findPersonRole, findHearing } from '@/lib/legal/repo'
+import { db } from '@/lib/legal/kysely'
+import { prisma } from '@/lib/db/prisma'
 
 export const dynamic = 'force-dynamic'
 
@@ -33,6 +35,7 @@ const SUPPORTED_OPS = [
   'nav',
   'read',
   'close',
+  'commit',
 ] as const
 type Op = (typeof SUPPORTED_OPS)[number]
 
@@ -185,16 +188,32 @@ async function opNav(params: URLSearchParams, body: any): Promise<string> {
   return encodeGrid(rows)
 }
 
+/**
+ * Marker → entity-kind map used for the panel's filter strings. Tag-panel sends
+ * `filter=<kind>` where `<kind>` is the camelCase EntityKind (case, motion,
+ * motionEvent, motionAttachment, hearing, personRole). `tableFromFilter` is
+ * already case-insensitive on bare markers, but we normalize defensively.
+ */
+function normalizeFilter(filter: string): string {
+  return filter.trim()
+}
+
 async function opRead(params: URLSearchParams, body: any): Promise<string> {
-  const filter =
+  const filter = normalizeFilter(
     params.get('filter') ??
-    (typeof body?.filter === 'string' ? body.filter : body?.filter?.val) ??
-    ''
+      (typeof body?.filter === 'string' ? body.filter : body?.filter?.val) ??
+      '',
+  )
   if (!filter) {
     return errGrid('read requires a filter parameter')
   }
   const limitRaw = params.get('limit') ?? body?.limit
   const limit = limitRaw != null ? Number(limitRaw) : undefined
+
+  // Direct id lookup — bypass the haystack-core filter compiler since `id`
+  // lives in a column, not the `tags` JSON. Tag-panel sends `id=@<id>`.
+  const idParam = params.get('id') ?? body?.id
+  const idValue = typeof idParam === 'string' ? idParam.replace(/^@/, '') : null
 
   const table = tableFromFilter(filter)
   if (!table) {
@@ -204,17 +223,42 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
   }
   try {
     let rows: any[]
-    switch (table) {
-      case 'Motion': rows = await findMotion(filter, limit); break
-      case 'MotionEvent': rows = await findMotionEvent(filter, limit); break
-      case 'MotionAttachment': rows = await findMotionAttachment(filter, limit); break
-      case 'Person': rows = await findPerson(filter, limit); break
-      case 'PersonRole': rows = await findPersonRole(filter, limit); break
-      case 'Hearing': rows = await findHearing(filter, limit); break
-      case 'Case': rows = await findCase(filter, limit); break
-      default: return errGrid(`entity ${table} not implemented in v1`)
+    if (idValue) {
+      // Read-by-id: skip the filter compiler entirely.
+      rows = await (db as any)
+        .selectFrom(table as any)
+        .selectAll()
+        .where('id' as any, '=', idValue as any)
+        .limit(1)
+        .execute()
+    } else {
+      switch (table) {
+        case 'Motion': rows = await findMotion(filter, limit); break
+        case 'MotionEvent': rows = await findMotionEvent(filter, limit); break
+        case 'MotionAttachment': rows = await findMotionAttachment(filter, limit); break
+        case 'Person': rows = await findPerson(filter, limit); break
+        case 'PersonRole': rows = await findPersonRole(filter, limit); break
+        case 'Hearing': rows = await findHearing(filter, limit); break
+        case 'Case': rows = await findCase(filter, limit); break
+        default: return errGrid(`entity ${table} not implemented in v1`)
+      }
     }
-    return encodeGrid(rows, { table: table as any })
+    // Inline the tags JSON onto each row so the client can read tag values
+    // directly from row.<tag> (the panel binds to record[spec.name]).
+    const inlined = rows.map((r: any) => {
+      const out: any = { ...r }
+      if (typeof r?.tags === 'string') {
+        try {
+          const parsed = JSON.parse(r.tags)
+          if (parsed && typeof parsed === 'object') Object.assign(out, parsed)
+        } catch { /* ignore malformed tags */ }
+      } else if (r?.tags && typeof r.tags === 'object') {
+        Object.assign(out, r.tags)
+      }
+      // Surface displayName-ish fields
+      return out
+    })
+    return encodeGrid(inlined, { table: table as any })
   } catch (e: any) {
     const msg = e?.message ?? String(e)
     // Missing table in v1 schema → clean err grid, not 500.
@@ -225,6 +269,79 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
   }
 }
 
+/**
+ * commit — minimal v1 stub. Accepts `{ id, kind, patch }` (panel shape) or a
+ * Haystack-style grid row with `id` + tag fields. Merges `patch` (or the row
+ * minus `id`/`kind`) into the target record's `tags` JSON via Prisma.
+ *
+ * XETO validation runs automatically if the Prisma extension is wired
+ * (`src/lib/db/prisma.ts`); otherwise this just persists.
+ */
+async function opCommit(_params: URLSearchParams, body: any): Promise<string> {
+  if (!body || typeof body !== 'object') return errGrid('commit requires a JSON body')
+
+  const id: string | null =
+    typeof body.id === 'string' ? body.id.replace(/^@/, '') :
+    body.id?.val ? String(body.id.val) : null
+  if (!id) return errGrid('commit requires an id')
+
+  const kind: string | null =
+    typeof body.kind === 'string' ? body.kind :
+    typeof body._kind === 'string' ? body._kind : null
+  if (!kind) return errGrid('commit requires a kind (case|motion|motionEvent|motionAttachment|hearing|person|personRole)')
+
+  const patch: any = body.patch ?? (() => {
+    // Build patch from body, excluding control fields
+    const { id: _i, kind: _k, _kind, ...rest } = body
+    return rest
+  })()
+  if (!patch || typeof patch !== 'object') return errGrid('commit requires a patch object')
+
+  // Map EntityKind → Prisma model name (camelCase)
+  const modelMap: Record<string, string> = {
+    case: 'case',
+    motion: 'motion',
+    motionEvent: 'motionEvent',
+    motionAttachment: 'motionAttachment',
+    hearing: 'hearing',
+    person: 'person',
+    personRole: 'personRole',
+  }
+  const model = modelMap[kind]
+  if (!model) return errGrid(`unknown kind: ${kind}`)
+
+  const client = (prisma as any)[model]
+  if (!client?.findUnique || !client?.update) {
+    return errGrid(`Prisma model ${model} not available`)
+  }
+
+  try {
+    const existing = await client.findUnique({ where: { id } })
+    if (!existing) return errGrid(`${kind} ${id} not found`)
+    let currentTags: any = {}
+    if (typeof existing.tags === 'string') {
+      try { currentTags = JSON.parse(existing.tags) } catch { currentTags = {} }
+    } else if (existing.tags && typeof existing.tags === 'object') {
+      currentTags = existing.tags
+    }
+    // Patch values: strip control/column fields; only tag-shaped keys go in.
+    const { id: _i, tags: _t, createdAt: _c, updatedAt: _u, ...tagPatch } = patch
+    const merged = { ...currentTags, ...tagPatch }
+    // Remove keys explicitly set to null/undefined.
+    for (const k of Object.keys(merged)) {
+      if (merged[k] == null) delete merged[k]
+    }
+    const updated = await client.update({
+      where: { id },
+      data: { tags: JSON.stringify(merged) },
+    })
+    const row: any = { ...updated, ...merged }
+    return encodeGrid([row], { table: kind as any })
+  } catch (e: any) {
+    return errGrid(`commit failed: ${e?.message ?? e}`)
+  }
+}
+
 function opClose(): string {
   // No session state in v1.
   return okGrid()
@@ -232,11 +349,23 @@ function opClose(): string {
 
 // ---------- dispatch --------------------------------------------------------
 
-async function handle(req: NextRequest, op: string): Promise<NextResponse> {
+/**
+ * Shared dispatcher. The public route enforces bearer auth; the same-origin
+ * proxy at `/api/haystack-proxy/[op]` passes `skipAuth: true` so the browser
+ * tag panel can read without shipping a token. The proxy is the only legitimate
+ * caller that should set `skipAuth`.
+ */
+export async function dispatchHaystack(
+  req: NextRequest,
+  op: string,
+  { skipAuth = false }: { skipAuth?: boolean } = {},
+): Promise<NextResponse> {
   const zinc = rejectZinc(req)
   if (zinc) return zinc
-  const auth = checkAuth(req)
-  if (!auth.ok) return auth.res
+  if (!skipAuth) {
+    const auth = checkAuth(req)
+    if (!auth.ok) return auth.res
+  }
 
   if (!SUPPORTED_OPS.includes(op as Op)) {
     return new NextResponse(errGrid(`unknown op: ${op}`), {
@@ -271,6 +400,7 @@ async function handle(req: NextRequest, op: string): Promise<NextResponse> {
       case 'nav': return jsonResponse(await opNav(url.searchParams, body))
       case 'read': return jsonResponse(await opRead(url.searchParams, body))
       case 'close': return jsonResponse(opClose())
+      case 'commit': return jsonResponse(await opCommit(url.searchParams, body))
     }
   } catch (e: any) {
     return jsonResponse(errGrid(`op ${op} failed: ${e?.message ?? e}`))
@@ -282,11 +412,15 @@ async function handle(req: NextRequest, op: string): Promise<NextResponse> {
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ op: string }> | { op: string } }) {
   const params = await (ctx.params as any)
-  return handle(req, params.op)
+  return dispatchHaystack(req, params.op)
 }
 export async function POST(req: NextRequest, ctx: { params: Promise<{ op: string }> | { op: string } }) {
   const params = await (ctx.params as any)
-  return handle(req, params.op)
+  return dispatchHaystack(req, params.op)
+}
+export async function PUT(req: NextRequest, ctx: { params: Promise<{ op: string }> | { op: string } }) {
+  const params = await (ctx.params as any)
+  return dispatchHaystack(req, params.op)
 }
 
 // silence unused-import warning if toHayson tree-shakes out
