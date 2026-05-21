@@ -15,6 +15,7 @@
 
 /** Intrinsic markers — properties of the human, not the role they play. */
 export type IntrinsicMarker =
+  | 'person'
   | 'lawyer'
   | 'judge'
   | 'courtClerk'

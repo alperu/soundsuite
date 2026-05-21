@@ -63,7 +63,7 @@ export function PersonaTable({ personas, selectedId, onSelect, onOpen }: Props) 
                 </td>
                 <td className="px-3 py-2">
                   <div className="flex flex-wrap gap-1">
-                    {p.markers.map((m) => (
+                    {(p.markers ?? []).map((m) => (
                       <MarkerChip key={m} marker={m} size="xs" />
                     ))}
                   </div>
