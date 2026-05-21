@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent for Sound Suite's macOS host-stats reporter.
+
+  Install:
+    cp report-host-stats.sh ~/Library/Application\ Support/SoundSuite/
+    chmod +x ~/Library/Application\ Support/SoundSuite/report-host-stats.sh
+    cp report-host-stats.plist ~/Library/LaunchAgents/ai.soundsuite.host-stats.plist
+    # edit the plist if your username isn't `me` or sidecar port isn't 8098
+    launchctl load ~/Library/LaunchAgents/ai.soundsuite.host-stats.plist
+
+  Logs at /tmp/soundsuite-host-stats.{out,err}.log. KeepAlive=true means
+  launchd restarts the script if it crashes; the script's own infinite loop
+  handles transient curl failures internally.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.soundsuite.host-stats</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <!-- EDIT THIS PATH to wherever you saved report-host-stats.sh -->
+    <string>/Users/me/Library/Application Support/SoundSuite/report-host-stats.sh</string>
+    <string>--sidecar</string>
+    <string>http://localhost:8098</string>
+    <string>--interval</string>
+    <string>10</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Don't relaunch faster than once every 30s if the script keeps dying -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/soundsuite-host-stats.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/soundsuite-host-stats.err.log</string>
+
+  <!-- Run as low-priority background; we're touching the network once every
+       10s, no need for foreground scheduling. -->
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
