@@ -13,41 +13,50 @@ datasource db {
 }
 
 model Case {
-  id           String      @id @default(uuid())
-  name         String
-  path         String      @unique
-  caseNumber   String?
-  jurisdiction String?
-  country      String?     @default("United States")
-  state        String?
-  county       String?
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
-  documents    Document[]
-  filings      Filing[]
-  drafts       Draft[]
-  draftCases   DraftCase[]
+  id                String             @id @default(uuid())
+  name              String
+  path              String             @unique
+  caseNumber        String?
+  jurisdiction      String?
+  country           String?            @default("United States")
+  state             String?
+  county            String?
+  // XETO v1 — site-level tag bag (Haystack `site` markers + ref lists)
+  tags              Json               @default("{}")
+  jurisdictionId    String?
+  jurisdictionRel   Jurisdiction?      @relation(fields: [jurisdictionId], references: [id])
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  documents         Document[]
+  filings           Filing[]
+  drafts            Draft[]
+  draftCases        DraftCase[]
+  motions           Motion[]           @relation("Case_motions")
+  motionEvents      MotionEvent[]
+  motionAttachments MotionAttachment[]
+  hearings          HearingCase[]
 
   @@index([path])
   @@index([caseNumber])
+  @@index([jurisdictionId])
 }
 
 model Filing {
-  id          String     @id @default(uuid())
-  caseId      String
-  case        Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  filingType  String
-  title       String
-  slug        String
-  filingDate  DateTime?
-  description  String?
+  id                String     @id @default(uuid())
+  caseId            String
+  case              Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  filingType        String
+  title             String
+  slug              String
+  filingDate        DateTime?
+  description       String?
   volumeNumber      Int?
-  isSupplemental    Boolean   @default(false)
-  supplementalOrder Int?      // 1 = 1st supplemental, 2 = 2nd, etc.
-  createdAt    DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
-  documents   Document[]
-  motions     Motion[]
+  isSupplemental    Boolean    @default(false)
+  supplementalOrder Int? // 1 = 1st supplemental, 2 = 2nd, etc.
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  documents         Document[]
+  motions           Motion[]
 
   @@unique([caseId, slug])
   @@index([caseId])
@@ -55,25 +64,31 @@ model Filing {
 }
 
 model Document {
-  id                String    @id @default(uuid())
-  caseId            String
-  case              Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  filingId          String?
-  filing            Filing?   @relation(fields: [filingId], references: [id], onDelete: SetNull)
-  filePath          String    @unique
-  fileName          String
-  hash              String    @unique
-  status            String    @default("QUEUED")
-  documentType      String?
-  documentSummary   String?
-  exhibitLabel      String?
-  errorMessage      String?
-  pageCount         Int?
-  detectedExhibits  Int       @default(0)
-  embeddingModel    String?
-  ingestCheckpoint  String?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  id               String   @id @default(uuid())
+  caseId           String
+  case             Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  filingId         String?
+  filing           Filing?  @relation(fields: [filingId], references: [id], onDelete: SetNull)
+  filePath         String   @unique
+  fileName         String
+  hash             String   @unique
+  status           String   @default("QUEUED")
+  documentType     String?
+  documentSummary  String?
+  exhibitLabel     String?
+  errorMessage     String?
+  pageCount        Int?
+  detectedExhibits Int      @default(0)
+  embeddingModel   String?
+  ingestCheckpoint String?
+  // XETO v1 — generic tag bag
+  tags             Json     @default("{}")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  motionEvents       MotionEvent[]      @relation("Document_motionEvents")
+  motionAttachments  MotionAttachment[] @relation("Document_motionAttachments")
+  hearingTranscripts Hearing[]          @relation("Document_hearingTranscripts")
 
   @@index([caseId])
   @@index([filingId])
@@ -84,13 +99,13 @@ model Document {
 }
 
 model JobLog {
-  id                  String    @id @default(uuid())
-  startedAt           DateTime  @default(now())
-  completedAt         DateTime?
-  documentsQueued     Int
-  documentsProcessed  Int
-  documentsFailed     Int
-  errorSummary        String?
+  id                 String    @id @default(uuid())
+  startedAt          DateTime  @default(now())
+  completedAt        DateTime?
+  documentsQueued    Int
+  documentsProcessed Int
+  documentsFailed    Int
+  errorSummary       String?
 
   @@index([startedAt])
 }
@@ -124,16 +139,16 @@ model ChatAttachment {
 }
 
 model ModelDownload {
-  id                String    @id @default(uuid())
-  modelName         String    @unique
-  provider          String
-  status            String
-  downloadProgress  Float     @default(0)
-  sizeBytes         BigInt?
-  downloadedAt      DateTime?
-  errorMessage      String?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  id               String    @id @default(uuid())
+  modelName        String    @unique
+  provider         String
+  status           String
+  downloadProgress Float     @default(0)
+  sizeBytes        BigInt?
+  downloadedAt     DateTime?
+  errorMessage     String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@index([provider])
   @@index([status])
@@ -145,7 +160,7 @@ model PageCache {
   pageNumber  Int
   text        String
   textDensity Int
-  source      String   // 'extract' or 'ocr'
+  source      String // 'extract' or 'ocr'
   confidence  Float?
   createdAt   DateTime @default(now())
 
@@ -155,14 +170,14 @@ model PageCache {
 }
 
 model ActionLog {
-  id          String   @id @default(uuid())
-  caseId      String?
-  action      String
-  target      String
-  status      String   @default("pending")
-  detail      String?
-  logType     String   @default("general")
-  createdAt   DateTime @default(now())
+  id        String   @id @default(uuid())
+  caseId    String?
+  action    String
+  target    String
+  status    String   @default("pending")
+  detail    String?
+  logType   String   @default("general")
+  createdAt DateTime @default(now())
 
   @@index([caseId])
   @@index([logType])
@@ -182,20 +197,55 @@ model Motion {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
+  // XETO v1 — equip-level container
+  tags   Json    @default("{}")
+  // Case denorm — every Motion belongs to a Case (matches XETO caseRef).
+  // Nullable for backfill safety; tighten after backfill completes.
+  caseId String?
+  case   Case?   @relation("Case_motions", fields: [caseId], references: [id], onDelete: Cascade)
+
+  // Sub-motion / nesting (Haystack equipRef analog).
+  parentMotionId String?
+  parentMotion   Motion?  @relation("MotionAmendment", fields: [parentMotionId], references: [id])
+  childMotions   Motion[] @relation("MotionAmendment")
+
+  // Amendable mixin: amends/supersedes are semantic pointers; kept as plain
+  // String? columns rather than FKs (the only structural FK is parentMotionId).
+  amendsId     String?
+  supersedesId String?
+  revisionSeq  Int?
+
+  // Denormalised Person refs — single-actor fast path.
+  judgeId      String?
+  judge        Person? @relation("Motion_judge", fields: [judgeId], references: [id])
+  movantId     String?
+  movant       Person? @relation("Motion_movant", fields: [movantId], references: [id])
+  respondentId String?
+  respondent   Person? @relation("Motion_respondent", fields: [respondentId], references: [id])
+
+  events      MotionEvent[]
+  attachments MotionAttachment[]
+  hearings    HearingMotion[]
+
   @@index([filingId])
+  @@index([caseId])
+  @@index([parentMotionId])
+  @@index([amendsId])
+  @@index([judgeId])
+  @@index([movantId])
 }
 
 model Exhibit {
-  id          String    @id @default(uuid())
+  id          String   @id @default(uuid())
   motionId    String
-  motion      Motion    @relation(fields: [motionId], references: [id], onDelete: Cascade)
+  motion      Motion   @relation(fields: [motionId], references: [id], onDelete: Cascade)
   label       String
   title       String?
   startPage   Int
   endPage     Int?
   description String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   @@index([motionId])
 }
@@ -216,42 +266,42 @@ model WorkflowTemplate {
 }
 
 model Workflow {
-  id          String             @id @default(uuid())
-  caseId      String
-  templateId  String?
-  template    WorkflowTemplate?  @relation(fields: [templateId], references: [id])
-  title       String
-  slug        String
-  content     String             @default("")
-  status      String             @default("draft")
-  createdAt   DateTime           @default(now())
-  updatedAt   DateTime           @updatedAt
+  id         String            @id @default(uuid())
+  caseId     String
+  templateId String?
+  template   WorkflowTemplate? @relation(fields: [templateId], references: [id])
+  title      String
+  slug       String
+  content    String            @default("")
+  status     String            @default("draft")
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
 
   @@unique([caseId, slug])
   @@index([caseId])
 }
 
 model Draft {
-  id            String          @id @default(uuid())
-  caseId        String
-  case          Case            @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  title         String
-  slug          String
-  documentType  String
-  content       String          @default("")
-  status        String          @default("draft")
-  version       Int             @default(1)
+  id             String            @id @default(uuid())
+  caseId         String
+  case           Case              @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  title          String
+  slug           String
+  documentType   String
+  content        String            @default("")
+  status         String            @default("draft")
+  version        Int               @default(1)
   // Vector indexing tracking
-  indexingStatus  String?
-  lastIndexedAt   DateTime?
-  indexedVersion  Int?
-  embeddingModel  String?
-  indexingError   String?
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
-  versions      DraftVersion[]
-  draftCases    DraftCase[]
-  suggestions   DraftSuggestion[]
+  indexingStatus String?
+  lastIndexedAt  DateTime?
+  indexedVersion Int?
+  embeddingModel String?
+  indexingError  String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  versions       DraftVersion[]
+  draftCases     DraftCase[]
+  suggestions    DraftSuggestion[]
 
   @@unique([caseId, slug])
   @@index([caseId])
@@ -272,13 +322,13 @@ model DraftCase {
 }
 
 model DraftVersion {
-  id            String    @id @default(uuid())
+  id            String   @id @default(uuid())
   draftId       String
-  draft         Draft     @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  draft         Draft    @relation(fields: [draftId], references: [id], onDelete: Cascade)
   version       Int
   content       String
   changeSummary String?
-  createdAt     DateTime  @default(now())
+  createdAt     DateTime @default(now())
 
   @@index([draftId])
 }
@@ -290,19 +340,19 @@ model DraftSuggestion {
   id                String    @id @default(uuid())
   draftId           String
   draft             Draft     @relation(fields: [draftId], references: [id], onDelete: Cascade)
-  sessionId         String                            // groups suggestions from one chat turn
-  draftVersion      Int                               // Draft.version at creation time
-  anchorFrom        Int                               // PM pos at creation (seed for live mapping)
+  sessionId         String // groups suggestions from one chat turn
+  draftVersion      Int // Draft.version at creation time
+  anchorFrom        Int // PM pos at creation (seed for live mapping)
   anchorTo          Int
-  originalText      String                            // exact substring the AI targeted
-  proposedText      String                            // replacement
-  category          String                            // tone|grammar|structure|citation|clarity|other
-  reason            String                            // AI rationale (<= 240 chars)
-  confidence        Float?                            // optional 0-1 from model
-  status            String    @default("pending")     // pending|accepted|denied|ignored|stale
-  denyReasonTags    String    @default("[]")          // JSON array of tag slugs
-  denyReasonText    String?                           // optional free text
-  regenerationCount Int       @default(0)             // times the Regenerate button was used on this row (max 3)
+  originalText      String // exact substring the AI targeted
+  proposedText      String // replacement
+  category          String // tone|grammar|structure|citation|clarity|other
+  reason            String // AI rationale (<= 240 chars)
+  confidence        Float? // optional 0-1 from model
+  status            String    @default("pending") // pending|accepted|denied|ignored|stale
+  denyReasonTags    String    @default("[]") // JSON array of tag slugs
+  denyReasonText    String? // optional free text
+  regenerationCount Int       @default(0) // times the Regenerate button was used on this row (max 3)
   resolvedAt        DateTime?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
@@ -316,14 +366,14 @@ model DraftSuggestion {
 // Auto-Suggest calls so the AI adapts to the user's style.
 model UserPreferenceSignal {
   id           String   @id @default(uuid())
-  caseId       String?                              // nullable scoping tiers
+  caseId       String? // nullable scoping tiers
   draftId      String?
-  documentType String?                              // e.g. "motion", "brief"
-  signal       String                               // prefer|avoid
-  category     String                               // mirrors DraftSuggestion.category
-  summary      String                               // <= 120 char rule
-  examplePairs String   @default("[]")              // JSON: up to 3 {original, proposed} few-shot pairs
-  weight       Float    @default(1.0)               // decays over time
+  documentType String? // e.g. "motion", "brief"
+  signal       String // prefer|avoid
+  category     String // mirrors DraftSuggestion.category
+  summary      String // <= 120 char rule
+  examplePairs String   @default("[]") // JSON: up to 3 {original, proposed} few-shot pairs
+  weight       Float    @default(1.0) // decays over time
   lastSeenAt   DateTime @default(now())
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -333,15 +383,15 @@ model UserPreferenceSignal {
 }
 
 model SidecarCommand {
-  id          String   @id @default(uuid())
-  sidecarUrl  String
-  action      String
-  payload     String   @default("{}")
-  status      String   @default("pending")
-  result      String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  expiresAt   DateTime
+  id         String   @id @default(uuid())
+  sidecarUrl String
+  action     String
+  payload    String   @default("{}")
+  status     String   @default("pending")
+  result     String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  expiresAt  DateTime
 
   @@index([sidecarUrl, status])
   @@index([status, expiresAt])
@@ -374,8 +424,8 @@ model HostProvisioning {
 
 model HostRoleAssignment {
   id             String   @id @default(cuid())
-  sidecarUrl     String                  // e.g. "http://10.10.20.5:8098"
-  mode           String                  // 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker'
+  sidecarUrl     String // e.g. "http://10.10.20.5:8098"
+  mode           String // 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker'
   enabled        Boolean  @default(true)
   minOnline      Int      @default(0)
   idleTimeoutMin Int      @default(5)
@@ -392,4 +442,194 @@ model HostRoleAssignment {
 
   @@unique([sidecarUrl, mode])
   @@index([sidecarUrl])
+}
+
+// ─── XETO v1 foundation ─────────────────────────────────────────────────
+//
+// New entities for the XETO/Haystack work documented in
+// `docs/xeto-haystack-research.md`. Tag bags live in `tags Json` columns;
+// hot tags are exposed via VIRTUAL generated columns added in the
+// hand-edited migration SQL (see §12.2 of the research doc).
+
+model Jurisdiction {
+  id        String   @id @default(cuid())
+  code      String   @unique // "TX" | "CA" | "US-FED" | ...
+  name      String
+  tags      Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cases   Case[]
+  persons Person[]
+}
+
+model Person {
+  id             String        @id @default(cuid())
+  displayName    String
+  email          String?
+  barNumber      String?
+  jurisdictionId String?
+  jurisdiction   Jurisdiction? @relation(fields: [jurisdictionId], references: [id])
+  // Intrinsic markers — { person, lawyer?, judge?, courtClerk?, courtReporter?,
+  // bailiff?, proSe?, self? }
+  tags           Json          @default("{}")
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  roles               PersonRole[]
+  motionsAsJudge      Motion[]           @relation("Motion_judge")
+  motionsAsMovant     Motion[]           @relation("Motion_movant")
+  motionsAsRespondent Motion[]           @relation("Motion_respondent")
+  eventsAuthored      MotionEvent[]      @relation("MotionEvent_authoredBy")
+  eventsServedOn      MotionEvent[]      @relation("MotionEvent_servedOn")
+  eventsAsClerk       MotionEvent[]      @relation("MotionEvent_courtClerk")
+  eventsAsReporter    MotionEvent[]      @relation("MotionEvent_courtReporter")
+  attachmentsAuthored MotionAttachment[] @relation("MotionAttachment_authoredBy")
+  hearingsAsJudge     Hearing[]          @relation("Hearing_judge")
+  hearingsAsClerk     Hearing[]          @relation("Hearing_courtClerk")
+  hearingsAsReporter  Hearing[]          @relation("Hearing_courtReporter")
+
+  @@index([displayName])
+  @@index([jurisdictionId])
+}
+
+model PersonRole {
+  id         String    @id @default(cuid())
+  personId   String
+  person     Person    @relation(fields: [personId], references: [id], onDelete: Cascade)
+  scopeKind  String // "motion" | "case"
+  scopeId    String // Motion.id or Case.id (polymorphic)
+  // Contextual markers — { personRole, movant?, respondent?, defendant?, ... }
+  tags       Json      @default("{}")
+  appearedOn DateTime?
+  withdrewOn DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([personId])
+  @@index([scopeKind, scopeId])
+}
+
+model MotionEvent {
+  id              String    @id @default(cuid())
+  motionId        String
+  motion          Motion    @relation(fields: [motionId], references: [id], onDelete: Cascade)
+  caseId          String
+  case            Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  // EventKind: received | filed | courtFiled | responded | signed | granted |
+  //            denied | served | hearingHeld | withdrawn | mooted
+  kind            String
+  occurredOn      DateTime
+  courtFilingDate DateTime?
+  causeNoStamp    String?
+
+  documentId      String?
+  document        Document? @relation("Document_motionEvents", fields: [documentId], references: [id], onDelete: SetNull)
+  authoredById    String?
+  authoredBy      Person?   @relation("MotionEvent_authoredBy", fields: [authoredById], references: [id])
+  servedOnId      String?
+  servedOn        Person?   @relation("MotionEvent_servedOn", fields: [servedOnId], references: [id])
+  courtClerkId    String?
+  courtClerk      Person?   @relation("MotionEvent_courtClerk", fields: [courtClerkId], references: [id])
+  courtReporterId String?
+  courtReporter   Person?   @relation("MotionEvent_courtReporter", fields: [courtReporterId], references: [id])
+  hearingId       String?
+  hearing         Hearing?  @relation(fields: [hearingId], references: [id], onDelete: SetNull)
+
+  tags      Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([motionId, kind])
+  @@index([occurredOn])
+  @@index([kind, courtFilingDate])
+  @@index([authoredById])
+  @@index([caseId])
+  @@index([documentId])
+  @@index([hearingId])
+}
+
+model MotionAttachment {
+  id             String    @id @default(cuid())
+  motionId       String
+  motion         Motion    @relation(fields: [motionId], references: [id], onDelete: Cascade)
+  caseId         String
+  case           Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  // attachmentKind: proposedOrder | brief | response | email | evidence |
+  //                 exhibit | supportingDoc | order | transcript | affidavit |
+  //                 subpoena | judgment | settlement | notice | rfa |
+  //                 billOfReview | petition
+  attachmentKind String
+  documentId     String?
+  document       Document? @relation("Document_motionAttachments", fields: [documentId], references: [id], onDelete: SetNull)
+
+  // Amendable mixin: self-FKs for amends/supersedes chains within attachments.
+  amendsId     String?
+  amends       MotionAttachment?  @relation("Attachment_amends", fields: [amendsId], references: [id])
+  amendedBy    MotionAttachment[] @relation("Attachment_amends")
+  supersedesId String?
+  supersedes   MotionAttachment?  @relation("Attachment_supersedes", fields: [supersedesId], references: [id])
+  supersededBy MotionAttachment[] @relation("Attachment_supersedes")
+  revisionSeq  Int?
+
+  authoredById String?
+  authoredBy   Person? @relation("MotionAttachment_authoredBy", fields: [authoredById], references: [id])
+
+  tags      Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([motionId, attachmentKind])
+  @@index([amendsId])
+  @@index([caseId])
+  @@index([documentId])
+}
+
+// Hearing — shared entity. Hybrid hearings span many cases & many motions
+// via join tables. Per-motion timeline link lives on MotionEvent.hearingId.
+model Hearing {
+  id                   String    @id @default(cuid())
+  judgeId              String?
+  judge                Person?   @relation("Hearing_judge", fields: [judgeId], references: [id])
+  courtReporterId      String?
+  courtReporter        Person?   @relation("Hearing_courtReporter", fields: [courtReporterId], references: [id])
+  courtClerkId         String?
+  courtClerk           Person?   @relation("Hearing_courtClerk", fields: [courtClerkId], references: [id])
+  scheduledFor         DateTime
+  heldOn               DateTime?
+  durationMin          Int?
+  location             String?
+  transcriptDocumentId String?
+  transcriptDocument   Document? @relation("Document_hearingTranscripts", fields: [transcriptDocumentId], references: [id], onDelete: SetNull)
+  hearingType          String?
+  tags                 Json      @default("{}")
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  cases   HearingCase[]
+  motions HearingMotion[]
+  events  MotionEvent[]
+
+  @@index([scheduledFor])
+  @@index([judgeId])
+}
+
+model HearingCase {
+  hearingId String
+  hearing   Hearing @relation(fields: [hearingId], references: [id], onDelete: Cascade)
+  caseId    String
+  case      Case    @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  @@id([hearingId, caseId])
+  @@index([caseId])
+}
+
+model HearingMotion {
+  hearingId String
+  hearing   Hearing @relation(fields: [hearingId], references: [id], onDelete: Cascade)
+  motionId  String
+  motion    Motion  @relation(fields: [motionId], references: [id], onDelete: Cascade)
+
+  @@id([hearingId, motionId])
+  @@index([motionId])
 }
