@@ -92,6 +92,12 @@ export async function GET(
       where: { id },
       include: {
         documents: {
+          // Filter out orphan Documents (no associated Filing). These can
+          // accumulate as ENOENT/ERROR entries when Case.path is edited and
+          // Document.filePath isn't migrated. They shouldn't surface in the
+          // user-visible to-index / error queue. Background indexing still
+          // sees all rows via the worker poll path.
+          where: { filingId: { not: null } },
           select: { id: true, filePath: true, status: true, fileName: true, filingId: true, filing: { select: { slug: true, title: true } } },
         },
       },
