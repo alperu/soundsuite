@@ -137,6 +137,21 @@ async function loadHaxallModules(): Promise<{
     '@haxall/haxall/esm/sys.js',
   )) as AnyMod
 
+  // 3a. Import the three `fan_*` bootstrap pods. fantom.js statically
+  //     imports these at its top (lines 2–4) so they execute before its
+  //     `boot()` runs — they register the indexed-props table, MIME
+  //     database, and unit database in `sys`. Our auto-discovery loop
+  //     below filters out `fan_*` (matching fantom.js's filter), so
+  //     without these explicit imports those tables stay empty.
+  //
+  //     Symptom of the missing imports: `ns.fits(dict, customSpec)`
+  //     throws `sys::NullErr: Coerce to non-null` for any spec in our
+  //     `cc.courtlens.legal` lib (stock `ph` specs happen to dodge the
+  //     affected reflection paths). See task #7.
+  await dynImport<AnyMod>('@haxall/haxall/esm/fan_indexed_props.js')
+  await dynImport<AnyMod>('@haxall/haxall/esm/fan_mime.js')
+  await dynImport<AnyMod>('@haxall/haxall/esm/fan_units.js')
+
   // 4. Replicate fantom.js boot()'s env setup (lines 60–67) so File/Env
   //    paths point at the package home, where the bundled .xetolib
   //    pre-builds live (home/lib/xeto/sys/sys-5.0.0.xetolib, etc.).
