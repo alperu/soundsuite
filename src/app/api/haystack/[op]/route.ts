@@ -541,124 +541,316 @@ async function ensureMotionForFiling(filingId: string): Promise<any | null> {
 }
 
 /**
- * commit — minimal v1 stub. Accepts `{ id, kind, patch }` (panel shape) or a
- * Haystack-style grid row with `id` + tag fields. Merges `patch` (or the row
- * minus `id`/`kind`) into the target record's `tags` JSON via Prisma.
+ * commit — single source of truth for Case and Filing data.
+ *
+ * Accepts `{ id, kind, patch }` (panel shape) or a Haystack-style grid row
+ * with `id` + tag fields. Splits the patch into a column-patch (real Prisma
+ * columns) and a tag-patch (everything else), and writes BOTH in one update.
+ *
+ * Create semantics: when `id` is missing OR equals "new", an INSERT is
+ * performed; structural keys (`id`, `createdAt`, `updatedAt`) are dropped
+ * from the column patch and required-fields are validated per kind.
  *
  * XETO validation runs automatically if the Prisma extension is wired
  * (`src/lib/db/prisma.ts`); otherwise this just persists.
  */
-async function opCommit(_params: URLSearchParams, body: any): Promise<string> {
-  if (!body || typeof body !== 'object') return errGrid('commit requires a JSON body')
 
-  const id: string | null =
-    typeof body.id === 'string' ? body.id.replace(/^@/, '') :
-    body.id?.val ? String(body.id.val) : null
-  if (!id) return errGrid('commit requires an id')
+// Map EntityKind → Prisma model name (camelCase). Module-level so the legacy
+// shim (and any other internal caller) can reuse it.
+const KIND_MODEL_MAP: Record<string, string> = {
+  case: 'case',
+  motion: 'motion',
+  motionEvent: 'motionEvent',
+  motionAttachment: 'motionAttachment',
+  hearing: 'hearing',
+  person: 'person',
+  personRole: 'personRole',
+  court: 'court',
+  clerksRecord: 'clerksRecord',
+  reportersRecord: 'reportersRecord',
+  // Per-filing-type EntityKinds all serialize to the MotionAttachment Prisma
+  // table — the table's `attachmentKind` discriminator column (set at row
+  // creation, not here) carries the type. The tag panel only mutates `tags`
+  // JSON via this commit op.
+  notice: 'motionAttachment',
+  letter: 'motionAttachment',
+  order: 'motionAttachment',
+  proposedOrder: 'motionAttachment',
+  petition: 'motionAttachment',
+  affidavit: 'motionAttachment',
+  subpoena: 'motionAttachment',
+  brief: 'motionAttachment',
+  response: 'motionAttachment',
+  reply: 'motionAttachment',
+  judgment: 'motionAttachment',
+  decree: 'motionAttachment',
+  transcript: 'motionAttachment',
+  settlement: 'motionAttachment',
+  billOfReview: 'motionAttachment',
+  returnOfService: 'motionAttachment',
+  demandLetter: 'motionAttachment',
+  objection: 'motionAttachment',
+  request: 'motionAttachment',
+  supplement: 'motionAttachment',
+  designation: 'motionAttachment',
+  other: 'motionAttachment',
+}
 
-  const kind: string | null =
-    typeof body.kind === 'string' ? body.kind :
-    typeof body._kind === 'string' ? body._kind : null
-  if (!kind) return errGrid('commit requires a kind (case|motion|motionEvent|motionAttachment|hearing|person|personRole)')
+// Columns that hold DateTime values. JSON arrives as ISO strings; Prisma
+// requires `Date` instances. Per Prisma model.
+const DATE_COLUMNS: Record<string, Set<string>> = {
+  motionEvent: new Set(['occurredOn', 'courtFilingDate']),
+  personRole: new Set(['appearedOn', 'withdrewOn']),
+  hearing: new Set(['scheduledFor', 'heldOn']),
+  clerksRecord: new Set(['filedOn']),
+  reportersRecord: new Set(['hearingDate']),
+}
 
-  const patch: any = body.patch ?? (() => {
-    // Build patch from body, excluding control fields
-    const { id: _i, kind: _k, _kind, ...rest } = body
-    return rest
-  })()
-  if (!patch || typeof patch !== 'object') return errGrid('commit requires a patch object')
+// Per-kind required column-fields for CREATE. Validated before Prisma so the
+// err grid is clear instead of a P2002/P2025 surprise.
+const REQUIRED_ON_CREATE: Record<string, string[]> = {
+  case: ['name', 'path'],
+  motion: ['caseId', 'title'],
+  motionEvent: ['motionId', 'caseId', 'kind', 'occurredOn'],
+  motionAttachment: ['motionId', 'caseId', 'attachmentKind'],
+  person: ['displayName'],
+  personRole: ['personId', 'scopeKind', 'scopeId'],
+  hearing: ['scheduledFor'],
+  court: ['name'],
+  clerksRecord: ['caseId'],
+  reportersRecord: ['caseId'],
+}
 
-  // Map EntityKind → Prisma model name (camelCase)
-  const modelMap: Record<string, string> = {
-    case: 'case',
-    motion: 'motion',
-    motionEvent: 'motionEvent',
-    motionAttachment: 'motionAttachment',
-    hearing: 'hearing',
-    person: 'person',
-    personRole: 'personRole',
-    court: 'court',
-    clerksRecord: 'clerksRecord',
-    reportersRecord: 'reportersRecord',
-    // Per-filing-type EntityKinds all serialize to the MotionAttachment
-    // Prisma table — the table's `attachmentKind` discriminator column
-    // (set at row creation, not here) carries the type. The tag panel
-    // only mutates `tags` JSON via this commit op.
-    notice: 'motionAttachment',
-    letter: 'motionAttachment',
-    order: 'motionAttachment',
-    proposedOrder: 'motionAttachment',
-    petition: 'motionAttachment',
-    affidavit: 'motionAttachment',
-    subpoena: 'motionAttachment',
-    brief: 'motionAttachment',
-    response: 'motionAttachment',
-    reply: 'motionAttachment',
-    judgment: 'motionAttachment',
-    decree: 'motionAttachment',
-    transcript: 'motionAttachment',
-    settlement: 'motionAttachment',
-    billOfReview: 'motionAttachment',
-    returnOfService: 'motionAttachment',
-    demandLetter: 'motionAttachment',
-    objection: 'motionAttachment',
-    request: 'motionAttachment',
-    supplement: 'motionAttachment',
-    designation: 'motionAttachment',
-    other: 'motionAttachment',
+/**
+ * Split an incoming patch into `columnPatch` (real Prisma columns) and
+ * `tagPatch` (everything else, destined for the `tags` JSON bag). Also
+ * coerces dates from ISO strings → `Date`. Drops structural keys
+ * (`id`/`tags`/`createdAt`/`updatedAt`) from the column patch.
+ */
+function splitPatch(
+  model: string,
+  patch: any,
+): { columnPatch: Record<string, unknown>; tagPatch: Record<string, unknown> } {
+  const columnPatch: Record<string, unknown> = {}
+  const tagPatch: Record<string, unknown> = {}
+  if (!patch || typeof patch !== 'object') return { columnPatch, tagPatch }
+
+  const colSet = NON_TAG_COLUMNS[model] ?? new Set(['id', 'tags', 'createdAt', 'updatedAt'])
+  const structural = new Set(['id', 'tags', 'createdAt', 'updatedAt'])
+  const dateCols = DATE_COLUMNS[model] ?? new Set<string>()
+
+  for (const [k, vRaw] of Object.entries(patch)) {
+    if (structural.has(k)) continue
+    if (colSet.has(k)) {
+      let v = vRaw
+      // Normalize empty strings on nullable columns to null so the form's
+      // "clear the field" UX actually clears the column.
+      if (typeof v === 'string') v = v.trim()
+      if (v === '') v = null
+      // Coerce ISO date strings to Date for DateTime columns.
+      if (dateCols.has(k) && typeof v === 'string') {
+        const d = new Date(v)
+        v = isNaN(d.getTime()) ? null : d
+      } else if (dateCols.has(k) && v != null && (v as any) instanceof Date === false) {
+        // Hayson date wrappers like { _kind: 'dateTime', val: '...' }
+        const inner = (v as any)?.val
+        if (typeof inner === 'string') {
+          const d = new Date(inner)
+          v = isNaN(d.getTime()) ? null : d
+        }
+      }
+      columnPatch[k] = v
+    } else {
+      tagPatch[k] = vRaw
+    }
   }
-  const model = modelMap[kind]
-  if (!model) return errGrid(`unknown kind: ${kind}`)
+  return { columnPatch, tagPatch }
+}
 
+/**
+ * Post-commit hooks for Case path changes. Mirrors the legacy
+ * `PATCH /api/cases/[id]` behavior: when `path` changes (or a new case is
+ * created), reconcile the FileWatcher.
+ */
+async function applyCaseSideEffects(
+  before: { path?: string | null } | null,
+  after: { path?: string | null } | null,
+): Promise<void> {
+  if (!after?.path) return
+  try {
+    const { getServicesManager } = await import('@/lib/services-manager')
+    const fileWatcher = getServicesManager().getFileWatcher()
+    if (!fileWatcher) return
+    if (!before) {
+      // Create
+      await fileWatcher.addPath(after.path)
+    } else if (before.path && before.path !== after.path) {
+      await fileWatcher.removePath(before.path)
+      await fileWatcher.addPath(after.path)
+    }
+  } catch (e: any) {
+    console.log(`[haystack/commit] file-watcher hook failed: ${e?.message ?? e}`)
+  }
+}
+
+/**
+ * Map Prisma errors → user-friendly err grids. P2002 is unique-violation,
+ * P2025 is record-not-found, etc.
+ */
+function prismaErrToGrid(e: any, kind: string): string {
+  const code = e?.code
+  if (code === 'P2002') {
+    const tgt = e?.meta?.target
+    const fields = Array.isArray(tgt) ? tgt.join(', ') : String(tgt ?? 'unique field')
+    return errGrid(`${kind} ${fields} must be unique (constraint violation)`)
+  }
+  if (code === 'P2025') return errGrid(`${kind} not found`)
+  if (code === 'P2003') return errGrid(`${kind} foreign key constraint failed: ${e?.meta?.field_name ?? ''}`)
+  return errGrid(`commit failed: ${e?.message ?? e}`)
+}
+
+/**
+ * Core commit function — exported so legacy `/api/cases/*` endpoints can
+ * call into the same write path.
+ */
+export async function commitEntity(input: {
+  id?: string | null
+  kind: string
+  patch: Record<string, unknown>
+}): Promise<{ ok: true; row: any } | { ok: false; errGridJson: string }> {
+  const { kind } = input
+  let id = input.id
+  if (typeof id === 'string') id = id.replace(/^@/, '')
+  if (id === 'new' || id === '') id = null
+
+  const model = KIND_MODEL_MAP[kind]
+  if (!model) return { ok: false, errGridJson: errGrid(`unknown kind: ${kind}`) }
   const client = (prisma as any)[model]
-  if (!client?.findUnique || !client?.update) {
-    return errGrid(`Prisma model ${model} not available`)
+  if (!client?.update || !client?.create) {
+    return { ok: false, errGridJson: errGrid(`Prisma model ${model} not available`) }
   }
 
+  const patch = input.patch ?? {}
+  if (!patch || typeof patch !== 'object') {
+    return { ok: false, errGridJson: errGrid('commit requires a patch object') }
+  }
+
+  const { columnPatch, tagPatch } = splitPatch(model, patch)
+
+  // ─── CREATE ─────────────────────────────────────────────────────────────
+  if (!id) {
+    const required = REQUIRED_ON_CREATE[kind] ?? []
+    const missing = required.filter((k) => {
+      const v = columnPatch[k]
+      return v == null || (typeof v === 'string' && v === '')
+    })
+    if (missing.length) {
+      return { ok: false, errGridJson: errGrid(`${kind} create missing required: ${missing.join(', ')}`) }
+    }
+
+    // Case-specific defaults & path validation
+    if (kind === 'case') {
+      if (columnPatch.country == null) columnPatch.country = 'United States'
+      const pathOk = await validateCasePath(columnPatch.path as string)
+      if (pathOk !== true) return { ok: false, errGridJson: errGrid(pathOk) }
+      // Trim trailing slashes
+      columnPatch.path = (columnPatch.path as string).replace(/\/+$/, '')
+    }
+
+    const createData: any = { ...columnPatch }
+    if (Object.keys(tagPatch).length) createData.tags = tagPatch
+
+    try {
+      const created = await client.create({ data: createData })
+      if (kind === 'case') await applyCaseSideEffects(null, created)
+      const row = inlineRow(created)
+      return { ok: true, row }
+    } catch (e: any) {
+      return { ok: false, errGridJson: prismaErrToGrid(e, kind) }
+    }
+  }
+
+  // ─── UPDATE ─────────────────────────────────────────────────────────────
   try {
     let existing = await client.findUnique({ where: { id } })
     if (!existing && kind === 'motion') {
-      // Auto-upsert: the panel passes a Filing.id for motion-typed filings;
-      // materialize the matching Motion row on the fly so the tag write
-      // succeeds against a record that didn't exist yet.
-      // TODO: extend to brief/response/etc. kinds once they route to
-      // MotionAttachment (needs a motionId to attach to — defer).
       existing = await ensureMotionForFiling(id)
     }
-    if (!existing) return errGrid(`${kind} ${id} not found`)
+    if (!existing) {
+      return { ok: false, errGridJson: errGrid(`${kind} ${id} not found`) }
+    }
 
-    // Defensively recover an object from existing.tags. Handles three cases:
-    //   1. Object (Prisma deserialized it)
-    //   2. String (Prisma left it raw — better-sqlite3 adapter behavior)
-    //   3. Character-spread garbage from the previous double-stringify bug
+    // Case path validation only when path actually changed
+    if (kind === 'case' && typeof columnPatch.path === 'string' && columnPatch.path !== existing.path) {
+      const pathOk = await validateCasePath(columnPatch.path)
+      if (pathOk !== true) return { ok: false, errGridJson: errGrid(pathOk) }
+      columnPatch.path = (columnPatch.path as string).replace(/\/+$/, '')
+    }
+
     const currentTags = recoverTagObject(existing.tags)
-
-    // Strip every non-tag field from the patch. The Prisma model has
-    // its own columns for case identity (name, caseNumber, path,
-    // jurisdiction, country, state, county, ...). The panel sends the
-    // full draft record back, so we keep ONLY tag-shaped keys.
-    const tagPatch = filterToTagFields(model, patch)
-
     const merged: Record<string, unknown> = { ...currentTags, ...tagPatch }
     for (const k of Object.keys(merged)) {
       if (merged[k] == null) delete merged[k]
     }
 
-    // CRITICAL: pass the OBJECT to Prisma, NOT a stringified string.
-    // Prisma's Json column auto-serializes; passing a string means it
-    // gets JSON.stringify'd again (double-encoding). The previous
-    // version stringified manually, which caused every saved tag set
-    // to come back as character-indexed garbage on the next commit.
-    const updated = await client.update({
-      where: { id },
-      data: { tags: merged as any },
-    })
-    const updatedTags = recoverTagObject(updated.tags)
-    const row: any = { ...updated, ...updatedTags, tags: updatedTags }
-    return encodeGrid([row], { table: kind as any })
+    const data: any = { ...columnPatch }
+    // Only write the `tags` column when the patch actually contains tag
+    // fields. Otherwise leave it untouched — the legacy PATCH /api/cases
+    // path never touched tags, and re-sending the existing tag bag would
+    // re-trigger the XETO validator on legacy/un-migrated tag keys.
+    if (Object.keys(tagPatch).length > 0) {
+      data.tags = merged
+    }
+
+    const updated = await client.update({ where: { id }, data })
+    if (kind === 'case') await applyCaseSideEffects(existing, updated)
+    return { ok: true, row: inlineRow(updated) }
   } catch (e: any) {
-    return errGrid(`commit failed: ${e?.message ?? e}`)
+    return { ok: false, errGridJson: prismaErrToGrid(e, kind) }
   }
+}
+
+function inlineRow(updated: any): any {
+  const tags = recoverTagObject(updated.tags)
+  return { ...updated, ...tags, tags }
+}
+
+/**
+ * Validate that a Case.path points at an existing directory.
+ * Returns `true` on success, or an error string on failure.
+ */
+async function validateCasePath(p: unknown): Promise<true | string> {
+  if (typeof p !== 'string' || p.trim() === '') return 'case path is required'
+  const fs = await import('fs/promises')
+  try {
+    const stat = await fs.stat(p.trim())
+    if (!stat.isDirectory()) return `path is not a directory: ${p}`
+    return true
+  } catch {
+    return `folder does not exist: ${p}`
+  }
+}
+
+async function opCommit(_params: URLSearchParams, body: any): Promise<string> {
+  if (!body || typeof body !== 'object') return errGrid('commit requires a JSON body')
+
+  const idRaw: unknown =
+    typeof body.id === 'string' ? body.id :
+    body.id?.val != null ? String(body.id.val) : null
+
+  const kind: string | null =
+    typeof body.kind === 'string' ? body.kind :
+    typeof body._kind === 'string' ? body._kind : null
+  if (!kind) return errGrid('commit requires a kind (case|motion|motionEvent|motionAttachment|hearing|person|personRole|...)')
+
+  const patch: any = body.patch ?? (() => {
+    const { id: _i, kind: _k, _kind, ...rest } = body
+    return rest
+  })()
+
+  const result = await commitEntity({ id: idRaw as string | null, kind, patch })
+  if (!result.ok) return result.errGridJson
+  return encodeGrid([result.row], { table: kind as any })
 }
 
 /**
