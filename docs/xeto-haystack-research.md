@@ -1,11 +1,14 @@
 # XETO + Project Haystack: court-domain modeling for Sound Suite
 
-**Status:** Research draft · **Date:** 2026-05-04 · **Scope:** architectural exploration, no code changes
+**Status:** Research draft (rev 2) · **Date:** 2026-05-20 · **Scope:** architectural exploration, no code changes
+
+> **Rev 2 (2026-05-20):** restructured the entity model around Haystack's `site / equip / point` containment idiom — `Case = site`, `Motion = equip` (nestable for amendment chains), `MotionEvent = point` (Received / Filed / Responded with `fileRef`). Generalized amendment as an `Amendable` mixin applied uniformly to motions and to attachments (proposed orders, briefs, responses, exhibits) so that amended proposed orders are first-class. Replaced the originally-proposed `Actor` table with a two-table Person pool: canonical immutable `Person` records plus `PersonRole` **ghost / virtual records** that bind a Person to a scope (Motion or Case) with contextual role tags (`movant`, `respondent`, `defendant`, `lawyerMovant`, `judge`, ...). Cases carry `judgeRefs[]` / `plaintiffRefs[]` / `respondentRefs[]`; Motions carry per-motion `judgeRef`. Touched: §1, §2, §4 (added §4.0), §5, §6, §7, §8, §9, §10, §11 (ops table + auth note), §12 (Prisma extension + graphology + VIRTUAL columns). Untouched: §3 (ORM verdict), §3a (Haxall surface), §11 (peer-server architecture), §12.1 (stack diagram), §13 (Hayson over Zinc).
 
 This is the output of a seven-agent investigation into how Project Haystack's tag/spec model and the XETO type language could be layered onto Sound Suite to encode legal procedure (cases, filings, motions, RFAs, per-state rules, deadlines) in a way the AI chat can reason about. It also answers the technical question that prompted it: **does Prisma stay or do we switch ORMs to better fit a tag-based data model?**
 
 The short version:
 
+- **The ontology is `site / equip / point + Amendable + Person pool with ghost roles`.** Cases are sites; Motions are equips and nest for amendment chains; lifecycle events (Received / Filed / Responded) are points with `fileRef`; attachments (proposed orders, briefs, responses, exhibits, emails) are point-attached docs that also amend recursively via an `Amendable` mixin; people live in one searchable pool with intrinsic tags (`person`, `lawyer`, `judge`), and per-motion roles (`movant`, `respondent`, `lawyerMovant`, ...) are carried by separate `PersonRole` ghost records so the canonical Person stays immutable.
 - **Keep Prisma 7 + SQLite.** Add a `tags` JSON column to the legal-domain models, compile Haystack filter syntax to `json_extract(...)` SQL via `$queryRaw`, validate writes against XETO specs at runtime via `@haxall/haxall`'s `Namespace.fits()`. There is no JS-native Haystack datastore worth switching to.
 - **XETO + Haystack are real and active.** Use `@haxall/haxall` (the official Fantom-compiled-to-JS package from SkyFoundry/Brian Frank, npm `@haxall/haxall@4.0.4`, AFL-3.0) for native XETO validation — `Namespace.fits()` and `Namespace.validate()` give us full-fidelity structural checks against XETO specs, with no offline compile step. Use `haystack-core` (j2inn) for the dict/filter runtime alongside it. **`@xeto/sdk` does not exist on npm — `@haxall/haxall` is the canonical entry point.**
 - **Encode procedural rules as XETO *instances*, not types.** Three libs: `proc.core` (jurisdiction-neutral), `proc.tx`, `proc.ca`, `proc.frap`. Each rule is a `Rule` dict with `triggerEvent`, `dueAfterDays`, `targetFiling`, `consequenceIfMissed`. Calendar arithmetic and cascading deadlines stay in plain TypeScript — XETO is the schema, not the rule engine.
@@ -20,12 +23,14 @@ The rest of this document is the detailed plan.
 
 The user's goals, restated as a data model:
 
-1. **Cases** are containers of **filings** (motions, notices, responses, orders, RFAs, bills of review, …).
-2. **Each filing has a lifecycle**: `received → response_due → response_filed → signed/granted/denied`. Today this is *not* tracked.
-3. **Per-state procedural rules** dictate deadlines: "Texas TRAP 38 says X days after Y event". Today there's a `Case.jurisdiction` free-text field and no rule database.
-4. **The system must know who you are** — today it has no User/Attorney model, just file-system paths.
-5. **The AI chat should answer** "what's due on this case?" and "what should I do next?" by reasoning over case state + rules.
-6. **A visual graph** shows the action sequence (file → serve → wait → respond → rule).
+1. **Cases (Haystack `site`)** are containers of **Motions (Haystack `equip`)**. Motions may **nest** other Motions to represent amendment chains — "Motion to Disqualify" → "Amended Motion to Disqualify" (sub-equip) → "Second Amended Motion to Disqualify" (sub-sub-equip). Each Motion contains **Events (point-like)** — `Received`, `Filed`, `Responded` — each with a `fileRef`, and **Attachments** — emails, evidence, exhibits, **proposed orders**, supporting docs. Every file is a single tagged record.
+2. **Each Motion's lifecycle lives in child Event records, not as additive markers on the Motion itself.** Today the lifecycle is *not* tracked at all.
+3. **Amendment is recursive across document types.** Not only motions are amended — proposed orders, briefs, responses, exhibit lists all have amended versions. Amendment is an `Amendable` mixin (`amends` / `supersedes` / `revisionSeq`) applied to any versionable shape, not a property special to Motion.
+4. **People (lawyers, judges, parties) are one shared pool** with tags. A single `Person` record may be tagged `person`, `lawyer`, etc. — these are the *intrinsic* tags. For per-motion or per-case context (Alper is the *movant* in Motion X but the *respondent* in Motion Y), we attach **ghost / virtual records** (`PersonRole`) that bind the canonical Person to a scope (motion/case) with the *contextual* tags overlaid (`movant`, `lawyerMovant`, `defendant`, `respondent`, etc.). Search across the pool by tag returns Persons; search by role returns PersonRoles, joining back to display the underlying Person.
+5. **Cases carry first-class refs** to `judgeRefs[]` (list), `plaintiffRefs[]`, `respondentRefs[]` / `defendantRefs[]` — each pointing at a Person. Motions carry a `judgeRef` (the judge hearing *this* motion, which may differ from other motions in the same case), `movantRef`, `respondentRef`. Every such ref is a pointer into the Person pool.
+6. **Per-state procedural rules** dictate deadlines: "Texas TRAP 38 says X days after Y event". Today there's a `Case.jurisdiction` free-text field and no rule database.
+7. **The AI chat should answer** "what's due on this case?" / "which motions did Judge Roberts sign?" / "which motions does Alper appear in as movant?" by reasoning over case state + rules + the Person/Role pool.
+8. **A visual graph** shows the action sequence (file → serve → wait → respond → rule), with motions as expandable group nodes that reveal their child Events, sub-Motions, and Attachments.
 
 This is essentially a **Project Haystack–style** problem: open-set tags + refs + a typed schema overlay (XETO) that explains what the tags mean. Haystack was designed for building ontologies; the legal domain has the same shape (entities + relations + state markers + rules) as the building/equipment domain it was built for.
 
@@ -43,15 +48,21 @@ Total: **18 models** (the upgrade doc said 13 — that was wrong; the count grew
 **Critical gaps for the XETO goal:**
 | Missing | Where it would live |
 |---|---|
-| User / Attorney / Pro Se model | new `Actor` model |
+| Motion-as-container (today `Motion` is a flat row off `Filing`) | add `parentMotionId` self-FK to `Motion`; promote `Motion` from leaf to equip |
+| Lifecycle Events (Received / Filed / Responded) as records | new `MotionEvent` model (point analog) with `kind`, `occurredOn`, `fileId` |
+| Attachments per motion (email, evidence, exhibit, proposed order, brief, response) with their own amendment chains | new `MotionAttachment` model (or reuse `Document` with `motionId`) + `Amendable` mixin (`amends`, `supersedes`, `revisionSeq`) |
+| Unified `Person` pool (lawyers, judges, parties — one table, tag-filterable) | new `Person` model; subsumes the originally-proposed `Actor` |
+| Per-context role binding (Alper-as-movant in M1, Alper-as-respondent in M2) | new `PersonRole` model — the **ghost/virtual record** that overlays contextual tags on a canonical Person ref |
+| Judge tracking per case **and** per motion | `Case.judgeRefs[]` (all judges who have touched the case) + `Motion.judgeRef` (the judge hearing this specific motion) |
+| Party tracking on Case | `Case.plaintiffRefs[]`, `Case.defendantRefs[]` / `Case.respondentRefs[]` — each a `Ref<Person>` |
 | Structured Jurisdiction (today `Case.jurisdiction` is free text) | new `Jurisdiction` model + FK |
 | Court rule database (TRAP, FRAP, CRC) | new `CourtRule` model OR XETO instances |
-| Filing phase / state machine | new `FilingPhase` model + history |
 | Deadline calculator | new `src/lib/procedure/` module |
 | "Next action" derivation | new derivation pipeline + UI graph |
-| Document service date / author / recipient | extend `Document` |
 
-**Filing taxonomy:** 24 hardcoded types in `src/services/filing-type-classifier.ts` (Motion, Notice, RFA, Bill of Review, …) → embedded in LanceDB → semantic classification by L2 distance, 7-day Redis cache. **This stays.** XETO specs would be a *type layer over* the existing classifier output, not a replacement.
+**Filing taxonomy:** 21 hardcoded types in `src/services/filing-type-classifier.ts` (Motion, Notice, RFA, Bill of Review, …) → embedded in LanceDB → semantic classification by L2 distance, 7-day Redis cache. **This stays.** XETO specs would be a *type layer over* the existing classifier output, not a replacement. Amendment status is orthogonal to type (today detected via the `MODIFIER_WORDS` regex in `filing-detector.ts`) — in the new model it surfaces as the `Amendable` mixin on whichever entity is being amended.
+
+**Note on `Filing`:** the existing `Filing` Prisma model conflates "the act of filing" (an event) with "the thing filed" (the motion / brief / order). The new model splits these cleanly: `Motion` (or `Brief`, etc.) is the entity; `MotionEvent { kind: filed }` is the act. `Filing` is scheduled for deprecation in the migration sequence (§10).
 
 ## 3. Why Prisma stays — the ORM question answered
 
@@ -201,11 +212,199 @@ Use `@haxall/haxall` and round-trip stays correct with SkyFoundry's reference im
 
 | Lib | Purpose |
 |---|---|
-| `cc.courtlens.legal` | Domain entities: `Case`, `Filing`, `Motion`, `Notice`, `RFA`, `BillOfReview`, `Order`, `Response`, `Actor`, `Court` |
-| `proc.core` | Jurisdiction-neutral procedural primitives: `Rule`, `TriggerEvent`, `Deadline`, `Action`, `Consequence` |
+| `cc.courtlens.legal` | Domain entities: `Case` (site), `Motion` (equip, nestable), `MotionEvent` (point), `MotionAttachment` (ProposedOrder, Brief, Response, Email, Evidence, Exhibit, SupportingDoc — all `Amendable`), `Person`, `PersonRole`, `Court`, `Jurisdiction` |
+| `proc.core` | Jurisdiction-neutral procedural primitives: `Rule`, `TriggerEvent`, `Deadline`, `Action`, `Consequence`, `SupersessionPolicy`, `Amendable` mixin |
 | `proc.tx` | Texas rules (TRAP, TRCP, etc.) — instances of `proc.core::Rule` |
 | `proc.ca` | California rules (CCP, CRC) |
 | `proc.frap` | Federal Rules of Appellate Procedure |
+
+### 4.0 Domain hierarchy: site / equip / point / amendable / person+role
+
+The legal-domain library follows Project Haystack's containment idiom. Verified semantics from the `ph` lib bundled with `@haxall/haxall`:
+
+- **Nesting** uses a single ref (`equipRef` in Haystack; we use `motionRef`) — *not* a separate `subEquip` marker. The `equip` (or `motion`) marker is repeated at every level. Depth is unbounded.
+- **Points** (`MotionEvent`) attach via the same ref. Canonical chain: `motionEvent → motionRef → motion → caseRef → case`. A point may attach at any level of the equip tree.
+- **Haystack has no native amendment pattern.** We invent `Amendable` (mixin) with two refs: `amends` (semantic predecessor) and `supersedes` (procedural replacement). For sub-motion structural nesting we also set `motionRef`. These two are *usually* the same pointer but may diverge (a "Second Amended" that revives the original instead of the First Amended).
+
+The eight core specs:
+
+```xeto
+// ----- proc.core (mixins + procedural primitives) ------------------------
+
+// Amendable: any versionable doc — Motion, ProposedOrder, Brief, Response, Exhibit, ...
+Amendable: Dict <abstract> {
+  amends?:       Ref           // semantic predecessor
+  supersedes?:   Ref           // procedural replacement (defaults to amends)
+  revisionSeq?:  Number        // 1=original, 2=first amended, 3=second amended, ...
+}
+
+// How a successor handles the predecessor's open obligations
+SupersessionPolicy: Choice
+ResetsClock:     SupersessionPolicy { resetsClock }     // new deadline runs from successor's event
+ContinuesClock:  SupersessionPolicy { continuesClock }  // original deadline survives
+Discharges:      SupersessionPolicy { discharges }      // predecessor's obligation dies
+
+// ----- cc.courtlens.legal (entities) -------------------------------------
+
+// Case = Haystack site
+Case: Dict {
+  case                          // marker
+  site                          // ph marker — declares site-ness
+  causeNo:         Str
+  jurisdictionRef: Ref<Jurisdiction>
+  courtRef:        Ref<Court>
+  judgeRefs:       List<Ref<Person>>     // every judge who has touched the case
+  plaintiffRefs:   List<Ref<Person>>
+  defendantRefs:   List<Ref<Person>>
+  respondentRefs:  List<Ref<Person>>     // for appellate cases
+  movantRefs?:     List<Ref<Person>>     // optional: party-level movant list
+  courtClerkRefs?: List<Ref<Person>>     // clerks of the court (file-stamping authority)
+  courtReporterRefs?: List<Ref<Person>>  // certified reporters assigned to the case
+  filedOn?:        DateTime              // case opening date (court of record entry)
+  causeFiledStamp?: Str                  // clerk's case-opening stamp identifier
+}
+
+// Motion = Haystack equip, nestable. Intersects Amendable.
+Motion: Dict & Amendable {
+  motion                         // marker
+  equip                          // ph marker
+  caseRef:        Ref<Case>      // siteRef equivalent
+  motionRef?:     Ref<Motion>    // parent motion (sub-equip nesting); equipRef analog
+  subMotion?                     // marker, present iff motionRef present
+  motionType:     Str            // "disqualify" | "vacate" | "compel" | "summaryJudgment" | ...
+  judgeRef?:      Ref<Person>    // the judge hearing THIS motion (may differ across motions in a case)
+  movantRef?:     Ref<Person>    // who is moving — points into Person pool
+  respondentRef?: Ref<Person>    // who must respond
+  // amends, supersedes, revisionSeq inherited from Amendable
+}
+
+// MotionEvent = Haystack point. Lifecycle as discrete records, not markers on Motion.
+MotionEvent: Dict {
+  motionEvent                    // marker
+  point                          // ph marker — declares point-ness
+  motionRef:      Ref<Motion>    // equipRef analog
+  caseRef:        Ref<Case>      // siteRef analog (denormalized for index hit)
+  kind:           EventKind      // Choice (received | filed | courtFiled | responded | signed | granted | denied | served | hearingHeld)
+  occurredOn:     DateTime        // when the event happened (our system time)
+  courtFilingDate?: DateTime      // the OFFICIAL court filing date — set on CourtFiled events,
+                                  // also denormalized onto Filed events when known. Distinct from
+                                  // occurredOn: a party may file at 11:58 PM and the clerk stamps it
+                                  // the next business day; only the stamp date counts for deadlines.
+  causeNoStamp?:  Str             // any clerk-stamped identifier (file-stamp number / sequence)
+  fileRef?:       Ref<Document>   // the PDF that documents this event (stamped copy for CourtFiled)
+  authoredBy?:    Ref<Person>     // who filed / responded — the party
+  servedOn?:      Ref<Person>     // who received service
+  courtClerkRef?: Ref<Person>     // clerk who file-stamped (on CourtFiled events)
+  courtReporterRef?: Ref<Person>  // reporter who transcribed (on HearingHeld events; usually equal to Hearing.courtReporterRef)
+  judgeRef?:      Ref<Person>     // judge who signed (on Signed/Granted/Denied events) — may differ
+                                  // from Motion.judgeRef when a substitute judge signs
+  hearingRef?:    Ref<Hearing>    // on HearingHeld events: link to the shared Hearing record
+                                  // (one Hearing, N MotionEvents pointing at it — handles hybrid hearings)
+}
+
+EventKind: Choice                // exclusive — XETO Choice exclusivity is load-bearing
+Received:  EventKind { received }     // we received it (opposing party's motion arrives at our office)
+Filed:     EventKind { filed }        // we submitted it to the court (party-filed)
+CourtFiled: EventKind { courtFiled }  // clerk's file-stamp / entered into court record — official filing date
+Responded: EventKind { responded }
+Signed:    EventKind { signed }       // judge signs (order signed)
+Granted:   EventKind { granted }
+Denied:    EventKind { denied }
+Served:    EventKind { served }
+HearingHeld: EventKind { hearingHeld } // hearing event-of-record; one per affected motion, all pointing at one Hearing record via hearingRef
+
+// Hearing — first-class shared entity, NOT a sub-equip of one Motion.
+// A hybrid hearing covers multiple motions across multiple cases (consolidated,
+// companion, or same-parties cases heard together). One Hearing record + N
+// MotionEvent{hearingHeld} records (one per affected motion) keeps the per-motion
+// timeline clean while the shared facts (judge, reporter, transcript, time, room)
+// live once. Same shape Haystack uses for a chiller-plant serving multiple AHUs
+// or a weather-station serving multiple sites.
+Hearing: Dict {
+  hearing                       // marker
+  hybrid?                       // marker, present iff caseRefs.size > 1
+  caseRefs:        List<Ref<Case>>     // every case touched (1 for normal, N for hybrid)
+  motionRefs:      List<Ref<Motion>>   // every motion on the docket for this hearing
+  judgeRef:        Ref<Person>
+  courtReporterRef?: Ref<Person>
+  courtClerkRef?:  Ref<Person>
+  scheduledFor:    DateTime
+  heldOn?:         DateTime     // null until it happens (may differ from scheduledFor on reschedule)
+  durationMin?:    Number
+  location?:       Str          // "Courtroom 4B" or a Zoom URL
+  remote?                       // marker for telephonic / video hearings
+  transcriptRef?:  Ref<Document>  // the official transcript, when produced
+  hearingType?:    Str          // "motion" | "status" | "pretrial" | "evidentiary" | "trial"
+}
+
+// MotionAttachment = anything attached to a motion that isn't a lifecycle event.
+// Every subtype intersects Amendable — proposed orders / briefs / responses / exhibits
+// all have amendment chains.
+MotionAttachment: Dict & Amendable <abstract> {
+  attachment                     // marker
+  motionRef:      Ref<Motion>
+  caseRef:        Ref<Case>      // denormalized
+  fileRef:        Ref<Document>
+  authoredBy?:    Ref<Person>
+}
+
+ProposedOrder:  MotionAttachment { proposedOrder }   // can be amended (amended proposed order)
+Brief:          MotionAttachment { brief }
+Response:       MotionAttachment { response }
+Exhibit:        MotionAttachment { exhibit, label:Str }
+Email:          MotionAttachment { email, from:Ref<Person>, to:List<Ref<Person>>, subject:Str, sentOn:DateTime }
+Evidence:       MotionAttachment { evidence }
+SupportingDoc:  MotionAttachment { supportingDoc }
+
+// ----- Person pool + ghost-record pattern --------------------------------
+
+// Person: canonical, immutable identity. Tags here are INTRINSIC — they describe
+// who the person is in the abstract, not what role they play in a specific motion.
+// One pool — search "person" returns everyone; filter by intrinsic tag (`lawyer`,
+// `judge`) to narrow.
+Person: Dict {
+  person                         // marker — selects the entire pool
+  displayName:    Str
+  email?:         Str
+  barNumber?:     Str            // present iff lawyer
+  jurisdictionRef?: Ref<Jurisdiction>
+  // Intrinsic role markers (always-true facts about this person):
+  lawyer?                        // is admitted to practice
+  judge?                         // is a sitting judge
+  courtClerk?                    // clerk of the court (file-stamps documents, maintains the docket)
+  courtReporter?                 // certified court reporter (transcribes hearings)
+  bailiff?                       // sheriff's deputy assigned to the court (rarer; include for completeness)
+  proSe?                         // is a non-attorney litigant
+  self?                          // marker for the app's primary user
+}
+
+// PersonRole: the GHOST / VIRTUAL record. Binds a canonical Person to a scope
+// (a Motion or a Case) with role tags that are CONTEXTUAL — true only in that
+// scope. Solves the immutability problem: Person records never mutate; role
+// records are created per binding and may carry contradictory roles across
+// scopes (Alper is movant in M1, respondent in M2).
+PersonRole: Dict {
+  personRole                     // marker
+  personRef:      Ref<Person>    // join key back to the pool
+  scopeRef:       Ref            // Ref<Motion> or Ref<Case>
+  // Contextual role markers — any combination:
+  movant?
+  respondent?
+  defendant?
+  plaintiff?
+  intervenor?
+  lawyerMovant?                  // = lawyer + movant in this scope
+  lawyerRespondent?
+  judge?                         // overrides Person.judge when the binding is "this person is THE judge on this motion"
+  // Optional metadata:
+  appearedOn?:    DateTime
+  withdrewOn?:    DateTime
+}
+```
+
+The pattern: the Person record holds identity; the PersonRole record holds role-in-context. When the UI attaches "Alper" to Motion-X as movant, the system **does not mutate the Person record** — it creates a new `PersonRole { personRef: @alper, scopeRef: @motion-x, movant, lawyerMovant }`. The same Alper can appear as `respondent` in `@motion-y` via a second `PersonRole` record. Search the pool by `person`, search by role by querying `personRole and movant and scopeRef==@motion-x`, and join `personRef → Person.displayName` for display.
+
+**Why ghost records, not tags-on-Motion:** the user could in principle just put `movantRef: @alper` on every Motion (and we keep that ref as a convenience — single most-common case). But that doesn't generalize to multi-movant motions, attorneys-of-record, withdrawing counsel, or per-appearance dates. The `PersonRole` table absorbs all of that without polluting the Motion record.
 
 ### Verified XETO syntax
 
@@ -281,30 +480,195 @@ Use `date-fns`, not Drools or Z3. Drools is overkill; Z3 is the wrong tool entir
 
 ## 5. Tag model — concrete additions to Sound Suite
 
-Sketch from the Haystack agent (~30 tags). Prefix: none required (we own the namespace).
+Tags are grouped by tier (site / equip / point / attachment / person / role / refs / values). Prefix: none required (we own the namespace).
 
-**Entity markers** (15): `case`, `motion`, `notice`, `rfa`, `billOfReview`, `appellate`, `hearing`, `order`, `response`, `affidavit`, `petition`, `subpoena`, `transcript`, `judgment`, `settlement`
+**Site-level markers** (Case): `case`, `site`
 
-**State markers** (9): `received`, `responded`, `signed`, `granted`, `denied`, `served`, `filed`, `withdrawn`, `mooted`
+**Equip-level markers** (Motion): `motion`, `equip`, `subMotion` (present iff `motionRef` is set), `appellate`
 
-**Refs** (8): `caseRef`, `motionRef`, `filingRef`, `partyRef`, `attorneyRef`, `courtRef`, `judgeRef`, `priorRef`
+**Shared-entity markers** (Hearing — cross-case shared record): `hearing`, `hybrid` (present iff the hearing spans ≥2 cases), `remote` (telephonic/video)
 
-**Value tags** (~11): `dueBy`, `receivedOn`, `respondedOn`, `signedOn`, `causeNo`, `jurisdictionTx`, `jurisdictionCa`, `jurisdictionFed`, `docUri`, `sha256`, `pageCount`
+**Point-level markers** (MotionEvent): `motionEvent`, `point`, plus `EventKind` Choice members — `received`, `filed` (party-filed), `courtFiled` (clerk-stamped, official), `responded`, `signed`, `granted`, `denied`, `served`, `hearingHeld`, `withdrawn`, `mooted`
 
-**State machine pattern** (Haystack idiom): a single record + additive markers + paired timestamps — not separate records per state.
+**Attachment markers** (MotionAttachment, all intersect `Amendable`): `attachment`, `proposedOrder`, `brief`, `response`, `email`, `evidence`, `exhibit`, `supportingDoc`, `order`, `transcript`, `affidavit`, `subpoena`, `judgment`, `settlement`, `notice`, `rfa`, `billOfReview`, `petition`
+
+**Person pool markers** (`Person` records — intrinsic, immutable): `person`, `lawyer`, `judge`, `courtClerk`, `courtReporter`, `bailiff`, `proSe`, `self`
+
+**Role markers** (`PersonRole` records — contextual, ghost-record): `personRole`, `movant`, `respondent`, `defendant`, `plaintiff`, `intervenor`, `lawyerMovant`, `lawyerRespondent`, `judge` (when binding "this person is THE judge on this scope")
+
+**Refs**: `caseRef` (siteRef), `motionRef` (equipRef / parent-motion / event-parent), `amends`, `supersedes`, `fileRef`, `personRef`, `scopeRef`, `judgeRef`, `movantRef`, `respondentRef`, `plaintiffRef`, `defendantRef`, `judgeRefs` / `plaintiffRefs` / `defendantRefs` / `respondentRefs` / `courtClerkRefs` / `courtReporterRefs` (list-valued on Case), `courtClerkRef`, `courtReporterRef` (single, on MotionEvent), `courtRef`, `authoredBy`, `servedOn`. Strike `filingRef` (deprecated with `Filing`).
+
+**Value tags**: `dueBy`, `occurredOn`, `courtFilingDate` (official clerk-stamp date — distinct from `occurredOn`), `causeNoStamp` (clerk's stamp identifier), `filedOn` (case-opening date on Case), `kind` (the `EventKind` value), `revisionSeq`, `motionType`, `attachmentKind`, `causeNo`, `jurisdictionTx`, `jurisdictionCa`, `jurisdictionFed`, `docUri`, `sha256`, `pageCount`, `displayName`, `barNumber`, `email`.
+
+**Why `Filed` and `CourtFiled` are separate events** (and not one with two timestamps): the official **court filing date is the legally-operative one** — deadline clocks (TRCP/TRAP/FRAP/CCP all) run from the clerk's file-stamp, not the moment we hit "submit" in the e-filing portal. A motion party-filed at 11:58 PM Friday that the clerk stamps Monday morning is *legally* filed Monday. Keeping them as distinct events also captures the gap-of-record: e-filing rejections, returned-for-correction, etc., which produce a `Filed` event with no follow-up `CourtFiled` event. Index `MotionEvent(kind, courtFilingDate)` so the deadline pipeline (§6 Layer 2) can match rule trigger events to the clerk-stamp date without re-deriving it.
+
+### State expressed as child records, not additive markers
+
+The old draft of this section showed a single Motion record carrying `received: true`, `responded: true`, `signed: true` simultaneously. The new model splits these into **point-level child records** so the audit trail, file pointers, and per-event actors are first-class.
+
 ```json
-{
-  "id": "@motion-1234",
-  "motion": true,
-  "received": true,  "receivedOn": "2026-04-15T...",
-  "responded": true, "respondedOn": "2026-05-01T...",
-  "signed": true,    "signedOn": "2026-05-12T...",
+// Person pool — canonical, immutable.
+{ "id": "@person-alper",    "person": true, "lawyer": true,
+  "displayName": "Alper Kanat", "barNumber": "TX-24123456" }
+{ "id": "@person-roberts",  "person": true, "judge":  true,
+  "displayName": "Hon. R. Roberts" }
+{ "id": "@person-smith",    "person": true, "lawyer": true,
+  "displayName": "J. Smith",  "barNumber": "TX-99887766" }
+{ "id": "@person-acme",     "person": true,
+  "displayName": "ACME Corp" }   // an organization counts as a Person record
+{ "id": "@person-clerk",    "person": true, "courtClerk": true,
+  "displayName": "M. Garcia, Clerk of Court" }
+{ "id": "@person-reporter", "person": true, "courtReporter": true,
+  "displayName": "L. Tran, CSR #4421" }
+
+// Case (site) — judge list + party lists + court personnel as first-class refs.
+{ "id": "@case-5678", "case": true, "site": true,
+  "causeNo": "DC-26-00123",
+  "jurisdictionTx": true,
+  "courtRef": "@court-tx-dc-95",
+  "judgeRefs":           ["@person-roberts"],
+  "plaintiffRefs":       ["@person-alper"],
+  "defendantRefs":       ["@person-acme"],
+  "courtClerkRefs":      ["@person-clerk"],
+  "courtReporterRefs":   ["@person-reporter"],
+  "filedOn":             "2026-03-01T...",
+  "causeFiledStamp":     "DC-26-00123-001" }
+
+// Motion (equip) — Motion to Disqualify. Carries judgeRef (THIS motion's judge),
+// movantRef, respondentRef. revisionSeq=1 because it's the original.
+{ "id": "@motion-1234", "motion": true, "equip": true,
+  "motionType": "disqualify",
   "caseRef": "@case-5678",
-  "dueBy": "2026-05-15T..."
-}
+  "judgeRef": "@person-roberts",
+  "movantRef": "@person-alper",
+  "respondentRef": "@person-smith",
+  "revisionSeq": 1 }
+
+// Amended Motion (sub-equip): motionRef pins parent, amends/supersedes are explicit.
+{ "id": "@motion-1235", "motion": true, "equip": true, "subMotion": true,
+  "motionType": "disqualify",
+  "caseRef":   "@case-5678",
+  "motionRef": "@motion-1234",
+  "amends":    "@motion-1234",
+  "supersedes":"@motion-1234",
+  "judgeRef":  "@person-roberts",
+  "movantRef": "@person-alper",
+  "revisionSeq": 2 }
+
+// Second Amended Motion (sub-sub-equip): chains off the Amended one.
+{ "id": "@motion-1236", "motion": true, "equip": true, "subMotion": true,
+  "caseRef":   "@case-5678",
+  "motionRef": "@motion-1235",
+  "amends":    "@motion-1235",
+  "supersedes":"@motion-1235",
+  "revisionSeq": 3 }
+
+// Lifecycle events (points) — one record per occurrence, each with fileRef.
+{ "id": "@evt-1", "motionEvent": true, "point": true, "received": true,
+  "kind": "received", "motionRef": "@motion-1234", "caseRef": "@case-5678",
+  "occurredOn": "2026-04-15T09:00:00Z", "fileRef": "@doc-aaa",
+  "authoredBy": "@person-smith" }
+{ "id": "@evt-2", "motionEvent": true, "point": true, "filed": true,
+  "kind": "filed",    "motionRef": "@motion-1234",
+  "occurredOn": "2026-04-20T23:58:00Z", "fileRef": "@doc-bbb",
+  "authoredBy": "@person-alper" }
+// Court-stamped (official) filing — Monday morning, after the Friday-night e-file.
+// THIS is the date the response clock runs from.
+{ "id": "@evt-2b", "motionEvent": true, "point": true, "courtFiled": true,
+  "kind": "courtFiled", "motionRef": "@motion-1234", "caseRef": "@case-5678",
+  "occurredOn":       "2026-04-23T08:14:00Z",
+  "courtFilingDate":  "2026-04-23T08:14:00Z",
+  "causeNoStamp":     "DC-26-00123-014",
+  "fileRef":          "@doc-bbb-stamped",
+  "courtClerkRef":    "@person-clerk" }
+{ "id": "@evt-3", "motionEvent": true, "point": true, "responded": true,
+  "kind": "responded", "motionRef": "@motion-1234",
+  "occurredOn": "2026-05-01T14:00:00Z", "fileRef": "@doc-ccc",
+  "authoredBy": "@person-smith" }
+{ "id": "@evt-4", "motionEvent": true, "point": true, "signed": true,
+  "kind": "signed", "motionRef": "@motion-1235",
+  "occurredOn": "2026-05-12T11:00:00Z", "fileRef": "@doc-ddd",
+  "judgeRef":  "@person-roberts" }
+// Hybrid hearing — one Hearing record covers Motion-1235 in Case-5678 AND
+// Motion-7777 in Case-9999 (consolidated proceedings). The Hearing is the
+// shared entity; each motion gets its own hearingHeld event pointing at it.
+{ "id": "@hearing-42", "hearing": true, "hybrid": true,
+  "caseRefs":          ["@case-5678", "@case-9999"],
+  "motionRefs":        ["@motion-1235", "@motion-7777"],
+  "judgeRef":          "@person-roberts",
+  "courtReporterRef":  "@person-reporter",
+  "courtClerkRef":     "@person-clerk",
+  "scheduledFor":      "2026-05-10T09:30:00Z",
+  "heldOn":            "2026-05-10T09:30:00Z",
+  "durationMin":       45,
+  "location":          "Courtroom 4B",
+  "hearingType":       "motion",
+  "transcriptRef":     "@doc-trans-42" }
+// One MotionEvent per affected motion — both point at @hearing-42.
+{ "id": "@evt-5", "motionEvent": true, "point": true, "hearingHeld": true,
+  "kind": "hearingHeld", "motionRef": "@motion-1235", "caseRef": "@case-5678",
+  "occurredOn":        "2026-05-10T09:30:00Z",
+  "hearingRef":        "@hearing-42",
+  "judgeRef":          "@person-roberts",
+  "courtReporterRef":  "@person-reporter" }
+{ "id": "@evt-5b", "motionEvent": true, "point": true, "hearingHeld": true,
+  "kind": "hearingHeld", "motionRef": "@motion-7777", "caseRef": "@case-9999",
+  "occurredOn":        "2026-05-10T09:30:00Z",
+  "hearingRef":        "@hearing-42",
+  "judgeRef":          "@person-roberts",
+  "courtReporterRef":  "@person-reporter" }
+
+// Attachments — proposed order with its own amendment chain (separate from the motion's chain).
+{ "id": "@att-1", "attachment": true, "proposedOrder": true,
+  "motionRef": "@motion-1234", "caseRef": "@case-5678",
+  "fileRef": "@doc-eee", "revisionSeq": 1 }
+{ "id": "@att-2", "attachment": true, "proposedOrder": true,
+  "motionRef": "@motion-1234", "caseRef": "@case-5678",
+  "fileRef": "@doc-fff", "revisionSeq": 2,
+  "amends": "@att-1", "supersedes": "@att-1" }
+{ "id": "@att-3", "attachment": true, "email": true,
+  "motionRef": "@motion-1234", "caseRef": "@case-5678",
+  "fileRef": "@doc-ggg",
+  "from": "@person-alper", "to": ["@person-smith"],
+  "subject": "Re: Proposed Order revisions",
+  "sentOn": "2026-04-25T16:20:00Z" }
+
+// PersonRole ghost records — bind canonical Persons to scopes with contextual roles.
+// Alper is movant + lawyerMovant on @motion-1234.
+{ "id": "@role-1", "personRole": true,
+  "personRef": "@person-alper", "scopeRef": "@motion-1234",
+  "movant": true, "lawyerMovant": true,
+  "appearedOn": "2026-04-15T..." }
+// Same Alper on @motion-9999 of another case — different role:
+{ "id": "@role-2", "personRole": true,
+  "personRef": "@person-alper", "scopeRef": "@motion-9999",
+  "respondent": true, "lawyerRespondent": true }
+// Roberts as the assigned judge on @motion-1234:
+{ "id": "@role-3", "personRole": true,
+  "personRef": "@person-roberts", "scopeRef": "@motion-1234",
+  "judge": true }
 ```
 
-The `mod` (modification timestamp) auto-updates on every write — that gives you free audit history without a separate event table.
+**Lifecycle truth lives in `MotionEvent` child records.** The `mod` (modification timestamp) on the parent Motion still auto-updates on every write, but it is not the audit log — the audit log is the ordered set of `motionEvent` records keyed by `motionRef`, naturally queryable as `motionEvent and motionRef==@motion-1234` and orderable by `occurredOn`.
+
+**`Choice` exclusivity is load-bearing on the write path.** `kind` on a `MotionEvent` is one of `received | filed | responded | signed | granted | denied | served`. XETO's `Choice` enforces single-membership at write time via `@haxall/haxall.fits()` (§3a); the bare-marker form (`received: true`) is allowed but the *combination* `{received: true, filed: true}` on the same event record fails validation. This is one of the three things JSON-Schema cannot round-trip — see §3a "what beats JSON-Schema-via-ajv".
+
+### Person-pool query patterns
+
+The Person pool gives the chat and the search UI a single source of truth for "who".
+
+| Query | Filter |
+|---|---|
+| Everyone | `person` |
+| All lawyers | `person and lawyer` |
+| All judges | `person and judge` |
+| All movants across the entire DB | `personRole and movant` |
+| Who is the movant on @motion-1234 | `personRole and movant and scopeRef==@motion-1234` (then deref `personRef`) |
+| Every motion Alper has filed as movant | `personRole and movant and personRef==@person-alper` (then deref `scopeRef` to Motion) |
+| Every motion Judge Roberts has signed | `motionEvent and signed and authoredBy==@person-roberts` |
+| Cases where Alper is a plaintiff | `case and plaintiffRefs.contains(@person-alper)` |
+
+The two-tier separation (intrinsic vs contextual) is what makes "search for whom" selectable in the UI: the search bar autocompletes against Persons (one row per human/org), while the result list can pivot through PersonRoles to show "appears as movant in N motions / respondent in M motions / etc."
 
 ## 6. The "what should I do next?" pipeline
 
@@ -314,10 +678,18 @@ Three layers, all server-side:
 At startup, walk `proc.{tx,ca,frap}/*.xeto`, load every `Rule` instance, index by `targetFilingType` and `triggerEvent`. Pure in-memory, ~milliseconds.
 
 ### Layer 2 — Action derivation (TS, not XETO)
-Given a Case, walk its filings + tags:
-- For each `Rule`, find filings whose state matches `triggerEvent` (e.g., `received` for `ServedOn`).
-- Compute `dueDate = triggerDate + dueAfterDays` (with weekend/holiday rollover).
-- Look for an existing filing of `targetFilingType` linked to the trigger filing. If absent → emit an `Action` (do this); if present → emit a `Completed` (already done); if `dueDate < now` → flag as overdue.
+Given a Case, walk its **Motions** (parent + nested sub-motions) and each Motion's child **MotionEvents** and **MotionAttachments**:
+- For each `Rule`, find `MotionEvent` records whose `kind` matches the rule's `triggerEvent` (e.g., `kind=="courtFiled"` matches `ServedOn` for a clerk-stamped service event).
+- Compute `dueDate = (event.courtFilingDate ?? event.occurredOn) + rule.dueAfterDays` (with weekend/holiday rollover via `date-fns`). **`courtFilingDate` is the legally-operative date** when present — fall back to `occurredOn` only for events that have no clerk-stamp concept (e.g., `received`).
+- Look for a satisfying `MotionEvent` of the target `kind` (typically `responded` or `courtFiled`) on a Motion whose `motionType` matches and `caseRef` is the same. If absent → emit an `Action`; if present → emit `Completed`; if `dueDate < now` → flag as overdue.
+
+### Layer 2.5 — Supersession resolution
+Walk the **amendment chain** for every `Amendable` record (Motion or MotionAttachment) — follow `amends` / `supersedes` back-edges:
+- For each pair (predecessor, successor), look up the governing `proc.core::SupersessionPolicy` for the rule that produced the predecessor's open obligation.
+- Apply: `resetsClock` → restart the deadline at the successor's filing event; `continuesClock` → keep the predecessor's deadline; `discharges` → drop the obligation entirely.
+- This applies uniformly to Motions ("Amended Motion to Disqualify supersedes the original — does the response clock reset?") AND to Attachments ("Amended Proposed Order supersedes the prior — does the judge's signing obligation continue?").
+
+The amendment-chain DAG is exactly what `graphology` + `graphology-dag` (§12) traverses; topological sort guarantees we process predecessors before successors.
 
 ### Layer 3 — MCP tools for the AI chat
 Exposed to the AI via the existing MCP layer:
@@ -327,6 +699,10 @@ Exposed to the AI via the existing MCP layer:
 // Tool: listOverdueActions(caseId, now) → Action[]
 // Tool: listUpcoming(caseId, withinDays) → Action[]
 // Tool: explainRule(ruleQname) → { citation, plainEnglish, sourceUrl }
+// Tool: findPerson(query) → Person[]                              // search the pool
+// Tool: rolesForPerson(personId) → PersonRole[]                   // every motion/case Alper appears in, with role
+// Tool: judgeMotions(judgeId) → Motion[]                          // motions assigned to this judge
+// Tool: amendmentChain(motionId | attachmentId) → Amendable[]     // walk amends/supersedes
 ```
 
 The AI then composes prompts like *"You filed an RFA on April 15. Texas TRCP 198.2 requires the opposing party to respond within 30 days. As of today (May 4), they have 12 days remaining. If they miss it, the requests are deemed admitted (TRCP 198.2(c))."* — entirely from the structured rule library, no hallucination.
@@ -347,38 +723,78 @@ The agent recommendation is unambiguous: **use `@xyflow/react`** (React Flow), n
 Implementation:
 
 - `src/components/case/case-action-graph.tsx`
-- Source of truth: derived from XETO Action specs + the case's actual Document/Filing records. Read-only.
-- Layout: `dagre` for hierarchical placement (top-to-bottom: prerequisites → action → outcome).
-- Node colors: green = completed, blue = pending, amber = due soon, red = overdue.
-- Click → opens the linked filing in the existing case explorer.
+- Source of truth: derived from Motion + MotionEvent + MotionAttachment records, with `proc.*::Rule` instances. Read-only.
+- **Each Motion renders as a React Flow group / subflow node** (built-in via the `parentNode` prop). Collapsed: shows motion title + status pill. Expanded: shows child MotionEvents (color-coded by `kind`), sub-motions (recursive group nodes), and attachments (proposed orders, briefs, responses, exhibits) in a strip.
+- **Amendment chains render left-to-right inside the group**, oldest at the left, with `amends`/`supersedes` edges drawn between consecutive `revisionSeq` records. The same pattern applies to Motion chains and Attachment chains (an amended proposed order strip lives inside the Motion's attachments lane).
+- Layout: `dagre` for hierarchical placement (top-to-bottom: prerequisites → action → outcome); intra-group layout uses a simpler left-to-right strip.
+- Node colors: green = completed, blue = pending, amber = due soon, red = overdue, grey = superseded.
+- Click MotionEvent → opens the linked Document in the case explorer. Click Person badge → opens the Person record and lists all roles.
 - Re-derive on case mutation; no canvas state to persist.
 
 Reserve Rete.js for a future v2 where users drag-edit XETO Action templates as a building block library (different problem, different tool).
 
-## 8. User identity model
+## 8. Person pool + ghost-record role binding
 
-The system today is case-centric, not user-centric. To make "this is the response *I* wrote vs the motion *they* sent" meaningful, add:
+The system today is case-centric, not person-centric. The new model replaces the originally-proposed `Actor` table with a two-table design: a **canonical Person pool** (immutable identity) plus a **PersonRole** ghost-record table (per-scope contextual roles). This is the Haystack-shaped solution to a problem the building-domain doesn't have: the same person plays different roles in different contexts.
 
 ```prisma
-model Actor {
-  id           String   @id @default(cuid())
-  kind         String   // "self" | "opposing-counsel" | "pro-se" | "judge" | "court-clerk"
-  displayName  String
-  barNumber    String?  // optional
-  email        String?
-  role         String?  // "appellant" | "appellee" | "plaintiff" | "defendant" | "intervenor"
-  jurisdictionRef String?
-  tags         Json     @default("{}")
-  // back-relations: filings authored, filings received, etc.
+model Person {
+  id              String   @id @default(cuid())
+  displayName     String
+  email           String?
+  barNumber       String?  // present for lawyers
+  jurisdictionId  String?  // FK → Jurisdiction
+  // Intrinsic markers as a JSON column under XETO validation:
+  //   { person: true, lawyer?: true, judge?: true, proSe?: true, self?: true }
+  tags            Json     @default("{}")
+  roles           PersonRole[]
+  @@index([displayName])
+}
+
+model PersonRole {
+  id          String   @id @default(cuid())
+  personId    String                   // FK → Person.id (canonical reference)
+  person      Person   @relation(fields: [personId], references: [id], onDelete: Cascade)
+  // scope is polymorphic: either a Motion id or a Case id.
+  scopeKind   String                   // "motion" | "case"
+  scopeId     String                   // FK target — Motion.id or Case.id depending on scopeKind
+  // Contextual markers as JSON:
+  //   { personRole: true, movant?, respondent?, defendant?, plaintiff?, intervenor?,
+  //     lawyerMovant?, lawyerRespondent?, judge? }
+  tags        Json     @default("{}")
+  appearedOn  DateTime?
+  withdrewOn  DateTime?
+  @@index([personId])
+  @@index([scopeKind, scopeId])
 }
 ```
 
-Plus:
-- `Document.authorId String?` and `Document.recipientId String?`
-- `Filing.filedById String?`
-- A "self" actor row created on first boot (the user enters name + bar # in admin once)
+Plus convenience refs on Motion and Case (denormalised pointers into the Person pool for the most-common single-actor cases — `judgeRef`, `movantRef`, `respondentRef` on Motion; `judgeRefs[]`, `plaintiffRefs[]`, `defendantRefs[]`, `respondentRefs[]` on Case). These are the fast path; `PersonRole` is the complete record for multi-actor cases (co-movants, withdrawing counsel, multiple judges over time).
 
-Now "motion received" vs "motion sent" is a one-tag query: `received and recipientRef == @actor.self`.
+Document authorship + service:
+- `MotionEvent.authoredById String?` and `MotionEvent.servedOnId String?` → FK to `Person.id`. Set per event, so "the motion was filed by Alper but served by the clerk" stays expressible.
+- A `self` Person row is created on first boot (the user enters name + bar # once in admin) and tagged `{person, lawyer, self}`. From then on, "did I file this?" is `motionEvent and authoredBy == @person.self`.
+
+### Search "for whom"
+
+The search UI offers a **person picker** that queries the Person pool (`person and ...`). Selecting a person opens a panel that pivots through `PersonRole` to show every motion / case they appear in, with the role badge. This is the concrete payoff of the two-table split: one searchable pool, role-rich context.
+
+```
+findPerson("Alper") → [@person-alper]
+rolesForPerson(@person-alper) →
+  - movant + lawyerMovant in @motion-1234 (Case-5678: Motion to Disqualify)
+  - lawyerRespondent in @motion-9999 (Case-1111: Motion for Summary Judgment)
+  - plaintiff in @case-5678
+```
+
+### Why this beats putting roles directly on Motion
+
+The Motion record has `movantRef` as a convenience (single most common case). But the rules below break that shortcut, which is why `PersonRole` exists as a separate table:
+
+1. **Multi-movant motions.** Joint motions have ≥2 movants — one ref column can't hold the list, and lists on the equip record itself force the UI into "edit the motion to add a movant" instead of "add Alper to this motion".
+2. **Attorney-of-record changes.** When a lawyer withdraws mid-case, the historical record needs `appearedOn` and `withdrewOn` per appearance.
+3. **Same person, multiple roles in one scope.** A pro-se litigant who is *also* a lawyer is both `proSe` and `lawyer`; on Motion-X they're `movant + proSe + lawyerMovant`. That combination lives cleanly in a `PersonRole`, awkwardly anywhere else.
+4. **Immutability of canonical Persons.** The user's stated constraint: "A record is immutable meaning when you add a tag it is static." If `movant` were a tag on the Person, attaching them to Motion-1 as movant would *globally* mark them as movant. The ghost-record pattern is the standard Haystack fix.
 
 ## 9. Folder/file XETO spec
 
@@ -388,12 +804,16 @@ Yes — define a `FsLayout` spec where each rule says "files matching glob X bel
 
 ```xeto
 LegalFsLayout: Dict {
-  rootPath:    Str
-  caseGlob:    Str <default:"{caseName}/">           // case-name as folder
-  filingGlob:  Str <default:"{caseName}/{filingType}/{filename}.pdf">
-  exhibitGlob: Str <default:"{caseName}/exhibits/{label}.pdf">
+  rootPath:        Str
+  caseGlob:        Str <default:"{caseName}/">                                                      // case-name folder = site
+  motionGlob:      Str <default:"{caseName}/{motionSlug}/">                                         // motion folder = equip
+  eventGlob:       Str <default:"{caseName}/{motionSlug}/events/{eventKind}/{occurredOn}.pdf">      // points
+  attachmentGlob:  Str <default:"{caseName}/{motionSlug}/attachments/{attachmentKind}/{revisionSeq}-{filename}.pdf">
+  amendedMotionGlob: Str <default:"{caseName}/{motionSlug}/amended/{revisionSeq}/">                 // sub-equips under their parent
 }
 ```
+
+The folder layout mirrors the entity hierarchy: case folder → motion folder → events / attachments / amended subfolders. A "Second Amended Motion to Disqualify" lives at `{case}/disqualify-roberts/amended/3/` — depth on disk matches `revisionSeq` in the records.
 
 Render a folder tree in the UI from this spec; show "you don't have a `responses/` folder for case X — create it" as a derived action. **Lower priority than the rules engine** — file the spec but don't implement the UI until the rules engine is shipping value.
 
@@ -402,17 +822,19 @@ Render a folder tree in the UI from this spec; show "you don't have a `responses
 The implementation order matters because each step de-risks the next.
 
 1. **Land the framework upgrade first** (`upgrade-nextjs-prisma.md` Steps 0–3). The better-sqlite3 driver adapter from Prisma 7 is a hard prerequisite for tag-heavy concurrent reads/writes.
-2. **Add the `tags Json` column** to Case, Filing, Document, Motion, Exhibit. Migration is additive, zero data risk. Default `{}`.
-3. **Vendor `haystack-core`** + write a `haystackFilter()` SQL emitter. Unit-test against a fixture set of dicts.
-4. **Add the `Actor` and `Jurisdiction` models.** Backfill: every existing Case gets `jurisdiction = parsed-from-Case.jurisdiction-string` (best-effort; flag unparseables).
-5. **Author the first XETO library** (`cc.courtlens.legal`) covering the 18 existing models. Compile to JSON Schema. Wire validation into the write path for `tags` only (don't validate the typed columns).
-6. **Author `proc.tx`** with 10–20 of the most-cited Texas rules (TRAP 38, TRCP 198, TRCP 99, etc.). Source: `txcourts.gov`.
-7. **Build the action-derivation pipeline** + MCP tools.
-8. **Build the React Flow case-action graph.** Wire to a new `/case/[id]/actions` page.
-9. **Open the AI chat surface** — the existing draft chat gets a new "Case actions" tool group.
-10. **Then `proc.ca` and `proc.frap`.** Same pattern, different rule sources.
+2. **Add the `tags Json` column** to Case, Motion, Document. Migration is additive, zero data risk. Default `{}`. (Filing keeps its `tags` column too while we're in transition — see step 4.5.)
+3. **Vendor `haystack-core`** + write a `haystackFilter()` SQL emitter wrapped by Kysely (§12.2). Unit-test against a fixture set of dicts.
+4. **Add the `Person`, `PersonRole`, and `Jurisdiction` models.** `Person` subsumes the originally-proposed `Actor`. Seed the `self` Person row on first boot. Backfill: every existing Case gets `jurisdiction = parsed-from-Case.jurisdiction-string` (best-effort; flag unparseables).
+5. **Schema migration — promote Motion to container.** Add `parentMotionId` self-FK on `Motion`; create `MotionEvent(motionId, caseId, kind, occurredOn, fileId, authoredById, servedOnId, tags)`; create `MotionAttachment(motionId, caseId, attachmentKind, fileId, amendsId, supersedesId, revisionSeq, tags)`. Add `Motion.amendsId`, `Motion.supersedesId`, `Motion.revisionSeq` (the `Amendable` mixin's Prisma form). Add `Motion.judgeId` / `movantId` / `respondentId` denormalized refs. Add `Case.judgeIds[]` / `plaintiffIds[]` / `defendantIds[]` / `respondentIds[]` (via a join table or JSON list — recommend join table `CaseParticipant` for indexability).
+5.5. **Backfill from current data.** Scan existing `Filing` rows whose tags include `motion` → create corresponding `Motion` rows. Scan filenames via the existing `MODIFIER_WORDS` regex in `filing-detector.ts` → propose `amends` links for human review (don't auto-link). Existing `Filing.isSupplemental` + `supplementalOrder` → `revisionSeq` on the new Motion / Attachment record. Existing `Filing.filingDate` becomes a `MotionEvent { kind: filed, occurredOn: filingDate }`. Mark `Filing` as deprecated; gate removal on telemetry showing no remaining reads.
+6. **Author the first XETO library** (`cc.courtlens.legal`) covering Case (site), Motion (equip+Amendable), MotionEvent (point), MotionAttachment subtypes (each Amendable), Person, PersonRole, Court, Jurisdiction. Wire validation via the Prisma `query` extension (§12.2) so writes that bypass the repo still validate.
+7. **Author `proc.core`** primitives (`Rule`, `TriggerEvent`, `Consequence`, `SupersessionPolicy`, `Amendable` mixin) and **`proc.tx`** with 10–20 of the most-cited Texas rules (TRAP 38, TRCP 198, TRCP 99, etc.). Source: `txcourts.gov`.
+8. **Build the action-derivation pipeline** (graphology + amendment-chain traversal — §6, §12.2) + MCP tools (`listPossibleActions`, `findPerson`, `rolesForPerson`, `judgeMotions`, `amendmentChain`, etc.).
+9. **Build the React Flow case-action graph** with Motion-as-group-node and amendment strips. Wire to a new `/case/[id]/actions` page.
+10. **Open the AI chat surface** — the existing draft chat gets a new "Case actions" tool group + Person/Role lookup tools.
+11. **Then `proc.ca` and `proc.frap`.** Same pattern, different rule sources.
 
-Estimated effort (rough, after the framework upgrade is done): **6–10 weeks of focused work** for steps 2–9. Step 10 is open-ended and can grow incrementally.
+Estimated effort (rough, after the framework upgrade is done): **8–12 weeks of focused work** for steps 2–10 — the new step 5/5.5 (Motion-as-container + backfill) is the biggest item and was not budgeted in the original draft. Step 11 is open-ended and can grow incrementally.
 
 ## 11. Haystack HTTP server alongside MCP
 
@@ -448,7 +870,7 @@ src/app/api/haystack/[op]/route.ts       ← Haystack HTTP API; dispatch to ops/
 src/app/api/mcp/execute/route.ts         ← unchanged; still none/apikey/OAuth
 ```
 
-Both routes terminate auth into the same `Actor` row from §8. One identity model, two front-ends.
+Both routes terminate auth into the same `Person { self: true }` row from §8. One identity model, two front-ends.
 
 ### Standard Haystack ops we expose (v1)
 
@@ -461,8 +883,8 @@ The Haystack 4 standard library defines 11 ops (`about, close, defs, filetypes, 
 | `libs` | the loaded XETO libs (`cc.courtlens.legal`, `proc.tx`, …) so a client knows our schema | ship v1 |
 | `defs` | full Haystack defs grid for the loaded libs | ship v1 |
 | `filetypes` | supported wire formats (Hayson, Zinc) | ship v1 |
-| `nav` | hierarchical nav (cases → filings → motions) | ship v1 |
-| `read` | filter-based query — `motion and signed and caseRef==@case-1234` | ship v1 |
+| `nav` | hierarchical nav — `Case → Motion → (sub-Motion \| MotionEvent \| MotionAttachment)`. Drops out naturally from the site/equip/point hierarchy adopted in §4.0; lets a SkySpark client browse a case like a building | ship v1 |
+| `read` | filter-based query. Examples: `motion and judgeRef==@person-roberts`, `motionEvent and kind=="responded" and motionRef==@m-1234`, `proposedOrder and supersedes==@att-1`, `personRole and movant and scopeRef==@m-1234`, `person and lawyer` | ship v1 |
 | `close` | end auth session | ship v1 |
 | `commit` | write/update records (SkySpark/Folio extension, not standard ph) | ship v1 |
 | `watchSub` / `watchPoll` / `watchUnsub` | record-change notifications | defer to v2 (use existing `/api/progress` SSE in the meantime) |
@@ -578,7 +1000,7 @@ The `query` extension is the single biggest ergonomic win. It wraps every `creat
 import { Prisma } from '@prisma/client';
 import { ns } from '@/lib/legal/xeto-namespace';   // Namespace singleton from §3a
 
-const TAG_MODELS = new Set(['Filing', 'Motion', 'Document', 'Notice', 'Actor']);
+const TAG_MODELS = new Set(['Case', 'Motion', 'MotionEvent', 'MotionAttachment', 'Person', 'PersonRole', 'Document']);
 
 export const xetoValidate = Prisma.defineExtension({
   query: {
@@ -647,7 +1069,12 @@ If `prisma-kysely` (the codegen that emits a Kysely `DB` type from a Prisma sche
 
 #### `graphology` for the next-action derivation
 
-`graphology@^0.x` (MIT, ~30 KB) — pure graph data-structure + algorithms (BFS, Dijkstra, topological sort, SCC detection). Fills the gap in §6 ("Action derivation") that was hand-waved as "TS code". The procedure-graph for "what's possible / overdue" is naturally a DAG of (XETO `Rule` instances → triggered Filings → derived Actions). graphology owns the graph; thin TS wraps it with the Haystack-aware `triggerEvent` matching.
+`graphology@^0.x` (MIT, ~30 KB) — pure graph data-structure + algorithms (BFS, Dijkstra, topological sort, SCC detection). Fills the gap in §6 ("Action derivation") that was hand-waved as "TS code". The procedure-graph under the new ontology has a richer node set than the original draft suggested:
+
+- **Nodes**: Motions (parent + nested sub-motions), MotionEvents, MotionAttachments (with their own amendment chains — proposed orders, briefs, etc.), `proc.*::Rule` instances, derived Actions.
+- **Edges**: `contains` (Motion → MotionEvent / MotionAttachment), `nests` (Motion → sub-Motion via `motionRef`), `amends` and `supersedes` (any Amendable → Amendable, across both Motion and Attachment chains), `triggers` (MotionEvent → Rule), `satisfies` (MotionEvent → Action).
+
+Topological sort walks **amendment chains parent-first**, which is what makes the supersession-resolution step (§6 Layer 2.5) tractable — we always know whether a predecessor was already discharged before we decide what to do with its open obligations.
 
 ```ts
 // src/lib/procedure/derive.ts (new)
@@ -656,12 +1083,16 @@ import { topologicalSort } from 'graphology-dag';
 
 export function deriveNextActions(
   caseRecord: Case,
-  rules: Rule[],          // XETO Rule instances loaded at boot
-  filings: Filing[],      // current state of the case
+  rules: Rule[],                // XETO Rule instances loaded at boot
+  motions: Motion[],            // Motion records (parent + nested), each with Amendable refs
+  events: MotionEvent[],        // child MotionEvent records (kind: received|filed|responded|...)
+  attachments: MotionAttachment[],  // child attachments with their own amendment chains
 ): Action[] {
   const g = new Graph({ type: 'directed' });
-  // Nodes: filings + rules + actions. Edges: "triggers" / "satisfies".
-  // ~30 LOC building the graph from rules + actual filings.
+  // ~50 LOC building the graph: insert motions/events/attachments/rules as nodes;
+  // wire contains/nests/amends/supersedes/triggers/satisfies edges.
+  // Walk topological sort; for each Rule, find matching MotionEvent (by kind),
+  // apply SupersessionPolicy for any amendment-chain successor, emit Action.
   return topologicalSort(g)
     .map(nodeId => g.getNodeAttribute(nodeId, 'action') as Action | null)
     .filter((a): a is Action => !!a && !a.completed);
@@ -721,12 +1152,68 @@ The non-obvious win: **VIRTUAL generated columns + ordinary index** dominate raw
 
 ```sql
 -- Hand-edit the Prisma migration to add this:
-ALTER TABLE Filing ADD COLUMN motion BOOLEAN GENERATED ALWAYS AS (json_extract(tags, '$.motion')) VIRTUAL;
-ALTER TABLE Filing ADD COLUMN signed BOOLEAN GENERATED ALWAYS AS (json_extract(tags, '$.signed')) VIRTUAL;
-ALTER TABLE Filing ADD COLUMN dueBy   TEXT    GENERATED ALWAYS AS (json_extract(tags, '$.dueBy'))   VIRTUAL;
-CREATE INDEX idx_filing_motion ON Filing(motion);
-CREATE INDEX idx_filing_signed ON Filing(signed);
-CREATE INDEX idx_filing_dueBy  ON Filing(dueBy);
+
+-- Motion (equip) — parent pointer + amendment chain
+ALTER TABLE Motion ADD COLUMN motionRefV   TEXT    GENERATED ALWAYS AS (json_extract(tags, '$.motionRef'))   VIRTUAL;
+ALTER TABLE Motion ADD COLUMN amendsV      TEXT    GENERATED ALWAYS AS (json_extract(tags, '$.amends'))      VIRTUAL;
+ALTER TABLE Motion ADD COLUMN supersedesV  TEXT    GENERATED ALWAYS AS (json_extract(tags, '$.supersedes'))  VIRTUAL;
+ALTER TABLE Motion ADD COLUMN judgeRefV    TEXT    GENERATED ALWAYS AS (json_extract(tags, '$.judgeRef'))    VIRTUAL;
+ALTER TABLE Motion ADD COLUMN movantRefV   TEXT    GENERATED ALWAYS AS (json_extract(tags, '$.movantRef'))   VIRTUAL;
+ALTER TABLE Motion ADD COLUMN motionTypeV  TEXT    GENERATED ALWAYS AS (json_extract(tags, '$.motionType'))  VIRTUAL;
+CREATE INDEX idx_motion_parent  ON Motion(motionRefV);
+CREATE INDEX idx_motion_amends  ON Motion(amendsV);
+CREATE INDEX idx_motion_judge   ON Motion(judgeRefV);
+CREATE INDEX idx_motion_movant  ON Motion(movantRefV);
+CREATE INDEX idx_motion_type    ON Motion(motionTypeV);
+
+-- MotionEvent (point) — kind + motion ref are the hot composite
+ALTER TABLE MotionEvent ADD COLUMN kindV       TEXT GENERATED ALWAYS AS (json_extract(tags, '$.kind'))       VIRTUAL;
+ALTER TABLE MotionEvent ADD COLUMN motionRefV  TEXT GENERATED ALWAYS AS (json_extract(tags, '$.motionRef'))  VIRTUAL;
+ALTER TABLE MotionEvent ADD COLUMN occurredOnV      TEXT GENERATED ALWAYS AS (json_extract(tags, '$.occurredOn'))       VIRTUAL;
+ALTER TABLE MotionEvent ADD COLUMN courtFilingDateV TEXT GENERATED ALWAYS AS (json_extract(tags, '$.courtFilingDate'))  VIRTUAL;
+ALTER TABLE MotionEvent ADD COLUMN authoredV        TEXT GENERATED ALWAYS AS (json_extract(tags, '$.authoredBy'))       VIRTUAL;
+ALTER TABLE MotionEvent ADD COLUMN clerkV           TEXT GENERATED ALWAYS AS (json_extract(tags, '$.courtClerkRef'))    VIRTUAL;
+ALTER TABLE MotionEvent ADD COLUMN reporterV        TEXT GENERATED ALWAYS AS (json_extract(tags, '$.courtReporterRef')) VIRTUAL;
+CREATE INDEX idx_event_motion_kind     ON MotionEvent(motionRefV, kindV);
+CREATE INDEX idx_event_due             ON MotionEvent(occurredOnV);
+CREATE INDEX idx_event_court_filed     ON MotionEvent(kindV, courtFilingDateV);  -- deadline pipeline hot path
+CREATE INDEX idx_event_authored        ON MotionEvent(authoredV);
+CREATE INDEX idx_event_clerk           ON MotionEvent(clerkV);
+CREATE INDEX idx_event_reporter        ON MotionEvent(reporterV);
+
+-- Hearing (shared entity for hybrid hearings) — query by case OR by motion via JSON list scan.
+ALTER TABLE MotionEvent ADD COLUMN hearingRefV TEXT GENERATED ALWAYS AS (json_extract(tags, '$.hearingRef')) VIRTUAL;
+CREATE INDEX idx_event_hearing ON MotionEvent(hearingRefV);
+-- On the Hearing table itself, json_each(caseRefs) lets us answer
+--   "every hearing on case @case-5678" → SELECT h.* FROM Hearing h, json_each(h.tags, '$.caseRefs') je WHERE je.value = '@case-5678';
+-- Add a Hearing(scheduledFor) index for the calendar view.
+ALTER TABLE Hearing ADD COLUMN scheduledForV TEXT    GENERATED ALWAYS AS (json_extract(tags, '$.scheduledFor')) VIRTUAL;
+ALTER TABLE Hearing ADD COLUMN judgeRefV     TEXT    GENERATED ALWAYS AS (json_extract(tags, '$.judgeRef'))     VIRTUAL;
+ALTER TABLE Hearing ADD COLUMN hybridV       BOOLEAN GENERATED ALWAYS AS (json_extract(tags, '$.hybrid'))       VIRTUAL;
+CREATE INDEX idx_hearing_scheduled ON Hearing(scheduledForV);
+CREATE INDEX idx_hearing_judge     ON Hearing(judgeRefV);
+
+-- MotionAttachment — kind + motion ref + own amendment chain
+ALTER TABLE MotionAttachment ADD COLUMN kindV       TEXT GENERATED ALWAYS AS (json_extract(tags, '$.attachmentKind')) VIRTUAL;
+ALTER TABLE MotionAttachment ADD COLUMN motionRefV  TEXT GENERATED ALWAYS AS (json_extract(tags, '$.motionRef'))      VIRTUAL;
+ALTER TABLE MotionAttachment ADD COLUMN amendsV     TEXT GENERATED ALWAYS AS (json_extract(tags, '$.amends'))         VIRTUAL;
+ALTER TABLE MotionAttachment ADD COLUMN supersedesV TEXT GENERATED ALWAYS AS (json_extract(tags, '$.supersedes'))     VIRTUAL;
+CREATE INDEX idx_att_motion_kind ON MotionAttachment(motionRefV, kindV);
+CREATE INDEX idx_att_amends      ON MotionAttachment(amendsV);
+
+-- Person — intrinsic markers
+ALTER TABLE Person ADD COLUMN lawyerV BOOLEAN GENERATED ALWAYS AS (json_extract(tags, '$.lawyer')) VIRTUAL;
+ALTER TABLE Person ADD COLUMN judgeV  BOOLEAN GENERATED ALWAYS AS (json_extract(tags, '$.judge'))  VIRTUAL;
+CREATE INDEX idx_person_lawyer ON Person(lawyerV);
+CREATE INDEX idx_person_judge  ON Person(judgeV);
+
+-- PersonRole (ghost record) — pivot by personRef AND by scopeRef
+ALTER TABLE PersonRole ADD COLUMN personRefV TEXT GENERATED ALWAYS AS (json_extract(tags, '$.personRef')) VIRTUAL;
+ALTER TABLE PersonRole ADD COLUMN scopeRefV  TEXT GENERATED ALWAYS AS (json_extract(tags, '$.scopeRef'))  VIRTUAL;
+ALTER TABLE PersonRole ADD COLUMN movantV    BOOLEAN GENERATED ALWAYS AS (json_extract(tags, '$.movant')) VIRTUAL;
+CREATE INDEX idx_role_person ON PersonRole(personRefV);
+CREATE INDEX idx_role_scope  ON PersonRole(scopeRefV);
+CREATE INDEX idx_role_movant ON PersonRole(scopeRefV, movantV);
 ```
 
 vs the obvious `CREATE INDEX … ON Filing(json_extract(tags, '$.motion'))` form — same query plan, but no syntactic-match brittleness. The SQLite planner uses an expression index *only* when the WHERE clause text matches the index expression text modulo whitespace; one rogue space and it scans. Storage cost is zero (VIRTUAL recomputes on read; the index is what's actually persisted).
@@ -734,7 +1221,7 @@ vs the obvious `CREATE INDEX … ON Filing(json_extract(tags, '$.motion'))` form
 Prisma 7's schema language can't express generated columns — they go in a hand-edited `migration.sql` after `prisma migrate dev --create-only` (we use `migrate deploy` in this repo per CLAUDE.md, but the create-only flow is fine for *adding* columns since the existing 13 migrations stay untouched). Drift detection survives because Prisma compares structural DDL and ignores generated columns it didn't emit.
 
 **Add immediately when the XETO/Haystack work begins:**
-- VIRTUAL generated columns + indexes on the top 5–10 hot tags (`motion`, `signed`, `dueBy`, `caseRef`, `received`, `responded`)
+- VIRTUAL generated columns + indexes on the top hot tags across the new entity tables: on **Motion** — `motionRef`, `amends`, `supersedes`, `judgeRef`, `movantRef`, `motionType`; on **MotionEvent** — `motionRef`+`kind` (composite), `occurredOn`, `authoredBy`; on **MotionAttachment** — `motionRef`+`attachmentKind` (composite), `amends`; on **Person** — `lawyer`, `judge`; on **PersonRole** — `personRef`, `scopeRef`+`movant` (composite)
 - `PRAGMA mmap_size = 268435456` (256 MB) at boot — wins big on json_extract scans against the 1 GB DB
 - `PRAGMA optimize` on graceful shutdown
 - A single `tagPath()` helper so every WHERE clause uses the exact same expression text as the index (`tagPath('motion')` returns `json_extract(tags, '$.motion')` and nowhere else writes that string)
