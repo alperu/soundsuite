@@ -1,0 +1,21 @@
+//
+// Sound Suite — cc.courtlens.legal
+// Domain entities (Case, Motion, MotionEvent, MotionAttachment, Person, ...).
+//
+// History:
+//   21 May 2026  Initial version (Agent 2, XETO v1 foundation)
+//
+
+pragma: Lib <
+  doc: "Court-lens-mcp domain ontology — Case, Motion, MotionEvent, Person, ..."
+  version: Version "0.1.0"
+  depends: {
+    { lib: "sys" }
+    { lib: "ph" }
+    { lib: "proc.core" }
+  }
+  org: {
+    dis: "Sound Suite"
+    uri: "https://soundsuite.ai"
+  }
+>

@@ -22,6 +22,6 @@ module.exports = {
   ],
   testTimeout: 30000, // 30 seconds for OCR tests
   transformIgnorePatterns: [
-    'node_modules/(?!(chokidar|p-queue|p-timeout|eventemitter3|@langchain)/)',
+    'node_modules/(?!(chokidar|p-queue|p-timeout|eventemitter3|@langchain|@haxall|haystack-core)/)',
   ],
 };

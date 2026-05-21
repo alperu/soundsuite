@@ -28,6 +28,13 @@ const nextConfig: NextConfig = {
     "@prisma/client",
     "@prisma/adapter-better-sqlite3",
     "better-sqlite3",
+    // @haxall/haxall ships ~13 MB of Fantom-compiled JS and is ESM-only;
+    // never bundle it for the client. haystack-core is consumed only by
+    // server code (HFilter compiler, Hayson encoder). kysely is the
+    // typed SQL emitter for the tag-query lane — server-side only.
+    "@haxall/haxall",
+    "haystack-core",
+    "kysely",
   ],
   turbopack: {},
 };

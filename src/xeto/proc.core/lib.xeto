@@ -1,0 +1,23 @@
+//
+// Sound Suite — proc.core
+// Jurisdiction-neutral procedural primitives.
+//
+// Rules, triggers, deadlines, consequences, supersession policy,
+// and the `Amendable` mixin reused by motions and attachments.
+//
+// History:
+//   21 May 2026  Initial version (Agent 2, XETO v1 foundation)
+//
+
+pragma: Lib <
+  doc: "Jurisdiction-neutral procedural primitives for Sound Suite legal modeling"
+  version: Version "0.1.0"
+  depends: {
+    { lib: "sys" }
+    { lib: "ph" }
+  }
+  org: {
+    dis: "Sound Suite"
+    uri: "https://soundsuite.ai"
+  }
+>
