@@ -537,18 +537,24 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
     setEditCaseLoading(true);
     setEditCaseError('');
     try {
+      const payload: Record<string, string> = {
+        name: editCaseName.trim(),
+        caseNumber: editCaseNumber.trim(),
+        jurisdiction: editCaseJurisdiction.trim(),
+        county: editCaseCounty.trim(),
+        state: editCaseState.trim(),
+        country: editCaseCountry.trim(),
+      };
+      // Only send path when the user actually changed it — otherwise the
+      // server's path-existence check can block unrelated field edits when
+      // the case folder isn't currently mounted.
+      if (editCasePath.trim() !== (editCaseRecord.path || '').trim()) {
+        payload.path = editCasePath.trim();
+      }
       const res = await fetch(`/api/cases/${editCaseRecord.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: editCaseName.trim(),
-          caseNumber: editCaseNumber.trim(),
-          jurisdiction: editCaseJurisdiction.trim(),
-          path: editCasePath.trim(),
-          county: editCaseCounty.trim(),
-          state: editCaseState.trim(),
-          country: editCaseCountry.trim(),
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) { setEditCaseError(data.error || 'Failed to update case'); return; }
