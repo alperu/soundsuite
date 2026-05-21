@@ -23,6 +23,7 @@ import {
 import { tableFromFilter, navHierarchy, findCase, findMotion, findMotionEvent, findMotionAttachment, findPerson, findPersonRole, findHearing, findClerksRecord, findReportersRecord } from '@/lib/legal/repo'
 import { db } from '@/lib/legal/kysely'
 import { prisma } from '@/lib/db/prisma'
+import { PER_FILING_TYPE_KINDS } from '@/lib/filings/classify-entity-kind'
 
 export const dynamic = 'force-dynamic'
 
@@ -823,37 +824,16 @@ async function ensureMotionForFiling(
 }
 
 /**
- * EntityKind → MotionAttachment.attachmentKind. Identity mapping for the 21
- * per-filing-type kinds plus 'proposedOrder'. `motion` is NOT in here — that
- * goes through `ensureMotionForFiling`, not MotionAttachment.
+ * EntityKind → MotionAttachment.attachmentKind. Identity mapping for the 22
+ * per-filing-type kinds. `motion` is NOT in here — that goes through
+ * `ensureMotionForFiling`, not MotionAttachment.
  *
- * Keep in sync with `ATTACHMENT_KIND_MARKERS` in `src/lib/legal/repo.ts` and
- * `EntityKind` in `src/components/case/tag-spec.ts`.
+ * Single source of truth: `PER_FILING_TYPE_KINDS` in
+ * `src/lib/filings/classify-entity-kind.ts`. Both this map and
+ * `tableFromFilter` import from there so the read-side and commit-side stay
+ * in sync.
  */
-const KIND_TO_ATTACHMENT_KIND: Record<string, string> = {
-  notice: 'notice',
-  letter: 'letter',
-  order: 'order',
-  proposedOrder: 'proposedOrder',
-  petition: 'petition',
-  affidavit: 'affidavit',
-  subpoena: 'subpoena',
-  brief: 'brief',
-  response: 'response',
-  reply: 'reply',
-  judgment: 'judgment',
-  decree: 'decree',
-  transcript: 'transcript',
-  settlement: 'settlement',
-  billOfReview: 'billOfReview',
-  returnOfService: 'returnOfService',
-  demandLetter: 'demandLetter',
-  objection: 'objection',
-  request: 'request',
-  supplement: 'supplement',
-  designation: 'designation',
-  other: 'other',
-}
+const KIND_TO_ATTACHMENT_KIND: Record<string, string> = PER_FILING_TYPE_KINDS
 
 /**
  * Auto-upsert a `MotionAttachment` row mirroring a non-motion-typed Filing.
@@ -927,6 +907,13 @@ async function ensureMotionAttachmentForFiling(
 
 // Map EntityKind → Prisma model name (camelCase). Module-level so the legacy
 // shim (and any other internal caller) can reuse it.
+//
+// Per-filing-type EntityKinds (notice/brief/response/…) all serialize to the
+// MotionAttachment Prisma table — the table's `attachmentKind` discriminator
+// column (set at row creation, not here) carries the type. The tag panel only
+// mutates `tags` JSON via this commit op. The full list of per-filing-type
+// kinds is pulled from `PER_FILING_TYPE_KINDS` so adding a new EntityKind
+// only requires touching one constant.
 const KIND_MODEL_MAP: Record<string, string> = {
   case: 'case',
   motion: 'motion',
@@ -938,32 +925,9 @@ const KIND_MODEL_MAP: Record<string, string> = {
   court: 'court',
   clerksRecord: 'clerksRecord',
   reportersRecord: 'reportersRecord',
-  // Per-filing-type EntityKinds all serialize to the MotionAttachment Prisma
-  // table — the table's `attachmentKind` discriminator column (set at row
-  // creation, not here) carries the type. The tag panel only mutates `tags`
-  // JSON via this commit op.
-  notice: 'motionAttachment',
-  letter: 'motionAttachment',
-  order: 'motionAttachment',
-  proposedOrder: 'motionAttachment',
-  petition: 'motionAttachment',
-  affidavit: 'motionAttachment',
-  subpoena: 'motionAttachment',
-  brief: 'motionAttachment',
-  response: 'motionAttachment',
-  reply: 'motionAttachment',
-  judgment: 'motionAttachment',
-  decree: 'motionAttachment',
-  transcript: 'motionAttachment',
-  settlement: 'motionAttachment',
-  billOfReview: 'motionAttachment',
-  returnOfService: 'motionAttachment',
-  demandLetter: 'motionAttachment',
-  objection: 'motionAttachment',
-  request: 'motionAttachment',
-  supplement: 'motionAttachment',
-  designation: 'motionAttachment',
-  other: 'motionAttachment',
+  ...Object.fromEntries(
+    Object.keys(PER_FILING_TYPE_KINDS).map((k) => [k, 'motionAttachment'] as const),
+  ),
 }
 
 // Columns that hold DateTime values. JSON arrives as ISO strings; Prisma
