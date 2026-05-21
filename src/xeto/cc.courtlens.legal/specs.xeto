@@ -151,6 +151,49 @@ Withdrawn:   EventKind { withdrawn }
 Mooted:      EventKind { mooted }
 
 //////////////////////////////////////////////////////////////////////////
+// MotionType — Choice catalogue for Motion.motionType
+//////////////////////////////////////////////////////////////////////////
+
+// MotionType. Open-ended Choice; new subtypes can be appended as
+// legal practice evolves. Unlike EventKind, this Choice is purely a
+// *catalogue*: Motion.motionType remains `Str?` and stores the
+// camelCase slug (e.g. "disqualify"). The combo picker in the tag
+// panel pulls the canonical list + display names from
+// src/lib/filings/motion-types.ts; XETO-only consumers can iterate
+// the subtypes here.
+MotionType: Choice
+
+Disqualify:         MotionType { disqualify }
+SummaryJudgment:    MotionType { summaryJudgment }
+Dismiss:            MotionType { dismiss }
+Strike:             MotionType { strike }
+Compel:             MotionType { compel }
+InLimine:           MotionType { inLimine }
+Continue:           MotionType { continueMotion }
+Reconsider:         MotionType { reconsider }
+Modify:             MotionType { modify }
+Withdraw:           MotionType { withdraw }
+AppointReceiver:    MotionType { appointReceiver }
+NewTrial:           MotionType { newTrial }
+Rehearing:          MotionType { rehearing }
+Recuse:             MotionType { recuse }
+Sanctions:          MotionType { sanctions }
+ProtectiveOrder:    MotionType { protectiveOrder }
+QuashSubpoena:      MotionType { quashSubpoena }
+Abate:              MotionType { abate }
+Remand:             MotionType { remand }
+EmergencyStay:      MotionType { emergencyStay }
+Consolidate:        MotionType { consolidate }
+TemporaryOrders:    MotionType { temporaryOrders }
+Enforcement:        MotionType { enforcement }
+BillOfReviewMotion: MotionType { billOfReview }
+SetAside:           MotionType { setAside }
+LeaveToFile:        MotionType { leaveToFile }
+ExtensionOfTime:    MotionType { extensionOfTime }
+SubstitutedService: MotionType { substitutedService }
+OtherMotion:        MotionType { otherMotion }
+
+//////////////////////////////////////////////////////////////////////////
 // MotionEvent — Haystack point analog
 //////////////////////////////////////////////////////////////////////////
 
