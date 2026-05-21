@@ -115,6 +115,13 @@ export async function GET(
       where: { id },
       include: {
         documents: {
+          // Exclude orphan Documents (no associated Filing) from the
+          // user-visible case detail. They aren't real filings — they're
+          // typically leftover rows whose filePath no longer resolves on
+          // disk (Case.path edits don't migrate Document.filePath). The
+          // FileWatcher / indexing worker still processes them by querying
+          // Prisma directly.
+          where: { filingId: { not: null } },
           orderBy: { createdAt: 'desc' },
         },
       },
