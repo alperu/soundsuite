@@ -102,6 +102,13 @@ export async function PATCH(
         updateData.filingId = body.filingId;
       }
     }
+    if (body.exhibitLabel !== undefined) {
+      if (body.exhibitLabel === null) {
+        updateData.exhibitLabel = null;
+      } else if (typeof body.exhibitLabel === 'string') {
+        updateData.exhibitLabel = body.exhibitLabel.trim() || null;
+      }
+    }
 
     if (Object.keys(updateData).length === 0) {
       return NextResponse.json({ error: 'No valid fields to update' }, { status: 400 });
@@ -133,8 +140,9 @@ export async function PATCH(
       data: updateData,
     });
 
-    // Invalidate Redis filings cache when filingId changes so sidebar shows fresh document counts
-    if (updateData.filingId !== undefined) {
+    // Invalidate Redis filings cache when filingId OR exhibitLabel changes so
+    // sidebar/detail-page reflect the move between Documents and Exhibits.
+    if (updateData.filingId !== undefined || updateData.exhibitLabel !== undefined) {
       const filingsCache = new FilingsCacheService();
       filingsCache.invalidateCaseFilings(doc.caseId).catch(() => {});
       // Also invalidate the old filing's case if document moved between cases (unlikely but safe)

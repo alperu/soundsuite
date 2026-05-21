@@ -5,6 +5,7 @@ import { useRouter, usePathname } from 'next/navigation';
 import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { SearchableCombo } from '@/components/searchable-combo';
 import { getCachedCases, setCachedCases, getCachedFilings, setCachedFilings } from '@/lib/indexed-db';
+import { formatFilingLabel } from '@/lib/filings/format-filing-label';
 
 interface CaseRecord {
   id: string;
@@ -132,6 +133,7 @@ export default function CaseManagementLayout({ children }: { children: React.Rea
   const [activeCategory, setActiveCategory] = useState('all');
   const [expandedFilings, setExpandedFilings] = useState<Set<string>>(new Set());
   const [selectedFilings, setSelectedFilings] = useState<Set<string>>(new Set());
+const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
   const lastSelectedFilingRef = useRef<string | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [folderPath, setFolderPath] = useState('');
@@ -806,6 +808,8 @@ export default function CaseManagementLayout({ children }: { children: React.Rea
                     const isSelected = selectedFilings.has(filing.id);
                     const exhibits = filing.documents.filter(d => d.exhibitLabel);
                     const mainDocs = filing.documents.filter(d => !d.exhibitLabel);
+                    const label = formatFilingLabel(filing);
+                    const isCopied = copiedFilings.has(filing.id);
                     const rowBg = isSelected
                       ? 'bg-blue-100'
                       : idx % 2 === 0
@@ -830,17 +834,42 @@ export default function CaseManagementLayout({ children }: { children: React.Rea
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-1">
-                              {filing.isSupplemental && (
-                                <span className="text-[9px] font-medium text-amber-700 bg-amber-100 px-1 py-0.5 rounded shrink-0">
-                                  Supp.{filing.supplementalOrder && filing.supplementalOrder > 1 ? ` ${filing.supplementalOrder}` : ''}
-                                </span>
-                              )}
                               <span
                                 className="text-sm text-gray-800 truncate flex-1 hover:text-blue-600"
-                                title={filing.title}
+                                title={label}
                               >
-                                {filing.title}
+                                {label}
                               </span>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigator.clipboard.writeText(label);
+                                  setCopiedFilings(prev => {
+                                    const next = new Set(prev);
+                                    next.add(filing.id);
+                                    return next;
+                                  });
+                                  setTimeout(() => {
+                                    setCopiedFilings(prev => {
+                                      const next = new Set(prev);
+                                      next.delete(filing.id);
+                                      return next;
+                                    });
+                                  }, 1500);
+                                }}
+                                className="p-0.5 text-gray-300 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
+                                title="Copy filing label"
+                              >
+                                {isCopied ? (
+                                  <svg className="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                  </svg>
+                                ) : (
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h4a2 2 0 002-2M8 5a2 2 0 012-2h4a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                                  </svg>
+                                )}
+                              </button>
                               <span className="text-xs text-gray-300 flex-shrink-0">{filing.documents.length}</span>
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleDeleteFiling(filing); }}
@@ -860,7 +889,14 @@ export default function CaseManagementLayout({ children }: { children: React.Rea
                         {isExpanded && (
                           <div className="ml-6 border-l border-gray-200">
                             {mainDocs.map(doc => (
-                              <div key={doc.id} className="flex items-center gap-2 px-3 py-1 text-xs text-gray-600 hover:bg-gray-50"
+                              <div key={doc.id} className="flex items-center gap-2 px-3 py-1 text-xs text-gray-600 hover:bg-gray-50 cursor-grab active:cursor-grabbing"
+                                draggable
+                                onDragStart={(e) => {
+                                  e.dataTransfer.setData('application/x-court-lens-doc-ids', JSON.stringify([doc.id]));
+                                  e.dataTransfer.setData('application/x-court-lens-paths', JSON.stringify([doc.filePath]));
+                                  e.dataTransfer.setData('text/plain', doc.fileName);
+                                  e.dataTransfer.effectAllowed = 'move';
+                                }}
                                 onContextMenu={(e) => handleDocContextMenu(doc, e)}>
                                 <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
                                   doc.status === 'INDEXED' ? 'bg-green-500' :
@@ -879,9 +915,16 @@ export default function CaseManagementLayout({ children }: { children: React.Rea
                                 {exhibits.map(doc => (
                                   <div
                                     key={doc.id}
+                                    draggable
+                                    onDragStart={(e) => {
+                                      e.dataTransfer.setData('application/x-court-lens-doc-ids', JSON.stringify([doc.id]));
+                                      e.dataTransfer.setData('application/x-court-lens-paths', JSON.stringify([doc.filePath]));
+                                      e.dataTransfer.setData('text/plain', doc.fileName);
+                                      e.dataTransfer.effectAllowed = 'move';
+                                    }}
                                     onClick={() => handleExhibitClick(filing, doc)}
                                     onContextMenu={(e) => handleDocContextMenu(doc, e)}
-                                    className="flex items-center gap-2 px-3 py-1 text-xs hover:bg-blue-50 cursor-pointer"
+                                    className="flex items-center gap-2 px-3 py-1 text-xs hover:bg-blue-50 cursor-grab active:cursor-grabbing"
                                   >
                                     <span className="text-blue-600 font-medium flex-shrink-0">{doc.exhibitLabel}</span>
                                     <span className="text-gray-600 truncate">{doc.fileName}</span>

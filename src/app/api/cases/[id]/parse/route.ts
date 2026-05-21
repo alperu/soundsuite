@@ -149,8 +149,32 @@ export async function POST(
         }
 
         if (existing) {
-          // Already QUEUED, PROCESSING, INDEXED, or ERROR — skip
-          results.push({ filePath, status: existing.status, documentId: existing.id });
+          // Already QUEUED, PROCESSING, INDEXED, or ERROR.
+          // If caller passed a filingId and it differs, reassign the document
+          // so right-click "Add to Filing" on an already-ingested file moves
+          // it into the chosen filing instead of leaving it under its
+          // auto-detected one.
+          if (providedFilingId && existing.filingId !== providedFilingId) {
+            await prisma.document.update({
+              where: { id: existing.id },
+              data: { filingId: providedFilingId, exhibitLabel: null } as any,
+            });
+            publishDocumentEvent({
+              type: 'document_added',
+              caseId: id,
+              documentId: existing.id,
+              fileName,
+              filePath,
+              status: existing.status,
+              filingId: providedFilingId,
+            }).catch(() => {});
+          }
+          results.push({
+            filePath,
+            status: existing.status,
+            documentId: existing.id,
+            filingId: providedFilingId || existing.filingId || undefined,
+          });
           continue;
         }
 

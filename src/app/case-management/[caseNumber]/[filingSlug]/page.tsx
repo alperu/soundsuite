@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import { formatFilingLabel } from '@/lib/filings/format-filing-label';
 
 const FILING_TYPES = [
   'Motion', 'Notice', 'Letter', 'Order', 'Petition', 'Affidavit',
@@ -33,6 +34,8 @@ interface FilingRecord {
   filingDate: string | null;
   description: string | null;
   volumeNumber: number | null;
+  isSupplemental?: boolean;
+  supplementalOrder?: number | null;
   documents: DocumentRecord[];
 }
 
@@ -63,6 +66,14 @@ export default function FilingDetailPage() {
 
   // Reparse state
   const [reparseLoading, setReparseLoading] = useState(false);
+
+  // Drag-and-drop state
+  const [dragOver, setDragOver] = useState(false);
+  const [dropLoading, setDropLoading] = useState(false);
+  const [dropError, setDropError] = useState('');
+
+  // Copy-to-clipboard state
+  const [copied, setCopied] = useState(false);
 
   const fetchFiling = () => {
     setLoading(true);
@@ -124,43 +135,146 @@ export default function FilingDetailPage() {
     }
   };
 
+  const addPathsToFiling = async (paths: string[]): Promise<string | null> => {
+    if (!caseId || !filing || paths.length === 0) return 'No paths provided';
+    const parseRes = await fetch(`/api/cases/${caseId}/parse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filePaths: paths, filingId: filing.id }),
+    });
+    if (!parseRes.ok) {
+      const err = await parseRes.json().catch(() => ({}));
+      return err.error || 'Failed to add document';
+    }
+    const parseData = await parseRes.json();
+    const results = parseData.results || [];
+    const skipped = results.filter((r: { status: string; documentId?: string }) => !r.documentId && r.status === 'skipped');
+    if (skipped.length === results.length && skipped.length > 0) {
+      return skipped[0]?.error || 'No document was created';
+    }
+    fetchFiling();
+    window.dispatchEvent(new Event('filings-changed'));
+    return null;
+  };
+
   const handleAddDocument = async () => {
     if (!caseId || !filing || !addDocPath.trim()) return;
     setAddDocLoading(true);
     setAddDocError('');
     try {
-      // Parse the document via the case parse endpoint
-      const parseRes = await fetch(`/api/cases/${caseId}/parse`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filePaths: [addDocPath.trim()] }),
-      });
-      if (!parseRes.ok) {
-        const err = await parseRes.json();
-        setAddDocError(err.error || 'Failed to add document');
-        return;
-      }
-      const parseData = await parseRes.json();
-      const results = parseData.results || [];
-      if (results.length === 0 || (!results[0].documentId && results[0].status === 'skipped')) {
-        setAddDocError(results[0]?.error || 'No document was created');
-        return;
-      }
-      // Reassign the document to this filing (move from auto-created filing)
-      const docId = results[0].documentId;
-      if (docId) {
-        await fetch(`/api/documents/${docId}/exhibit`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filingId: filing.id }),
-        });
-      }
+      const err = await addPathsToFiling([addDocPath.trim()]);
+      if (err) { setAddDocError(err); return; }
       setShowAddDocDialog(false);
       setAddDocPath('');
-      fetchFiling();
-      window.dispatchEvent(new Event('filings-changed'));
     } catch { setAddDocError('Network error'); }
     finally { setAddDocLoading(false); }
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (!caseId || !filing) return;
+
+    // Fastest path: drag came from another filing in the sidebar — we have
+    // document IDs, just reassign filingId. No parse, no upload.
+    const docIdsRaw = e.dataTransfer.getData('application/x-court-lens-doc-ids');
+    if (docIdsRaw) {
+      try {
+        const docIds = JSON.parse(docIdsRaw) as string[];
+        setDropLoading(true);
+        setDropError('');
+        for (const docId of docIds) {
+          await fetch(`/api/documents/${docId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filingId: filing.id, exhibitLabel: null }),
+          });
+        }
+        fetchFiling();
+        window.dispatchEvent(new Event('filings-changed'));
+      } catch (err) {
+        setDropError(err instanceof Error ? err.message : 'Reassign failed');
+      } finally {
+        setDropLoading(false);
+      }
+      return;
+    }
+
+    // Fast path: drag came from the in-app case file tree — we already know
+    // the server-side absolute paths, no upload needed.
+    const internal = e.dataTransfer.getData('application/x-court-lens-paths');
+    if (internal) {
+      try {
+        const paths = JSON.parse(internal) as string[];
+        const pdfPaths = paths.filter(p => p.toLowerCase().endsWith('.pdf'));
+        if (pdfPaths.length === 0) {
+          setDropError('No PDF paths in drop');
+          setTimeout(() => setDropError(''), 4000);
+          return;
+        }
+        setDropLoading(true);
+        setDropError('');
+        const err = await addPathsToFiling(pdfPaths);
+        if (err) setDropError(err);
+        return;
+      } catch {
+        // fall through to OS file drop handling
+      } finally { setDropLoading(false); }
+    }
+
+    // OS file drop from Finder/Explorer — browsers don't expose the absolute
+    // path, so upload the bytes.
+    const files = Array.from(e.dataTransfer.files || []).filter(
+      f => f.name.toLowerCase().endsWith('.pdf')
+    );
+    if (files.length === 0) {
+      setDropError('Drop one or more PDF files');
+      setTimeout(() => setDropError(''), 4000);
+      return;
+    }
+    setDropLoading(true);
+    setDropError('');
+    try {
+      const form = new FormData();
+      form.append('filingId', filing.id);
+      for (const f of files) form.append('file', f, f.name);
+      const res = await fetch(`/api/cases/${caseId}/upload`, { method: 'POST', body: form });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setDropError(err.error || 'Upload failed');
+        return;
+      }
+      const data = await res.json();
+      const failed = (data.results || []).filter((r: { status: string }) => r.status === 'error' || r.status === 'skipped');
+      if (failed.length > 0 && data.uploaded === 0) {
+        setDropError(failed[0]?.error || 'No files were added');
+      }
+      fetchFiling();
+      window.dispatchEvent(new Event('filings-changed'));
+    } catch { setDropError('Network error'); }
+    finally { setDropLoading(false); }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (!dragOver) setDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.currentTarget === e.target) setDragOver(false);
+  };
+
+  const handleDemoteExhibit = async (docId: string) => {
+    const res = await fetch(`/api/documents/${docId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ exhibitLabel: null }),
+    });
+    if (res.ok) {
+      fetchFiling();
+      window.dispatchEvent(new Event('filings-changed'));
+    }
   };
 
   const handleReparse = async () => {
@@ -213,9 +327,32 @@ export default function FilingDetailPage() {
 
   const mainDocs = filing.documents.filter(d => !d.exhibitLabel);
   const exhibits = filing.documents.filter(d => d.exhibitLabel);
+  const label = formatFilingLabel(filing);
+
+  const handleCopyLabel = () => {
+    navigator.clipboard.writeText(label).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {});
+  };
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div
+      className={`flex-1 overflow-y-auto relative ${dragOver ? 'ring-4 ring-blue-400 ring-inset' : ''}`}
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+    >
+      {dragOver && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-blue-50/80 pointer-events-none">
+          <div className="text-blue-700 font-medium text-sm">Drop PDFs to add them to this filing</div>
+        </div>
+      )}
+      {(dropLoading || dropError) && (
+        <div className={`px-4 py-2 text-xs ${dropError ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700'}`}>
+          {dropLoading ? 'Adding dropped files…' : dropError}
+        </div>
+      )}
       {/* Header with toolbar */}
       <div className="p-4 border-b border-gray-200">
         <button onClick={() => router.push(`/case-management/${encodeURIComponent(caseNumberParam)}`)}
@@ -223,10 +360,22 @@ export default function FilingDetailPage() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3 min-w-0">
             <span className="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded-full flex-shrink-0">{filing.filingType}</span>
-            {filing.volumeNumber != null && (
-              <span className="px-2 py-0.5 bg-indigo-100 text-indigo-800 text-xs rounded-full flex-shrink-0">Vol. {filing.volumeNumber}</span>
-            )}
-            <h2 className="text-lg font-semibold text-gray-900 truncate">{filing.title}</h2>
+            <h2
+              onClick={handleCopyLabel}
+              title="Copy to clipboard"
+              className="text-lg font-semibold text-gray-900 truncate cursor-pointer hover:text-blue-700"
+            >{label}</h2>
+            <button
+              onClick={handleCopyLabel}
+              title={copied ? 'Copied' : 'Copy to clipboard'}
+              className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors flex-shrink-0"
+            >
+              {copied ? (
+                <svg className="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+              ) : (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+              )}
+            </button>
           </div>
           <div className="flex items-center gap-1 flex-shrink-0 ml-3">
             <button onClick={() => { setEditType(filing.filingType); setEditTitle(filing.title); setEditDescription(filing.description || ''); setEditVolume(filing.volumeNumber != null ? String(filing.volumeNumber) : ''); setShowEditDialog(true); }}
@@ -310,6 +459,11 @@ export default function FilingDetailPage() {
                   <span className="text-xs font-medium text-blue-700 bg-blue-50 px-2 py-0.5 rounded flex-shrink-0">{doc.exhibitLabel}</span>
                   <span className="text-sm text-gray-800 flex-1 truncate">{doc.fileName}</span>
                   <span className={`text-xs px-1.5 py-0.5 rounded-full ${getStatusBadge(doc.status)}`}>{doc.status}</span>
+                  <button onClick={() => handleDemoteExhibit(doc.id)}
+                    className="text-xs text-gray-400 hover:text-blue-600 hover:underline flex-shrink-0"
+                    title="This is not an exhibit — move it to Documents">
+                    Not an exhibit
+                  </button>
                 </div>
                 {doc.status === 'INDEXED' && doc.documentSummary && (
                   <p className="mt-2 text-xs text-gray-500 line-clamp-3">{doc.documentSummary}</p>

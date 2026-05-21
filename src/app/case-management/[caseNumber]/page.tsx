@@ -157,6 +157,8 @@ export default function CaseDetailPage() {
   const [newFilingType, setNewFilingType] = useState('Motion');
   const [newFilingTitle, setNewFilingTitle] = useState('');
   const [newVolumeNumber, setNewVolumeNumber] = useState('');
+  const [newFilingSupplemental, setNewFilingSupplemental] = useState(false);
+  const [newFilingSupplementalOrder, setNewFilingSupplementalOrder] = useState('');
   const [exhibitLabel, setExhibitLabel] = useState('');
   const [dialogLoading, setDialogLoading] = useState(false);
   const [dialogError, setDialogError] = useState('');
@@ -751,6 +753,8 @@ export default function CaseDetailPage() {
     setNewFilingType(''); // Empty until detection completes
     setNewFilingTitle('');
     setNewVolumeNumber('');
+    setNewFilingSupplemental(false);
+    setNewFilingSupplementalOrder('');
     setDetectionSource('');
     setDetectionConfidence(0);
     await loadFilings();
@@ -816,6 +820,10 @@ export default function CaseDetailPage() {
             filingType: newFilingType,
             title: newFilingTitle.trim(),
             volumeNumber: newVolumeNumber.trim() ? parseInt(newVolumeNumber, 10) : null,
+            isSupplemental: newFilingSupplemental,
+            supplementalOrder: newFilingSupplemental && newFilingSupplementalOrder.trim()
+              ? parseInt(newFilingSupplementalOrder, 10)
+              : null,
           }),
         });
         if (!res.ok) { const d = await res.json(); setDialogError(d.error || 'Failed'); setDialogLoading(false); updateLog(logId, 'error', d.error); return; }
@@ -1419,6 +1427,15 @@ export default function CaseDetailPage() {
       return (
         <div
           key={entry.path}
+          draggable
+          onDragStart={(e) => {
+            const paths = isSelected && selectedFiles.size > 1
+              ? Array.from(selectedFiles)
+              : [entry.path];
+            e.dataTransfer.setData('application/x-court-lens-paths', JSON.stringify(paths));
+            e.dataTransfer.setData('text/plain', paths.join('\n'));
+            e.dataTransfer.effectAllowed = 'copy';
+          }}
           className={`flex items-center gap-2 py-1.5 px-2 rounded cursor-pointer select-none group/file ${isSelected ? 'bg-blue-50 ring-1 ring-blue-300' : 'hover:bg-gray-50'}`}
           style={{ paddingLeft: `${depth * 20 + 28}px` }}
           onClick={(e) => handleFileClick(entry.path, e)}
@@ -1621,6 +1638,30 @@ export default function CaseDetailPage() {
                     <input type="number" min="1" value={newVolumeNumber} onChange={e => setNewVolumeNumber(e.target.value)}
                       placeholder="e.g. 2"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <div className="flex items-center gap-3 mb-3">
+                      <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={newFilingSupplemental}
+                          onChange={e => setNewFilingSupplemental(e.target.checked)}
+                          className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        Supplemental Record
+                      </label>
+                      {newFilingSupplemental && (
+                        <div className="flex items-center gap-1.5">
+                          <label className="text-xs text-gray-500">Order:</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={newFilingSupplementalOrder}
+                            onChange={e => setNewFilingSupplementalOrder(e.target.value)}
+                            placeholder="1"
+                            className="w-16 px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                        </div>
+                      )}
+                    </div>
                   </>
                 )}
                 <button onClick={() => setCreateNewFiling(false)} className="text-sm text-gray-500 hover:underline mb-3">← Add to existing filing instead</button>
