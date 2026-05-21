@@ -10,6 +10,7 @@
 import { db, type DB } from './kysely'
 import { readByHaystack } from './haystack-filter-sql'
 import { prisma } from '@/lib/db/prisma'
+import { PER_FILING_TYPE_KINDS } from '@/lib/filings/classify-entity-kind'
 
 // ---------- read API --------------------------------------------------------
 
@@ -187,12 +188,27 @@ export function tableFromFilter(filter: string): keyof DB | null {
   if (has('motion')) return 'Motion'
   if (has('person')) return 'Person'
   if (has('case')) return 'Case'
+  // Per-filing-type EntityKinds (notice, brief, response, …) all resolve to
+  // `MotionAttachment` — the table's `attachmentKind` column carries the
+  // type. The tag panel sends `filter=<kind>` where `<kind>` is one of these
+  // EntityKinds. Without this branch, `read?filter=response&id=@<filing-id>`
+  // returns the "no marker" err grid and the panel shows "Haystack API
+  // unavailable" (Task #21).
+  //
+  // `has()` uses non-alpha boundaries, so `transcript` matches bare
+  // `transcript` but NOT `transcriptref` (the 'r' boundary keeps them
+  // distinct). Same applies to `letter`/`demandletter`, `order`/`proposedorder`.
+  // Single source of truth: `PER_FILING_TYPE_KINDS` in
+  // `src/lib/filings/classify-entity-kind.ts`.
+  for (const kind of Object.keys(PER_FILING_TYPE_KINDS)) {
+    if (has(kind.toLowerCase())) return 'MotionAttachment'
+  }
   // Ref-picker aliases — the picker's refTarget strings don't always carry an
   // entity marker; they may name the *ref tag* directly (e.g. `attachment`,
   // `documentref`, `transcriptref`). Map these onto the correct entity table
   // so a ref-picker query like `filter=attachment` doesn't err out.
   if (has('attachment')) return 'MotionAttachment'
-  if (has('transcript') || has('transcriptref')) return 'Hearing'
+  if (has('transcriptref')) return 'Hearing'
   if (has('document') || has('documentref') || has('fileref')) return 'Document'
   return null
 }

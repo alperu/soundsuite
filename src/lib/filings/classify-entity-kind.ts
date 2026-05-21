@@ -149,3 +149,42 @@ const ATTACHMENT_KIND_HINTS: Partial<Record<EntityKind, AttachmentKindHint>> = {
   designation: 'designation',
   other: 'other',
 };
+
+/**
+ * Canonical list of per-filing-type EntityKinds → MotionAttachment.attachmentKind.
+ * Single source of truth for routing/validation across:
+ *  - `tableFromFilter` in `src/lib/legal/repo.ts` (panel `filter=<kind>` → table)
+ *  - `KIND_TO_ATTACHMENT_KIND` in `src/app/api/haystack/[op]/route.ts`
+ *    (auto-upsert + commit kind resolution)
+ *  - `KIND_MODEL_MAP` in the same file (kind → Prisma model name)
+ *
+ * Each key is a camelCase EntityKind from `tag-spec.ts`; the value is the
+ * `MotionAttachment.attachmentKind` discriminator. Identity mapping today —
+ * if a future EntityKind ever splits or renames its attachmentKind, this is
+ * the only place that needs to know. `motion` / `case` / `clerksRecord` /
+ * `reportersRecord` are NOT here: they have dedicated Prisma tables.
+ */
+export const PER_FILING_TYPE_KINDS: Record<string, string> = {
+  notice: 'notice',
+  letter: 'letter',
+  order: 'order',
+  proposedOrder: 'proposedOrder',
+  petition: 'petition',
+  affidavit: 'affidavit',
+  subpoena: 'subpoena',
+  brief: 'brief',
+  response: 'response',
+  reply: 'reply',
+  judgment: 'judgment',
+  decree: 'decree',
+  transcript: 'transcript',
+  settlement: 'settlement',
+  billOfReview: 'billOfReview',
+  returnOfService: 'returnOfService',
+  demandLetter: 'demandLetter',
+  objection: 'objection',
+  request: 'request',
+  supplement: 'supplement',
+  designation: 'designation',
+  other: 'other',
+};
