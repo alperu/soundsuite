@@ -16,9 +16,19 @@ import {
   firstRow,
   gridHasError,
 } from '@/lib/haystack-client';
+import { getPreference, setPreference } from '@/lib/indexed-db';
 import { RefPicker, type PersonMarker, type RefTarget } from './ref-picker';
 import { MarkerPicker } from './marker-picker';
 import { MotionTypePicker } from './motion-type-picker';
+
+const TAG_PANEL_MIN_WIDTH = 240;
+const TAG_PANEL_MAX_WIDTH = 600;
+const TAG_PANEL_DEFAULT_WIDTH = 320;
+const TAG_PANEL_WIDTH_PREF_KEY = 'case-management.tagPanelWidth';
+
+function clampPanelWidth(n: number): number {
+  return Math.min(TAG_PANEL_MAX_WIDTH, Math.max(TAG_PANEL_MIN_WIDTH, n));
+}
 
 interface Props {
   entityKind: EntityKind | null;
@@ -34,6 +44,60 @@ type HaystackRecord = Record<string, unknown> & { id?: string };
  */
 export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
   const [collapsed, setCollapsed] = useState(false);
+  const [width, setWidth] = useState<number>(TAG_PANEL_DEFAULT_WIDTH);
+  const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Load persisted panel width from IndexedDB preferences (once).
+  useEffect(() => {
+    let cancelled = false;
+    getPreference(TAG_PANEL_WIDTH_PREF_KEY)
+      .then((v: unknown) => {
+        if (cancelled) return;
+        const n = typeof v === 'number'
+          ? v
+          : typeof v === 'string'
+            ? parseInt(v, 10)
+            : NaN;
+        if (Number.isFinite(n)) setWidth(clampPanelWidth(n));
+      })
+      .catch(() => { /* ignore */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Debounced persistence on width change.
+  useEffect(() => {
+    if (persistTimer.current) clearTimeout(persistTimer.current);
+    persistTimer.current = setTimeout(() => {
+      void setPreference(TAG_PANEL_WIDTH_PREF_KEY, width);
+    }, 250);
+    return () => {
+      if (persistTimer.current) clearTimeout(persistTimer.current);
+    };
+  }, [width]);
+
+  // Drag handle: mousedown on the left edge starts a global drag.
+  // The panel is on the right side of the layout, so dragging the handle
+  // LEFT (negative deltaX) increases width, dragging RIGHT shrinks it.
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = width;
+    const onMove = (ev: MouseEvent) => {
+      const delta = ev.clientX - startX;
+      setWidth(clampPanelWidth(startWidth - delta));
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [width]);
+
   const [record, setRecord] = useState<HaystackRecord | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -172,7 +236,16 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
   const grouped = groupByTier(visibleSpecs);
 
   return (
-    <div className="w-80 border-l border-gray-200 bg-gray-50 flex flex-col flex-shrink-0">
+    <div
+      className="border-l border-gray-200 bg-gray-50 flex flex-col flex-shrink-0 relative"
+      style={{ width: `${width}px` }}
+    >
+      {/* Drag handle (left edge) — drag to resize, persists to IndexedDB */}
+      <div
+        onMouseDown={handleResizeStart}
+        title="Drag to resize"
+        className="absolute top-0 left-0 h-full w-1 cursor-col-resize hover:bg-blue-400 active:bg-blue-500 transition-colors z-10"
+      />
       {/* Header */}
       <div className="px-3 py-2 border-b border-gray-200 bg-white flex items-center gap-2">
         <button
