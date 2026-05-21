@@ -292,6 +292,7 @@ function synthesizeRefsFromColumns(table: string, row: any): Record<string, unkn
  */
 const REF_TARGET_TABLE: Record<string, 'Case' | 'Motion' | 'Person' | 'Court' | 'Hearing' | 'Document'> = {
   caseRef: 'Case',
+  caseRefs: 'Case',
   motionRef: 'Motion',
   motionRefs: 'Motion',
   amends: 'Motion',
@@ -357,47 +358,115 @@ function stripAt(v: unknown): string | null {
 }
 
 /**
+ * Format an ISO-ish YYYY-MM-DD from any date-shaped value. Returns null if
+ * the input doesn't parse.
+ */
+function asYmd(v: unknown): string | null {
+  if (!v) return null
+  const d = v instanceof Date ? v : new Date(v as string | number)
+  if (isNaN(d.getTime())) return null
+  return d.toISOString().slice(0, 10)
+}
+
+/**
+ * Synthesize a Haystack-canonical `dis` (display-string) for a row. This is
+ * the single source-of-truth label per entity type — pickers, the tag panel,
+ * the ref-label resolver, and any future Haystack-aware client all read from
+ * here. Caller is responsible for stitching it back onto the row.
+ *
+ * Per-table preference order:
+ *   Case            → name → caseNumber → id
+ *   Motion          → title → motionType → id
+ *   Person          → displayName → email → id
+ *   Court           → shortName → name → id
+ *   Hearing         → "<hearingType ?? 'Hearing'> on <YYYY-MM-DD>" → id
+ *   MotionEvent     → "<kind> on <occurredOn|courtFilingDate as YYYY-MM-DD>" → id
+ *   MotionAttachment→ "<attachmentKind ?? 'attachment'>" + " — <title>"? → id
+ *   PersonRole      → "<roleMarker> <personDis>" → roleKind → id
+ *   Jurisdiction    → displayName → name → code → id
+ *   Document        → fileName → id
+ *   ClerksRecord    → "Clerk's Record vol <volume>" → id
+ *   ReportersRecord → "Reporter's Record vol <volume>" → id
+ *
+ * Returns a non-empty string on success, or null if the row is unusable.
+ */
+function computeDis(table: string, row: any): string | null {
+  if (!row || typeof row !== 'object') return null
+  // Honour explicit pre-existing `dis` (legacy data may carry one).
+  if (typeof row.dis === 'string' && row.dis.length > 0) return row.dis
+
+  // Some legacy rows carry tags as a JSON string. Merge for easier picks.
+  let tags: any = row.tags
+  if (typeof tags === 'string') { try { tags = JSON.parse(tags) } catch { tags = {} } }
+  const merged = (tags && typeof tags === 'object') ? { ...row, ...tags } : row
+
+  switch (table) {
+    case 'Case':
+      return merged.name || merged.caseNumber || merged.causeNo || merged.id || null
+    case 'Motion': {
+      const motionType = merged.motionType
+      const title = merged.title
+      return title || motionType || merged.id || null
+    }
+    case 'Person':
+      return merged.displayName || merged.email || merged.id || null
+    case 'Court':
+      return merged.shortName || merged.name || merged.id || null
+    case 'Hearing': {
+      const kind = merged.hearingType || 'Hearing'
+      const ymd = asYmd(merged.scheduledFor)
+      if (ymd) return `${kind} on ${ymd}`
+      return merged.id || null
+    }
+    case 'MotionEvent': {
+      const kind = merged.kind || 'event'
+      const ymd = asYmd(merged.occurredOn) || asYmd(merged.courtFilingDate)
+      if (ymd) return `${kind} on ${ymd}`
+      return kind || merged.id || null
+    }
+    case 'MotionAttachment': {
+      const kind = merged.attachmentKind || merged.kind || 'attachment'
+      const title = merged.title || merged.label
+      return title ? `${kind} — ${title}` : (kind || merged.id || null)
+    }
+    case 'PersonRole': {
+      // Pick a role-marker from common marker tags; fall back to roleKind.
+      const markerKeys = [
+        'movant', 'respondent', 'plaintiff', 'defendant', 'judge',
+        'courtClerk', 'courtReporter', 'attorney', 'witness',
+      ]
+      let roleMarker: string | null = null
+      for (const k of markerKeys) {
+        if (merged[k] === true || merged[k] === 'm:') { roleMarker = k; break }
+      }
+      roleMarker = roleMarker || merged.roleKind || merged.role || null
+      const personDis = merged.personDis || null
+      if (roleMarker && personDis) return `${roleMarker} ${personDis}`
+      if (personDis) return personDis
+      if (roleMarker) return roleMarker
+      return merged.id || null
+    }
+    case 'Jurisdiction':
+      return merged.displayName || merged.name || merged.code || merged.id || null
+    case 'Document':
+      return merged.fileName || merged.id || null
+    case 'ClerksRecord':
+      return merged.volume != null ? `Clerk's Record vol ${merged.volume}` : (merged.id || null)
+    case 'ReportersRecord':
+      return merged.volume != null ? `Reporter's Record vol ${merged.volume}` : (merged.id || null)
+    default:
+      return merged.name || merged.title || merged.displayName || merged.id || null
+  }
+}
+
+/**
  * Format a label for a target row in the convention the ref-picker uses,
- * so the read-mode display matches what users see when picking.
+ * so the read-mode display matches what users see when picking. Thin wrapper
+ * over computeDis — kept for callers that want the "(missing)" sentinel.
  */
 function formatLabelFor(target: string, row: any): string {
   if (!row) return '(missing)'
-  switch (target) {
-    case 'Case': {
-      // Prefer caseNumber (the legal identifier the user cares about) and
-      // optionally append the human-readable name when distinct.
-      const num = row.caseNumber || row.causeNo
-      const name = row.name
-      if (num && name && num !== name) return `${num} · ${name}`
-      return num || name || row.id || '(missing)'
-    }
-    case 'Motion': {
-      // motionType lives in `tags` JSON for legacy rows; fall back to title.
-      let tags: any = row.tags
-      if (typeof tags === 'string') { try { tags = JSON.parse(tags) } catch { tags = {} } }
-      const motionType = tags?.motionType || row.motionType
-      const title = row.title
-      const primary = motionType || title
-      // Don't recurse into a case lookup here — keep label formation cheap.
-      return primary || row.id || '(missing)'
-    }
-    case 'Person':
-      return row.displayName || row.email || row.id || '(missing)'
-    case 'Court':
-      return row.shortName || row.name || row.id || '(missing)'
-    case 'Hearing': {
-      const kind = row.hearingType || 'hearing'
-      if (row.scheduledFor) {
-        const d = row.scheduledFor instanceof Date ? row.scheduledFor : new Date(row.scheduledFor)
-        if (!isNaN(d.getTime())) return `${kind} on ${d.toISOString().slice(0, 10)}`
-      }
-      return row.dis || row.id || '(missing)'
-    }
-    case 'Document':
-      return row.fileName || row.id || '(missing)'
-    default:
-      return row.dis || row.name || row.title || row.displayName || row.id || '(missing)'
-  }
+  return computeDis(target, row) || row.id || '(missing)'
 }
 
 /**
@@ -642,8 +711,10 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
       // have a single canonical label field to render. The pickers fall back to
       // entity-specific fields (name/title/displayName), but `dis` lets them
       // (and any future Haystack-aware client) treat all kinds uniformly.
+      // Re-uses `computeDis` so row.dis stays identical to <ref>Label values
+      // pointing at the same row.
       if (out.dis == null) {
-        const d = pickDisplay(table, out)
+        const d = computeDis(table, out)
         if (d) out.dis = d
       }
       return out
@@ -663,28 +734,6 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
       return errGrid(`schema not yet migrated: ${msg}`)
     }
     return errGrid(`read failed: ${msg}`)
-  }
-}
-
-/**
- * Pick a sensible Haystack `dis` (display string) for a row based on which
- * table it came from. Order: explicit fields → fallback to id. Pickers can
- * still read entity-specific columns directly; this is the universal label.
- */
-function pickDisplay(table: string, r: any): string | null {
-  if (!r || typeof r !== 'object') return null
-  switch (table) {
-    case 'Case': return r.name || r.caseNumber || r.causeNo || r.id || null
-    case 'Motion': return r.title || r.motionType || r.id || null
-    case 'MotionEvent': return r.kind || r.label || r.id || null
-    case 'MotionAttachment': return r.label || r.attachmentKind || r.kind || r.id || null
-    case 'Person': return r.displayName || r.name || r.email || r.id || null
-    case 'PersonRole': return r.roleKind || r.dis || r.id || null
-    case 'Hearing': return r.hearingType || r.location || r.id || null
-    case 'Court': return r.name || r.shortName || r.id || null
-    case 'ClerksRecord': return `Vol ${r.volume ?? '?'}` || r.id || null
-    case 'ReportersRecord': return `Vol ${r.volume ?? '?'}` || r.id || null
-    default: return r.name || r.title || r.displayName || r.id || null
   }
 }
 
@@ -756,7 +805,13 @@ function inlineCourt(c: any): any {
   if (typeof tags === 'string') {
     try { tags = JSON.parse(tags) } catch { tags = {} }
   }
-  return { ...c, ...(tags && typeof tags === 'object' ? tags : {}) }
+  const out: any = { ...c, ...(tags && typeof tags === 'object' ? tags : {}) }
+  // Synthesize Haystack `dis` so clients have one canonical label per row.
+  if (out.dis == null) {
+    const d = computeDis('Court', out)
+    if (d) out.dis = d
+  }
+  return out
 }
 
 /**
@@ -1015,6 +1070,8 @@ function splitPatch(
     // never reach the tags JSON. The client strips these too; this is belt-
     // and-suspenders for any other caller of commitEntity.
     if (k.endsWith('Label')) continue
+    // `dis` is server-synthesized on read (via computeDis) — never persist it.
+    if (k === 'dis') continue
     if (colSet.has(k)) {
       let v = vRaw
       // Normalize empty strings on nullable columns to null so the form's

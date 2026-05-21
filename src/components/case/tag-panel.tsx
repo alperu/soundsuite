@@ -625,13 +625,71 @@ function RefRow({
   onChange: (v: unknown) => void;
   onOpenPicker: (anchor: DOMRect | null) => void;
 }) {
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const isListTier = spec.tier === 'refs';
+  const isListValue = Array.isArray(value);
+
+  // List-valued refs render as chip rows — one chip per id, each labelled
+  // from the parallel `<refName>Label` array the server resolver emits. Raw
+  // id stays as a tooltip for traceability.
+  if (isListTier || isListValue) {
+    const rawList: unknown[] = Array.isArray(value) ? (value as unknown[]) : [];
+    const labelList: unknown[] = Array.isArray(label) ? (label as unknown[]) : [];
+    // In read mode, hide the row entirely when there are no refs.
+    if (!editMode && rawList.length === 0) return null;
+    const hasTypedRefTarget = Boolean(spec.refTarget);
+    return (
+      <div className="flex items-start gap-2 text-[11px]">
+        <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
+          <span className="truncate" title={spec.name}>{spec.name}</span>
+          <HelpDot doc={spec.doc} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-wrap gap-1 items-center">
+            {rawList.length === 0 && (
+              <span className="text-gray-400">—</span>
+            )}
+            {rawList.map((rid, i) => {
+              const rawId = typeof rid === 'string' ? rid : formatRefValue(rid);
+              const idForTooltip = rawId.replace(/^@/, '');
+              const labelStr = typeof labelList[i] === 'string'
+                ? (labelList[i] as string)
+                : '';
+              const chipText = labelStr || (idForTooltip ? `${idForTooltip.slice(0, 8)}…` : '(missing)');
+              return (
+                <span
+                  key={`${rawId}-${i}`}
+                  title={idForTooltip || undefined}
+                  className="px-1.5 py-0.5 bg-blue-50 text-blue-700 rounded text-[11px] border border-blue-100 max-w-full truncate"
+                >
+                  {chipText}
+                </span>
+              );
+            })}
+            {editMode && hasTypedRefTarget && (
+              <button
+                ref={btnRef}
+                type="button"
+                title={`Pick ${spec.refTarget}`}
+                onClick={() => onOpenPicker(btnRef.current?.getBoundingClientRect() ?? null)}
+                className="px-1.5 py-0.5 text-[10px] rounded border border-blue-300 text-blue-700 bg-blue-50 hover:bg-blue-100 transition-colors flex-shrink-0"
+              >
+                {rawList.length === 0 ? 'Pick…' : 'Edit…'}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Scalar ref rendering (preserved from prior behaviour).
   const rawDisplay = formatRefValue(value);
   const labelDisplay = formatLabelValue(label);
   // Read-mode preference: server-resolved label, with raw ref as tooltip.
   // Falls back to the raw ref string when no label is available (e.g.
   // free-text ref slots without a refTarget table).
   const display = labelDisplay || rawDisplay;
-  const btnRef = useRef<HTMLButtonElement | null>(null);
   if (!editMode && !display) return null;
   const hasTypedRefTarget = Boolean(spec.refTarget);
   const rawTooltip = rawDisplay && labelDisplay && rawDisplay !== labelDisplay ? rawDisplay : '';
