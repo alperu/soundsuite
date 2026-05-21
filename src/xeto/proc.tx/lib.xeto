@@ -1,0 +1,21 @@
+//
+// Sound Suite — proc.tx
+// Texas procedural rules (TRCP, TRAP, TBOR, ...) as Rule instances.
+//
+// History:
+//   21 May 2026  Initial version (Agent 2, XETO v1 foundation)
+//
+
+pragma: Lib <
+  doc: "Texas procedural rules — Rule INSTANCES, not new types"
+  version: Version "0.1.0"
+  depends: {
+    { lib: "sys" }
+    { lib: "ph" }
+    { lib: "proc.core" }
+  }
+  org: {
+    dis: "Sound Suite"
+    uri: "https://soundsuite.ai"
+  }
+>

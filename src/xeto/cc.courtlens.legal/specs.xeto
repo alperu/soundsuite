@@ -1,0 +1,220 @@
+//
+// cc.courtlens.legal::specs — domain entities.
+//
+// Containment idiom follows Project Haystack:
+//   Case  = site   (geographic container)
+//   Motion = equip  (nestable for amendment chains via motionRef)
+//   MotionEvent = point (Received / Filed / Responded / Signed ...)
+//   MotionAttachment = point-adjacent (Brief, Response, ProposedOrder, ...)
+//
+// Amendment is an `Amendable` mixin (from proc.core) reused on Motion
+// and on every MotionAttachment subtype.
+//
+
+//////////////////////////////////////////////////////////////////////////
+// Jurisdiction + Court
+//////////////////////////////////////////////////////////////////////////
+
+// Legal jurisdiction (Texas, California, Federal, ...).
+Jurisdiction: Dict {
+  jurisdiction
+  code:        Str
+  displayName: Str
+  parent:      Ref?
+}
+
+// Court of record.
+Court: Dict {
+  court
+  displayName:     Str
+  jurisdictionRef: Ref
+  county:          Str?
+  district:        Str?
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Person — canonical, immutable identity pool
+//////////////////////////////////////////////////////////////////////////
+
+// Canonical immutable identity. Intrinsic markers describe WHO the
+// person is in the abstract (judge, lawyer, ...); contextual roles
+// (movant, respondent, ...) live on PersonRole ghost records.
+Person: Dict {
+  person
+  displayName:      Str
+  email:            Str?
+  barNumber:        Str?
+  jurisdictionRef:  Ref?
+  // Intrinsic role markers (always-true facts about this person):
+  lawyer:           Marker?
+  judge:            Marker?
+  courtClerk:       Marker?
+  courtReporter:    Marker?
+  bailiff:          Marker?
+  proSe:            Marker?
+  self:             Marker?
+}
+
+// Ghost / virtual record that binds a canonical Person to a scope
+// (a Motion or a Case) with contextual role tags. Solves the
+// immutability problem: Person records never mutate; role records
+// are created per binding and may carry contradictory roles across
+// scopes (Alper is movant in M1, respondent in M2).
+PersonRole: Dict {
+  personRole
+  personRef:  Ref
+  scopeRef:   Ref
+  // Contextual role markers — any combination may apply:
+  movant:           Marker?
+  respondent:       Marker?
+  defendant:        Marker?
+  plaintiff:        Marker?
+  intervenor:       Marker?
+  lawyerMovant:     Marker?
+  lawyerRespondent: Marker?
+  judge:            Marker?
+  appearedOn:       DateTime?
+  withdrewOn:       DateTime?
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Case — Haystack site analog
+//////////////////////////////////////////////////////////////////////////
+
+// Legal case. Container of motions, hearings, and party records.
+Case: Dict {
+  case
+  site
+  causeNo:            Str
+  jurisdictionRef:    Ref
+  courtRef:           Ref?
+  judgeRefs:          List? <of:Ref>
+  plaintiffRefs:      List? <of:Ref>
+  defendantRefs:      List? <of:Ref>
+  respondentRefs:     List? <of:Ref>
+  movantRefs:         List? <of:Ref>
+  courtClerkRefs:     List? <of:Ref>
+  courtReporterRefs:  List? <of:Ref>
+  filedOn:            DateTime?
+  causeFiledStamp:    Str?
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Motion — Haystack equip analog, nestable, Amendable
+//////////////////////////////////////////////////////////////////////////
+
+// Motion. Equip-like; nestable via motionRef to model amendment chains
+// ("Motion to Disqualify" → "Amended Motion to Disqualify" → ...).
+// Intersects Amendable from proc.core.
+Motion: Amendable {
+  motion
+  equip
+  caseRef:        Ref
+  motionRef:      Ref?
+  subMotion:      Marker?
+  motionType:     Str
+  judgeRef:       Ref?
+  movantRef:      Ref?
+  respondentRef:  Ref?
+}
+
+//////////////////////////////////////////////////////////////////////////
+// EventKind — exclusive Choice over MotionEvent lifecycle states
+//////////////////////////////////////////////////////////////////////////
+
+// MotionEvent kind. Exclusive Choice — exactly one applies per event.
+EventKind: Choice
+
+Received:    EventKind { received }
+Filed:       EventKind { filed }
+CourtFiled:  EventKind { courtFiled }
+Responded:   EventKind { responded }
+Signed:      EventKind { signed }
+Granted:     EventKind { granted }
+Denied:      EventKind { denied }
+Served:      EventKind { served }
+HearingHeld: EventKind { hearingHeld }
+Withdrawn:   EventKind { withdrawn }
+Mooted:      EventKind { mooted }
+
+//////////////////////////////////////////////////////////////////////////
+// MotionEvent — Haystack point analog
+//////////////////////////////////////////////////////////////////////////
+
+// MotionEvent. Lifecycle as discrete records, not as additive markers
+// on Motion. Each event carries a kind + occurredOn + optional fileRef
+// pointing at the PDF that documents it.
+MotionEvent: Dict {
+  motionEvent
+  point
+  motionRef:          Ref
+  caseRef:            Ref
+  kind:               EventKind
+  occurredOn:         DateTime
+  courtFilingDate:    DateTime?
+  causeNoStamp:       Str?
+  fileRef:            Ref?
+  authoredBy:         Ref?
+  servedOn:           Ref?
+  courtClerkRef:      Ref?
+  courtReporterRef:   Ref?
+  judgeRef:           Ref?
+  hearingRef:         Ref?
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Hearing — shared cross-motion entity (hybrid hearings)
+//////////////////////////////////////////////////////////////////////////
+
+// First-class shared hearing record. Hybrid hearings cover multiple
+// motions across multiple cases; this record holds the shared facts
+// (judge, reporter, transcript, time, room) while each affected motion
+// gets its own MotionEvent{hearingHeld} pointing at this Hearing.
+Hearing: Dict {
+  hearing
+  hybrid:            Marker?
+  caseRefs:          List <of:Ref>
+  motionRefs:        List <of:Ref>
+  judgeRef:          Ref
+  courtReporterRef:  Ref?
+  courtClerkRef:     Ref?
+  scheduledFor:      DateTime
+  heldOn:            DateTime?
+  durationMin:       Number?
+  location:          Str?
+  remote:            Marker?
+  transcriptRef:     Ref?
+  hearingType:       Str?
+}
+
+//////////////////////////////////////////////////////////////////////////
+// MotionAttachment — non-event documents attached to a motion
+//////////////////////////////////////////////////////////////////////////
+
+// Abstract: anything attached to a motion that isn't a lifecycle event.
+// Every concrete subtype intersects Amendable from proc.core — proposed
+// orders, briefs, responses, exhibits all have amendment chains.
+MotionAttachment: Amendable <abstract> {
+  attachment
+  motionRef:   Ref
+  caseRef:     Ref
+  fileRef:     Ref
+  authoredBy:  Ref?
+}
+
+ProposedOrder: MotionAttachment { proposedOrder }
+Brief:         MotionAttachment { brief }
+Response:      MotionAttachment { response }
+Exhibit:       MotionAttachment {
+  exhibit
+  label:  Str?
+}
+Email: MotionAttachment {
+  email
+  fromRef:    Ref?
+  toRefs:     List? <of:Ref>
+  subject:    Str?
+  sentOn:     DateTime?
+}
+Evidence:      MotionAttachment { evidence }
+SupportingDoc: MotionAttachment { supportingDoc }

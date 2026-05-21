@@ -2,9 +2,14 @@ import path from 'node:path'
 import { PrismaClient, Prisma } from '@prisma/client'
 import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
 import { withCacheInvalidation } from './cache-invalidation'
+import { xetoValidate } from '@/lib/legal/prisma-extensions/validate'
 
+// The exported `prisma` is the extended client (Prisma's
+// `$extends` returns a structurally-distinct type), so we widen the
+// global cache to `unknown` here and rely on the export site to set
+// the type. This keeps the singleton stable across HMR reloads in dev.
 const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined
+  prisma: unknown
   pragmasApplied: boolean | undefined
 }
 
@@ -44,7 +49,18 @@ function makeClient(): PrismaClient {
   return new PrismaClient({ adapter })
 }
 
-export const prisma = globalForPrisma.prisma ?? withCacheInvalidation(makeClient())
+/**
+ * Compose the Prisma client:
+ *   raw client → withCacheInvalidation (memcache hooks) → $extends(xetoValidate)
+ *
+ * The XETO write-path validation MUST sit outside the cache-invalidation
+ * wrapper so it sees the un-rewritten user args. Agent 3's repo layer
+ * builds on `prisma` (the extended client) — see
+ * `docs/xeto-haystack-research.md §12.2` for the layering rationale.
+ */
+const baseClient = withCacheInvalidation(makeClient())
+export const prisma =
+  globalForPrisma.prisma ?? baseClient.$extends(xetoValidate)
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
 

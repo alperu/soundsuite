@@ -1,0 +1,44 @@
+//
+// proc.tx::instances — Texas Rule instances.
+//
+// Each entry is an instance of proc.core::Rule (not a new type).
+// New rule = new instance, not new code.
+//
+// Choice values (TriggerEvent, Consequence) are satisfied by adding
+// the underlying marker tag directly to the dict — e.g. `servedOn`
+// (not `triggerEvent: ServedOn`). This follows the Project Haystack
+// idiom where Choice members are themselves markers.
+//
+
+// TRCP 198.2 — response to Requests for Admission.
+// Choice: servedOn => TriggerEvent.ServedOn; deemedAdmitted => Consequence.DeemedAdmitted
+@txRfaResponseRule: Rule {
+  citation:            "Texas TRCP 198.2"
+  servedOn
+  dueAfterDays:        30
+  deemedAdmitted
+  targetFilingType:    "rfaResponse"
+  notes:               "Failure to timely respond results in matters being deemed admitted."
+}
+
+// TRCP 99(b) — answer-by deadline (general). 20 days from service.
+// Choice: servedOn => TriggerEvent.ServedOn; noticeOfDefault => Consequence.NoticeOfDefault
+@txAnswerRule: Rule {
+  citation:            "Texas TRCP 99(b)"
+  servedOn
+  dueAfterDays:        20
+  noticeOfDefault
+  targetFilingType:    "answer"
+  notes:               "First Monday after 20 days from service of citation."
+}
+
+// TRCP 329b — Motion for New Trial filing window.
+// Choice: filedOn => TriggerEvent.FiledOn; noConsequence => Consequence.NoConsequence
+@txMotionForNewTrialRule: Rule {
+  citation:            "Texas TRCP 329b"
+  filedOn
+  dueAfterDays:        30
+  noConsequence
+  targetFilingType:    "motionForNewTrial"
+  notes:               "Filed within 30 days after the judgment is signed."
+}

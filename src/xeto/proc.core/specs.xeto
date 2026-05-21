@@ -1,0 +1,115 @@
+//
+// proc.core::specs — primitives reused across all procedural libs.
+//
+// `Amendable` is the mixin every versionable doc inherits (Motion,
+// ProposedOrder, Brief, Response, Exhibit). It supplies the two refs
+// — `amends` (semantic predecessor) and `supersedes` (procedural
+// replacement) — plus the optional `revisionSeq` counter.
+//
+// `Rule` is the dict shape we instantiate per-jurisdiction (TRCP,
+// TRAP, FRAP, CCP, CRC, ...). New rule = new instance, not new code.
+//
+
+//////////////////////////////////////////////////////////////////////////
+// Amendable mixin — any versionable document
+//////////////////////////////////////////////////////////////////////////
+
+// Mixin applied to anything that can be amended: motions, proposed
+// orders, briefs, responses, exhibit lists. Carries the predecessor /
+// supersession refs and an optional revision counter.
+Amendable: Dict <abstract> {
+  amends:       Ref?
+  supersedes:   Ref?
+  revisionSeq:  Number?
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Trigger events — what kicks off a deadline
+//////////////////////////////////////////////////////////////////////////
+
+// What event starts a Rule's deadline clock. Exclusive Choice — exactly
+// one of `servedOn` or `filedOn` is true on any given Rule instance.
+TriggerEvent: Choice
+
+ServedOn: TriggerEvent { servedOn }
+FiledOn:  TriggerEvent { filedOn }
+
+//////////////////////////////////////////////////////////////////////////
+// Consequence — what happens if the deadline is missed
+//////////////////////////////////////////////////////////////////////////
+
+// What happens if the responding party blows the deadline. Exclusive
+// Choice — exactly one consequence per Rule.
+Consequence: Choice
+
+DeemedAdmitted:  Consequence { deemedAdmitted }
+NoticeOfDefault: Consequence { noticeOfDefault }
+NoConsequence:   Consequence { noConsequence }
+
+//////////////////////////////////////////////////////////////////////////
+// Supersession policy — how a successor handles predecessor obligations
+//////////////////////////////////////////////////////////////////////////
+
+// When an amended motion supersedes its predecessor, what becomes of the
+// predecessor's open deadlines? Exclusive Choice.
+SupersessionPolicy: Choice
+
+ResetsClock:    SupersessionPolicy { resetsClock }
+ContinuesClock: SupersessionPolicy { continuesClock }
+Discharges:     SupersessionPolicy { discharges }
+
+//////////////////////////////////////////////////////////////////////////
+// Deadline — a computed obligation hanging off a MotionEvent
+//////////////////////////////////////////////////////////////////////////
+
+// Deadline materialized from a Rule + a triggering MotionEvent.
+// Not authored by users; produced by the deadline calculator
+// (see src/lib/procedure/).
+Deadline: Dict {
+  deadline
+  ruleRef:        Ref
+  triggerEventRef: Ref?
+  dueBy:          DateTime
+  satisfiedOn:    DateTime?
+  satisfied:      Bool?
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Action — a derived "do this next" surface
+//////////////////////////////////////////////////////////////////////////
+
+// Action surfaced on the case "what's next" graph. Derived, not stored.
+Action: Dict {
+  action
+  scopeRef:    Ref
+  ruleRef:     Ref?
+  dueBy:       DateTime?
+  priority:    Str?
+  description: Str?
+  completed:   Bool?
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Rule — the schema every per-jurisdiction rule instance fills in
+//////////////////////////////////////////////////////////////////////////
+
+// Procedural rule. Instances live in `proc.tx`, `proc.ca`, `proc.frap`, ...
+// Concrete instances — never subclass; never define `TexasRfaRule extends Rule`.
+Rule: Dict {
+  rule
+  citation:            Str
+  triggerEvent:        TriggerEvent
+  dueAfterDays:        Number
+  consequenceIfMissed: Consequence
+  targetFilingType:    Str?
+  notes:               Str?
+}
+
+// Note on Choice slots:
+//   `triggerEvent: TriggerEvent` and `consequenceIfMissed: Consequence`
+//   declare two required Choice families on Rule. Instances satisfy each
+//   family by adding the underlying marker for the chosen sub-choice
+//   directly to the dict — e.g. `servedOn` (not `triggerEvent: ServedOn`).
+//   This matches the Project Haystack idiom (see ph::AirHandlingEquip's
+//   `ahuZoneDelivery: AhuZoneDelivery?` slot + `chilledBeamZone` marker
+//   on an instance).
