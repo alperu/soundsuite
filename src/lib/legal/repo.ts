@@ -28,6 +28,19 @@ export const findPersonRole = (filter: string, limit?: number) =>
 export const findHearing = (filter: string, limit?: number) =>
   readByHaystack(db, 'Hearing', filter, limit)
 
+/**
+ * Find a ClerksRecord/ReportersRecord by Haystack filter. These tables don't
+ * have a typed Kysely entry (yet), so we route through Prisma directly. v1
+ * supports only `id`-based reads via the route's idValue path; tag-filter
+ * compilation here is a stub returning the full table (limit applied).
+ */
+export const findClerksRecord = async (_filter: string, limit?: number) => {
+  return (prisma as any).clerksRecord.findMany({ take: limit })
+}
+export const findReportersRecord = async (_filter: string, limit?: number) => {
+  return (prisma as any).reportersRecord.findMany({ take: limit })
+}
+
 // ---------- write API -------------------------------------------------------
 
 /**
@@ -169,6 +182,8 @@ export function tableFromFilter(filter: string): keyof DB | null {
   if (has('motionattachment')) return 'MotionAttachment'
   if (has('personrole')) return 'PersonRole'
   if (has('hearing')) return 'Hearing'
+  if (has('clerksrecord')) return 'ClerksRecord' as any
+  if (has('reportersrecord')) return 'ReportersRecord' as any
   if (has('motion')) return 'Motion'
   if (has('person')) return 'Person'
   if (has('case')) return 'Case'

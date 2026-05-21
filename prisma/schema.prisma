@@ -37,6 +37,8 @@ model Case {
   motionEvents      MotionEvent[]
   motionAttachments MotionAttachment[]
   hearings          HearingCase[]
+  clerksRecords     ClerksRecord[]
+  reportersRecords  ReportersRecord[]
 
   @@index([path])
   @@index([caseNumber])
@@ -92,6 +94,8 @@ model Document {
   motionEvents       MotionEvent[]      @relation("Document_motionEvents")
   motionAttachments  MotionAttachment[] @relation("Document_motionAttachments")
   hearingTranscripts Hearing[]          @relation("Document_hearingTranscripts")
+  clerksRecords      ClerksRecord[]     @relation("Document_clerksRecords")
+  reportersRecords   ReportersRecord[]  @relation("Document_reportersRecords")
 
   @@index([caseId])
   @@index([filingId])
@@ -512,6 +516,7 @@ model Person {
   hearingsAsJudge     Hearing[]          @relation("Hearing_judge")
   hearingsAsClerk     Hearing[]          @relation("Hearing_courtClerk")
   hearingsAsReporter  Hearing[]          @relation("Hearing_courtReporter")
+  reportersRecords    ReportersRecord[]  @relation("ReportersRecord_reporter")
 
   @@index([displayName])
   @@index([jurisdictionId])
@@ -656,4 +661,48 @@ model HearingMotion {
 
   @@id([hearingId, motionId])
   @@index([motionId])
+}
+
+// ─── Case-level record entities (appellate) ─────────────────────────────
+//
+// Some filing types are case-level, not motion-attached: the Clerk's Record
+// (appellate clerk's compilation of trial-court papers) and the Reporter's
+// Record (court reporter's transcript of trial proceedings, often in volumes).
+// Modeled as first-class entities so the tag panel can edit them directly,
+// rather than forcing them into MotionAttachment (which requires a motionId).
+
+model ClerksRecord {
+  id         String    @id @default(cuid())
+  caseId     String
+  case       Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  volume     Int?
+  filedOn    DateTime?
+  documentId String?
+  document   Document? @relation("Document_clerksRecords", fields: [documentId], references: [id], onDelete: SetNull)
+  // XETO v1 — tag bag (markers/refs/values)
+  tags       Json      @default("{}")
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([caseId])
+  @@index([documentId])
+}
+
+model ReportersRecord {
+  id          String    @id @default(cuid())
+  caseId      String
+  case        Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  reporterId  String?
+  reporter    Person?   @relation("ReportersRecord_reporter", fields: [reporterId], references: [id])
+  volume      Int?
+  hearingDate DateTime?
+  documentId  String?
+  document    Document? @relation("Document_reportersRecords", fields: [documentId], references: [id], onDelete: SetNull)
+  tags        Json      @default("{}")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([caseId])
+  @@index([reporterId])
+  @@index([documentId])
 }
