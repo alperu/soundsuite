@@ -64,6 +64,18 @@ async function loadHaxallModules(): Promise<{
   xeto: AnyMod
   haystack: AnyMod
 }> {
+  // Override any inherited FAN_HOME before importing @haxall/haxall/fan.js.
+  // The user's shell may set FAN_HOME to a local haxall checkout (e.g.
+  // ~/fantom or ~/haxall) that is missing the bundled fantom pods. Without
+  // this override, fan.js throws `ArgErr {}` at boot and the Next.js server
+  // crashes — exactly the failure that took the dashboard offline on
+  // 2026-05-21. Always point at the npm package root.
+  const path = await dynImport<typeof import('node:path')>('node:path')
+  const haxallRoot = path.resolve(
+    process.cwd(),
+    'node_modules/@haxall/haxall',
+  )
+  process.env.FAN_HOME = haxallRoot
   const fan = await dynImport<{ sys: AnyMod }>('@haxall/haxall/fan.js')
   const xetoMod = await dynImport<AnyMod>('@haxall/haxall/esm/xeto.js')
   const haystackMod = await dynImport<AnyMod>(
