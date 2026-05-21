@@ -187,6 +187,12 @@ export function tableFromFilter(filter: string): keyof DB | null {
   if (has('motion')) return 'Motion'
   if (has('person')) return 'Person'
   if (has('case')) return 'Case'
-  if (has('document')) return 'Document'
+  // Ref-picker aliases — the picker's refTarget strings don't always carry an
+  // entity marker; they may name the *ref tag* directly (e.g. `attachment`,
+  // `documentref`, `transcriptref`). Map these onto the correct entity table
+  // so a ref-picker query like `filter=attachment` doesn't err out.
+  if (has('attachment')) return 'MotionAttachment'
+  if (has('transcript') || has('transcriptref')) return 'Hearing'
+  if (has('document') || has('documentref') || has('fileref')) return 'Document'
   return null
 }

@@ -287,6 +287,7 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
       '',
   )
   if (!filter) {
+    console.log('[haystack/read] err=missing-filter')
     return errGrid('read requires a filter parameter')
   }
   const limitRaw = params.get('limit') ?? body?.limit
@@ -301,11 +302,14 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
   // DB type used by tableFromFilter. Intercept `filter=court` here so
   // /api/haystack/read?filter=court returns Court rows for the ref-picker.
   if (/(^|[^a-z_])court([^a-z_]|$)/i.test(filter)) {
-    return await opReadCourt(params, body, limit, idValue)
+    const grid = await opReadCourt(params, body, limit, idValue)
+    console.log(`[haystack/read] filter=${JSON.stringify(filter)} id=${idValue ?? '-'} table=Court rows=${countGridRows(grid)}`)
+    return grid
   }
 
   const table = tableFromFilter(filter)
   if (!table) {
+    console.log(`[haystack/read] err=no-marker filter=${JSON.stringify(filter)}`)
     return errGrid(
       'filter must contain an entity marker (motion, motionEvent, person, personRole, hearing, case, court)',
     )
@@ -328,6 +332,13 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
           .where('id' as any, '=', idValue as any)
           .limit(1)
           .execute()
+        // Mirror the commit-path auto-upsert: when the panel reads a Motion
+        // by Filing.id and no Motion row exists yet, materialize one so the
+        // panel sees an empty-but-real record instead of an empty grid.
+        if (rows.length === 0 && table === 'Motion') {
+          const created = await ensureMotionForFiling(idValue)
+          if (created) rows = [created]
+        }
       }
     } else {
       switch (table) {
@@ -340,7 +351,9 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
         case 'Case': rows = await findCase(filter, limit); break
         case 'ClerksRecord' as any: rows = await findClerksRecord(filter, limit); break
         case 'ReportersRecord' as any: rows = await findReportersRecord(filter, limit); break
-        default: return errGrid(`entity ${table} not implemented in v1`)
+        default:
+          console.log(`[haystack/read] err=not-implemented filter=${JSON.stringify(filter)} table=${String(table)}`)
+          return errGrid(`entity ${table} not implemented in v1`)
       }
     }
     // Inline the tags JSON + synthesize Haystack refs from FK columns onto
@@ -363,16 +376,62 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
       } else if (r?.tags && typeof r.tags === 'object') {
         Object.assign(out, r.tags)
       }
+      // Synthesize `dis` (Haystack display-string convention) so ref pickers
+      // have a single canonical label field to render. The pickers fall back to
+      // entity-specific fields (name/title/displayName), but `dis` lets them
+      // (and any future Haystack-aware client) treat all kinds uniformly.
+      if (out.dis == null) {
+        const d = pickDisplay(table, out)
+        if (d) out.dis = d
+      }
       return out
     })
-    return encodeGrid(inlined, { table: table as any })
+    const grid = encodeGrid(inlined, { table: table as any })
+    console.log(`[haystack/read] filter=${JSON.stringify(filter)} id=${idValue ?? '-'} table=${table} rows=${inlined.length}`)
+    return grid
   } catch (e: any) {
     const msg = e?.message ?? String(e)
+    console.log(`[haystack/read] err filter=${JSON.stringify(filter)} table=${String(table)} msg=${msg}`)
     // Missing table in v1 schema → clean err grid, not 500.
     if (/no such table|no such column/i.test(msg)) {
       return errGrid(`schema not yet migrated: ${msg}`)
     }
     return errGrid(`read failed: ${msg}`)
+  }
+}
+
+/**
+ * Pick a sensible Haystack `dis` (display string) for a row based on which
+ * table it came from. Order: explicit fields → fallback to id. Pickers can
+ * still read entity-specific columns directly; this is the universal label.
+ */
+function pickDisplay(table: string, r: any): string | null {
+  if (!r || typeof r !== 'object') return null
+  switch (table) {
+    case 'Case': return r.name || r.caseNumber || r.causeNo || r.id || null
+    case 'Motion': return r.title || r.motionType || r.id || null
+    case 'MotionEvent': return r.kind || r.label || r.id || null
+    case 'MotionAttachment': return r.label || r.attachmentKind || r.kind || r.id || null
+    case 'Person': return r.displayName || r.name || r.email || r.id || null
+    case 'PersonRole': return r.roleKind || r.dis || r.id || null
+    case 'Hearing': return r.hearingType || r.location || r.id || null
+    case 'Court': return r.name || r.shortName || r.id || null
+    case 'ClerksRecord': return `Vol ${r.volume ?? '?'}` || r.id || null
+    case 'ReportersRecord': return `Vol ${r.volume ?? '?'}` || r.id || null
+    default: return r.name || r.title || r.displayName || r.id || null
+  }
+}
+
+/**
+ * Count the rows in an encoded grid string. Cheap — parses once for the log
+ * line. Returns -1 on parse failure (so the log line stays readable).
+ */
+function countGridRows(gridJson: string): number {
+  try {
+    const g = JSON.parse(gridJson)
+    return Array.isArray(g?.rows) ? g.rows.length : 0
+  } catch {
+    return -1
   }
 }
 
@@ -432,6 +491,56 @@ function inlineCourt(c: any): any {
 }
 
 /**
+ * Auto-upsert a Motion row mirroring a motion-typed Filing.
+ *
+ * Background: the case-management UI keys filings (events) by `Filing.id`,
+ * but tags live on the XETO entity (Motion / MotionAttachment / etc.). For
+ * motion-typed Filings we adopt the convention `Motion.id === Filing.id`, so
+ * the panel can read/write tags against the Filing id without the caller
+ * needing to know whether a Motion row has been materialized yet.
+ *
+ * Returns the (possibly freshly-created) Motion row, or null if no Filing
+ * exists for `filingId` or the Filing isn't motion-typed.
+ *
+ * Idempotency: races between two concurrent saves can both reach the
+ * `create` call. We catch the unique-violation on the second one and
+ * re-read the row.
+ */
+async function ensureMotionForFiling(filingId: string): Promise<any | null> {
+  const existing = await (prisma as any).motion.findUnique({ where: { id: filingId } })
+  if (existing) return existing
+  const filing = await (prisma as any).filing.findUnique({ where: { id: filingId } })
+  if (!filing) return null
+  if (!/motion/i.test(filing.filingType ?? '')) return null
+  try {
+    return await (prisma as any).motion.create({
+      data: {
+        id: filing.id,
+        filingId: filing.id,
+        caseId: filing.caseId,
+        title: filing.title ?? '',
+        description: filing.description ?? null,
+        // schema requires startPage (Int). Use 1 as a benign default; the
+        // real page range is on the underlying Document, not the Motion
+        // entity-level container.
+        startPage: 1,
+        endPage: null,
+        // XETO Motion spec requires the `motion` marker. Seed it so the
+        // create passes validation; if the caller's patch also sets it
+        // (the common case for the "tag motion=true" panel save), the
+        // tag merge is idempotent.
+        tags: { motion: { _kind: 'marker' } } as any, // marker; `dict()` also accepts `true` but Hayson form is explicit
+      },
+    })
+  } catch (e: any) {
+    // Likely a unique-violation race — another request created it first.
+    const row = await (prisma as any).motion.findUnique({ where: { id: filingId } })
+    if (row) return row
+    throw e
+  }
+}
+
+/**
  * commit — minimal v1 stub. Accepts `{ id, kind, patch }` (panel shape) or a
  * Haystack-style grid row with `id` + tag fields. Merges `patch` (or the row
  * minus `id`/`kind`) into the target record's `tags` JSON via Prisma.
@@ -471,6 +580,32 @@ async function opCommit(_params: URLSearchParams, body: any): Promise<string> {
     court: 'court',
     clerksRecord: 'clerksRecord',
     reportersRecord: 'reportersRecord',
+    // Per-filing-type EntityKinds all serialize to the MotionAttachment
+    // Prisma table — the table's `attachmentKind` discriminator column
+    // (set at row creation, not here) carries the type. The tag panel
+    // only mutates `tags` JSON via this commit op.
+    notice: 'motionAttachment',
+    letter: 'motionAttachment',
+    order: 'motionAttachment',
+    proposedOrder: 'motionAttachment',
+    petition: 'motionAttachment',
+    affidavit: 'motionAttachment',
+    subpoena: 'motionAttachment',
+    brief: 'motionAttachment',
+    response: 'motionAttachment',
+    reply: 'motionAttachment',
+    judgment: 'motionAttachment',
+    decree: 'motionAttachment',
+    transcript: 'motionAttachment',
+    settlement: 'motionAttachment',
+    billOfReview: 'motionAttachment',
+    returnOfService: 'motionAttachment',
+    demandLetter: 'motionAttachment',
+    objection: 'motionAttachment',
+    request: 'motionAttachment',
+    supplement: 'motionAttachment',
+    designation: 'motionAttachment',
+    other: 'motionAttachment',
   }
   const model = modelMap[kind]
   if (!model) return errGrid(`unknown kind: ${kind}`)
@@ -481,7 +616,15 @@ async function opCommit(_params: URLSearchParams, body: any): Promise<string> {
   }
 
   try {
-    const existing = await client.findUnique({ where: { id } })
+    let existing = await client.findUnique({ where: { id } })
+    if (!existing && kind === 'motion') {
+      // Auto-upsert: the panel passes a Filing.id for motion-typed filings;
+      // materialize the matching Motion row on the fly so the tag write
+      // succeeds against a record that didn't exist yet.
+      // TODO: extend to brief/response/etc. kinds once they route to
+      // MotionAttachment (needs a motionId to attach to — defer).
+      existing = await ensureMotionForFiling(id)
+    }
     if (!existing) return errGrid(`${kind} ${id} not found`)
 
     // Defensively recover an object from existing.tags. Handles three cases:
