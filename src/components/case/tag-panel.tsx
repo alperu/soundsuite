@@ -184,7 +184,15 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
     if (!entityKind || !entityId) return;
     setSaving(true);
     try {
-      const grid = await hsCommit({ id: entityId, kind: entityKind, patch: draft });
+      // Strip server-resolved `<refName>Label` siblings — they're read-only
+      // display hints inlined by /api/haystack/read; persisting them would
+      // pollute the tags JSON with stale labels.
+      const patch: HaystackRecord = {};
+      for (const [k, v] of Object.entries(draft)) {
+        if (k.endsWith('Label')) continue;
+        patch[k] = v;
+      }
+      const grid = await hsCommit({ id: entityId, kind: entityKind, patch });
       const gridErr = gridHasError(grid);
       if (gridErr) {
         showToast(`Save failed: ${gridErr}`);
@@ -355,6 +363,7 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
                       key={spec.name}
                       spec={spec}
                       value={(editMode ? draft[spec.name] : record?.[spec.name]) as unknown}
+                      label={record?.[`${spec.name}Label`] as unknown}
                       editMode={editMode}
                       onChange={(v) => setDraft(prev => ({ ...prev, [spec.name]: v }))}
                       onOpenPicker={(anchor) => setPickerFor({ spec, anchor })}
@@ -599,19 +608,33 @@ function formatRefValue(v: unknown): string {
   return String(v);
 }
 
+function formatLabelValue(v: unknown): string {
+  if (v == null) return '';
+  if (Array.isArray(v)) return v.map(formatLabelValue).filter(Boolean).join(', ');
+  if (typeof v === 'string') return v;
+  return String(v);
+}
+
 function RefRow({
-  spec, value, editMode, onChange, onOpenPicker,
+  spec, value, label, editMode, onChange, onOpenPicker,
 }: {
   spec: TagSpec;
   value: unknown;
+  label: unknown;
   editMode: boolean;
   onChange: (v: unknown) => void;
   onOpenPicker: (anchor: DOMRect | null) => void;
 }) {
-  const display = formatRefValue(value);
+  const rawDisplay = formatRefValue(value);
+  const labelDisplay = formatLabelValue(label);
+  // Read-mode preference: server-resolved label, with raw ref as tooltip.
+  // Falls back to the raw ref string when no label is available (e.g.
+  // free-text ref slots without a refTarget table).
+  const display = labelDisplay || rawDisplay;
   const btnRef = useRef<HTMLButtonElement | null>(null);
   if (!editMode && !display) return null;
   const hasTypedRefTarget = Boolean(spec.refTarget);
+  const rawTooltip = rawDisplay && labelDisplay && rawDisplay !== labelDisplay ? rawDisplay : '';
   return (
     <div className="flex items-start gap-2 text-[11px]">
       <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
@@ -622,7 +645,10 @@ function RefRow({
         {editMode ? (
           hasTypedRefTarget ? (
             <div className="flex items-center gap-1">
-              <div className="flex-1 min-w-0 px-1.5 py-0.5 border border-gray-200 rounded text-[11px] bg-white text-gray-800 truncate">
+              <div
+                className="flex-1 min-w-0 px-1.5 py-0.5 border border-gray-200 rounded text-[11px] bg-white text-gray-800 truncate"
+                title={rawTooltip || undefined}
+              >
                 {display || <span className="text-gray-400">—</span>}
               </div>
               <button
@@ -638,14 +664,21 @@ function RefRow({
           ) : (
             <input
               type="text"
-              value={typeof value === 'string' ? value : display}
+              value={typeof value === 'string' ? value : rawDisplay}
               placeholder="@id"
               onChange={e => onChange(e.target.value || null)}
               className="w-full px-1.5 py-0.5 border border-gray-300 rounded text-[11px] focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
           )
         ) : (
-          <span className="text-gray-800 break-all">{display}</span>
+          <span className="text-gray-800 break-all" title={rawTooltip || undefined}>
+            {display}
+            {rawTooltip && (
+              <span className="text-[10px] text-gray-400 ml-1 font-mono">
+                {rawDisplay.replace(/^@/, '').slice(0, 8)}…
+              </span>
+            )}
+          </span>
         )}
       </div>
     </div>

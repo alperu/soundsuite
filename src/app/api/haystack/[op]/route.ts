@@ -280,6 +280,256 @@ function synthesizeRefsFromColumns(table: string, row: any): Record<string, unkn
   return out
 }
 
+// ---------- ref-label resolution -------------------------------------------
+
+/**
+ * Map a ref key name → the Prisma model that ref points at. Mirrors the
+ * `refTarget` slot on each TagSpec so the panel and the server agree on
+ * how to format the label for a given ref slot.
+ *
+ * Multi-target refs (scopeRef is polymorphic per PersonRole.scopeKind) are
+ * resolved dynamically — see `resolveScopeRef`.
+ */
+const REF_TARGET_TABLE: Record<string, 'Case' | 'Motion' | 'Person' | 'Court' | 'Hearing' | 'Document'> = {
+  caseRef: 'Case',
+  motionRef: 'Motion',
+  motionRefs: 'Motion',
+  amends: 'Motion',
+  supersedes: 'Motion',
+  judgeRef: 'Person',
+  judgeRefs: 'Person',
+  movantRef: 'Person',
+  movantRefs: 'Person',
+  respondentRef: 'Person',
+  respondentRefs: 'Person',
+  authoredBy: 'Person',
+  servedOn: 'Person',
+  courtClerkRef: 'Person',
+  courtClerkRefs: 'Person',
+  courtReporterRef: 'Person',
+  courtReporterRefs: 'Person',
+  reporterRef: 'Person',
+  personRef: 'Person',
+  plaintiffRefs: 'Person',
+  defendantRefs: 'Person',
+  courtRef: 'Court',
+  hearingRef: 'Hearing',
+  fileRef: 'Document',
+  documentRef: 'Document',
+  transcriptRef: 'Document',
+}
+
+/**
+ * Tiny in-memory LRU for ref → label lookups. The case-management UI hits
+ * /api/haystack/read on every panel render; without caching a Motion row
+ * with 8 refs would issue 8 queries per page-view. Capped at 5000 entries,
+ * 60s TTL (labels rarely change and read-staleness here is acceptable).
+ */
+const LABEL_CACHE = new Map<string, { label: string; expiresAt: number }>()
+const LABEL_CACHE_MAX = 5000
+const LABEL_CACHE_TTL_MS = 60_000
+
+function cacheGet(key: string): string | undefined {
+  const hit = LABEL_CACHE.get(key)
+  if (!hit) return undefined
+  if (hit.expiresAt < Date.now()) {
+    LABEL_CACHE.delete(key)
+    return undefined
+  }
+  // touch — refresh insertion order for naive LRU
+  LABEL_CACHE.delete(key)
+  LABEL_CACHE.set(key, hit)
+  return hit.label
+}
+
+function cacheSet(key: string, label: string): void {
+  if (LABEL_CACHE.size >= LABEL_CACHE_MAX) {
+    const firstKey = LABEL_CACHE.keys().next().value
+    if (firstKey !== undefined) LABEL_CACHE.delete(firstKey)
+  }
+  LABEL_CACHE.set(key, { label, expiresAt: Date.now() + LABEL_CACHE_TTL_MS })
+}
+
+function stripAt(v: unknown): string | null {
+  if (typeof v !== 'string') return null
+  const s = v.startsWith('@') ? v.slice(1) : v
+  return s.length > 0 ? s : null
+}
+
+/**
+ * Format a label for a target row in the convention the ref-picker uses,
+ * so the read-mode display matches what users see when picking.
+ */
+function formatLabelFor(target: string, row: any): string {
+  if (!row) return '(missing)'
+  switch (target) {
+    case 'Case': {
+      // Prefer caseNumber (the legal identifier the user cares about) and
+      // optionally append the human-readable name when distinct.
+      const num = row.caseNumber || row.causeNo
+      const name = row.name
+      if (num && name && num !== name) return `${num} · ${name}`
+      return num || name || row.id || '(missing)'
+    }
+    case 'Motion': {
+      // motionType lives in `tags` JSON for legacy rows; fall back to title.
+      let tags: any = row.tags
+      if (typeof tags === 'string') { try { tags = JSON.parse(tags) } catch { tags = {} } }
+      const motionType = tags?.motionType || row.motionType
+      const title = row.title
+      const primary = motionType || title
+      // Don't recurse into a case lookup here — keep label formation cheap.
+      return primary || row.id || '(missing)'
+    }
+    case 'Person':
+      return row.displayName || row.email || row.id || '(missing)'
+    case 'Court':
+      return row.shortName || row.name || row.id || '(missing)'
+    case 'Hearing': {
+      const kind = row.hearingType || 'hearing'
+      if (row.scheduledFor) {
+        const d = row.scheduledFor instanceof Date ? row.scheduledFor : new Date(row.scheduledFor)
+        if (!isNaN(d.getTime())) return `${kind} on ${d.toISOString().slice(0, 10)}`
+      }
+      return row.dis || row.id || '(missing)'
+    }
+    case 'Document':
+      return row.fileName || row.id || '(missing)'
+    default:
+      return row.dis || row.name || row.title || row.displayName || row.id || '(missing)'
+  }
+}
+
+/**
+ * Resolve a polymorphic scopeRef on a PersonRole row. Looks at the parent
+ * row's `scopeKind` to know which table to hit. Falls back to no lookup if
+ * scopeKind is unknown.
+ */
+function scopeRefTarget(parentRow: any): keyof typeof REF_TARGET_TABLE | null {
+  const kind = typeof parentRow?.scopeKind === 'string' ? parentRow.scopeKind : null
+  if (kind === 'motion') return 'motionRef'
+  if (kind === 'case') return 'caseRef'
+  if (kind === 'hearing') return 'hearingRef'
+  return null
+}
+
+/**
+ * Walk a row, collect every ref-shaped value into per-target id sets, batch
+ * fetch from Prisma, then emit sibling `<refName>Label` fields. Single-valued
+ * refs get a string; list-valued refs get an array of strings (matching the
+ * input order). Missing targets render as "(missing)".
+ *
+ * This runs AFTER tags JSON is merged into the row, so explicit tag overrides
+ * (e.g. an old row that pinned its own caseRef in tags) are honoured.
+ */
+async function inlineRefLabels(row: any, _table: string): Promise<any> {
+  if (!row || typeof row !== 'object') return row
+
+  // Collect per-target id sets to batch.
+  const buckets: Record<string, Set<string>> = {}
+  // Per-key record of (target, ids[]) so we can stitch labels back in order.
+  const keyPlans: Array<{ key: string; target: string; ids: (string | null)[]; isList: boolean }> = []
+
+  for (const [key, value] of Object.entries(row)) {
+    if (value == null) continue
+    if (key === 'id' || key === 'tags' || key.endsWith('Label')) continue
+
+    let target: string | null = null
+    if (key === 'scopeRef') {
+      const t = scopeRefTarget(row)
+      target = t ? REF_TARGET_TABLE[t] : null
+    } else if (key in REF_TARGET_TABLE) {
+      target = REF_TARGET_TABLE[key]
+    }
+    if (!target) continue
+
+    const isList = Array.isArray(value)
+    const rawList: unknown[] = isList ? (value as unknown[]) : [value]
+    const ids = rawList.map((r) => stripAt(r))
+    if (!ids.some((x) => x)) continue
+
+    keyPlans.push({ key, target, ids, isList })
+    const bucket = (buckets[target] ??= new Set<string>())
+    for (const id of ids) if (id) bucket.add(id)
+  }
+
+  if (keyPlans.length === 0) return row
+
+  // Resolve from cache first, then batch-fetch any leftovers per target.
+  const resolved: Record<string, Record<string, string>> = {} // target → id → label
+  for (const target of Object.keys(buckets)) {
+    resolved[target] = {}
+    const missing: string[] = []
+    for (const id of buckets[target]) {
+      const cached = cacheGet(`${target}:${id}`)
+      if (cached !== undefined) resolved[target][id] = cached
+      else missing.push(id)
+    }
+    if (missing.length === 0) continue
+    try {
+      let rows: any[] = []
+      const p = prisma as any
+      switch (target) {
+        case 'Case':
+          rows = await p.case.findMany({ where: { id: { in: missing } } })
+          break
+        case 'Motion':
+          rows = await p.motion.findMany({ where: { id: { in: missing } } })
+          break
+        case 'Person':
+          rows = await p.person.findMany({ where: { id: { in: missing } } })
+          break
+        case 'Court':
+          rows = await p.court.findMany({ where: { id: { in: missing } } })
+          break
+        case 'Hearing':
+          rows = await p.hearing.findMany({ where: { id: { in: missing } } })
+          break
+        case 'Document':
+          rows = await p.document.findMany({ where: { id: { in: missing } } })
+          break
+      }
+      const byId: Record<string, any> = {}
+      for (const r of rows) byId[r.id] = r
+      for (const id of missing) {
+        const label = formatLabelFor(target, byId[id])
+        resolved[target][id] = label
+        cacheSet(`${target}:${id}`, label)
+      }
+    } catch (e: any) {
+      // Don't poison the row on lookup failure — emit "(missing)" and move on.
+      for (const id of missing) resolved[target][id] = '(missing)'
+    }
+  }
+
+  // Stitch labels back onto the row.
+  const out = { ...row }
+  for (const plan of keyPlans) {
+    const labels = plan.ids.map((id) => (id ? resolved[plan.target][id] ?? '(missing)' : ''))
+    out[`${plan.key}Label`] = plan.isList ? labels : labels[0]
+  }
+  return out
+}
+
+/**
+ * Sniff an attachmentKind out of a Haystack filter string. The tag panel sends
+ * `filter=<kind>` where `<kind>` is one of the per-filing-type EntityKinds
+ * (notice, brief, letter, …). Case-insensitive on the bare word; returns the
+ * canonical camelCase attachmentKind, or null if the filter isn't one of the
+ * known kinds. (Polymorphic camelCase markers like `proposedOrder` /
+ * `billOfReview` / `returnOfService` / `demandLetter` arrive lowercased from
+ * the panel's normalizeFilter, so we match on lowercase keys.)
+ */
+function attachmentKindFromFilter(filter: string): string | null {
+  const text = ` ${filter.toLowerCase()} `
+  // Pre-compute lowercase → canonical lookup once per call. Cheap; ~22 entries.
+  for (const [canonical] of Object.entries(KIND_TO_ATTACHMENT_KIND)) {
+    const lc = canonical.toLowerCase()
+    if (new RegExp(`[^a-z_]${lc}[^a-z_]`).test(text)) return canonical
+  }
+  return null
+}
+
 async function opRead(params: URLSearchParams, body: any): Promise<string> {
   const filter = normalizeFilter(
     params.get('filter') ??
@@ -339,6 +589,18 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
           const created = await ensureMotionForFiling(idValue)
           if (created) rows = [created]
         }
+        // Same for MotionAttachment: per-filing-type kinds (notice/brief/…)
+        // need their row materialized on first read so the panel surfaces the
+        // marker section instead of the "unavailable" banner. Filter string
+        // carries the EntityKind (e.g. `filter=notice`), which we map back
+        // to an attachmentKind.
+        if (rows.length === 0 && table === 'MotionAttachment') {
+          const ak = attachmentKindFromFilter(filter)
+          if (ak) {
+            const created = await ensureMotionAttachmentForFiling(idValue, ak)
+            if (created) rows = [created]
+          }
+        }
       }
     } else {
       switch (table) {
@@ -386,7 +648,11 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
       }
       return out
     })
-    const grid = encodeGrid(inlined, { table: table as any })
+    // Resolve every ref-shaped value (caseRef, judgeRef, ...) into a
+    // sibling `<refName>Label` string the panel can render in read mode.
+    // Batched per-target so we issue at most one Prisma query per table.
+    const withLabels = await Promise.all(inlined.map((r: any) => inlineRefLabels(r, table)))
+    const grid = encodeGrid(withLabels, { table: table as any })
     console.log(`[haystack/read] filter=${JSON.stringify(filter)} id=${idValue ?? '-'} table=${table} rows=${inlined.length}`)
     return grid
   } catch (e: any) {
@@ -450,7 +716,8 @@ async function opReadCourt(
     if (idValue) {
       const row = await prisma.court.findUnique({ where: { id: idValue } })
       if (!row) return encodeGrid([], { table: 'Court' as any })
-      return encodeGrid([inlineCourt(row)], { table: 'Court' as any })
+      const withLabels = await inlineRefLabels(inlineCourt(row), 'Court')
+      return encodeGrid([withLabels], { table: 'Court' as any })
     }
     const q = (params.get('q') ?? body?.q ?? '').toString().trim()
     // Heuristic: pluck a courtType marker (`trial`/`appellate`/`supreme`/`magistrate`)
@@ -472,7 +739,9 @@ async function opReadCourt(
       orderBy: { name: 'asc' },
       take: typeof limit === 'number' && Number.isFinite(limit) ? Math.min(limit, 500) : 100,
     })
-    return encodeGrid(rows.map(inlineCourt), { table: 'Court' as any })
+    const inlined = rows.map(inlineCourt)
+    const withLabels = await Promise.all(inlined.map((r: any) => inlineRefLabels(r, 'Court')))
+    return encodeGrid(withLabels, { table: 'Court' as any })
   } catch (e: any) {
     const msg = e?.message ?? String(e)
     if (/no such table|no such column/i.test(msg)) {
@@ -506,12 +775,25 @@ function inlineCourt(c: any): any {
  * `create` call. We catch the unique-violation on the second one and
  * re-read the row.
  */
-async function ensureMotionForFiling(filingId: string): Promise<any | null> {
+async function ensureMotionForFiling(
+  filingId: string,
+  opts: { anyFilingType?: boolean } = {},
+): Promise<any | null> {
   const existing = await (prisma as any).motion.findUnique({ where: { id: filingId } })
   if (existing) return existing
   const filing = await (prisma as any).filing.findUnique({ where: { id: filingId } })
   if (!filing) return null
-  if (!/motion/i.test(filing.filingType ?? '')) return null
+  // Default behavior (motion-typed Filings only): preserves Task #10 semantics
+  // where `kind:'motion'` reads/commits materialize a Motion row.
+  //
+  // When called from `ensureMotionAttachmentForFiling` (anyFilingType: true)
+  // we relax this so per-filing-type kinds (notice/brief/letter/…) can hang
+  // their MotionAttachment row off a parent Motion. `MotionAttachment.motionId`
+  // is a required FK, so we need a Motion regardless of filing type. The
+  // Motion's `motion` marker is still seeded — for non-motion filings it's a
+  // structural shadow row, but harmless: the panel reads MotionAttachment for
+  // those kinds, not Motion.
+  if (!opts.anyFilingType && !/motion/i.test(filing.filingType ?? '')) return null
   try {
     return await (prisma as any).motion.create({
       data: {
@@ -535,6 +817,94 @@ async function ensureMotionForFiling(filingId: string): Promise<any | null> {
   } catch (e: any) {
     // Likely a unique-violation race — another request created it first.
     const row = await (prisma as any).motion.findUnique({ where: { id: filingId } })
+    if (row) return row
+    throw e
+  }
+}
+
+/**
+ * EntityKind → MotionAttachment.attachmentKind. Identity mapping for the 21
+ * per-filing-type kinds plus 'proposedOrder'. `motion` is NOT in here — that
+ * goes through `ensureMotionForFiling`, not MotionAttachment.
+ *
+ * Keep in sync with `ATTACHMENT_KIND_MARKERS` in `src/lib/legal/repo.ts` and
+ * `EntityKind` in `src/components/case/tag-spec.ts`.
+ */
+const KIND_TO_ATTACHMENT_KIND: Record<string, string> = {
+  notice: 'notice',
+  letter: 'letter',
+  order: 'order',
+  proposedOrder: 'proposedOrder',
+  petition: 'petition',
+  affidavit: 'affidavit',
+  subpoena: 'subpoena',
+  brief: 'brief',
+  response: 'response',
+  reply: 'reply',
+  judgment: 'judgment',
+  decree: 'decree',
+  transcript: 'transcript',
+  settlement: 'settlement',
+  billOfReview: 'billOfReview',
+  returnOfService: 'returnOfService',
+  demandLetter: 'demandLetter',
+  objection: 'objection',
+  request: 'request',
+  supplement: 'supplement',
+  designation: 'designation',
+  other: 'other',
+}
+
+/**
+ * Auto-upsert a `MotionAttachment` row mirroring a non-motion-typed Filing.
+ * Parallel to `ensureMotionForFiling` for the Motion case.
+ *
+ * The tag panel keys per-filing-type tag edits by `Filing.id`, but tags live
+ * on `MotionAttachment.tags` (rows discriminated by `attachmentKind`). For a
+ * fresh Notice / Brief / Letter / … Filing no MotionAttachment row exists
+ * yet, so the panel's `read?filter=notice&id=@<filing-id>` returns an empty
+ * grid and the subsequent `commit` finds nothing to update.
+ *
+ * We adopt the convention `MotionAttachment.id === Filing.id` (same trick as
+ * Motion). Because `MotionAttachment.motionId` is a required FK, we also
+ * materialize a parent Motion row using the relaxed `ensureMotionForFiling`
+ * (anyFilingType: true). The shadow Motion exists only to satisfy the FK;
+ * the tag panel reads MotionAttachment for these kinds.
+ *
+ * Idempotent — catches unique-violation races and re-reads.
+ */
+async function ensureMotionAttachmentForFiling(
+  filingId: string,
+  attachmentKind: string,
+): Promise<any | null> {
+  const existing = await (prisma as any).motionAttachment.findUnique({ where: { id: filingId } })
+  if (existing) return existing
+  const filing = await (prisma as any).filing.findUnique({ where: { id: filingId } })
+  if (!filing) return null
+
+  // Ensure a parent Motion row exists for the FK.
+  const motion = await ensureMotionForFiling(filingId, { anyFilingType: true })
+  if (!motion) return null
+
+  try {
+    return await (prisma as any).motionAttachment.create({
+      data: {
+        id: filingId,
+        motionId: motion.id,
+        caseId: filing.caseId,
+        attachmentKind,
+        revisionSeq: filing.supplementalOrder ?? 1,
+        // Seed XETO markers so the row passes any future validator hooks. The
+        // `attachment` umbrella marker plus the specific kind marker mirror
+        // what the tag-spec entries for each kind define.
+        tags: {
+          attachment: { _kind: 'marker' },
+          [attachmentKind]: { _kind: 'marker' },
+        } as any,
+      },
+    })
+  } catch (e: any) {
+    const row = await (prisma as any).motionAttachment.findUnique({ where: { id: filingId } })
     if (row) return row
     throw e
   }
@@ -641,6 +1011,10 @@ function splitPatch(
 
   for (const [k, vRaw] of Object.entries(patch)) {
     if (structural.has(k)) continue
+    // Read-only server-inlined ref-label siblings (`caseRefLabel`, …) must
+    // never reach the tags JSON. The client strips these too; this is belt-
+    // and-suspenders for any other caller of commitEntity.
+    if (k.endsWith('Label')) continue
     if (colSet.has(k)) {
       let v = vRaw
       // Normalize empty strings on nullable columns to null so the form's
@@ -775,6 +1149,13 @@ export async function commitEntity(input: {
     let existing = await client.findUnique({ where: { id } })
     if (!existing && kind === 'motion') {
       existing = await ensureMotionForFiling(id)
+    }
+    if (!existing && model === 'motionAttachment') {
+      // Per-filing-type kinds (notice/brief/letter/…) all resolve to the
+      // motionAttachment Prisma model. Auto-upsert the row from the Filing
+      // on first save so the panel doesn't have to pre-create it.
+      const ak = KIND_TO_ATTACHMENT_KIND[kind]
+      if (ak) existing = await ensureMotionAttachmentForFiling(id, ak)
     }
     if (!existing) {
       return { ok: false, errGridJson: errGrid(`${kind} ${id} not found`) }
