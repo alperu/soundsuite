@@ -73,3 +73,6 @@ tmp-*.mjs
 
 # Claude Code (user-specific)
 .claude/
+
+# Local project embedding/runtime cache
+.cache/

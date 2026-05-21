@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { PrismaClient, Prisma } from '@prisma/client'
 import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
+import { withCacheInvalidation } from './cache-invalidation'
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
@@ -43,7 +44,7 @@ function makeClient(): PrismaClient {
   return new PrismaClient({ adapter })
 }
 
-export const prisma = globalForPrisma.prisma ?? makeClient()
+export const prisma = globalForPrisma.prisma ?? withCacheInvalidation(makeClient())
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
 
