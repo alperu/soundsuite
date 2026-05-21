@@ -170,7 +170,11 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
     );
   }
 
-  const grouped = groupByTier(specs);
+  // Hide Haystack-ontology plumbing markers (site/equip/point/attachment/...)
+  // from the UI. They stay in the underlying record for client compatibility
+  // (a SkySpark client traverses via these), but carry no user-actionable info.
+  const visibleSpecs = specs.filter(s => !s.internal);
+  const grouped = groupByTier(visibleSpecs);
 
   return (
     <div className="w-80 border-l border-gray-200 bg-gray-50 flex flex-col flex-shrink-0">

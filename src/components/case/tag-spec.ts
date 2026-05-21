@@ -24,6 +24,11 @@ export interface TagSpec {
   valueType?: 'text' | 'number' | 'date' | 'bool' | 'ref';
   /** For ref-typed tags, which entityKind the target should be. */
   refTarget?: 'person' | 'motion' | 'case' | 'court' | 'hearing' | 'doc' | 'motionAttachment';
+  /** Haystack ontology plumbing — not surfaced in the tag panel UI.
+   *  These markers exist on records so a SkySpark/Haxall client can traverse
+   *  via the standard site/equip/point idiom; they carry no information the
+   *  user can act on, so the panel hides them. They stay in the record. */
+  internal?: boolean;
 }
 
 /** Per-entity tag set. Order here is the order shown in the UI. */
@@ -31,7 +36,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   case: [
     // markers
     { name: 'case', tier: 'marker', doc: 'Marker: this record is a Case (site).', valueType: 'bool' },
-    { name: 'site', tier: 'marker', doc: 'Project Haystack site marker — Case = site.', valueType: 'bool' },
+    { name: 'site', tier: 'marker', doc: 'Project Haystack site marker — Case = site.', valueType: 'bool', internal: true },
     { name: 'jurisdictionTx', tier: 'marker', doc: 'Texas jurisdiction.', valueType: 'bool' },
     { name: 'jurisdictionCa', tier: 'marker', doc: 'California jurisdiction.', valueType: 'bool' },
     { name: 'jurisdictionFed', tier: 'marker', doc: 'Federal jurisdiction.', valueType: 'bool' },
@@ -51,7 +56,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   motion: [
     // markers
     { name: 'motion', tier: 'marker', doc: 'Marker: this record is a Motion.', valueType: 'bool' },
-    { name: 'equip', tier: 'marker', doc: 'Project Haystack equip marker — Motion = equip.', valueType: 'bool' },
+    { name: 'equip', tier: 'marker', doc: 'Project Haystack equip marker — Motion = equip.', valueType: 'bool', internal: true },
     { name: 'subMotion', tier: 'marker', doc: 'Present iff this motion has a parent motionRef (amended motion).', valueType: 'bool' },
     { name: 'appellate', tier: 'marker', doc: 'Motion is filed at the appellate level.', valueType: 'bool' },
     // refs
@@ -68,8 +73,8 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   ],
 
   motionEvent: [
-    { name: 'motionEvent', tier: 'marker', doc: 'Marker: lifecycle event on a Motion.', valueType: 'bool' },
-    { name: 'point', tier: 'marker', doc: 'Project Haystack point marker — MotionEvent = point.', valueType: 'bool' },
+    { name: 'motionEvent', tier: 'marker', doc: 'Marker: lifecycle event on a Motion.', valueType: 'bool', internal: true },
+    { name: 'point', tier: 'marker', doc: 'Project Haystack point marker — MotionEvent = point.', valueType: 'bool', internal: true },
     { name: 'received', tier: 'marker', doc: 'Event kind: received (mutually exclusive with other kinds).', valueType: 'bool' },
     { name: 'filed', tier: 'marker', doc: 'Event kind: party-filed (e-filed). Not the legally-operative date.', valueType: 'bool' },
     { name: 'courtFiled', tier: 'marker', doc: 'Event kind: clerk-stamped. THIS is when the deadline clock starts.', valueType: 'bool' },
@@ -91,7 +96,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   ],
 
   motionAttachment: [
-    { name: 'attachment', tier: 'marker', doc: 'Marker: attachment to a Motion.', valueType: 'bool' },
+    { name: 'attachment', tier: 'marker', doc: 'Marker: attachment to a Motion.', internal: true, valueType: 'bool' },
     { name: 'proposedOrder', tier: 'marker', doc: 'Attachment kind: proposed order.', valueType: 'bool' },
     { name: 'brief', tier: 'marker', doc: 'Attachment kind: brief.', valueType: 'bool' },
     { name: 'evidence', tier: 'marker', doc: 'Attachment kind: evidence.', valueType: 'bool' },
