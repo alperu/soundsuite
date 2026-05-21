@@ -61,6 +61,22 @@ export async function commit(payload: {
   })
 }
 
+/**
+ * Create a new entity via Haystack commit. Equivalent to calling `commit`
+ * with `id: 'new'`. The server INSERTs and returns a single-row grid
+ * containing the assigned `id`. Use `firstRow(grid)` to read it back.
+ */
+export async function create(payload: {
+  kind: string
+  patch: Record<string, unknown>
+}): Promise<HaysonGrid> {
+  return jsonFetch(`${BASE}/commit`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: 'new', kind: payload.kind, patch: payload.patch }),
+  })
+}
+
 // --- defs cache -------------------------------------------------------------
 
 let defsCache: { at: number; data: HaysonGrid } | null = null

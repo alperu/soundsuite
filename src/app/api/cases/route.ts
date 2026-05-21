@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
-import { getServicesManager } from '@/lib/services-manager';
-import fs from 'fs/promises';
 import path from 'path';
+import { commitEntity } from '../haystack/[op]/route';
 
 /**
  * Parse case metadata from a folder name.
@@ -99,6 +98,11 @@ export async function GET(request: NextRequest) {
 /**
  * POST /api/cases - Create a new case from a folder path
  * Body: { folderPath: string, name?: string, caseNumber?: string, jurisdiction?: string }
+ *
+ * @deprecated Prefer `PUT /api/haystack-proxy/commit` with
+ * `{ id: 'new', kind: 'case', patch: { name, path, caseNumber, ... } }`.
+ * This endpoint forwards to the unified commit code path; folder-name
+ * parsing remains here as a convenience for the legacy "add case" UX.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -114,23 +118,9 @@ export async function POST(request: NextRequest) {
 
     const cleanPath = folderPath.replace(/\/+$/, ''); // trim trailing slashes
 
-    // Validate folder exists
-    try {
-      const stat = await fs.stat(cleanPath);
-      if (!stat.isDirectory()) {
-        return NextResponse.json(
-          { error: 'Path is not a directory' },
-          { status: 400 }
-        );
-      }
-    } catch {
-      return NextResponse.json(
-        { error: 'Folder path does not exist or is not accessible' },
-        { status: 400 }
-      );
-    }
-
-    // Check if case already exists
+    // Surface the explicit 409 for duplicate paths the way the legacy API did
+    // (commitEntity would also throw P2002, but the legacy contract returns
+    // the existing case row so callers can adopt it).
     const existing = await prisma.case.findUnique({ where: { path: cleanPath } });
     if (existing) {
       return NextResponse.json(
@@ -145,25 +135,47 @@ export async function POST(request: NextRequest) {
     const caseNum = (caseNumber && caseNumber.trim()) || parsed.caseNumber;
     const juris = (jurisdiction && jurisdiction.trim()) || parsed.jurisdiction;
 
-    const newCase = await prisma.case.create({
-      data: {
+    const result = await commitEntity({
+      id: null, // create
+      kind: 'case',
+      patch: {
         name: caseName,
         path: cleanPath,
-        caseNumber: caseNum || null,
-        jurisdiction: juris || null,
-        county: (county && county.trim()) || null,
-        state: (state && state.trim()) || null,
-        country: (country && country.trim()) || 'United States',
+        caseNumber: caseNum,
+        jurisdiction: juris,
+        county,
+        state,
+        country,
       },
     });
 
-    // Notify FileWatcher to start watching the new case path
-    const fileWatcher = getServicesManager().getFileWatcher();
-    if (fileWatcher) {
-      await fileWatcher.addPath(cleanPath);
+    if (!result.ok) {
+      let msg = 'Failed to create case';
+      try {
+        const g = JSON.parse(result.errGridJson);
+        msg = String(g?.meta?.dis ?? msg);
+      } catch { /* ignore */ }
+      const status = /unique|already exists/i.test(msg) ? 409
+        : /missing required|does not exist|not a directory|is required/i.test(msg) ? 400
+        : 500;
+      return NextResponse.json({ error: msg }, { status });
     }
 
-    return NextResponse.json({ case: newCase }, { status: 201 });
+    const r = result.row;
+    return NextResponse.json({
+      case: {
+        id: r.id,
+        name: r.name,
+        path: r.path,
+        caseNumber: r.caseNumber,
+        jurisdiction: r.jurisdiction,
+        country: r.country,
+        state: r.state,
+        county: r.county,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      },
+    }, { status: 201 });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to create case' },
