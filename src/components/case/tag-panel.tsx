@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import {
   TAG_SPEC_BY_KIND,
   TIER_LABEL,
@@ -16,6 +16,7 @@ import {
   firstRow,
   gridHasError,
 } from '@/lib/haystack-client';
+import { RefPicker, type PersonMarker, type RefTarget } from './ref-picker';
 
 interface Props {
   entityKind: EntityKind | null;
@@ -41,6 +42,12 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
 
   // Tag specs from the /api/haystack/defs endpoint, with fallback to local stub.
   const [serverDefs, setServerDefs] = useState<Record<string, string> | null>(null);
+
+  // Active ref-picker state (one at a time).
+  const [pickerFor, setPickerFor] = useState<{
+    spec: TagSpec;
+    anchor: DOMRect | null;
+  } | null>(null);
 
   // Local-stub specs for current entity kind
   const baseSpecs: TagSpec[] = useMemo(() => {
@@ -244,6 +251,7 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
                       value={(editMode ? draft[spec.name] : record?.[spec.name]) as unknown}
                       editMode={editMode}
                       onChange={(v) => setDraft(prev => ({ ...prev, [spec.name]: v }))}
+                      onOpenPicker={(anchor) => setPickerFor({ spec, anchor })}
                     />
                   ))}
                 </div>
@@ -294,8 +302,82 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
           {toast}
         </div>
       )}
+
+      {pickerFor && pickerFor.spec.refTarget && (
+        <RefPicker
+          refTarget={pickerFor.spec.refTarget as RefTarget}
+          multi={pickerFor.spec.tier === 'refs'}
+          personMarker={inferPersonMarker(pickerFor.spec.name)}
+          scopeFilter={inferScopeFilter(pickerFor.spec.name, entityKind, draft, record)}
+          value={refValueToPickerValue(
+            (editMode ? draft[pickerFor.spec.name] : record?.[pickerFor.spec.name]) as unknown,
+            pickerFor.spec.tier === 'refs',
+          )}
+          onChange={(next) => {
+            const specName = pickerFor.spec.name;
+            setDraft(prev => ({ ...prev, [specName]: next }));
+          }}
+          onClose={() => setPickerFor(null)}
+          anchorRect={pickerFor.anchor}
+        />
+      )}
     </div>
   );
+}
+
+/** Infer a sub-marker constraint for person refs from the tag name. */
+function inferPersonMarker(name: string): PersonMarker | undefined {
+  if (name === 'judgeRef' || name === 'judgeRefs') return 'judge';
+  if (name === 'courtClerkRef' || name === 'courtClerkRefs') return 'courtClerk';
+  if (name === 'courtReporterRef' || name === 'courtReporterRefs') return 'courtReporter';
+  return undefined;
+}
+
+/** Infer a scope filter for amendment-style refs on a motion record. */
+function inferScopeFilter(
+  name: string,
+  entityKind: EntityKind | null,
+  draft: HaystackRecord,
+  record: HaystackRecord | null,
+): string | undefined {
+  if (entityKind !== 'motion') return undefined;
+  if (name !== 'amends' && name !== 'supersedes') return undefined;
+  const caseRefRaw =
+    (draft && draft.caseRef) ??
+    (record && record.caseRef) ??
+    null;
+  const id = canonRefId(caseRefRaw);
+  if (!id) return undefined;
+  return `caseRef==${id}`;
+}
+
+function canonRefId(v: unknown): string | null {
+  if (!v) return null;
+  if (typeof v === 'string') return v.startsWith('@') ? v : `@${v}`;
+  if (typeof v === 'object') {
+    const o = v as { val?: string; id?: string };
+    if (typeof o.val === 'string') return o.val.startsWith('@') ? o.val : `@${o.val}`;
+    if (typeof o.id === 'string') return o.id.startsWith('@') ? o.id : `@${o.id}`;
+  }
+  return null;
+}
+
+/** Coerce a tag-panel ref value into the shape RefPicker expects. */
+function refValueToPickerValue(v: unknown, multi: boolean): string | string[] | null {
+  if (v == null) return null;
+  if (Array.isArray(v)) {
+    const out = v
+      .map(canonRefId)
+      .filter((x): x is string => Boolean(x));
+    return out.length ? out : null;
+  }
+  if (typeof v === 'string') {
+    if (!v) return null;
+    return multi ? [v.startsWith('@') ? v : `@${v}`] : (v.startsWith('@') ? v : `@${v}`);
+  }
+  const id = canonRefId(v);
+  if (!id) return null;
+  return multi ? [id] : id;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -365,10 +447,18 @@ function formatRefValue(v: unknown): string {
 }
 
 function RefRow({
-  spec, value, editMode, onChange,
-}: { spec: TagSpec; value: unknown; editMode: boolean; onChange: (v: unknown) => void }) {
+  spec, value, editMode, onChange, onOpenPicker,
+}: {
+  spec: TagSpec;
+  value: unknown;
+  editMode: boolean;
+  onChange: (v: unknown) => void;
+  onOpenPicker: (anchor: DOMRect | null) => void;
+}) {
   const display = formatRefValue(value);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
   if (!editMode && !display) return null;
+  const hasTypedRefTarget = Boolean(spec.refTarget);
   return (
     <div className="flex items-start gap-2 text-[11px]">
       <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
@@ -377,13 +467,30 @@ function RefRow({
       </div>
       <div className="flex-1 min-w-0">
         {editMode ? (
-          <input
-            type="text"
-            value={typeof value === 'string' ? value : display}
-            placeholder={spec.refTarget ? `@${spec.refTarget}-…` : '@id'}
-            onChange={e => onChange(e.target.value || null)}
-            className="w-full px-1.5 py-0.5 border border-gray-300 rounded text-[11px] focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
+          hasTypedRefTarget ? (
+            <div className="flex items-center gap-1">
+              <div className="flex-1 min-w-0 px-1.5 py-0.5 border border-gray-200 rounded text-[11px] bg-white text-gray-800 truncate">
+                {display || <span className="text-gray-400">—</span>}
+              </div>
+              <button
+                ref={btnRef}
+                type="button"
+                title={`Pick ${spec.refTarget}`}
+                onClick={() => onOpenPicker(btnRef.current?.getBoundingClientRect() ?? null)}
+                className="px-1.5 py-0.5 text-[10px] rounded border border-blue-300 text-blue-700 bg-blue-50 hover:bg-blue-100 transition-colors flex-shrink-0"
+              >
+                Pick…
+              </button>
+            </div>
+          ) : (
+            <input
+              type="text"
+              value={typeof value === 'string' ? value : display}
+              placeholder="@id"
+              onChange={e => onChange(e.target.value || null)}
+              className="w-full px-1.5 py-0.5 border border-gray-300 rounded text-[11px] focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+          )
         ) : (
           <span className="text-gray-800 break-all">{display}</span>
         )}
