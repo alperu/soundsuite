@@ -18,6 +18,63 @@ const ALLOWED_INTRINSIC = [
   'self',
 ] as const
 
+const INTRINSIC_MARKERS = [
+  'person',
+  'lawyer',
+  'judge',
+  'courtClerk',
+  'courtReporter',
+  'bailiff',
+  'proSe',
+  'self',
+] as const
+
+/**
+ * Defensively unwrap a `tags` column value. Handles double-stringify and
+ * character-spread corruption (see `recoverTagObject` in haystack/[op]).
+ */
+function recoverTagObject(raw: unknown): Record<string, unknown> {
+  let val: unknown = raw
+  for (let i = 0; i < 4; i++) {
+    if (val == null) return {}
+    if (typeof val === 'object' && !Array.isArray(val)) {
+      const keys = Object.keys(val as object)
+      const digitKeys = keys.filter(k => /^\d+$/.test(k))
+      if (digitKeys.length > 0 && digitKeys.length >= keys.length / 2) {
+        const chars: string[] = []
+        const n = digitKeys.length
+        for (let j = 0; j < n; j++) {
+          const c = (val as Record<string, unknown>)[String(j)]
+          if (typeof c !== 'string') break
+          chars.push(c)
+        }
+        const tail: Record<string, unknown> = {}
+        for (const k of keys) {
+          if (!/^\d+$/.test(k)) tail[k] = (val as Record<string, unknown>)[k]
+        }
+        try {
+          const inner = JSON.parse(chars.join(''))
+          if (inner && typeof inner === 'object') {
+            return { ...(inner as Record<string, unknown>), ...tail }
+          }
+        } catch {
+          /* fall through */
+        }
+        return tail
+      }
+      return val as Record<string, unknown>
+    }
+    if (typeof val === 'string') {
+      try { val = JSON.parse(val) } catch { return {} }
+      continue
+    }
+    return {}
+  }
+  return typeof val === 'object' && val !== null
+    ? (val as Record<string, unknown>)
+    : {}
+}
+
 type PersonRow = {
   id: string
   displayName: string
@@ -67,8 +124,22 @@ export async function GET(req: NextRequest) {
     )
     const total = Number(totalRows[0]?.c ?? 0)
 
+    // Compute per-persona PersonRole counts in a single grouped query.
+    const personIds = rows.map((r: PersonRow) => r.id)
+    const roleCountMap = new Map<string, number>()
+    if (personIds.length > 0) {
+      const counts = await prisma.personRole.groupBy({
+        by: ['personId'],
+        where: { personId: { in: personIds } },
+        _count: { _all: true },
+      }) as Array<{ personId: string; _count: { _all: number } }>
+      for (const c of counts) {
+        roleCountMap.set(c.personId, c._count._all)
+      }
+    }
+
     return NextResponse.json({
-      personas: rows.map(materialize),
+      personas: rows.map((r: PersonRow) => materialize(r, roleCountMap.get(r.id) ?? 0)),
       total,
     })
   } catch (e) {
@@ -87,7 +158,9 @@ export async function POST(req: NextRequest) {
       email,
       barNumber,
       jurisdictionId,
+      jurisdiction,
       intrinsicTags = {},
+      markers,
     } = body ?? {}
     if (!displayName || typeof displayName !== 'string') {
       return NextResponse.json(
@@ -96,19 +169,31 @@ export async function POST(req: NextRequest) {
       )
     }
     const tagBag: Record<string, true> = { person: true }
+    // Accept both legacy `intrinsicTags: { lawyer: true }` and the newer
+    // `markers: ['lawyer', ...]` shape from the create modal.
     for (const k of ALLOWED_INTRINSIC) {
-      if (intrinsicTags[k]) tagBag[k] = true
+      if (intrinsicTags && intrinsicTags[k]) tagBag[k] = true
+    }
+    if (Array.isArray(markers)) {
+      for (const k of markers) {
+        if ((ALLOWED_INTRINSIC as readonly string[]).includes(k)) {
+          tagBag[k as typeof ALLOWED_INTRINSIC[number]] = true
+        }
+      }
     }
     const created = await prisma.person.create({
       data: {
         displayName: displayName.trim(),
         email: email ?? null,
         barNumber: barNumber ?? null,
-        jurisdictionId: jurisdictionId ?? null,
+        jurisdictionId: (jurisdictionId ?? jurisdiction) ?? null,
         tags: tagBag as Prisma.InputJsonValue,
       },
     })
-    return NextResponse.json({ persona: created }, { status: 201 })
+    return NextResponse.json(
+      { persona: materialize(created as unknown as PersonRow, 0) },
+      { status: 201 },
+    )
   } catch (e) {
     return NextResponse.json(
       { error: 'persona_create_failed', message: (e as Error).message },
@@ -117,24 +202,19 @@ export async function POST(req: NextRequest) {
   }
 }
 
-function materialize(p: PersonRow) {
-  // SQLite returns JSON columns as strings; better-sqlite3 sometimes parses,
-  // sometimes not. Coerce defensively.
-  let tags: unknown = p.tags
-  if (typeof tags === 'string') {
-    try {
-      tags = JSON.parse(tags)
-    } catch {
-      tags = {}
-    }
-  }
+function materialize(p: PersonRow, rolesCount = 0) {
+  const tags = recoverTagObject(p.tags)
+  const markers = INTRINSIC_MARKERS.filter(k => tags[k] === true)
   return {
     id: p.id,
     displayName: p.displayName,
     email: p.email,
     barNumber: p.barNumber,
     jurisdictionId: p.jurisdictionId,
+    jurisdiction: p.jurisdictionId,
     tags,
+    markers,
+    rolesCount,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
   }

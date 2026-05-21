@@ -8,6 +8,7 @@ import {
   type Persona,
   PersonasApiError,
 } from '@/lib/personas/client';
+import { read as haystackRead } from '@/lib/haystack-client';
 import { MarkerChip } from './persona-chips';
 
 interface Props {
@@ -48,11 +49,10 @@ export function PersonaCreateModal({ open, onClose, onCreated }: Props) {
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    fetch('/api/haystack/read?filter=jurisdiction')
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (cancelled || !data) return;
-        const rows = (data.rows || []) as JurisdictionRow[];
+    haystackRead({ filter: 'jurisdiction' })
+      .then(grid => {
+        if (cancelled || !grid) return;
+        const rows = (grid.rows || []) as JurisdictionRow[];
         setJurisdictions(rows);
       })
       .catch(() => { /* ignore */ });
