@@ -25,6 +25,8 @@ model Case {
   tags              Json               @default("{}")
   jurisdictionId    String?
   jurisdictionRel   Jurisdiction?      @relation(fields: [jurisdictionId], references: [id])
+  courtId           String?
+  court             Court?             @relation(fields: [courtId], references: [id])
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
   documents         Document[]
@@ -39,6 +41,7 @@ model Case {
   @@index([path])
   @@index([caseNumber])
   @@index([jurisdictionId])
+  @@index([courtId])
 }
 
 model Filing {
@@ -461,6 +464,27 @@ model Jurisdiction {
 
   cases   Case[]
   persons Person[]
+  courts  Court[]
+}
+
+model Court {
+  id             String        @id @default(cuid())
+  name           String
+  shortName      String?
+  jurisdictionId String?
+  jurisdiction   Jurisdiction? @relation(fields: [jurisdictionId], references: [id])
+  courtType      String? // "trial" | "appellate" | "supreme" | "magistrate"
+  address        String?
+  phone          String?
+  website        String?
+  tags           Json          @default("{}")
+  cases          Case[]
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([jurisdictionId])
+  @@index([name])
+  @@index([courtType])
 }
 
 model Person {

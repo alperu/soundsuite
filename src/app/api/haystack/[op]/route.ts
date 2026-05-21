@@ -215,10 +215,17 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
   const idParam = params.get('id') ?? body?.id
   const idValue = typeof idParam === 'string' ? idParam.replace(/^@/, '') : null
 
+  // Court is owned by the courts module (Prisma-direct), not the kysely
+  // DB type used by tableFromFilter. Intercept `filter=court` here so
+  // /api/haystack/read?filter=court returns Court rows for the ref-picker.
+  if (/(^|[^a-z_])court([^a-z_]|$)/i.test(filter)) {
+    return await opReadCourt(params, body, limit, idValue)
+  }
+
   const table = tableFromFilter(filter)
   if (!table) {
     return errGrid(
-      'filter must contain an entity marker (motion, motionEvent, person, personRole, hearing, case)',
+      'filter must contain an entity marker (motion, motionEvent, person, personRole, hearing, case, court)',
     )
   }
   try {
@@ -270,6 +277,61 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
 }
 
 /**
+ * Court read — Prisma-direct, since Court isn't in the kysely DB type.
+ * Supports `id=@<id>` direct lookup, `q=<name>` LIKE search, and
+ * `courtType=<type>` filtering inferred from the filter string.
+ */
+async function opReadCourt(
+  params: URLSearchParams,
+  body: any,
+  limit: number | undefined,
+  idValue: string | null,
+): Promise<string> {
+  try {
+    if (idValue) {
+      const row = await prisma.court.findUnique({ where: { id: idValue } })
+      if (!row) return encodeGrid([], { table: 'Court' as any })
+      return encodeGrid([inlineCourt(row)], { table: 'Court' as any })
+    }
+    const q = (params.get('q') ?? body?.q ?? '').toString().trim()
+    // Heuristic: pluck a courtType marker (`trial`/`appellate`/`supreme`/`magistrate`)
+    // out of the filter string if present. The ref-picker just sends `court`,
+    // but the admin UI may send `court and courtType=="appellate"`.
+    const filterStr = (params.get('filter') ?? '').toString().toLowerCase()
+    let courtType: string | null = null
+    for (const t of ['trial', 'appellate', 'supreme', 'magistrate']) {
+      if (filterStr.includes(`"${t}"`) || new RegExp(`courttype\\s*==\\s*"?${t}"?`).test(filterStr)) {
+        courtType = t
+        break
+      }
+    }
+    const where: any = {}
+    if (q) where.name = { contains: q }
+    if (courtType) where.courtType = courtType
+    const rows = await prisma.court.findMany({
+      where,
+      orderBy: { name: 'asc' },
+      take: typeof limit === 'number' && Number.isFinite(limit) ? Math.min(limit, 500) : 100,
+    })
+    return encodeGrid(rows.map(inlineCourt), { table: 'Court' as any })
+  } catch (e: any) {
+    const msg = e?.message ?? String(e)
+    if (/no such table|no such column/i.test(msg)) {
+      return errGrid(`schema not yet migrated: ${msg}`)
+    }
+    return errGrid(`court read failed: ${msg}`)
+  }
+}
+
+function inlineCourt(c: any): any {
+  let tags: any = c?.tags
+  if (typeof tags === 'string') {
+    try { tags = JSON.parse(tags) } catch { tags = {} }
+  }
+  return { ...c, ...(tags && typeof tags === 'object' ? tags : {}) }
+}
+
+/**
  * commit — minimal v1 stub. Accepts `{ id, kind, patch }` (panel shape) or a
  * Haystack-style grid row with `id` + tag fields. Merges `patch` (or the row
  * minus `id`/`kind`) into the target record's `tags` JSON via Prisma.
@@ -306,6 +368,7 @@ async function opCommit(_params: URLSearchParams, body: any): Promise<string> {
     hearing: 'hearing',
     person: 'person',
     personRole: 'personRole',
+    court: 'court',
   }
   const model = modelMap[kind]
   if (!model) return errGrid(`unknown kind: ${kind}`)
@@ -425,6 +488,7 @@ const NON_TAG_COLUMNS: Record<string, Set<string>> = {
   person: new Set(['id', 'tags', 'displayName', 'email', 'barNumber', 'jurisdictionId', 'createdAt', 'updatedAt']),
   personRole: new Set(['id', 'tags', 'personId', 'scopeKind', 'scopeId', 'appearedOn', 'withdrewOn', 'createdAt', 'updatedAt']),
   hearing: new Set(['id', 'tags', 'judgeId', 'courtReporterId', 'courtClerkId', 'scheduledFor', 'heldOn', 'durationMin', 'location', 'transcriptDocumentId', 'hearingType', 'createdAt', 'updatedAt']),
+  court: new Set(['id', 'tags', 'name', 'shortName', 'jurisdictionId', 'courtType', 'address', 'phone', 'website', 'createdAt', 'updatedAt']),
 }
 
 function filterToTagFields(model: string, patch: any): Record<string, unknown> {
