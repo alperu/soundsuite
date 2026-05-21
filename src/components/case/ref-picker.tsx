@@ -4,10 +4,10 @@
  * RefPicker — autofill popover for choosing a Haystack ref value.
  *
  * Replaces the plain text input that previously sat in the tag-panel for
- * tier === 'ref' / 'refs' rows. Queries /api/haystack/read for candidate
- * entities and surfaces them as a keyboard-navigable list. Degrades to a
- * manual `@id` input when the API is unavailable (e.g. 401 before
- * HAYSTACK_API_KEY is wired — Task #2 pending).
+ * tier === 'ref' / 'refs' rows. Queries the same-origin Haystack proxy
+ * (/api/haystack-proxy/read via the typed client) for candidate entities
+ * and surfaces them as a keyboard-navigable list. Degrades to a manual
+ * `@id` input when the proxy is unavailable / unauthorized.
  */
 
 import {
@@ -17,6 +17,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { read as haystackRead, gridHasError, type HaysonGrid } from '@/lib/haystack-client';
 
 export type RefTarget =
   | 'person'
@@ -229,7 +230,7 @@ function clientSideQueryMatch(r: RefResult, q: string): boolean {
 
 export interface FetchOutcome {
   results: RefResult[];
-  /** True iff /api/haystack/read returned 401 (auth not wired). */
+  /** True iff the proxy returned 401/403 (bearer auth not wired). */
   unauthorized: boolean;
 }
 
@@ -241,33 +242,36 @@ async function fetchResults(
   signal?: AbortSignal,
 ): Promise<FetchOutcome> {
   const filter = composeFilter(refTarget, personMarker, scopeFilter);
-  const url = `/api/haystack/read?filter=${encodeURIComponent(filter)}${
-    q ? `&q=${encodeURIComponent(q)}` : ''
-  }&limit=24`;
   try {
-    const res = await fetch(url, { method: 'GET', signal });
-    if (res.status === 401 || res.status === 403) {
-      return { results: [], unauthorized: true };
-    }
-    if (!res.ok) {
+    // Route through the same-origin proxy via the typed client. The proxy
+    // attaches the bearer auth server-side; the browser never sees the key.
+    // haystackRead has no AbortSignal hook, but the outer effect still drops
+    // stale results via ctl.signal.aborted before applying them.
+    const grid: HaysonGrid = await haystackRead({ filter, limit: 24 });
+    if (signal?.aborted) {
       return { results: [], unauthorized: false };
     }
-    const data = (await res.json()) as {
-      rows?: unknown;
-      results?: unknown;
-    };
-    const raw: unknown =
-      (Array.isArray(data.rows) && data.rows) ||
-      (Array.isArray(data.results) && data.results) ||
-      [];
-    const rows = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
+    const err = gridHasError(grid);
+    if (err) {
+      // Domain-level err from haystack — treat as empty, not unauthorized.
+      return { results: [], unauthorized: false };
+    }
+    const rows: Record<string, unknown>[] = Array.isArray(grid.rows)
+      ? (grid.rows as Record<string, unknown>[])
+      : [];
     const mapped = rows.map((r) => labelRow(refTarget, r));
-    // Client-side narrow by q if server didn't already filter.
+    // Client-side narrow by q so the user can type to filter the cached set.
     const narrowed = q ? mapped.filter((m) => clientSideQueryMatch(m, q)) : mapped;
     return { results: narrowed.slice(0, 8), unauthorized: false };
   } catch (e) {
     if ((e as { name?: string })?.name === 'AbortError') {
       return { results: [], unauthorized: false };
+    }
+    // jsonFetch throws "Haystack <url> → HTTP <status>" — detect 401/403 to
+    // light up the manual-typing fallback so the user knows it's an env issue.
+    const msg = (e as { message?: string })?.message ?? '';
+    if (/HTTP 401\b/.test(msg) || /HTTP 403\b/.test(msg)) {
+      return { results: [], unauthorized: true };
     }
     return { results: [], unauthorized: false };
   }
@@ -553,7 +557,7 @@ export function RefPicker({
       {/* Auth warning */}
       {unauthorized && (
         <div className="px-2 py-1.5 text-[11px] text-amber-800 bg-amber-50 border-b border-amber-200">
-          Haystack API unavailable — type the ref manually below.
+          Bearer auth not configured — type the ref manually below.
         </div>
       )}
 
