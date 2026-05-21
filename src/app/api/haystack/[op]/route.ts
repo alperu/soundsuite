@@ -318,28 +318,124 @@ async function opCommit(_params: URLSearchParams, body: any): Promise<string> {
   try {
     const existing = await client.findUnique({ where: { id } })
     if (!existing) return errGrid(`${kind} ${id} not found`)
-    let currentTags: any = {}
-    if (typeof existing.tags === 'string') {
-      try { currentTags = JSON.parse(existing.tags) } catch { currentTags = {} }
-    } else if (existing.tags && typeof existing.tags === 'object') {
-      currentTags = existing.tags
-    }
-    // Patch values: strip control/column fields; only tag-shaped keys go in.
-    const { id: _i, tags: _t, createdAt: _c, updatedAt: _u, ...tagPatch } = patch
-    const merged = { ...currentTags, ...tagPatch }
-    // Remove keys explicitly set to null/undefined.
+
+    // Defensively recover an object from existing.tags. Handles three cases:
+    //   1. Object (Prisma deserialized it)
+    //   2. String (Prisma left it raw — better-sqlite3 adapter behavior)
+    //   3. Character-spread garbage from the previous double-stringify bug
+    const currentTags = recoverTagObject(existing.tags)
+
+    // Strip every non-tag field from the patch. The Prisma model has
+    // its own columns for case identity (name, caseNumber, path,
+    // jurisdiction, country, state, county, ...). The panel sends the
+    // full draft record back, so we keep ONLY tag-shaped keys.
+    const tagPatch = filterToTagFields(model, patch)
+
+    const merged: Record<string, unknown> = { ...currentTags, ...tagPatch }
     for (const k of Object.keys(merged)) {
       if (merged[k] == null) delete merged[k]
     }
+
+    // CRITICAL: pass the OBJECT to Prisma, NOT a stringified string.
+    // Prisma's Json column auto-serializes; passing a string means it
+    // gets JSON.stringify'd again (double-encoding). The previous
+    // version stringified manually, which caused every saved tag set
+    // to come back as character-indexed garbage on the next commit.
     const updated = await client.update({
       where: { id },
-      data: { tags: JSON.stringify(merged) },
+      data: { tags: merged as any },
     })
-    const row: any = { ...updated, ...merged }
+    const updatedTags = recoverTagObject(updated.tags)
+    const row: any = { ...updated, ...updatedTags, tags: updatedTags }
     return encodeGrid([row], { table: kind as any })
   } catch (e: any) {
     return errGrid(`commit failed: ${e?.message ?? e}`)
   }
+}
+
+/**
+ * Unpeel any number of levels of JSON.stringify wrapping. Defensive
+ * against historical bad data from the double-stringify bug: rows
+ * saved by the broken commit op stored their tags as a JSON string
+ * whose contents were ANOTHER JSON string, and so on. Also handles
+ * the "character-indexed object" form where `{...someString}` was
+ * accidentally spread into a record. Caps unwrapping at 4 iterations
+ * to avoid runaway loops on truly malformed input.
+ */
+function recoverTagObject(raw: unknown): Record<string, unknown> {
+  let val: unknown = raw
+  for (let i = 0; i < 4; i++) {
+    if (val == null) return {}
+    if (typeof val === 'object' && !Array.isArray(val)) {
+      const keys = Object.keys(val as object)
+      // Character-spread garbage: keys "0", "1", "2", ... that
+      // reassemble into a JSON-stringified object plus a tail of
+      // normal keys (the most-recent patch).
+      const digitKeys = keys.filter(k => /^\d+$/.test(k))
+      if (digitKeys.length > 0 && digitKeys.length >= keys.length / 2) {
+        const chars: string[] = []
+        const n = digitKeys.length
+        for (let j = 0; j < n; j++) {
+          const c = (val as Record<string, unknown>)[String(j)]
+          if (typeof c !== 'string') break
+          chars.push(c)
+        }
+        const tail: Record<string, unknown> = {}
+        for (const k of keys) {
+          if (!/^\d+$/.test(k)) tail[k] = (val as Record<string, unknown>)[k]
+        }
+        try {
+          const inner = JSON.parse(chars.join(''))
+          if (inner && typeof inner === 'object') {
+            return { ...(inner as Record<string, unknown>), ...tail }
+          }
+        } catch {
+          /* fall through */
+        }
+        return tail
+      }
+      return val as Record<string, unknown>
+    }
+    if (typeof val === 'string') {
+      try {
+        val = JSON.parse(val)
+      } catch {
+        return {}
+      }
+      continue
+    }
+    return {}
+  }
+  return typeof val === 'object' && val !== null
+    ? (val as Record<string, unknown>)
+    : {}
+}
+
+/**
+ * Strip column-level fields from the patch. The tag panel sends back
+ * the full draft record (columns + inlined tags), so the patch may
+ * contain `name`, `caseNumber`, `path`, etc. — those are real DB
+ * columns, not tags, and must not be merged into the JSON.
+ */
+const NON_TAG_COLUMNS: Record<string, Set<string>> = {
+  case: new Set(['id', 'tags', 'name', 'path', 'caseNumber', 'jurisdiction', 'country', 'state', 'county', 'createdAt', 'updatedAt']),
+  motion: new Set(['id', 'tags', 'filingId', 'caseId', 'parentMotionId', 'amendsId', 'supersedesId', 'revisionSeq', 'judgeId', 'movantId', 'respondentId', 'title', 'description', 'startPage', 'endPage', 'createdAt', 'updatedAt']),
+  motionEvent: new Set(['id', 'tags', 'motionId', 'caseId', 'kind', 'occurredOn', 'courtFilingDate', 'causeNoStamp', 'documentId', 'authoredById', 'servedOnId', 'courtClerkId', 'courtReporterId', 'hearingId', 'createdAt', 'updatedAt']),
+  motionAttachment: new Set(['id', 'tags', 'motionId', 'caseId', 'attachmentKind', 'documentId', 'amendsId', 'supersedesId', 'revisionSeq', 'authoredById', 'createdAt', 'updatedAt']),
+  person: new Set(['id', 'tags', 'displayName', 'email', 'barNumber', 'jurisdictionId', 'createdAt', 'updatedAt']),
+  personRole: new Set(['id', 'tags', 'personId', 'scopeKind', 'scopeId', 'appearedOn', 'withdrewOn', 'createdAt', 'updatedAt']),
+  hearing: new Set(['id', 'tags', 'judgeId', 'courtReporterId', 'courtClerkId', 'scheduledFor', 'heldOn', 'durationMin', 'location', 'transcriptDocumentId', 'hearingType', 'createdAt', 'updatedAt']),
+}
+
+function filterToTagFields(model: string, patch: any): Record<string, unknown> {
+  if (!patch || typeof patch !== 'object') return {}
+  const skip = NON_TAG_COLUMNS[model] ?? new Set(['id', 'tags', 'createdAt', 'updatedAt'])
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(patch)) {
+    if (skip.has(k)) continue
+    out[k] = v
+  }
+  return out
 }
 
 function opClose(): string {
