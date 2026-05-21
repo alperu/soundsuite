@@ -401,20 +401,58 @@ export class FileWatcher {
   }
 
   /**
-   * Get the current running status
+   * Add a directory to the watched set. Keeps `config.watchPaths` in sync
+   * with chokidar's internal state — without this the watcher would receive
+   * fs events for the new path but `findCaseForFile` (which iterates
+   * `config.watchPaths`) would fail to attribute them, dropping new documents
+   * with "No case found for file".
    */
-  async addPath(path: string): Promise<void> {
+  async addPath(p: string): Promise<void> {
+    if (!p) return;
+    const normalized = p;
+    if (!this.config.watchPaths.includes(normalized)) {
+      this.config.watchPaths.push(normalized);
+    }
     if (this.watcher) {
-      this.watcher.add(path);
-      this.logger.info(`Added watch path: ${path}`);
+      this.watcher.add(normalized);
+      this.logger.info(`Added watch path: ${normalized}`);
     }
   }
 
-  async removePath(path: string): Promise<void> {
+  /**
+   * Remove a directory from the watched set. Mirrors `addPath` — also drops
+   * the path from `config.watchPaths` so subsequent lookups don't resolve
+   * files against a path that's no longer being watched.
+   */
+  async removePath(p: string): Promise<void> {
+    if (!p) return;
+    const before = this.config.watchPaths.length;
+    this.config.watchPaths = this.config.watchPaths.filter((wp) => wp !== p);
     if (this.watcher) {
-      await this.watcher.unwatch(path);
-      this.logger.info(`Removed watch path: ${path}`);
+      await this.watcher.unwatch(p);
+      this.logger.info(`Removed watch path: ${p}`, { removed: before - this.config.watchPaths.length });
     }
+  }
+
+  /**
+   * Re-attach a Case directory after its path has changed. Convenience that
+   * removes the old path (if any) and adds the new one in a single call so
+   * callers don't have to interleave the two operations. Safe to call when
+   * `oldPath` is null/empty (new-case case) or equal to `newPath` (no-op
+   * defensive guard).
+   */
+  async reattachCase(opts: { oldPath?: string | null; newPath: string; caseId?: string | null }): Promise<void> {
+    const { oldPath, newPath, caseId } = opts;
+    if (!newPath) return;
+    if (oldPath && oldPath !== newPath) {
+      await this.removePath(oldPath);
+    }
+    await this.addPath(newPath);
+    this.logger.info('FileWatcher reattach', {
+      caseId: caseId ?? null,
+      oldPath: oldPath ?? null,
+      newPath,
+    });
   }
 
   isWatcherRunning(): boolean {
