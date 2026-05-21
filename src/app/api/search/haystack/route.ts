@@ -19,6 +19,44 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
+import { interpretQuery, type InterpretContext, type PersonIndexEntry, type CaseIndexEntry } from '@/lib/search/freetext-interpreter';
+
+interface InterpretedHint {
+  compiledFilter: string;
+  freetextResidual: string;
+  confidence: 'high' | 'medium' | 'low';
+}
+
+/** Best-effort load of the person/case index for the interpreter. */
+async function loadInterpretContext(): Promise<InterpretContext> {
+  let personIndex: PersonIndexEntry[] = [];
+  let caseIndex: CaseIndexEntry[] = [];
+  try {
+    const repo: any = await import('@/lib/legal/repo' as any).catch(() => null);
+    if (repo?.findPerson) {
+      const rows: any[] = await repo.findPerson('person', 5000).catch(() => []);
+      personIndex = rows.map((r) => ({
+        id: String(r.id ?? ''),
+        displayName: String(r.displayName ?? r.id ?? ''),
+        intrinsicTags: {
+          judge: r.judge === true || r?.tags?.judge === true,
+          lawyer: r.lawyer === true || r?.tags?.lawyer === true,
+        },
+      })).filter((p) => p.id && p.displayName);
+    }
+    if (repo?.findCase) {
+      const rows: any[] = await repo.findCase('case', 5000).catch(() => []);
+      caseIndex = rows.map((r) => ({
+        id: String(r.id ?? ''),
+        causeNo: r.causeNo ?? undefined,
+        name: r.name ?? r.title ?? undefined,
+      })).filter((c) => c.id);
+    }
+  } catch {
+    /* schema not ready */
+  }
+  return { personIndex, caseIndex, now: new Date() };
+}
 
 interface HaystackSearchBody {
   filter?: string;
@@ -72,8 +110,8 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const filter = (body.filter ?? '').trim();
-  const freetext = (body.freetext ?? '').trim();
+  let filter = (body.filter ?? '').trim();
+  let freetext = (body.freetext ?? '').trim();
   const limit = body.limit ?? 10;
 
   if (!filter && !freetext) {
@@ -81,6 +119,29 @@ export async function POST(request: NextRequest) {
       { error: { message: 'Provide at least one of filter or freetext' } },
       { status: 400 },
     );
+  }
+
+  // Magic: when caller provides only freetext, interpret it into chips +
+  // compiledFilter. The compiled filter feeds Haystack; the residual feeds
+  // the semantic pass. If the interpreter doesn't produce a filter (low
+  // confidence), fall through to pure semantic search.
+  let interpreted: InterpretedHint | null = null;
+  if (!filter && freetext) {
+    try {
+      const ctx = await loadInterpretContext();
+      const r = await interpretQuery(freetext, ctx);
+      interpreted = {
+        compiledFilter: r.compiledFilter,
+        freetextResidual: r.freetextResidual,
+        confidence: r.confidence,
+      };
+      if (r.compiledFilter) {
+        filter = r.compiledFilter;
+        freetext = r.freetextResidual;
+      }
+    } catch {
+      /* interpreter optional — fall back to pure semantic */
+    }
   }
 
   const origin = request.nextUrl.origin;
@@ -119,9 +180,11 @@ export async function POST(request: NextRequest) {
   const response: {
     filter: string;
     freetext: string;
+    interpreted?: InterpretedHint;
     haystack?: { results: HaystackResultRow[]; note?: string };
     semantic?: { results: unknown; error?: string };
   } = { filter, freetext };
+  if (interpreted) response.interpreted = interpreted;
 
   if (haystackTask) {
     const r = await haystackTask;
