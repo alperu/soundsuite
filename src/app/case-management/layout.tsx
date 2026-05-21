@@ -6,6 +6,8 @@ import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { SearchableCombo } from '@/components/searchable-combo';
 import { getCachedCases, setCachedCases, getCachedFilings, setCachedFilings } from '@/lib/indexed-db';
 import { formatFilingLabel } from '@/lib/filings/format-filing-label';
+import { TagPanel } from '@/components/case/tag-panel';
+import type { EntityKind } from '@/components/case/tag-spec';
 
 interface CaseRecord {
   id: string;
@@ -153,6 +155,25 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
   const [dragOver, setDragOver] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
+
+  // Tracks the entity currently selected in the children pages, for the
+  // right-hand TagPanel. Child pages may override via 'selected-entity-changed'
+  // CustomEvents; otherwise we fall back to URL-derived selection below.
+  const [selectedOverride, setSelectedOverride] = useState<{ kind: EntityKind; id: string; label?: string } | null>(null);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { kind: EntityKind; id: string; label?: string } | null;
+      setSelectedOverride(detail);
+    };
+    window.addEventListener('selected-entity-changed', handler);
+    return () => window.removeEventListener('selected-entity-changed', handler);
+  }, []);
+
+  // Reset override when navigating to a different case
+  useEffect(() => {
+    setSelectedOverride(null);
+  }, [pathname]);
 
   // Resizable sidebar state
   const SIDEBAR_MIN = 240;
@@ -960,10 +981,37 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
         className="w-1 cursor-col-resize hover:bg-blue-400 active:bg-blue-500 transition-colors flex-shrink-0"
       />
 
-      {/* Right panel: children (case detail or empty state) */}
-      <div className="flex-1 flex flex-col bg-white">
+      {/* Middle panel: children (case detail or empty state) */}
+      <div className="flex-1 flex flex-col bg-white min-w-0">
         {children}
       </div>
+
+      {/* Right panel: context-aware XETO/Haystack tags */}
+      {(() => {
+        // Selection: prefer explicit override from child page; otherwise
+        // derive from URL — filing slug if present else active case.
+        let kind: EntityKind | null = null;
+        let id: string | null = null;
+        let label: string | undefined = undefined;
+        if (selectedOverride) {
+          kind = selectedOverride.kind;
+          id = selectedOverride.id;
+          label = selectedOverride.label;
+        } else if (activeCase) {
+          const filingSlug = pathParts.length > 2 ? decodeURIComponent(pathParts[2]) : null;
+          if (filingSlug) {
+            const f = filings.find(x => x.slug === filingSlug);
+            kind = 'motion';
+            id = f ? f.id : filingSlug;
+            label = f ? formatFilingLabel(f) : filingSlug;
+          } else {
+            kind = 'case';
+            id = activeCase.id;
+            label = `${activeCase.name}${activeCase.caseNumber ? ` — ${activeCase.caseNumber}` : ''}`;
+          }
+        }
+        return <TagPanel entityKind={kind} entityId={id} entityLabel={label} />;
+      })()}
 
       {/* Sidebar Context Menu */}
       {sidebarContextMenu && (

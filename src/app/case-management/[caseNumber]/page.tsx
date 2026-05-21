@@ -6,6 +6,7 @@ import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { getSharedDocumentMenuItems, type DocumentTarget, type DocumentContextMenuActions } from '@/components/document-context-menu';
 import { getFiles, setFiles as idbSetFiles, getCachedFilings, setCachedFilings, getCachedTrackedFiles, setCachedTrackedFiles, setPreference, getPreference } from '@/lib/indexed-db';
 import { persistActionLog } from '@/lib/action-log';
+import { SelectedEntityProvider } from '@/components/case/selected-entity-context';
 
 interface ActionLog {
   id: string;
@@ -399,6 +400,17 @@ export default function CaseDetailPage() {
   }, [caseNumberParam]);
 
   useEffect(() => { if (caseRecord) loadFiles(caseRecord.id); }, [caseRecord]);
+
+  // Notify the layout's right-hand TagPanel that we're viewing a Case.
+  useEffect(() => {
+    if (!caseRecord) return;
+    window.dispatchEvent(new CustomEvent('selected-entity-changed', {
+      detail: { kind: 'case', id: caseRecord.id, label: `${caseRecord.name}${caseRecord.caseNumber ? ` — ${caseRecord.caseNumber}` : ''}` },
+    }));
+    return () => {
+      window.dispatchEvent(new CustomEvent('selected-entity-changed', { detail: null }));
+    };
+  }, [caseRecord]);
 
   // Load auto-add preference from API (with localStorage fallback)
   useEffect(() => {
@@ -1505,7 +1517,11 @@ export default function CaseDetailPage() {
   if (!caseRecord) return null;
 
   return (
-    <>
+    <SelectedEntityProvider
+      entityKind="case"
+      entityId={caseRecord.id}
+      entityLabel={`${caseRecord.name}${caseRecord.caseNumber ? ` — ${caseRecord.caseNumber}` : ''}`}
+    >
       {/* Header */}
       <div className="border-b border-gray-200">
         <div className="p-4 pb-2">
@@ -1845,6 +1861,6 @@ export default function CaseDetailPage() {
           </div>
         )}
       </div>
-    </>
+    </SelectedEntityProvider>
   );
 }
