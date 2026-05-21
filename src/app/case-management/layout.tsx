@@ -599,6 +599,7 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
       if (editCasePath.trim() !== (editCaseRecord.path || '').trim()) {
         patch.path = editCasePath.trim();
       }
+      const pathChanged = patch.path !== undefined;
       const grid = await hsCommit({ id: editCaseRecord.id, kind: 'case', patch });
       const gridErr = hsGridHasError(grid);
       if (gridErr) { setEditCaseError(gridErr); return; }
@@ -609,6 +610,27 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
         setEditCaseRecord(prev => (prev ? { ...prev, ...row } : prev));
       }
       await loadCases();
+      // When the case path changed, the FileWatcher has been re-attached
+      // server-side (applyCaseSideEffects in /api/haystack/commit). The
+      // indexing badges in the sidebar are derived from filing/document
+      // status, which the FileWatcher refreshes asynchronously as it
+      // re-scans the new directory. Force a filings refetch now so the
+      // sidebar picks up any status changes already in the DB, and again
+      // shortly afterwards to catch the re-scan results.
+      if (pathChanged && activeCase) {
+        await loadFilings(activeCase.id, true);
+        window.dispatchEvent(new Event('filings-changed'));
+        // Re-poll once after the watcher has had a chance to re-scan. The
+        // file-watcher's polling interval defaults to ~5s — refetch a bit
+        // after that so freshly-discovered documents surface without forcing
+        // a full page reload.
+        setTimeout(() => {
+          if (activeCase) {
+            loadFilings(activeCase.id, true).catch(() => {});
+            window.dispatchEvent(new Event('filings-changed'));
+          }
+        }, 6000);
+      }
       // If case number changed, navigate to the new URL
       const oldCn = editCaseRecord.caseNumber || editCaseRecord.id;
       const newCn = (row?.caseNumber as string | null | undefined) || row?.id || oldCn;

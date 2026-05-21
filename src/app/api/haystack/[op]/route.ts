@@ -1066,25 +1066,36 @@ function splitPatch(
  * Post-commit hooks for Case path changes. Mirrors the legacy
  * `PATCH /api/cases/[id]` behavior: when `path` changes (or a new case is
  * created), reconcile the FileWatcher.
+ *
+ * Errors from the reattach call are swallowed and logged — a saved path
+ * change with a stale watcher is still better than rolling back the commit.
+ * Operators can recover by restarting the service.
  */
 async function applyCaseSideEffects(
   before: { path?: string | null } | null,
-  after: { path?: string | null } | null,
+  after: { id?: string | null; path?: string | null } | null,
 ): Promise<void> {
-  if (!after?.path) return
+  const afterPath = typeof after?.path === 'string' ? after.path.trim() : null
+  if (!afterPath) return
+  const beforePath = typeof before?.path === 'string' ? before.path.trim() : null
   try {
     const { getServicesManager } = await import('@/lib/services-manager')
     const fileWatcher = getServicesManager().getFileWatcher()
-    if (!fileWatcher) return
+    if (!fileWatcher) {
+      console.log(
+        `[haystack/commit] case-path change: file-watcher not registered, skipping reattach (case=${after?.id ?? '?'} new=${JSON.stringify(afterPath)})`,
+      )
+      return
+    }
     if (!before) {
-      // Create
-      await fileWatcher.addPath(after.path)
-    } else if (before.path && before.path !== after.path) {
-      await fileWatcher.removePath(before.path)
-      await fileWatcher.addPath(after.path)
+      console.log(`[haystack/commit] case create: attaching file-watcher (case=${after?.id ?? '?'} path=${JSON.stringify(afterPath)})`)
+      await fileWatcher.reattachCase({ oldPath: null, newPath: afterPath, caseId: after?.id ?? null })
+    } else if (beforePath && beforePath !== afterPath) {
+      console.log(`[haystack/commit] case-path changed, reattach: ${JSON.stringify(beforePath)} -> ${JSON.stringify(afterPath)} (case=${after?.id ?? '?'})`)
+      await fileWatcher.reattachCase({ oldPath: beforePath, newPath: afterPath, caseId: after?.id ?? null })
     }
   } catch (e: any) {
-    console.log(`[haystack/commit] file-watcher hook failed: ${e?.message ?? e}`)
+    console.log(`[haystack/commit] file-watcher reattach failed (case=${after?.id ?? '?'}): ${e?.message ?? e}`)
   }
 }
 
