@@ -15,8 +15,8 @@ const CANONICAL_CATEGORIES: readonly MotionTypeCategory[] = [
 const CANONICAL_SOURCES = ['user-data', 'texas-rules', 'frcp', 'practice'] as const;
 
 describe('MOTION_TYPES catalogue', () => {
-  it('has at least 30 entries', () => {
-    expect(MOTION_TYPES.length).toBeGreaterThanOrEqual(30);
+  it('has at least 80 entries', () => {
+    expect(MOTION_TYPES.length).toBeGreaterThanOrEqual(80);
   });
 
   it('has unique slugs', () => {

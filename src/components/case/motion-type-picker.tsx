@@ -23,15 +23,17 @@ import {
 } from 'react';
 import { MOTION_TYPES, type MotionTypeEntry } from '@/lib/filings/motion-types';
 
-const MAX_RESULTS = 10;
+const MAX_RESULTS = 20;
 
 const CATEGORY_CHIP: Record<string, string> = {
   procedural: 'bg-blue-50 text-blue-700 border-blue-200',
-  dispositive: 'bg-red-50 text-red-700 border-red-200',
+  disposition: 'bg-red-50 text-red-700 border-red-200',
   discovery: 'bg-amber-50 text-amber-700 border-amber-200',
-  evidentiary: 'bg-purple-50 text-purple-700 border-purple-200',
-  family: 'bg-pink-50 text-pink-700 border-pink-200',
+  evidence: 'bg-purple-50 text-purple-700 border-purple-200',
+  'family-law': 'bg-pink-50 text-pink-700 border-pink-200',
   appellate: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+  protective: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  scheduling: 'bg-cyan-50 text-cyan-700 border-cyan-200',
   other: 'bg-gray-50 text-gray-700 border-gray-200',
 };
 
@@ -239,7 +241,7 @@ export function MotionTypePicker({
       {showDropdown && (
         <div
           role="listbox"
-          className="absolute left-0 right-0 mt-1 z-20 bg-white border border-gray-200 rounded-lg shadow-md max-h-72 overflow-y-auto"
+          className="absolute left-0 mt-1 z-20 bg-white border border-gray-200 rounded-lg shadow-lg w-[480px] max-w-[calc(100vw-2rem)] max-h-[480px] overflow-y-auto"
         >
           {results.map((entry, idx) => {
             const active = idx === highlight;
@@ -252,22 +254,22 @@ export function MotionTypePicker({
                 onMouseDown={(e) => e.preventDefault()}
                 onMouseEnter={() => setHighlight(idx)}
                 onClick={() => commitEntry(entry)}
-                className={`w-full text-left px-2 py-1 flex items-center gap-2 transition-colors ${
+                className={`w-full text-left px-3 py-2 flex items-center gap-3 transition-colors ${
                   active ? 'bg-blue-50' : 'hover:bg-gray-50'
                 }`}
               >
                 <span className="flex-1 min-w-0">
-                  <span className="block text-[11px] text-gray-900 truncate">
+                  <span className="block text-sm text-gray-900 truncate">
                     {entry.displayName}
                   </span>
                   {entry.shortDoc && (
-                    <span className="block text-[10px] text-gray-500 truncate">
+                    <span className="block text-xs text-gray-500 truncate">
                       {entry.shortDoc}
                     </span>
                   )}
                 </span>
                 <span
-                  className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] border flex-shrink-0 ${chipClass(entry.category)}`}
+                  className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] border flex-shrink-0 ${chipClass(entry.category)}`}
                 >
                   {entry.category}
                 </span>
@@ -282,12 +284,12 @@ export function MotionTypePicker({
               onMouseDown={(e) => e.preventDefault()}
               onMouseEnter={() => setHighlight(results.length)}
               onClick={() => commitFreeText(trimmed)}
-              className={`w-full text-left px-2 py-1 border-t border-gray-100 flex items-center gap-2 transition-colors ${
+              className={`sticky bottom-0 w-full text-left px-3 py-2 border-t border-gray-200 bg-white flex items-center gap-2 transition-colors ${
                 highlight === results.length ? 'bg-blue-50' : 'hover:bg-gray-50'
               }`}
             >
-              <span className="text-[10px] text-gray-500">Use as-is:</span>
-              <span className="text-[11px] text-gray-900 truncate flex-1">{trimmed}</span>
+              <span className="text-xs text-gray-500">Use as-is:</span>
+              <span className="text-sm text-gray-900 truncate flex-1">{trimmed}</span>
             </button>
           )}
         </div>
