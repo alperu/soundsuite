@@ -24,6 +24,8 @@ import { WorkflowsPanel } from './search/workflows-panel';
 import { HistoryPanel } from './search/history-panel';
 import { ChatAttachmentsStrip } from './chat-attachments';
 import { HaystackFilterInput } from './search/haystack-filter-input';
+import { SampleQueryPanel } from './search/sample-query-panel';
+import type { SampleQuery } from '@/lib/search/sample-queries';
 import {
   buildHaystackFilter,
   type FilterChip,
@@ -378,6 +380,40 @@ export default function SearchInterface({
       setHaystackBusy(false);
     }
   }, [haystackChips, aiQuery, aiCaseId]);
+
+  // Click-to-apply from the sample-query panel.
+  //
+  // Once Task #5 lands (`POST /api/search/interpret`), this will round-trip the
+  // English prompt through the interpreter to get back structured chips +
+  // freetext residual. Until then, we fall back to populating the input
+  // verbatim — semantic search runs over the prompt text and the user can hit
+  // Enter to submit, or refine the chips manually.
+  const handleSampleQuery = useCallback((q: SampleQuery) => {
+    // TODO(task-5): when /api/search/interpret is live, POST {prompt} and use
+    // the returned {chips, freetextResidual} to drive setHaystackChips +
+    // setAiQuery; on 404 / non-200 keep the verbatim fallback below.
+    setHaystackChips([]);
+    setAiQuery(q.englishPrompt);
+    aiQueryRef.current?.focus();
+  }, []);
+
+  // Click-to-insert a token prefix from the glossary. Appending `<token>:`
+  // (with a leading space if non-empty) triggers HaystackFilterInput's
+  // prefix-detector, which opens the matching picker on the next render.
+  const handleSampleToken = useCallback((token: string) => {
+    setAiQuery((prev) => {
+      const trimmed = prev.replace(/\s+$/, '');
+      if (!trimmed) return `${token}:`;
+      // Replace a dangling partial token (e.g. user typed "jud") with the
+      // selected one. Otherwise append after a single space.
+      const partial = trimmed.match(/(?:^|\s)(\w+)$/);
+      if (partial) {
+        return trimmed.replace(/(?:^|\s)(\w+)$/, (m) => (m.startsWith(' ') ? ` ${token}:` : `${token}:`));
+      }
+      return `${trimmed} ${token}:`;
+    });
+    aiQueryRef.current?.focus();
+  }, []);
 
   // Mirror the singleton deep-search runner into local state. This is what
   // lets an in-flight deep search survive page navigation: the runner keeps
@@ -1537,7 +1573,7 @@ export default function SearchInterface({
 
         {/* Main Content */}
         <main
-          className={`flex-1 bg-gray-50 ${mode === 'analysis' ? 'flex overflow-hidden' : ''} ${mode === 'ai' ? 'relative flex flex-col overflow-hidden' : ''} ${mode === 'direct' ? 'overflow-auto' : ''}`}
+          className={`flex-1 bg-gray-50 ${mode === 'analysis' ? 'flex overflow-hidden' : ''} ${mode === 'ai' ? `relative flex ${haystackMode ? 'flex-row' : 'flex-col'} overflow-hidden` : ''} ${mode === 'direct' ? 'overflow-auto' : ''}`}
           onDragEnter={mode === 'ai' ? handleDragEnter : undefined}
           onDragOver={mode === 'ai' ? handleDragOver : undefined}
           onDragLeave={mode === 'ai' ? handleDragLeave : undefined}
@@ -1545,8 +1581,19 @@ export default function SearchInterface({
         >
 
           {/* ---- AI Search Mode — Chat Layout ---- */}
+          {/* When haystackMode is on, the outer container is flex-row and the
+              sample-query rail renders to the left of the chat column. When
+              off, the outer is flex-col (legacy single-column) and no rail.
+              The chat column itself is always flex-col with the scrollable
+              conversation + fixed input. */}
+          {mode === 'ai' && haystackMode && (
+            <SampleQueryPanel
+              onSelectQuery={handleSampleQuery}
+              onSelectToken={handleSampleToken}
+            />
+          )}
           {mode === 'ai' && (
-            <>
+            <div className={haystackMode ? 'flex-1 flex flex-col overflow-hidden min-w-0' : 'contents'}>
               {isDraggingFiles && (
                 <div className="absolute inset-0 z-30 pointer-events-none flex items-center justify-center bg-blue-500/10 border-4 border-dashed border-blue-400 rounded-lg">
                   <div className="bg-white px-6 py-4 rounded-lg shadow-lg border border-blue-200">
@@ -1915,7 +1962,7 @@ export default function SearchInterface({
                 </div>
                 </div>
               </div>
-            </>
+            </div>
           )}
 
           {/* ---- Direct Search Mode ---- */}

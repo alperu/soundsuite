@@ -152,21 +152,25 @@ export function HaystackFilterInput({
     }
   }, [freetext]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load async options for person/case pickers.
+  // Load async options for person/case pickers. Debounced 150ms so the API
+  // isn't hit on every keystroke as the user types into the inline typeahead.
   useEffect(() => {
     if (!picker) return;
     if (picker.kind !== 'person' && picker.kind !== 'case') return;
     const filter =
       picker.kind === 'case' ? 'case' : (personFilterForToken(picker.token) ?? 'person');
     let cancelled = false;
-    fetchPersons(filter, picker.query).then((opts) => {
-      if (cancelled) return;
-      setPicker((p) =>
-        p && p.token === picker.token ? { ...p, options: opts, highlight: 0 } : p,
-      );
-    });
+    const handle = setTimeout(() => {
+      fetchPersons(filter, picker.query).then((opts) => {
+        if (cancelled) return;
+        setPicker((p) =>
+          p && p.token === picker.token ? { ...p, options: opts, highlight: 0 } : p,
+        );
+      });
+    }, 150);
     return () => {
       cancelled = true;
+      clearTimeout(handle);
     };
   }, [picker?.token, picker?.query]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -341,9 +345,17 @@ export function HaystackFilterInput({
   const showPicker = !!picker && pickerOptions.length > 0;
   const showTokens = tokenSuggestions.length > 0 && !showPicker;
 
+  // The caller passes `style={{ minHeight }}` so the chip container matches the
+  // legacy textarea's user-resizable height. We forward it to the inner
+  // bordered box (not the outer positioning wrapper) so the visible input
+  // never collapses below the textarea baseline when toggling Haystack mode.
   return (
-    <div className={`relative ${className ?? ''}`} style={style}>
-      <div className="flex flex-wrap items-center gap-1.5 px-2 py-1.5 border border-gray-300 rounded-lg bg-white focus-within:ring-2 focus-within:ring-purple-500 focus-within:border-transparent min-h-[44px]">
+    <div className={`relative ${className ?? ''}`}>
+      <div
+        className="flex flex-wrap content-start items-start gap-1.5 px-2 py-1.5 border border-gray-300 rounded-lg bg-white focus-within:ring-2 focus-within:ring-purple-500 focus-within:border-transparent overflow-y-auto"
+        style={style}
+        onClick={() => inputRef.current?.focus()}
+      >
         {chips.map((c, i) => {
           const def = TOKEN_MAP[c.key];
           const cat = def?.category ?? 'text';
