@@ -17,13 +17,17 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
 import { MOTION_TYPES, type MotionTypeEntry } from '@/lib/filings/motion-types';
+import { pickAnchor, type PopupAnchor } from './popup-anchor';
 
 const MAX_RESULTS = 20;
+const POPUP_WIDTH_PX = 480;
+const POPUP_MAX_HEIGHT_PX = 480;
 
 const CATEGORY_CHIP: Record<string, string> = {
   procedural: 'bg-blue-50 text-blue-700 border-blue-200',
@@ -86,6 +90,10 @@ export function MotionTypePicker({
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
+  const [anchor, setAnchor] = useState<PopupAnchor>({
+    horizontal: 'left',
+    vertical: 'below',
+  });
   const inputRef = useRef<HTMLInputElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -123,6 +131,21 @@ export function MotionTypePicker({
     };
     document.addEventListener('mousedown', onDocClick);
     return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+
+  // Viewport-aware anchor: recompute on open and on resize so the popup
+  // doesn't fall off the right edge of the right-side tag panel.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const recompute = () => {
+      const el = inputRef.current ?? rootRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      setAnchor(pickAnchor(rect, POPUP_WIDTH_PX, POPUP_MAX_HEIGHT_PX));
+    };
+    recompute();
+    window.addEventListener('resize', recompute);
+    return () => window.removeEventListener('resize', recompute);
   }, [open]);
 
   // Read mode
@@ -241,7 +264,17 @@ export function MotionTypePicker({
       {showDropdown && (
         <div
           role="listbox"
-          className="absolute left-0 mt-1 z-20 bg-white border border-gray-200 rounded-lg shadow-lg w-[480px] max-w-[calc(100vw-2rem)] max-h-[480px] overflow-y-auto"
+          style={{
+            position: 'absolute',
+            [anchor.horizontal === 'left' ? 'left' : 'right']: 0,
+            [anchor.vertical === 'below' ? 'top' : 'bottom']: '100%',
+            width: `${POPUP_WIDTH_PX}px`,
+            maxWidth: 'calc(100vw - 16px)',
+            maxHeight: `${POPUP_MAX_HEIGHT_PX}px`,
+            marginTop: anchor.vertical === 'below' ? 4 : 0,
+            marginBottom: anchor.vertical === 'above' ? 4 : 0,
+          }}
+          className="z-20 bg-white border border-gray-200 rounded-lg shadow-lg overflow-y-auto"
         >
           {results.map((entry, idx) => {
             const active = idx === highlight;

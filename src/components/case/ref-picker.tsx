@@ -18,6 +18,7 @@ import {
   useState,
 } from 'react';
 import { read as haystackRead, gridHasError, type HaysonGrid } from '@/lib/haystack-client';
+import { pickAnchor } from './popup-anchor';
 
 export type RefTarget =
   | 'person'
@@ -307,13 +308,30 @@ function computePos(anchorRect: DOMRect | null | undefined): Pos {
       centered: true,
     };
   }
+  // Use the shared anchor picker so RefPicker, MotionTypePicker and
+  // MarkerPicker stay consistent: flip horizontal if there's not enough
+  // room to the right (the right-edge tag-panel case), flip vertical if
+  // not enough room below.
+  const anchor = pickAnchor(anchorRect, POPOVER_W, POPOVER_MAX_H);
   const spaceBelow = vh - anchorRect.bottom;
   const spaceAbove = anchorRect.top;
-  const flipUp = spaceBelow < 220 && spaceAbove > spaceBelow;
-  const maxHeight = Math.min(POPOVER_MAX_H, Math.max(160, flipUp ? spaceAbove - 12 : spaceBelow - 12));
-  const top = flipUp ? Math.max(8, anchorRect.top - maxHeight - 4) : anchorRect.bottom + 4;
-  let left = anchorRect.left;
-  if (left + POPOVER_W > vw - 8) left = Math.max(8, vw - POPOVER_W - 8);
+  const flipUp = anchor.vertical === 'above';
+  const maxHeight = Math.min(
+    POPOVER_MAX_H,
+    Math.max(160, flipUp ? spaceAbove - 12 : spaceBelow - 12),
+  );
+  const top = flipUp
+    ? Math.max(8, anchorRect.top - maxHeight - 4)
+    : anchorRect.bottom + 4;
+  // Horizontal: 'left' anchors popover's LEFT edge to input.left;
+  // 'right' anchors popover's RIGHT edge to input.right (popover grows
+  // leftward). Clamp to keep at least an 8px viewport margin.
+  let left =
+    anchor.horizontal === 'left'
+      ? anchorRect.left
+      : anchorRect.right - POPOVER_W;
+  if (left + POPOVER_W > vw - 8) left = vw - POPOVER_W - 8;
+  if (left < 8) left = 8;
   return { top, left, width: POPOVER_W, maxHeight, centered: false };
 }
 
@@ -374,7 +392,20 @@ export function RefPicker({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
 
-  const pos = useMemo(() => computePos(anchorRect ?? null), [anchorRect]);
+  // Bump on window resize so `pos` recomputes for viewport changes.
+  const [resizeTick, setResizeTick] = useState(0);
+  useEffect(() => {
+    const onResize = () => setResizeTick((t) => t + 1);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const pos = useMemo(
+    () => computePos(anchorRect ?? null),
+    // resizeTick is intentional — its only purpose is to invalidate the memo.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [anchorRect, resizeTick],
+  );
   const chips = currentChips(value, multi);
 
   // Debounce
