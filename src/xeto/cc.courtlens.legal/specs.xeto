@@ -10,24 +10,44 @@
 // Amendment is an `Amendable` mixin (from proc.core) reused on Motion
 // and on every MotionAttachment subtype.
 //
+//
+// SLOT-OPTIONALITY POLICY (read before adding required slots)
+//
+// XETO validation runs against the `tags` JSON only — Prisma columns are
+// invisible to ns.fits(). So any slot whose value lives in a Prisma column
+// (name, displayName, caseNumber, path, etc.) MUST be optional here, or
+// every UI create/edit fails because the validator can't see the column.
+//
+// Required slots in these specs should be limited to:
+//   1. The entity's identity marker (case, motion, notice, person, ...)
+//   2. XETO Choice members where the Choice itself is load-bearing
+//      (e.g., MotionEvent.kind selects ONE of received|filed|signed|...)
+//
+// Everything else: optional. Real identity + non-null constraints live
+// in the Prisma schema columns.
+//
 
 //////////////////////////////////////////////////////////////////////////
 // Jurisdiction + Court
 //////////////////////////////////////////////////////////////////////////
 
 // Legal jurisdiction (Texas, California, Federal, ...).
+// `code` and `displayName` live in Prisma columns (`code`, `name`); optional
+// here per the slot-optionality policy.
 Jurisdiction: Dict {
   jurisdiction
-  code:        Str
-  displayName: Str
+  code:        Str?
+  displayName: Str?
   parent:      Ref?
 }
 
 // Court of record.
+// `displayName` (Prisma `name`) and `jurisdictionRef` (Prisma `jurisdictionId`)
+// are columns; optional per slot-optionality policy.
 Court: Dict {
   court
-  displayName:     Str
-  jurisdictionRef: Ref
+  displayName:     Str?
+  jurisdictionRef: Ref?
   county:          Str?
   district:        Str?
 }
@@ -39,9 +59,11 @@ Court: Dict {
 // Canonical immutable identity. Intrinsic markers describe WHO the
 // person is in the abstract (judge, lawyer, ...); contextual roles
 // (movant, respondent, ...) live on PersonRole ghost records.
+// `displayName`, `email`, `barNumber`, `jurisdictionRef` all live in
+// Prisma columns on Person — optional per slot-optionality policy.
 Person: Dict {
   person
-  displayName:      Str
+  displayName:      Str?
   email:            Str?
   barNumber:        Str?
   jurisdictionRef:  Ref?
@@ -60,10 +82,12 @@ Person: Dict {
 // immutability problem: Person records never mutate; role records
 // are created per binding and may carry contradictory roles across
 // scopes (Alper is movant in M1, respondent in M2).
+// `personRef` (Prisma `personId`) and `scopeRef` (Prisma `scopeId`) are
+// non-null columns; optional per slot-optionality policy.
 PersonRole: Dict {
   personRole
-  personRef:  Ref
-  scopeRef:   Ref
+  personRef:  Ref?
+  scopeRef:   Ref?
   // Contextual role markers — any combination may apply:
   movant:           Marker?
   respondent:       Marker?
@@ -228,15 +252,18 @@ MotionEvent: Dict {
 // motions across multiple cases; this record holds the shared facts
 // (judge, reporter, transcript, time, room) while each affected motion
 // gets its own MotionEvent{hearingHeld} pointing at this Hearing.
+// `judgeRef` (Prisma `judgeId`) and `scheduledFor` are columns; case/motion
+// join-table refs and the schedule may be filled incrementally. Optional per
+// slot-optionality policy.
 Hearing: Dict {
   hearing
   hybrid:            Marker?
-  caseRefs:          List <of:Ref>
-  motionRefs:        List <of:Ref>
-  judgeRef:          Ref
+  caseRefs:          List? <of:Ref>
+  motionRefs:        List? <of:Ref>
+  judgeRef:          Ref?
   courtReporterRef:  Ref?
   courtClerkRef:     Ref?
-  scheduledFor:      DateTime
+  scheduledFor:      DateTime?
   heldOn:            DateTime?
   durationMin:       Number?
   location:          Str?
