@@ -287,6 +287,7 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
       '',
   )
   if (!filter) {
+    console.log('[haystack/read] err=missing-filter')
     return errGrid('read requires a filter parameter')
   }
   const limitRaw = params.get('limit') ?? body?.limit
@@ -301,11 +302,14 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
   // DB type used by tableFromFilter. Intercept `filter=court` here so
   // /api/haystack/read?filter=court returns Court rows for the ref-picker.
   if (/(^|[^a-z_])court([^a-z_]|$)/i.test(filter)) {
-    return await opReadCourt(params, body, limit, idValue)
+    const grid = await opReadCourt(params, body, limit, idValue)
+    console.log(`[haystack/read] filter=${JSON.stringify(filter)} id=${idValue ?? '-'} table=Court rows=${countGridRows(grid)}`)
+    return grid
   }
 
   const table = tableFromFilter(filter)
   if (!table) {
+    console.log(`[haystack/read] err=no-marker filter=${JSON.stringify(filter)}`)
     return errGrid(
       'filter must contain an entity marker (motion, motionEvent, person, personRole, hearing, case, court)',
     )
@@ -347,7 +351,9 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
         case 'Case': rows = await findCase(filter, limit); break
         case 'ClerksRecord' as any: rows = await findClerksRecord(filter, limit); break
         case 'ReportersRecord' as any: rows = await findReportersRecord(filter, limit); break
-        default: return errGrid(`entity ${table} not implemented in v1`)
+        default:
+          console.log(`[haystack/read] err=not-implemented filter=${JSON.stringify(filter)} table=${String(table)}`)
+          return errGrid(`entity ${table} not implemented in v1`)
       }
     }
     // Inline the tags JSON + synthesize Haystack refs from FK columns onto
@@ -370,16 +376,62 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
       } else if (r?.tags && typeof r.tags === 'object') {
         Object.assign(out, r.tags)
       }
+      // Synthesize `dis` (Haystack display-string convention) so ref pickers
+      // have a single canonical label field to render. The pickers fall back to
+      // entity-specific fields (name/title/displayName), but `dis` lets them
+      // (and any future Haystack-aware client) treat all kinds uniformly.
+      if (out.dis == null) {
+        const d = pickDisplay(table, out)
+        if (d) out.dis = d
+      }
       return out
     })
-    return encodeGrid(inlined, { table: table as any })
+    const grid = encodeGrid(inlined, { table: table as any })
+    console.log(`[haystack/read] filter=${JSON.stringify(filter)} id=${idValue ?? '-'} table=${table} rows=${inlined.length}`)
+    return grid
   } catch (e: any) {
     const msg = e?.message ?? String(e)
+    console.log(`[haystack/read] err filter=${JSON.stringify(filter)} table=${String(table)} msg=${msg}`)
     // Missing table in v1 schema → clean err grid, not 500.
     if (/no such table|no such column/i.test(msg)) {
       return errGrid(`schema not yet migrated: ${msg}`)
     }
     return errGrid(`read failed: ${msg}`)
+  }
+}
+
+/**
+ * Pick a sensible Haystack `dis` (display string) for a row based on which
+ * table it came from. Order: explicit fields → fallback to id. Pickers can
+ * still read entity-specific columns directly; this is the universal label.
+ */
+function pickDisplay(table: string, r: any): string | null {
+  if (!r || typeof r !== 'object') return null
+  switch (table) {
+    case 'Case': return r.name || r.caseNumber || r.causeNo || r.id || null
+    case 'Motion': return r.title || r.motionType || r.id || null
+    case 'MotionEvent': return r.kind || r.label || r.id || null
+    case 'MotionAttachment': return r.label || r.attachmentKind || r.kind || r.id || null
+    case 'Person': return r.displayName || r.name || r.email || r.id || null
+    case 'PersonRole': return r.roleKind || r.dis || r.id || null
+    case 'Hearing': return r.hearingType || r.location || r.id || null
+    case 'Court': return r.name || r.shortName || r.id || null
+    case 'ClerksRecord': return `Vol ${r.volume ?? '?'}` || r.id || null
+    case 'ReportersRecord': return `Vol ${r.volume ?? '?'}` || r.id || null
+    default: return r.name || r.title || r.displayName || r.id || null
+  }
+}
+
+/**
+ * Count the rows in an encoded grid string. Cheap — parses once for the log
+ * line. Returns -1 on parse failure (so the log line stays readable).
+ */
+function countGridRows(gridJson: string): number {
+  try {
+    const g = JSON.parse(gridJson)
+    return Array.isArray(g?.rows) ? g.rows.length : 0
+  } catch {
+    return -1
   }
 }
 

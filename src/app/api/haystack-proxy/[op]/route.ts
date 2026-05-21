@@ -36,6 +36,8 @@ function isSameOrigin(req: NextRequest): boolean {
 
 async function handle(req: NextRequest, op: string): Promise<NextResponse> {
   if (!isSameOrigin(req)) {
+    const origin = req.headers.get('origin') ?? '-'
+    console.log(`[haystack-proxy/${op}] rejected cross-origin origin=${origin}`)
     return new NextResponse('Forbidden: haystack-proxy is same-origin only', { status: 403 })
   }
   return dispatchHaystack(req, op, { skipAuth: true })
