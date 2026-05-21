@@ -20,7 +20,32 @@ export type EntityKind =
   | 'motionAttachment'
   | 'hearing'
   | 'clerksRecord'
-  | 'reportersRecord';
+  | 'reportersRecord'
+  // Per-filing-type entity kinds (one per canonical filing type from
+  // src/services/filing-type-classifier.ts). Each extends MotionAttachment
+  // in the XETO spec; here we render type-specific marker/ref/value sets.
+  | 'notice'
+  | 'letter'
+  | 'order'
+  | 'proposedOrder'
+  | 'petition'
+  | 'affidavit'
+  | 'subpoena'
+  | 'brief'
+  | 'response'
+  | 'reply'
+  | 'judgment'
+  | 'decree'
+  | 'transcript'
+  | 'settlement'
+  | 'billOfReview'
+  | 'returnOfService'
+  | 'demandLetter'
+  | 'objection'
+  | 'request'
+  | 'supplement'
+  | 'designation'
+  | 'other';
 
 export interface TagSpec {
   name: string;
@@ -36,6 +61,35 @@ export interface TagSpec {
    *  via the standard site/equip/point idiom; they carry no information the
    *  user can act on, so the panel hides them. They stay in the record. */
   internal?: boolean;
+}
+
+/**
+ * Helper: the common MotionAttachment-derived tag set every per-filing-type
+ * entity inherits. Returns a fresh array each call (the kind marker is
+ * type-specific). Order is: markers → refs → values, matching the UI grouping.
+ */
+function attachmentBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
+  return [
+    // markers
+    { name: kindMarker, tier: 'marker', doc: kindDoc, valueType: 'bool' },
+    { name: 'attachment', tier: 'marker', doc: 'Marker: attachment to a Motion.', internal: true, valueType: 'bool' },
+    { name: 'appellate', tier: 'marker', doc: 'Filed at the appellate level.', valueType: 'bool' },
+    { name: 'urgent', tier: 'marker', doc: 'Flagged as urgent.', valueType: 'bool' },
+    { name: 'amended', tier: 'marker', doc: 'This filing amends a prior one.', valueType: 'bool' },
+    { name: 'confidential', tier: 'marker', doc: 'Confidential filing.', valueType: 'bool' },
+    { name: 'sealed', tier: 'marker', doc: 'Sealed by court order.', valueType: 'bool' },
+    // refs
+    { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
+    { name: 'motionRef', tier: 'ref', doc: 'Reference to the parent motion.', refTarget: 'motion' },
+    { name: 'fileRef', tier: 'ref', doc: 'Reference to the document (PDF).', refTarget: 'doc' },
+    { name: 'authoredBy', tier: 'ref', doc: 'Person who authored this filing.', refTarget: 'person' },
+    { name: 'amends', tier: 'ref', doc: 'Attachment this one amends.', refTarget: 'motionAttachment' },
+    { name: 'supersedes', tier: 'ref', doc: 'Attachment this one supersedes.', refTarget: 'motionAttachment' },
+    // values
+    { name: 'revisionSeq', tier: 'value', doc: 'Revision sequence number (1 for original).', valueType: 'number' },
+    { name: 'filedOn', tier: 'value', doc: 'Date filed with the court.', valueType: 'date' },
+    { name: 'receivedOn', tier: 'value', doc: 'Date received.', valueType: 'date' },
+  ];
 }
 
 /** Per-entity tag set. Order here is the order shown in the UI. */
@@ -159,9 +213,11 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // refs
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
     { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document.', refTarget: 'doc' },
+    { name: 'preparedBy', tier: 'ref', doc: 'Court clerk who prepared this volume.', refTarget: 'person' },
     // values
     { name: 'volume', tier: 'value', doc: 'Volume number of the clerk’s record.', valueType: 'number' },
     { name: 'filedOn', tier: 'value', doc: 'Date the clerk’s record was filed.', valueType: 'date' },
+    { name: 'preparedOn', tier: 'value', doc: 'Date prepared by the clerk.', valueType: 'date' },
   ],
 
   reportersRecord: [
@@ -176,6 +232,145 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // values
     { name: 'volume', tier: 'value', doc: 'Volume number of the reporter’s record.', valueType: 'number' },
     { name: 'hearingDate', tier: 'value', doc: 'Date of the hearing/proceeding transcribed.', valueType: 'date' },
+  ],
+
+  notice: [
+    ...attachmentBaseSpec('notice', 'Marker: this record is a Notice filing.'),
+    { name: 'from', tier: 'ref', doc: 'Sender of the notice.', refTarget: 'person' },
+    { name: 'to', tier: 'refs', doc: 'Recipients of the notice.', refTarget: 'person' },
+    { name: 'noticeType', tier: 'value', doc: 'Kind of notice (e.g. "hearing", "appearance").', valueType: 'text' },
+    { name: 'sentOn', tier: 'value', doc: 'Date the notice was sent.', valueType: 'date' },
+  ],
+
+  letter: [
+    ...attachmentBaseSpec('letter', 'Marker: this record is a Letter.'),
+    { name: 'from', tier: 'ref', doc: 'Author of the letter.', refTarget: 'person' },
+    { name: 'to', tier: 'refs', doc: 'Recipients of the letter.', refTarget: 'person' },
+    { name: 'sentOn', tier: 'value', doc: 'Date the letter was sent.', valueType: 'date' },
+    { name: 'subject', tier: 'value', doc: 'Subject line / topic.', valueType: 'text' },
+  ],
+
+  order: [
+    ...attachmentBaseSpec('order', 'Marker: this record is a court Order.'),
+    { name: 'signedBy', tier: 'ref', doc: 'Judge who signed the order.', refTarget: 'person' },
+    { name: 'orderType', tier: 'value', doc: 'Type of order (e.g. "scheduling", "protective").', valueType: 'text' },
+    { name: 'signedOn', tier: 'value', doc: 'Date the order was signed.', valueType: 'date' },
+  ],
+
+  proposedOrder: [
+    ...attachmentBaseSpec('proposedOrder', 'Marker: this record is a Proposed Order.'),
+    { name: 'signedBy', tier: 'ref', doc: 'Judge who would sign the order if granted.', refTarget: 'person' },
+    { name: 'orderType', tier: 'value', doc: 'Type of order proposed.', valueType: 'text' },
+    { name: 'signedOn', tier: 'value', doc: 'Date the order was signed (if granted).', valueType: 'date' },
+  ],
+
+  petition: [
+    ...attachmentBaseSpec('petition', 'Marker: this record is a Petition.'),
+    { name: 'petitionType', tier: 'value', doc: 'Kind of petition (e.g. "divorce", "habeas").', valueType: 'text' },
+  ],
+
+  affidavit: [
+    ...attachmentBaseSpec('affidavit', 'Marker: this record is an Affidavit.'),
+    { name: 'affiant', tier: 'ref', doc: 'Person making the sworn statement.', refTarget: 'person' },
+    { name: 'notarizedBy', tier: 'ref', doc: 'Notary who acknowledged the affidavit.', refTarget: 'person' },
+    { name: 'swornOn', tier: 'value', doc: 'Date the affidavit was sworn.', valueType: 'date' },
+  ],
+
+  subpoena: [
+    ...attachmentBaseSpec('subpoena', 'Marker: this record is a Subpoena.'),
+    { name: 'servedOn', tier: 'ref', doc: 'Person served with the subpoena.', refTarget: 'person' },
+    { name: 'subpoenaType', tier: 'value', doc: 'Kind of subpoena (e.g. "duces tecum", "ad testificandum").', valueType: 'text' },
+    { name: 'servedAt', tier: 'value', doc: 'Location where served.', valueType: 'text' },
+    { name: 'returnDate', tier: 'value', doc: 'Date by which the subpoena must be answered.', valueType: 'date' },
+  ],
+
+  brief: [
+    ...attachmentBaseSpec('brief', 'Marker: this record is a Brief.'),
+    { name: 'briefType', tier: 'value', doc: 'Kind of brief (e.g. "opening", "reply", "amicus").', valueType: 'text' },
+    { name: 'wordCount', tier: 'value', doc: 'Word count (for length-limit compliance).', valueType: 'number' },
+  ],
+
+  response: [
+    ...attachmentBaseSpec('response', 'Marker: this record is a Response filing.'),
+    { name: 'respondingTo', tier: 'ref', doc: 'The motion/filing this responds to.', refTarget: 'motion' },
+  ],
+
+  reply: [
+    ...attachmentBaseSpec('reply', 'Marker: this record is a Reply filing.'),
+    { name: 'replyingTo', tier: 'ref', doc: 'The response this replies to.', refTarget: 'motionAttachment' },
+  ],
+
+  judgment: [
+    ...attachmentBaseSpec('judgment', 'Marker: this record is a Judgment.'),
+    { name: 'signedBy', tier: 'ref', doc: 'Judge who signed the judgment.', refTarget: 'person' },
+    { name: 'judgmentType', tier: 'value', doc: 'Kind of judgment (e.g. "default", "summary", "final").', valueType: 'text' },
+    { name: 'signedOn', tier: 'value', doc: 'Date the judgment was signed.', valueType: 'date' },
+  ],
+
+  decree: [
+    ...attachmentBaseSpec('decree', 'Marker: this record is a Decree.'),
+    { name: 'signedBy', tier: 'ref', doc: 'Judge who signed the decree.', refTarget: 'person' },
+    { name: 'decreeType', tier: 'value', doc: 'Kind of decree (e.g. "divorce", "adoption").', valueType: 'text' },
+    { name: 'signedOn', tier: 'value', doc: 'Date the decree was signed.', valueType: 'date' },
+  ],
+
+  transcript: [
+    ...attachmentBaseSpec('transcript', 'Marker: this record is a Transcript.'),
+    { name: 'reporter', tier: 'ref', doc: 'Court reporter who produced the transcript.', refTarget: 'person' },
+    { name: 'hearingDate', tier: 'value', doc: 'Date of the proceeding transcribed.', valueType: 'date' },
+    { name: 'pageCount', tier: 'value', doc: 'Number of pages in the transcript.', valueType: 'number' },
+  ],
+
+  settlement: [
+    ...attachmentBaseSpec('settlement', 'Marker: this record is a Settlement.'),
+    { name: 'parties', tier: 'refs', doc: 'Parties to the settlement.', refTarget: 'person' },
+    { name: 'settledOn', tier: 'value', doc: 'Date the settlement was reached.', valueType: 'date' },
+  ],
+
+  billOfReview: [
+    ...attachmentBaseSpec('billOfReview', 'Marker: this record is a Bill of Review.'),
+  ],
+
+  returnOfService: [
+    ...attachmentBaseSpec('returnOfService', 'Marker: this record is a Return of Service.'),
+    { name: 'servedOn', tier: 'ref', doc: 'Person served.', refTarget: 'person' },
+    { name: 'servedBy', tier: 'ref', doc: 'Process server.', refTarget: 'person' },
+    { name: 'servedAt', tier: 'value', doc: 'Location where service was effected.', valueType: 'text' },
+    { name: 'servedMethod', tier: 'value', doc: 'Method of service (personal, substituted, mail, etc.).', valueType: 'text' },
+  ],
+
+  demandLetter: [
+    ...attachmentBaseSpec('demandLetter', 'Marker: this record is a Demand Letter.'),
+    { name: 'from', tier: 'ref', doc: 'Sender of the demand.', refTarget: 'person' },
+    { name: 'to', tier: 'refs', doc: 'Recipients of the demand.', refTarget: 'person' },
+    { name: 'sentOn', tier: 'value', doc: 'Date the demand letter was sent.', valueType: 'date' },
+    { name: 'demandAmount', tier: 'value', doc: 'Amount demanded (in dollars).', valueType: 'number' },
+  ],
+
+  objection: [
+    ...attachmentBaseSpec('objection', 'Marker: this record is an Objection.'),
+    { name: 'objectionTo', tier: 'ref', doc: 'The filing being objected to.', refTarget: 'motionAttachment' },
+    { name: 'basis', tier: 'value', doc: 'Legal basis for the objection.', valueType: 'text' },
+  ],
+
+  request: [
+    ...attachmentBaseSpec('request', 'Marker: this record is a Request (e.g. discovery, admissions).'),
+    { name: 'requestType', tier: 'value', doc: 'Kind of request (e.g. "admissions", "production", "interrogatories").', valueType: 'text' },
+  ],
+
+  supplement: [
+    ...attachmentBaseSpec('supplement', 'Marker: this record is a Supplement to a prior filing.'),
+    { name: 'supplements', tier: 'ref', doc: 'The filing this supplements.', refTarget: 'motionAttachment' },
+  ],
+
+  designation: [
+    ...attachmentBaseSpec('designation', 'Marker: this record is a Designation (e.g. of expert, of record).'),
+    { name: 'designatedRef', tier: 'ref', doc: 'The person/record being designated.', refTarget: 'person' },
+    { name: 'designationOf', tier: 'value', doc: 'What is being designated (e.g. "expert witness", "record on appeal").', valueType: 'text' },
+  ],
+
+  other: [
+    ...attachmentBaseSpec('other', 'Marker: this filing did not match a known type.'),
   ],
 };
 

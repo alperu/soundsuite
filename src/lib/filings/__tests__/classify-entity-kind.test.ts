@@ -1,7 +1,7 @@
 import { classifyFilingEntityKind } from '../classify-entity-kind';
 
 describe('classifyFilingEntityKind', () => {
-  it('maps Motion to motion entity', () => {
+  it('maps Motion to motion entity (no hint)', () => {
     expect(classifyFilingEntityKind('Motion')).toEqual({ entityKind: 'motion' });
   });
 
@@ -17,51 +17,49 @@ describe('classifyFilingEntityKind', () => {
     expect(classifyFilingEntityKind('RR')).toEqual({ entityKind: 'reportersRecord' });
   });
 
-  it('maps Brief to motionAttachment with brief hint', () => {
-    expect(classifyFilingEntityKind('Brief')).toEqual({
-      entityKind: 'motionAttachment',
-      attachmentKindHint: 'brief',
+  // Per-filing-type entity kinds. Each canonical filing type now maps to its
+  // own EntityKind (no longer collapsed to `motionAttachment`).
+  it.each([
+    ['Notice', 'notice', 'notice'],
+    ['Letter', 'letter', 'letter'],
+    ['Order', 'order', 'order'],
+    ['Petition', 'petition', 'petition'],
+    ['Affidavit', 'affidavit', 'affidavit'],
+    ['Subpoena', 'subpoena', 'subpoena'],
+    ['Brief', 'brief', 'brief'],
+    ['Response', 'response', 'response'],
+    ['Reply', 'reply', 'reply'],
+    ['Judgment', 'judgment', 'judgment'],
+    ['Decree', 'decree', 'decree'],
+    ['Transcript', 'transcript', 'transcript'],
+    ['Settlement', 'settlement', 'settlement'],
+    ['Bill of Review', 'billOfReview', 'billOfReview'],
+    ['Return of Service', 'returnOfService', 'returnOfService'],
+    ['Demand Letter', 'demandLetter', 'demandLetter'],
+    ['Objection', 'objection', 'objection'],
+    ['Request', 'request', 'request'],
+    ['Supplement', 'supplement', 'supplement'],
+    ['Designation', 'designation', 'designation'],
+    ['Other', 'other', 'other'],
+  ])('maps %s to entityKind=%s with hint=%s', (label, kind, hint) => {
+    expect(classifyFilingEntityKind(label)).toEqual({
+      entityKind: kind,
+      attachmentKindHint: hint,
     });
   });
 
-  it('maps Response and Reply both to motionAttachment + response hint', () => {
-    expect(classifyFilingEntityKind('Response')).toEqual({
-      entityKind: 'motionAttachment',
-      attachmentKindHint: 'response',
+  it('falls through to "other" for unknown / null / empty input', () => {
+    expect(classifyFilingEntityKind(null)).toEqual({
+      entityKind: 'other',
+      attachmentKindHint: 'other',
     });
-    expect(classifyFilingEntityKind('Reply')).toEqual({
-      entityKind: 'motionAttachment',
-      attachmentKindHint: 'response',
+    expect(classifyFilingEntityKind('')).toEqual({
+      entityKind: 'other',
+      attachmentKindHint: 'other',
     });
-  });
-
-  it('maps Notice / Petition / Affidavit / Subpoena / Order / Judgment / Decree to motionAttachment with kind hint', () => {
-    expect(classifyFilingEntityKind('Notice').attachmentKindHint).toBe('notice');
-    expect(classifyFilingEntityKind('Petition').attachmentKindHint).toBe('petition');
-    expect(classifyFilingEntityKind('Affidavit').attachmentKindHint).toBe('affidavit');
-    expect(classifyFilingEntityKind('Subpoena').attachmentKindHint).toBe('subpoena');
-    expect(classifyFilingEntityKind('Order').attachmentKindHint).toBe('order');
-    expect(classifyFilingEntityKind('Judgment').attachmentKindHint).toBe('judgment');
-    expect(classifyFilingEntityKind('Decree').attachmentKindHint).toBe('judgment');
-  });
-
-  it('maps Bill of Review / Demand Letter / Settlement / Transcript', () => {
-    expect(classifyFilingEntityKind('Bill of Review').attachmentKindHint).toBe('billOfReview');
-    expect(classifyFilingEntityKind('Demand Letter').attachmentKindHint).toBe('email');
-    expect(classifyFilingEntityKind('Settlement').attachmentKindHint).toBe('settlement');
-    expect(classifyFilingEntityKind('Transcript').attachmentKindHint).toBe('transcript');
-  });
-
-  it('maps Request to rfa hint and Supplement/Objection/Designation to supportingDoc', () => {
-    expect(classifyFilingEntityKind('Request').attachmentKindHint).toBe('rfa');
-    expect(classifyFilingEntityKind('Supplement').attachmentKindHint).toBe('supportingDoc');
-    expect(classifyFilingEntityKind('Objection').attachmentKindHint).toBe('supportingDoc');
-    expect(classifyFilingEntityKind('Designation').attachmentKindHint).toBe('supportingDoc');
-  });
-
-  it('falls through to motionAttachment with no hint for unknown / null input', () => {
-    expect(classifyFilingEntityKind('Other')).toEqual({ entityKind: 'motionAttachment' });
-    expect(classifyFilingEntityKind(null)).toEqual({ entityKind: 'motionAttachment' });
-    expect(classifyFilingEntityKind('')).toEqual({ entityKind: 'motionAttachment' });
+    expect(classifyFilingEntityKind('Some Made-Up Type')).toEqual({
+      entityKind: 'other',
+      attachmentKindHint: 'other',
+    });
   });
 });

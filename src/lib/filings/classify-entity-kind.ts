@@ -1,20 +1,13 @@
 /**
- * Map a Filing's classified `filingType` (one of the 21 canonical strings from
- * `src/services/filing-type-classifier.ts`) to the tag-panel `EntityKind` that
- * controls which tag spec the panel renders.
+ * Map a Filing's classified `filingType` (one of the 24 canonical strings
+ * from `src/services/filing-type-classifier.ts`) to the tag-panel
+ * `EntityKind` that controls which tag spec the panel renders.
  *
- * The mapping:
- *   - Motion           → `motion`
- *   - Clerk's Record   → `clerksRecord`
- *   - Reporter's Record→ `reportersRecord`
- *   - everything else  → `motionAttachment` (with an `attachmentKindHint`
- *                        suggesting which MotionAttachment marker would apply
- *                        if/when a MotionAttachment row exists).
- *
- * v1 note: the hint is informational only — the actual MotionAttachment row
- * isn't always present at the time the page renders; we surface the EntityKind
- * so the tag panel can show the right marker set, and the hint is exposed for
- * future seeding/UI use.
+ * Each of the 24 filing types now has its own EntityKind so the tag panel
+ * surfaces the right per-type markers/refs/values. The `attachmentKindHint`
+ * stays in the return shape for downstream consumers; it mirrors the entity
+ * kind for back-compat (and falls back to a sensible value for the special
+ * Motion / Clerk's Record / Reporter's Record cases).
  */
 import type { EntityKind } from '@/components/case/tag-spec';
 
@@ -35,17 +28,27 @@ export type AttachmentKindHint =
   | 'notice'
   | 'rfa'
   | 'billOfReview'
-  | 'petition';
+  | 'petition'
+  | 'letter'
+  | 'decree'
+  | 'reply'
+  | 'returnOfService'
+  | 'demandLetter'
+  | 'objection'
+  | 'request'
+  | 'supplement'
+  | 'designation'
+  | 'other';
 
 export interface FilingEntityClassification {
   entityKind: EntityKind;
-  /** Optional MotionAttachment.attachmentKind hint when entityKind === 'motionAttachment'. */
+  /** Optional MotionAttachment.attachmentKind hint. For backwards compat
+   *  with downstream consumers — defaults to the camelCase of the kind. */
   attachmentKindHint?: AttachmentKindHint;
 }
 
 /**
- * Best-guess mapping from Filing.filingType → EntityKind (+ optional
- * attachmentKind hint for motionAttachment cases). Match is
+ * Best-guess mapping from Filing.filingType → EntityKind. Match is
  * case-insensitive and tolerant of apostrophe variants.
  */
 export function classifyFilingEntityKind(
@@ -53,20 +56,28 @@ export function classifyFilingEntityKind(
 ): FilingEntityClassification {
   const norm = normalize(filingType);
 
-  // Case-level records get their own entity kinds.
-  if (norm === "clerks record" || norm === 'clerksrecord' || norm === 'cr') {
+  // Case-level records get their own entity kinds and no attachment hint
+  // (they aren't MotionAttachment rows).
+  if (norm === 'clerks record' || norm === 'clerksrecord' || norm === 'cr') {
     return { entityKind: 'clerksRecord' };
   }
-  if (norm === "reporters record" || norm === 'reportersrecord' || norm === 'rr') {
+  if (norm === 'reporters record' || norm === 'reportersrecord' || norm === 'rr') {
     return { entityKind: 'reportersRecord' };
   }
 
   // Motion is its own first-class entity.
   if (norm === 'motion') return { entityKind: 'motion' };
 
-  // Everything else → motionAttachment, with a hint of which marker applies.
-  const hint = ATTACHMENT_KIND_HINTS[norm];
-  return { entityKind: 'motionAttachment', attachmentKindHint: hint };
+  const kind = FILING_TYPE_TO_KIND[norm];
+  if (!kind) {
+    // Unknown / empty input → fall through to 'other'.
+    return { entityKind: 'other', attachmentKindHint: 'other' };
+  }
+
+  const hint = ATTACHMENT_KIND_HINTS[kind];
+  return hint
+    ? { entityKind: kind, attachmentKindHint: hint }
+    : { entityKind: kind };
 }
 
 /** Lowercase + strip punctuation + collapse whitespace. */
@@ -80,29 +91,61 @@ function normalize(s: string | null | undefined): string {
 }
 
 /**
- * Mapping from a normalized filingType string → MotionAttachment.attachmentKind
- * marker. Any filingType that isn't Motion / Clerk's Record / Reporter's Record
- * routes here; unknown strings fall through to `motionAttachment` with no hint.
+ * Normalized filing-type label → EntityKind. Covers all 24 canonical
+ * filing types from filing-type-classifier.ts (minus Motion / Clerk's
+ * Record / Reporter's Record which are special-cased above).
  */
-const ATTACHMENT_KIND_HINTS: Record<string, AttachmentKindHint> = {
-  brief: 'brief',
-  response: 'response',
-  reply: 'response',
+const FILING_TYPE_TO_KIND: Record<string, EntityKind> = {
   notice: 'notice',
+  letter: 'letter',
+  order: 'order',
   petition: 'petition',
   affidavit: 'affidavit',
   subpoena: 'subpoena',
+  brief: 'brief',
+  response: 'response',
+  reply: 'reply',
   judgment: 'judgment',
-  decree: 'judgment',
-  order: 'order',
+  decree: 'decree',
+  transcript: 'transcript',
   settlement: 'settlement',
   'bill of review': 'billOfReview',
-  'return of service': 'supportingDoc',
-  'demand letter': 'email',
-  letter: 'email',
-  objection: 'supportingDoc',
-  request: 'rfa',
-  supplement: 'supportingDoc',
-  designation: 'supportingDoc',
+  'return of service': 'returnOfService',
+  'demand letter': 'demandLetter',
+  objection: 'objection',
+  request: 'request',
+  supplement: 'supplement',
+  designation: 'designation',
+  other: 'other',
+};
+
+/**
+ * Per-entity-kind hint for downstream consumers that still want a
+ * MotionAttachment.attachmentKind-style label. Most kinds map identity-style
+ * (brief → brief); a few use the legacy supportingDoc / email / rfa labels
+ * that the original MotionAttachment.attachmentKind enum used.
+ */
+const ATTACHMENT_KIND_HINTS: Partial<Record<EntityKind, AttachmentKindHint>> = {
+  notice: 'notice',
+  letter: 'letter',
+  order: 'order',
+  proposedOrder: 'proposedOrder',
+  petition: 'petition',
+  affidavit: 'affidavit',
+  subpoena: 'subpoena',
+  brief: 'brief',
+  response: 'response',
+  reply: 'reply',
+  judgment: 'judgment',
+  decree: 'decree',
   transcript: 'transcript',
+  settlement: 'settlement',
+  billOfReview: 'billOfReview',
+  returnOfService: 'returnOfService',
+  demandLetter: 'demandLetter',
+  objection: 'objection',
+  request: 'request',
+  supplement: 'supplement',
+  designation: 'designation',
+  other: 'other',
 };
