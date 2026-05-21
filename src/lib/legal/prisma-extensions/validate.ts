@@ -84,9 +84,28 @@ export const xetoValidate = Prisma.defineExtension({
           if (!tagDict) continue
           const result = await validateTags(model, tagDict)
           if (!result.ok) {
-            throw new Error(
+            // Log the rejected dict + structured errors so the user can
+            // tell WHAT failed and WHY without re-deriving it from a
+            // toast string. Goes to logs/dashboard.log; surfaces in the
+            // dev-server stdout too.
+            try {
+              // eslint-disable-next-line no-console
+              console.error(
+                `[xeto-validate] REJECTED ${model}.${operation}\n` +
+                  `  errors: ${result.errors.join(' | ')}\n` +
+                  `  dict:   ${JSON.stringify(tagDict, null, 2).slice(0, 2000)}`,
+              )
+            } catch {
+              /* never let logging itself throw */
+            }
+            const err = new Error(
               `XETO validation failed for ${model}.${operation}: ${result.errors.join('; ')}`,
             )
+            // Stash the structured errors on the Error so the API route
+            // can surface them to the toast/UI verbatim.
+            ;(err as Error & { xetoErrors?: string[]; xetoDict?: unknown }).xetoErrors = result.errors
+            ;(err as Error & { xetoErrors?: string[]; xetoDict?: unknown }).xetoDict = tagDict
+            throw err
           }
         }
 

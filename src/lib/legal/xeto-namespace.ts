@@ -361,6 +361,28 @@ export async function validateTags(
       // ns.validate() throws unless inside an XetoContext; the boolean
       // from fits() is the load-bearing check.
     }
+
+    // Synthesize a human-readable diff between what's in the dict and
+    // what the spec declares. The Haxall `validate` output is terse;
+    // augmenting it with slot-by-slot info makes the error actionable
+    // ("missing required: causeNo" instead of just "tags do not fit").
+    try {
+      const want = extractSlotShape(boot, targetSpec)
+      const dictKeys = Object.keys(
+        (tagDict && typeof tagDict === 'object' ? tagDict : {}) as Record<string, unknown>,
+      )
+      const missingRequired = want.required.filter(k => !dictKeys.includes(k))
+      const unknown = dictKeys.filter(k => !want.known.has(k) && !INFRA_KEYS.has(k))
+      if (missingRequired.length) {
+        errors.push(`missing required: ${missingRequired.join(', ')}`)
+      }
+      if (unknown.length) {
+        errors.push(`unknown for ${qname}: ${unknown.join(', ')}`)
+      }
+    } catch {
+      /* best-effort enrichment only */
+    }
+
     return { ok: false, errors }
   } catch (e) {
     // Haxall internal error (NullErr, ArgErr, etc.) — pass through the
@@ -368,6 +390,50 @@ export async function validateTags(
     logBootErrorOnce(model, e)
     return { ok: true, errors: [] }
   }
+}
+
+/**
+ * Tag keys that aren't part of the spec slot set but are universally
+ * tolerated (id, mod, dis, …). Don't flag them as "unknown for spec".
+ */
+const INFRA_KEYS = new Set([
+  'id', 'mod', 'dis', 'navName', 'doc',
+  // markers we hide from UI but routinely accept on records (§5):
+  'site', 'equip', 'point', 'attachment', 'motionEvent', 'personRole',
+])
+
+/**
+ * Walk a XETO Spec's slot definitions and return `{ known, required }`.
+ * Helper for synthesizing actionable error messages.
+ */
+function extractSlotShape(boot: XetoBoot, spec: unknown): {
+  known: Set<string>
+  required: string[]
+} {
+  const known = new Set<string>()
+  const required: string[] = []
+  try {
+    const slots = (spec as { slots?: unknown }).slots
+    if (!slots) return { known, required }
+    // ns.slots returns a sys::Map keyed by slot name (string) → Spec.
+    // Fantom Maps expose .each((val, key) => ...) — use it if present.
+    const each = (slots as { each?: (cb: (v: unknown, k: string) => void) => void }).each
+    if (typeof each === 'function') {
+      each.call(slots, (slotSpec: unknown, name: string) => {
+        known.add(name)
+        // A slot is "required" if it isn't tagged as `maybe` (optional)
+        // and has no default. Best-effort detection.
+        const meta = (slotSpec as { meta?: unknown }).meta as
+          | { has?: (k: string) => boolean }
+          | undefined
+        const isOptional = !!(meta && meta.has && (meta.has('maybe') || meta.has('default')))
+        if (!isOptional) required.push(name)
+      })
+    }
+  } catch {
+    /* best-effort */
+  }
+  return { known, required }
 }
 
 const SPEC_MISS_LOGGED = new Set<string>()
