@@ -206,30 +206,197 @@ Hearing: Dict {
 // MotionAttachment — non-event documents attached to a motion
 //////////////////////////////////////////////////////////////////////////
 
-// Abstract: anything attached to a motion that isn't a lifecycle event.
-// Every concrete subtype intersects Amendable from proc.core — proposed
-// orders, briefs, responses, exhibits all have amendment chains.
+// Abstract: anything attached to a motion or case as a discrete
+// document/event-of-record. Subtypes carry their own kind marker
+// (notice, letter, brief, ...). All slots optional — real entity
+// identity lives in Prisma columns; tags JSON carries the open-ended
+// marker set users edit incrementally via the panel.
+//
+// MotionAttachment intersects Amendable so any subtype can chain
+// (amended brief, second amended proposed order, ...). For naturally
+// final docs (Order signed, Judgment, Decree, Transcript) the inherited
+// `amends` / `supersedes` slots are simply left empty.
 MotionAttachment: Amendable <abstract> {
   attachment
-  motionRef:   Ref
-  caseRef:     Ref
-  fileRef:     Ref
-  authoredBy:  Ref?
+  motionRef:       Ref?
+  caseRef:         Ref?
+  fileRef:         Ref?
+  authoredBy:      Ref?
+  filedOn:         DateTime?
+  receivedOn:      DateTime?
+  attachmentKind:  Str?
 }
 
-ProposedOrder: MotionAttachment { proposedOrder }
-Brief:         MotionAttachment { brief }
-Response:      MotionAttachment { response }
-Exhibit:       MotionAttachment {
+//////////////////////////////////////////////////////////////////////////
+// Filing-type subtypes — one per Filing.filingType label
+// (see src/services/filing-type-classifier.ts for the canonical 24).
+// Each carries its kind marker as the only required slot; everything
+// else is optional so the tag panel can edit partial dicts.
+//////////////////////////////////////////////////////////////////////////
+
+Notice: MotionAttachment {
+  notice
+  noticeType:  Str?
+}
+
+Letter: MotionAttachment {
+  letter
+  from:     Ref?
+  to:       List? <of:Ref>
+  sentOn:   DateTime?
+  subject:  Str?
+}
+
+Order: MotionAttachment {
+  order
+  orderType:  Str?
+  signedBy:   Ref?
+  signedOn:   DateTime?
+}
+
+ProposedOrder: Order {
+  proposedOrder
+}
+
+Petition: MotionAttachment {
+  petition
+  petitionType:  Str?
+}
+
+Affidavit: MotionAttachment {
+  affidavit
+  affiant:      Ref?
+  swornOn:      DateTime?
+  notarizedBy:  Ref?
+}
+
+Subpoena: MotionAttachment {
+  subpoena
+  subpoenaType:  Str?
+  servedOn:      Ref?
+  servedAt:      DateTime?
+  returnDate:    DateTime?
+}
+
+Brief: MotionAttachment {
+  brief
+  briefType:  Str?
+  wordCount:  Number?
+}
+
+Response: MotionAttachment {
+  response
+  respondingTo:  Ref?
+}
+
+Reply: MotionAttachment {
+  reply
+  replyingTo:  Ref?
+}
+
+Judgment: MotionAttachment {
+  judgment
+  judgmentType:  Str?
+  signedBy:      Ref?
+  signedOn:      DateTime?
+}
+
+Decree: MotionAttachment {
+  decree
+  decreeType:  Str?
+  signedBy:    Ref?
+  signedOn:    DateTime?
+}
+
+ClerksRecord: MotionAttachment {
+  clerksRecord
+  volume:      Number?
+  preparedBy:  Ref?
+  preparedOn:  DateTime?
+}
+
+ReportersRecord: MotionAttachment {
+  reportersRecord
+  volume:       Number?
+  reporter:     Ref?
+  hearingDate:  DateTime?
+}
+
+Transcript: MotionAttachment {
+  transcript
+  reporter:     Ref?
+  hearingDate:  DateTime?
+  pageCount:    Number?
+}
+
+Settlement: MotionAttachment {
+  settlement
+  settledOn:  DateTime?
+  parties:    List? <of:Ref>
+}
+
+BillOfReview: MotionAttachment {
+  billOfReview
+}
+
+ReturnOfService: MotionAttachment {
+  returnOfService
+  servedOn:      Ref?
+  servedAt:      DateTime?
+  servedBy:      Ref?
+  servedMethod:  Str?
+}
+
+DemandLetter: MotionAttachment {
+  demandLetter
+  from:          Ref?
+  to:            List? <of:Ref>
+  sentOn:        DateTime?
+  demandAmount:  Number?
+}
+
+Objection: MotionAttachment {
+  objection
+  objectionTo:  Ref?
+  basis:        Str?
+}
+
+Request: MotionAttachment {
+  request
+  requestType:  Str?
+}
+
+Supplement: MotionAttachment {
+  supplement
+  supplements:  Ref?
+}
+
+Designation: MotionAttachment {
+  designation
+  designationOf:  Str?
+  designatedRef:  Ref?
+}
+
+Other: MotionAttachment {
+  other
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Legacy attachment subtypes (kept for back-compat with v1 ingestion).
+//////////////////////////////////////////////////////////////////////////
+
+Exhibit: MotionAttachment {
   exhibit
   label:  Str?
 }
+
 Email: MotionAttachment {
   email
-  fromRef:    Ref?
-  toRefs:     List? <of:Ref>
-  subject:    Str?
-  sentOn:     DateTime?
+  fromRef:  Ref?
+  toRefs:   List? <of:Ref>
+  subject:  Str?
+  sentOn:   DateTime?
 }
+
 Evidence:      MotionAttachment { evidence }
 SupportingDoc: MotionAttachment { supportingDoc }
