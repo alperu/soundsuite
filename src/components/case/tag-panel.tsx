@@ -124,9 +124,11 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
   } | null>(null);
 
   const openInfo = useCallback((spec: TagSpec, anchor: DOMRect | null) => {
-    setInfoFor((prev) =>
-      prev && prev.spec.name === spec.name ? null : { spec, anchor },
-    );
+    // Note on toggling: the document `mousedown` handler in TagInfoPopover
+    // fires before this `click`, so re-clicking the same "?" closes and
+    // then reopens (rather than toggling off). Net effect is "always
+    // reopen", which is the desired UX for swapping between tags.
+    setInfoFor({ spec, anchor });
   }, []);
 
   // Local-stub specs for current entity kind
@@ -153,6 +155,13 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
       .catch(() => { /* keep stub */ });
     return () => { cancelled = true; };
   }, []);
+
+  // Clear any open tag-info popover when the selection changes — otherwise
+  // the popover lingers anchored to coordinates that no longer point at a
+  // "?" icon (different entity → different tag set).
+  useEffect(() => {
+    setInfoFor(null);
+  }, [entityKind, entityId]);
 
   // Fetch entity record when selection changes.
   useEffect(() => {
