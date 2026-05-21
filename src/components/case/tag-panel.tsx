@@ -17,6 +17,7 @@ import {
   gridHasError,
 } from '@/lib/haystack-client';
 import { RefPicker, type PersonMarker, type RefTarget } from './ref-picker';
+import { MarkerPicker } from './marker-picker';
 
 interface Props {
   entityKind: EntityKind | null;
@@ -226,17 +227,48 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
             {/* Markers */}
             {grouped.marker.length > 0 && (
               <Section title={TIER_LABEL.marker}>
-                <div className="flex flex-wrap gap-1.5">
-                  {grouped.marker.map(spec => (
-                    <MarkerChip
-                      key={spec.name}
-                      spec={spec}
-                      value={Boolean(editMode ? draft[spec.name] : record?.[spec.name])}
-                      editMode={editMode}
-                      onChange={(v) => setDraft(prev => ({ ...prev, [spec.name]: v }))}
+                {editMode ? (
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap gap-1.5">
+                      {grouped.marker
+                        .filter(spec => Boolean(draft[spec.name]))
+                        .map(spec => (
+                          <RemovableMarkerChip
+                            key={spec.name}
+                            spec={spec}
+                            onRemove={() =>
+                              setDraft(prev => ({ ...prev, [spec.name]: false }))
+                            }
+                          />
+                        ))}
+                    </div>
+                    <MarkerPicker
+                      available={grouped.marker}
+                      current={
+                        new Set(
+                          grouped.marker
+                            .filter(s => Boolean(draft[s.name]))
+                            .map(s => s.name),
+                        )
+                      }
+                      onAdd={(name) =>
+                        setDraft(prev => ({ ...prev, [name]: true }))
+                      }
                     />
-                  ))}
-                </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5">
+                    {grouped.marker.map(spec => (
+                      <MarkerChip
+                        key={spec.name}
+                        spec={spec}
+                        value={Boolean(record?.[spec.name])}
+                        editMode={false}
+                        onChange={(v) => setDraft(prev => ({ ...prev, [spec.name]: v }))}
+                      />
+                    ))}
+                  </div>
+                )}
               </Section>
             )}
 
@@ -429,6 +461,29 @@ function MarkerChip({
     >
       {spec.name}
       <HelpDot doc={spec.doc} />
+    </span>
+  );
+}
+
+function RemovableMarkerChip({
+  spec, onRemove,
+}: { spec: TagSpec; onRemove: () => void }) {
+  return (
+    <span
+      title={spec.doc}
+      className="inline-flex items-center gap-1 pl-1.5 pr-0.5 py-0.5 rounded-full text-[11px] bg-emerald-100 text-emerald-800 border border-emerald-200"
+    >
+      {spec.name}
+      <button
+        type="button"
+        onClick={onRemove}
+        title={`Remove ${spec.name}`}
+        className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full text-emerald-700 hover:bg-emerald-200 transition-colors"
+      >
+        <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
     </span>
   );
 }
