@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { formatFilingLabel } from '@/lib/filings/format-filing-label';
+import { SelectedEntityProvider } from '@/components/case/selected-entity-context';
 
 const FILING_TYPES = [
   'Motion', 'Notice', 'Letter', 'Order', 'Petition', 'Affidavit',
@@ -95,6 +96,17 @@ export default function FilingDetailPage() {
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { fetchFiling(); }, [caseNumberParam, filingSlugParam]);
+
+  // Notify the layout's right-hand TagPanel that we're viewing a Filing (treated as Motion for v1).
+  useEffect(() => {
+    if (!filing) return;
+    window.dispatchEvent(new CustomEvent('selected-entity-changed', {
+      detail: { kind: 'motion', id: filing.id, label: formatFilingLabel(filing) },
+    }));
+    return () => {
+      window.dispatchEvent(new CustomEvent('selected-entity-changed', { detail: null }));
+    };
+  }, [filing]);
 
   const handleEditSave = async () => {
     if (!caseId || !filing) return;
@@ -337,6 +349,7 @@ export default function FilingDetailPage() {
   };
 
   return (
+    <SelectedEntityProvider entityKind="motion" entityId={filing.id} entityLabel={label}>
     <div
       className={`flex-1 overflow-y-auto relative ${dragOver ? 'ring-4 ring-blue-400 ring-inset' : ''}`}
       onDrop={handleDrop}
@@ -542,5 +555,6 @@ export default function FilingDetailPage() {
         </div>
       )}
     </div>
+    </SelectedEntityProvider>
   );
 }
