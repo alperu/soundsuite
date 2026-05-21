@@ -18,6 +18,7 @@ import {
 } from '@/lib/haystack-client';
 import { RefPicker, type PersonMarker, type RefTarget } from './ref-picker';
 import { MarkerPicker } from './marker-picker';
+import { MotionTypePicker } from './motion-type-picker';
 
 interface Props {
   entityKind: EntityKind | null;
@@ -294,15 +295,39 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
             {grouped.value.length > 0 && (
               <Section title={TIER_LABEL.value}>
                 <div className="space-y-1.5">
-                  {grouped.value.map(spec => (
-                    <ValueRow
-                      key={spec.name}
-                      spec={spec}
-                      value={(editMode ? draft[spec.name] : record?.[spec.name]) as unknown}
-                      editMode={editMode}
-                      onChange={(v) => setDraft(prev => ({ ...prev, [spec.name]: v }))}
-                    />
-                  ))}
+                  {grouped.value.map(spec => {
+                    if (spec.name === 'motionType') {
+                      const v = (editMode ? draft[spec.name] : record?.[spec.name]) as unknown;
+                      const slug = typeof v === 'string' && v ? v : null;
+                      // In read mode, render nothing when empty (matches ValueRow behaviour).
+                      if (!editMode && !slug) return null;
+                      return (
+                        <div key={spec.name} className="flex items-start gap-2 text-[11px]">
+                          <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
+                            <span className="truncate" title={spec.name}>{spec.name}</span>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <MotionTypePicker
+                              value={slug}
+                              editable={editMode}
+                              onChange={(next) =>
+                                setDraft(prev => ({ ...prev, [spec.name]: next }))
+                              }
+                            />
+                          </div>
+                        </div>
+                      );
+                    }
+                    return (
+                      <ValueRow
+                        key={spec.name}
+                        spec={spec}
+                        value={(editMode ? draft[spec.name] : record?.[spec.name]) as unknown}
+                        editMode={editMode}
+                        onChange={(v) => setDraft(prev => ({ ...prev, [spec.name]: v }))}
+                      />
+                    );
+                  })}
                 </div>
               </Section>
             )}
