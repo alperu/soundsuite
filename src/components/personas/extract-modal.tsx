@@ -18,6 +18,12 @@ interface Props {
   onClose(): void;
   onConfirmed(result: ExtractResult): void;
   defaultDocumentId?: string;
+  /** When set, skip the file picker and extract across every Document linked
+   * to this Motion (via MotionAttachment). Server merges candidates with dedup
+   * and pre-scopes proposed role bindings to the motion. */
+  defaultMotionId?: string;
+  /** Optional human-readable label shown in the modal header when motion is pre-selected. */
+  defaultMotionLabel?: string;
   /** Test-only: force initial state and pre-populate candidates. */
   defaultState?: ModalState;
   defaultCandidates?: ExtractCandidate[];
@@ -42,6 +48,8 @@ export function ExtractModal({
   onClose,
   onConfirmed,
   defaultDocumentId,
+  defaultMotionId,
+  defaultMotionLabel,
   defaultState,
   defaultCandidates,
 }: Props) {
@@ -64,10 +72,17 @@ export function ExtractModal({
     setSuccessResult(null);
     setSubmitting(false);
     if (defaultCandidates) setCandidates(defaultCandidates);
-    if (defaultDocumentId && !defaultState) {
+    if (defaultMotionId && !defaultState) {
+      // Auto-extract every document attached to the motion in one batch.
+      setSelectedDoc({
+        id: `motion:${defaultMotionId}`,
+        fileName: defaultMotionLabel ?? '(motion documents)',
+      });
+      void startExtract({ motionId: defaultMotionId });
+    } else if (defaultDocumentId && !defaultState) {
       // Auto-extract if document pre-selected
       setSelectedDoc({ id: defaultDocumentId, fileName: '(pre-selected)' });
-      void startExtract(defaultDocumentId);
+      void startExtract({ documentId: defaultDocumentId });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -104,7 +119,7 @@ export function ExtractModal({
     };
   }, [query, open, tab]);
 
-  const startExtract = useCallback(async (documentId: string) => {
+  const startExtract = useCallback(async (target: { documentId?: string; motionId?: string }) => {
     setState('extracting');
     setExtractError(null);
     setStagesRun([]);
@@ -112,7 +127,7 @@ export function ExtractModal({
       const r = await fetch('/api/personas/extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ documentId }),
+        body: JSON.stringify(target),
       });
       if (!r.ok) {
         throw new Error(`Extraction failed (HTTP ${r.status})`);
@@ -252,7 +267,7 @@ export function ExtractModal({
               results={results}
               onPick={doc => {
                 setSelectedDoc(doc);
-                void startExtract(doc.id);
+                void startExtract({ documentId: doc.id });
               }}
             />
           )}

@@ -4,6 +4,8 @@ import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { formatFilingLabel } from '@/lib/filings/format-filing-label';
 import { SelectedEntityProvider } from '@/components/case/selected-entity-context';
+import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
+import { ExtractModal } from '@/components/personas/extract-modal';
 
 const FILING_TYPES = [
   'Motion', 'Notice', 'Letter', 'Order', 'Petition', 'Affidavit',
@@ -72,6 +74,11 @@ export default function FilingDetailPage() {
   const [dragOver, setDragOver] = useState(false);
   const [dropLoading, setDropLoading] = useState(false);
   const [dropError, setDropError] = useState('');
+
+  // Motion context menu + Persona extraction modal
+  const [motionMenu, setMotionMenu] = useState<{ x: number; y: number } | null>(null);
+  const [extractOpen, setExtractOpen] = useState(false);
+  const [extractToast, setExtractToast] = useState<string | null>(null);
 
   // Copy-to-clipboard state
   const [copied, setCopied] = useState(false);
@@ -375,7 +382,8 @@ export default function FilingDetailPage() {
             <span className="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded-full flex-shrink-0">{filing.filingType}</span>
             <h2
               onClick={handleCopyLabel}
-              title="Copy to clipboard"
+              onContextMenu={(e) => { e.preventDefault(); setMotionMenu({ x: e.clientX, y: e.clientY }); }}
+              title="Copy to clipboard · Right-click for actions"
               className="text-lg font-semibold text-gray-900 truncate cursor-pointer hover:text-blue-700"
             >{label}</h2>
             <button
@@ -398,6 +406,10 @@ export default function FilingDetailPage() {
             <button onClick={() => { setAddDocPath(''); setAddDocError(''); setShowAddDocDialog(true); }}
               className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded transition-colors" title="Add Document">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+            </button>
+            <button onClick={() => setExtractOpen(true)} disabled={filing.documents.length === 0}
+              className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded transition-colors disabled:opacity-30" title="Extract Persona (right-click motion title for menu)">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
             </button>
             <button onClick={handleReparse} disabled={reparseLoading || filing.documents.length === 0}
               className="p-1.5 text-gray-400 hover:text-orange-600 hover:bg-orange-50 rounded transition-colors disabled:opacity-30" title="Reparse All Documents">
@@ -552,6 +564,45 @@ export default function FilingDetailPage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Motion right-click context menu */}
+      {motionMenu && (
+        <ContextMenu
+          x={motionMenu.x}
+          y={motionMenu.y}
+          items={[
+            {
+              label: 'Extract Persona',
+              onClick: () => { setExtractOpen(true); setMotionMenu(null); },
+              disabled: filing.documents.length === 0,
+            } as ContextMenuItem,
+            {
+              label: 'Copy title',
+              onClick: () => { handleCopyLabel(); setMotionMenu(null); },
+            } as ContextMenuItem,
+          ]}
+          onClose={() => setMotionMenu(null)}
+        />
+      )}
+
+      {/* Persona extraction modal — scoped to this motion */}
+      <ExtractModal
+        open={extractOpen}
+        onClose={() => setExtractOpen(false)}
+        onConfirmed={(r) => {
+          setExtractOpen(false);
+          setExtractToast(`Created ${r.created} · merged ${r.updated} · bindings ${r.rolesAdded}`);
+          setTimeout(() => setExtractToast(null), 4500);
+        }}
+        defaultMotionId={filing.id}
+        defaultMotionLabel={label}
+      />
+
+      {extractToast && (
+        <div className="fixed bottom-6 right-6 z-50 bg-purple-700 text-white text-sm px-4 py-2 rounded-lg shadow-lg">
+          {extractToast}
         </div>
       )}
     </div>

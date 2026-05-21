@@ -14,12 +14,8 @@ import {
   PersonasApiError,
 } from '@/lib/personas/client';
 
-// Agent C will deliver `@/components/personas/extract-modal`. Until then this
-// page stubs the trigger button with a console.log TODO. To wire it up once
-// Agent C lands, change `EXTRACT_MODAL_AVAILABLE` to true and uncomment the
-// import below — no other edits needed.
-const EXTRACT_MODAL_AVAILABLE = false;
-// import { ExtractModal } from '@/components/personas/extract-modal';
+import { ExtractModal } from '@/components/personas/extract-modal';
+const EXTRACT_MODAL_AVAILABLE = true;
 
 const PAGE_LIMIT = 50;
 
