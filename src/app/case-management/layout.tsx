@@ -8,6 +8,13 @@ import { getCachedCases, setCachedCases, getCachedFilings, setCachedFilings } fr
 import { formatFilingLabel } from '@/lib/filings/format-filing-label';
 import { TagPanel } from '@/components/case/tag-panel';
 import type { EntityKind } from '@/components/case/tag-spec';
+import {
+  read as hsRead,
+  commit as hsCommit,
+  firstRow as hsFirstRow,
+  gridHasError as hsGridHasError,
+} from '@/lib/haystack-client';
+import { classifyFilingEntityKind } from '@/lib/filings/classify-entity-kind';
 
 interface CaseRecord {
   id: string;
@@ -361,28 +368,40 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
     setAddError('');
     setAddLoading(true);
     try {
-      const res = await fetch('/api/cases', {
-        method: 'POST',
+      // TODO: switch to haystackClient.create() once it lands.
+      // For now we POST directly to the haystack-proxy /commit endpoint with
+      // id: 'new', which Agent A's commit handler maps to a Prisma create.
+      const patch = {
+        name: caseName.trim(),
+        caseNumber: caseNumber.trim(),
+        path: folderPath.trim(),
+        jurisdiction: jurisdiction.trim(),
+        county: county.trim(),
+        state: state.trim(),
+        country: country.trim(),
+      };
+      const res = await fetch('/api/haystack-proxy/commit', {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          folderPath: folderPath.trim(),
-          name: caseName.trim(),
-          caseNumber: caseNumber.trim(),
-          jurisdiction: jurisdiction.trim(),
-          county: county.trim(),
-          state: state.trim(),
-          country: country.trim(),
-        }),
+        body: JSON.stringify({ id: 'new', kind: 'case', patch }),
       });
-      const data = await res.json();
-      if (!res.ok) { setAddError(data.error || 'Failed to add case'); return; }
+      if (!res.ok) {
+        setAddError(`Failed to add case (HTTP ${res.status})`);
+        return;
+      }
+      const grid = await res.json();
+      const gridErr = hsGridHasError(grid);
+      if (gridErr) { setAddError(gridErr); return; }
+      const row = hsFirstRow<{ id?: string; caseNumber?: string | null }>(grid);
+      if (!row?.id) { setAddError('Create returned no row'); return; }
       setShowAddDialog(false);
       setFolderPath('');
       await loadCases();
-      const cn = data.case.caseNumber || data.case.id;
+      const cn = row.caseNumber || row.id;
       router.push(`/case-management/${encodeURIComponent(cn)}`);
-    } catch { setAddError('Network error'); }
-    finally { setAddLoading(false); }
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : 'Network error');
+    } finally { setAddLoading(false); }
   };
 
   const browseTo = async (dirPath?: string) => {
@@ -495,31 +514,36 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
     if (!activeCase || !editFilingId) return;
     setEditFilingLoading(true);
     try {
-      const res = await fetch(`/api/cases/${activeCase.id}/filings/${editFilingId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: editFilingTitle.trim(),
-          filingType: editFilingType,
-          volumeNumber: editFilingVolume.trim() ? parseInt(editFilingVolume, 10) : null,
-          isSupplemental: editFilingSupplemental,
-          supplementalOrder: editFilingSupplementalOrder.trim() ? parseInt(editFilingSupplementalOrder, 10) : null,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setShowEditFilingDialog(false);
-        await loadFilings(activeCase.id);
-        // If slug changed and we're on this filing's page, navigate to new slug
-        if (data.filing?.slug && pathname.includes(editFilingId)) {
-          router.push(`/case-management/${encodeURIComponent(activeCaseNumber!)}/${encodeURIComponent(data.filing.slug)}`);
-        }
+      const { entityKind } = classifyFilingEntityKind(editFilingType);
+      const patch: Record<string, unknown> = {
+        title: editFilingTitle.trim(),
+        filingType: editFilingType,
+        volumeNumber: editFilingVolume.trim() ? parseInt(editFilingVolume, 10) : null,
+        isSupplemental: editFilingSupplemental,
+        supplementalOrder: editFilingSupplementalOrder.trim() ? parseInt(editFilingSupplementalOrder, 10) : null,
+      };
+      const grid = await hsCommit({ id: editFilingId, kind: entityKind, patch });
+      const gridErr = hsGridHasError(grid);
+      if (gridErr) {
+        console.error('Edit filing failed:', gridErr);
+        return;
       }
-    } catch { /* ignore */ }
-    finally { setEditFilingLoading(false); }
+      const row = hsFirstRow<{ slug?: string | null }>(grid);
+      setShowEditFilingDialog(false);
+      await loadFilings(activeCase.id);
+      window.dispatchEvent(new Event('filings-changed'));
+      // If slug changed and we're on this filing's page, navigate to new slug
+      if (row?.slug && pathname.includes(editFilingId)) {
+        router.push(`/case-management/${encodeURIComponent(activeCaseNumber!)}/${encodeURIComponent(row.slug)}`);
+      }
+    } catch (err) {
+      console.error('Edit filing error:', err);
+    } finally { setEditFilingLoading(false); }
   };
 
   const openEditCaseDialog = (c: CaseRecord) => {
+    // Optimistic-fill from the sidebar's cached record so the dialog renders
+    // instantly. The effect below will overwrite with fresh Haystack data.
     setEditCaseRecord(c);
     setEditCaseName(c.name);
     setEditCaseNumber(c.caseNumber || '');
@@ -532,12 +556,36 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
     setShowEditCaseDialog(true);
   };
 
+  // Re-hydrate the Edit Case form from Haystack whenever it opens. This makes
+  // the dialog see the same authoritative columns the tag panel reads from.
+  useEffect(() => {
+    if (!showEditCaseDialog || !editCaseRecord?.id) return;
+    let cancelled = false;
+    hsRead({ filter: 'case', id: editCaseRecord.id })
+      .then(grid => {
+        if (cancelled) return;
+        if (hsGridHasError(grid)) return;
+        const row = hsFirstRow<CaseRecord & Record<string, unknown>>(grid);
+        if (!row) return;
+        setEditCaseName(typeof row.name === 'string' ? row.name : '');
+        setEditCaseNumber(typeof row.caseNumber === 'string' ? row.caseNumber : '');
+        setEditCasePath(typeof row.path === 'string' ? row.path : '');
+        setEditCaseJurisdiction(typeof row.jurisdiction === 'string' ? row.jurisdiction : '');
+        setEditCaseCounty(typeof row.county === 'string' ? row.county : '');
+        setEditCaseState(typeof row.state === 'string' ? row.state : '');
+        setEditCaseCountry(typeof row.country === 'string' ? row.country : 'United States');
+        setEditCaseRecord(prev => (prev ? { ...prev, ...row } : prev));
+      })
+      .catch(() => { /* keep optimistic fill */ });
+    return () => { cancelled = true; };
+  }, [showEditCaseDialog, editCaseRecord?.id]);
+
   const handleEditCaseSave = async () => {
     if (!editCaseRecord || !editCaseName.trim()) return;
     setEditCaseLoading(true);
     setEditCaseError('');
     try {
-      const payload: Record<string, string> = {
+      const patch: Record<string, unknown> = {
         name: editCaseName.trim(),
         caseNumber: editCaseNumber.trim(),
         jurisdiction: editCaseJurisdiction.trim(),
@@ -549,25 +597,27 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
       // server's path-existence check can block unrelated field edits when
       // the case folder isn't currently mounted.
       if (editCasePath.trim() !== (editCaseRecord.path || '').trim()) {
-        payload.path = editCasePath.trim();
+        patch.path = editCasePath.trim();
       }
-      const res = await fetch(`/api/cases/${editCaseRecord.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) { setEditCaseError(data.error || 'Failed to update case'); return; }
+      const grid = await hsCommit({ id: editCaseRecord.id, kind: 'case', patch });
+      const gridErr = hsGridHasError(grid);
+      if (gridErr) { setEditCaseError(gridErr); return; }
+      const row = hsFirstRow<CaseRecord & { id: string }>(grid);
       setShowEditCaseDialog(false);
+      // Refresh local state from response so sidebar + form stay in sync.
+      if (row) {
+        setEditCaseRecord(prev => (prev ? { ...prev, ...row } : prev));
+      }
       await loadCases();
       // If case number changed, navigate to the new URL
       const oldCn = editCaseRecord.caseNumber || editCaseRecord.id;
-      const newCn = data.case.caseNumber || data.case.id;
+      const newCn = (row?.caseNumber as string | null | undefined) || row?.id || oldCn;
       if (activeCaseNumber === oldCn && newCn !== oldCn) {
         router.push(`/case-management/${encodeURIComponent(newCn)}`);
       }
-    } catch { setEditCaseError('Network error'); }
-    finally { setEditCaseLoading(false); }
+    } catch (err) {
+      setEditCaseError(err instanceof Error ? err.message : 'Network error');
+    } finally { setEditCaseLoading(false); }
   };
 
   const getSidebarContextMenuItems = (): ContextMenuItem[] => {

@@ -4,6 +4,11 @@ import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { formatFilingLabel } from '@/lib/filings/format-filing-label';
 import { classifyFilingEntityKind } from '@/lib/filings/classify-entity-kind';
+import {
+  commit as hsCommit,
+  firstRow as hsFirstRow,
+  gridHasError as hsGridHasError,
+} from '@/lib/haystack-client';
 import { SelectedEntityProvider } from '@/components/case/selected-entity-context';
 import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { ExtractModal } from '@/components/personas/extract-modal';
@@ -123,29 +128,31 @@ export default function FilingDetailPage() {
     if (!caseId || !filing) return;
     setEditLoading(true);
     try {
-      const res = await fetch(`/api/cases/${caseId}/filings/${filing.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: editTitle.trim(),
-          filingType: editType,
-          description: editDescription.trim() || null,
-          volumeNumber: editVolume.trim() ? parseInt(editVolume, 10) : null,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setShowEditDialog(false);
-        window.dispatchEvent(new Event('filings-changed'));
-        // If slug changed, navigate to new URL
-        if (data.filing?.slug && data.filing.slug !== filingSlugParam) {
-          router.push(`/case-management/${encodeURIComponent(caseNumberParam)}/${encodeURIComponent(data.filing.slug)}`);
-        } else {
-          fetchFiling();
-        }
+      const { entityKind } = classifyFilingEntityKind(editType);
+      const patch: Record<string, unknown> = {
+        title: editTitle.trim(),
+        filingType: editType,
+        description: editDescription.trim() || null,
+        volumeNumber: editVolume.trim() ? parseInt(editVolume, 10) : null,
+      };
+      const grid = await hsCommit({ id: filing.id, kind: entityKind, patch });
+      const gridErr = hsGridHasError(grid);
+      if (gridErr) {
+        console.error('Edit filing failed:', gridErr);
+        return;
       }
-    } catch { /* ignore */ }
-    finally { setEditLoading(false); }
+      const row = hsFirstRow<{ slug?: string | null }>(grid);
+      setShowEditDialog(false);
+      window.dispatchEvent(new Event('filings-changed'));
+      // If slug changed, navigate to new URL
+      if (row?.slug && row.slug !== filingSlugParam) {
+        router.push(`/case-management/${encodeURIComponent(caseNumberParam)}/${encodeURIComponent(row.slug)}`);
+      } else {
+        fetchFiling();
+      }
+    } catch (err) {
+      console.error('Edit filing error:', err);
+    } finally { setEditLoading(false); }
   };
 
   const handleDelete = async () => {
