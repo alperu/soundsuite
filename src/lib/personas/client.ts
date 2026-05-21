@@ -155,8 +155,12 @@ export async function listPersonas(
 
 // ---------- CRUD ----------
 
+/** Server wraps single-persona responses as `{ persona: {...} }`. Unwrap. */
+type PersonaEnvelope = { persona: Persona };
+
 export async function getPersona(id: string): Promise<Persona> {
-  return request<Persona>(`/api/personas/${encodeURIComponent(id)}`);
+  const env = await request<PersonaEnvelope>(`/api/personas/${encodeURIComponent(id)}`);
+  return env.persona;
 }
 
 export interface CreatePersonaBody {
@@ -168,10 +172,11 @@ export interface CreatePersonaBody {
 }
 
 export async function createPersona(body: CreatePersonaBody): Promise<Persona> {
-  return request<Persona>('/api/personas', {
+  const env = await request<PersonaEnvelope>('/api/personas', {
     method: 'POST',
     body: JSON.stringify(body),
   });
+  return env.persona;
 }
 
 export interface UpdatePersonaBody {
@@ -186,10 +191,11 @@ export async function updatePersona(
   id: string,
   body: UpdatePersonaBody,
 ): Promise<Persona> {
-  return request<Persona>(`/api/personas/${encodeURIComponent(id)}`, {
+  const env = await request<PersonaEnvelope>(`/api/personas/${encodeURIComponent(id)}`, {
     method: 'PUT',
     body: JSON.stringify(body),
   });
+  return env.persona;
 }
 
 // ---------- Role bindings ----------
