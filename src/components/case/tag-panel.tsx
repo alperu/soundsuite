@@ -20,6 +20,7 @@ import { getPreference, setPreference } from '@/lib/indexed-db';
 import { RefPicker, type PersonMarker, type RefTarget } from './ref-picker';
 import { MarkerPicker } from './marker-picker';
 import { MotionTypePicker } from './motion-type-picker';
+import { TagInfoPopover } from './tag-info-popover';
 
 const TAG_PANEL_MIN_WIDTH = 240;
 const TAG_PANEL_MAX_WIDTH = 600;
@@ -114,6 +115,19 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
     spec: TagSpec;
     anchor: DOMRect | null;
   } | null>(null);
+
+  // Active tag-info popover state (one at a time, distinct from pickerFor).
+  // Triggered by clicking the "?" icon on any tag row.
+  const [infoFor, setInfoFor] = useState<{
+    spec: TagSpec;
+    anchor: DOMRect | null;
+  } | null>(null);
+
+  const openInfo = useCallback((spec: TagSpec, anchor: DOMRect | null) => {
+    setInfoFor((prev) =>
+      prev && prev.spec.name === spec.name ? null : { spec, anchor },
+    );
+  }, []);
 
   // Local-stub specs for current entity kind
   const baseSpecs: TagSpec[] = useMemo(() => {
@@ -347,6 +361,7 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
                         value={Boolean(record?.[spec.name])}
                         editMode={false}
                         onChange={(v) => setDraft(prev => ({ ...prev, [spec.name]: v }))}
+                        onInfoOpen={openInfo}
                       />
                     ))}
                   </div>
@@ -367,6 +382,7 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
                       editMode={editMode}
                       onChange={(v) => setDraft(prev => ({ ...prev, [spec.name]: v }))}
                       onOpenPicker={(anchor) => setPickerFor({ spec, anchor })}
+                      onInfoOpen={openInfo}
                     />
                   ))}
                 </div>
@@ -407,6 +423,7 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
                         value={(editMode ? draft[spec.name] : record?.[spec.name]) as unknown}
                         editMode={editMode}
                         onChange={(v) => setDraft(prev => ({ ...prev, [spec.name]: v }))}
+                        onInfoOpen={openInfo}
                       />
                     );
                   })}
@@ -460,6 +477,14 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
           anchorRect={pickerFor.anchor}
         />
       )}
+
+      <TagInfoPopover
+        open={!!infoFor}
+        spec={infoFor?.spec ?? null}
+        anchorRect={infoFor?.anchor ?? null}
+        onClose={() => setInfoFor(null)}
+        specsForRelated={visibleSpecs}
+      />
     </div>
   );
 }
@@ -532,20 +557,47 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function HelpDot({ doc }: { doc: string }) {
+/**
+ * Click-to-open info trigger. Replaces the prior static `title=` tooltip
+ * with a button that opens TagInfoPopover at the click anchor. The native
+ * `title=` attribute is kept too for keyboard/hover fallback.
+ */
+function HelpDot({
+  spec,
+  onOpen,
+}: {
+  spec: TagSpec;
+  onOpen: (spec: TagSpec, anchor: DOMRect) => void;
+}) {
+  const btnRef = useRef<HTMLButtonElement | null>(null);
   return (
-    <span
-      className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-gray-300 text-gray-400 text-[9px] leading-none cursor-help flex-shrink-0"
-      title={doc}
+    <button
+      ref={btnRef}
+      type="button"
+      title={spec.doc}
+      aria-label={`More info: ${spec.name}`}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = btnRef.current?.getBoundingClientRect();
+        if (rect) onOpen(spec, rect);
+      }}
+      className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-gray-300 text-gray-400 text-[9px] leading-none hover:border-blue-400 hover:text-blue-600 cursor-pointer flex-shrink-0 bg-white transition-colors"
     >
       ?
-    </span>
+    </button>
   );
 }
 
 function MarkerChip({
-  spec, value, editMode, onChange,
-}: { spec: TagSpec; value: boolean; editMode: boolean; onChange: (v: boolean) => void }) {
+  spec, value, editMode, onChange, onInfoOpen,
+}: {
+  spec: TagSpec;
+  value: boolean;
+  editMode: boolean;
+  onChange: (v: boolean) => void;
+  onInfoOpen: (spec: TagSpec, anchor: DOMRect) => void;
+}) {
   const active = Boolean(value);
   if (editMode) {
     return (
@@ -571,7 +623,7 @@ function MarkerChip({
       className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] bg-blue-100 text-blue-800 border border-blue-200"
     >
       {spec.name}
-      <HelpDot doc={spec.doc} />
+      <HelpDot spec={spec} onOpen={onInfoOpen} />
     </span>
   );
 }
@@ -620,7 +672,7 @@ function formatLabelValue(v: unknown): string {
 }
 
 function RefRow({
-  spec, value, label, editMode, onChange, onOpenPicker,
+  spec, value, label, editMode, onChange, onOpenPicker, onInfoOpen,
 }: {
   spec: TagSpec;
   value: unknown;
@@ -628,6 +680,7 @@ function RefRow({
   editMode: boolean;
   onChange: (v: unknown) => void;
   onOpenPicker: (anchor: DOMRect | null) => void;
+  onInfoOpen: (spec: TagSpec, anchor: DOMRect) => void;
 }) {
   const btnRef = useRef<HTMLButtonElement | null>(null);
   const isListTier = spec.tier === 'refs';
@@ -646,7 +699,7 @@ function RefRow({
       <div className="flex items-start gap-2 text-[11px]">
         <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
           <span className="truncate" title={spec.name}>{spec.name}</span>
-          <HelpDot doc={spec.doc} />
+          <HelpDot spec={spec} onOpen={onInfoOpen} />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap gap-1 items-center">
@@ -701,7 +754,7 @@ function RefRow({
     <div className="flex items-start gap-2 text-[11px]">
       <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
         <span className="truncate" title={spec.name}>{spec.name}</span>
-        <HelpDot doc={spec.doc} />
+        <HelpDot spec={spec} onOpen={onInfoOpen} />
       </div>
       <div className="flex-1 min-w-0">
         {editMode ? (
@@ -748,8 +801,14 @@ function RefRow({
 }
 
 function ValueRow({
-  spec, value, editMode, onChange,
-}: { spec: TagSpec; value: unknown; editMode: boolean; onChange: (v: unknown) => void }) {
+  spec, value, editMode, onChange, onInfoOpen,
+}: {
+  spec: TagSpec;
+  value: unknown;
+  editMode: boolean;
+  onChange: (v: unknown) => void;
+  onInfoOpen: (spec: TagSpec, anchor: DOMRect) => void;
+}) {
   const display = value == null ? '' : String(value);
   if (!editMode && !display) return null;
   const inputType =
@@ -760,7 +819,7 @@ function ValueRow({
     <div className="flex items-start gap-2 text-[11px]">
       <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
         <span className="truncate" title={spec.name}>{spec.name}</span>
-        <HelpDot doc={spec.doc} />
+        <HelpDot spec={spec} onOpen={onInfoOpen} />
       </div>
       <div className="flex-1 min-w-0">
         {editMode ? (

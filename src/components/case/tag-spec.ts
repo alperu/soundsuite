@@ -47,6 +47,35 @@ export type EntityKind =
   | 'designation'
   | 'other';
 
+/**
+ * Rich info shown in the click-to-open "?" popover. Optional — when absent,
+ * the popover falls back to rendering `spec.doc` as a plain paragraph.
+ *
+ * The fields are deliberately granular so the popover can render structured
+ * sections (definition, derivation, persistence, XETO reference, example,
+ * related tags). All are optional except `whatItIs` so partial backfills
+ * still surface useful content.
+ */
+export interface TagInfo {
+  /** 1-line plain-English definition. Required when info is set. */
+  whatItIs: string;
+  /** Derivation, cascade, or compute rules (free-form prose). */
+  howItWorks?: string;
+  /**
+   * Where the tag lives on the server side. Use one of:
+   *   - "Prisma.<Model>.<column> (column)"
+   *   - "tags JSON: '$.<path>'"
+   *   - "computed (<source>)"
+   */
+  mapsTo?: string;
+  /** Fully-qualified XETO slot path (e.g. "cc.courtlens.legal::Case.causeNo"). */
+  xetoSpec?: string;
+  /** Sample value or usage. */
+  example?: string;
+  /** Related tag names — UI shows as clickable chips that swap the popover. */
+  relatedTags?: string[];
+}
+
 export interface TagSpec {
   name: string;
   tier: TagTier;
@@ -61,6 +90,12 @@ export interface TagSpec {
    *  via the standard site/equip/point idiom; they carry no information the
    *  user can act on, so the panel hides them. They stay in the record. */
   internal?: boolean;
+  /**
+   * Rich info shown when the user clicks the "?" icon. Falls back to `doc`
+   * when absent. Backfilled for the most-touched tags; other entries render
+   * the `doc` string only until a future pass populates them.
+   */
+  info?: TagInfo;
 }
 
 /**
@@ -96,66 +131,638 @@ function attachmentBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
 export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   case: [
     // markers
-    { name: 'case', tier: 'marker', doc: 'Marker: this record is a Case (site).', valueType: 'bool' },
+    {
+      name: 'case',
+      tier: 'marker',
+      doc: 'Marker: this record is a Case (site).',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Identity marker — every Case row carries this tag so haystack filters like "case and jurisdictionTx" match.',
+        howItWorks: 'Always true on Case rows; the marker is emitted by the read resolver regardless of whether the Prisma row has any tags JSON content.',
+        mapsTo: 'computed (haystack resolver) — Prisma row in Case table is the source of truth.',
+        xetoSpec: 'cc.courtlens.legal::Case',
+        example: 'true (marker)',
+        relatedTags: ['site', 'motion', 'motionEvent'],
+      },
+    },
     { name: 'site', tier: 'marker', doc: 'Project Haystack site marker — Case = site.', valueType: 'bool', internal: true },
-    { name: 'jurisdictionTx', tier: 'marker', doc: 'Texas jurisdiction.', valueType: 'bool' },
-    { name: 'jurisdictionCa', tier: 'marker', doc: 'California jurisdiction.', valueType: 'bool' },
-    { name: 'jurisdictionFed', tier: 'marker', doc: 'Federal jurisdiction.', valueType: 'bool' },
+    {
+      name: 'jurisdictionTx',
+      tier: 'marker',
+      doc: 'Texas jurisdiction.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Marker indicating this case falls under Texas law.',
+        howItWorks: 'Mutually exclusive with jurisdictionCa / jurisdictionFed (a case sits in one primary jurisdiction). Used by the procedural-rule engine (proc.tx) to compute deadlines per Texas TRCP/TRAP.',
+        mapsTo: "tags JSON: '$.jurisdictionTx'",
+        xetoSpec: 'cc.courtlens.legal::Case.jurisdictionTx',
+        example: 'true (marker)',
+        relatedTags: ['jurisdictionCa', 'jurisdictionFed', 'courtRef'],
+      },
+    },
+    {
+      name: 'jurisdictionCa',
+      tier: 'marker',
+      doc: 'California jurisdiction.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Marker indicating this case falls under California law.',
+        howItWorks: 'Mutually exclusive with jurisdictionTx / jurisdictionFed. Routes deadline computation through the proc.ca procedural rules.',
+        mapsTo: "tags JSON: '$.jurisdictionCa'",
+        xetoSpec: 'cc.courtlens.legal::Case.jurisdictionCa',
+        example: 'true (marker)',
+        relatedTags: ['jurisdictionTx', 'jurisdictionFed', 'courtRef'],
+      },
+    },
+    {
+      name: 'jurisdictionFed',
+      tier: 'marker',
+      doc: 'Federal jurisdiction.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Marker indicating this case is in federal court (district / circuit / SCOTUS).',
+        howItWorks: 'Mutually exclusive with jurisdictionTx / jurisdictionCa. FRCP / FRAP rules apply.',
+        mapsTo: "tags JSON: '$.jurisdictionFed'",
+        xetoSpec: 'cc.courtlens.legal::Case.jurisdictionFed',
+        example: 'true (marker)',
+        relatedTags: ['jurisdictionTx', 'jurisdictionCa', 'courtRef'],
+      },
+    },
     // refs
-    { name: 'courtRef', tier: 'ref', doc: 'Reference to the Court record where this case is filed.', refTarget: 'court' },
-    { name: 'judgeRefs', tier: 'refs', doc: 'List of judges assigned to this case (Persons).', refTarget: 'person' },
-    { name: 'plaintiffRefs', tier: 'refs', doc: 'List of plaintiffs (Persons or organizations).', refTarget: 'person' },
-    { name: 'defendantRefs', tier: 'refs', doc: 'List of defendants (Persons or organizations).', refTarget: 'person' },
-    { name: 'plaintiffLawyers', tier: 'refs', doc: 'Attorneys representing the plaintiff(s).', refTarget: 'person' },
-    { name: 'defendantLawyers', tier: 'refs', doc: 'Attorneys representing the defendant(s).', refTarget: 'person' },
-    { name: 'courtClerkRefs', tier: 'refs', doc: 'Court clerks of record.', refTarget: 'person' },
-    { name: 'courtReporterRefs', tier: 'refs', doc: 'Court reporters of record.', refTarget: 'person' },
+    {
+      name: 'courtRef',
+      tier: 'ref',
+      doc: 'Reference to the Court record where this case is filed.',
+      refTarget: 'court',
+      info: {
+        whatItIs: 'Pointer to the Court (venue) where this case is docketed.',
+        howItWorks: 'The Court row carries its own courtType marker (trial / appellate / supreme). When you set courtRef, the picker is scoped to courts matching the case-level marker.',
+        mapsTo: 'computed (haystack resolver) — derived from Prisma.Case.jurisdictionRel and related Court table.',
+        xetoSpec: 'cc.courtlens.legal::Case.courtRef',
+        example: '@court-tx-travis-345',
+        relatedTags: ['jurisdictionTx', 'jurisdictionCa', 'jurisdictionFed', 'judgeRefs'],
+      },
+    },
+    {
+      name: 'judgeRefs',
+      tier: 'refs',
+      doc: 'List of judges assigned to this case (Persons).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'Judges assigned to the case across its lifecycle.',
+        howItWorks: 'Picker is constrained to Person rows carrying the `judge` intrinsic marker. Order matters — index 0 is conventionally the currently-assigned presiding judge.',
+        mapsTo: "tags JSON: '$.judgeRefs' (array of @id strings)",
+        xetoSpec: 'cc.courtlens.legal::Case.judgeRefs',
+        example: '["@person-judge-naranjo", "@person-judge-aleman"]',
+        relatedTags: ['plaintiffRefs', 'defendantRefs', 'courtClerkRefs'],
+      },
+    },
+    {
+      name: 'plaintiffRefs',
+      tier: 'refs',
+      doc: 'List of plaintiffs (Persons or organizations).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'The party (or parties) bringing the case.',
+        howItWorks: 'Includes natural persons and organizations. Their representing attorneys go in plaintiffLawyers, not here. Used by the persona engine to disambiguate "movant" / "respondent" on derived Motion rows.',
+        mapsTo: "tags JSON: '$.plaintiffRefs' (array of @id strings)",
+        xetoSpec: 'cc.courtlens.legal::Case.plaintiffRefs',
+        example: '["@person-jane-doe"]',
+        relatedTags: ['defendantRefs', 'plaintiffLawyers', 'movantRef'],
+      },
+    },
+    {
+      name: 'defendantRefs',
+      tier: 'refs',
+      doc: 'List of defendants (Persons or organizations).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'The party (or parties) being sued / prosecuted.',
+        howItWorks: 'Mirror of plaintiffRefs. Their attorneys live on defendantLawyers. The persona engine matches defendant identities against signature blocks to attribute filings.',
+        mapsTo: "tags JSON: '$.defendantRefs' (array of @id strings)",
+        xetoSpec: 'cc.courtlens.legal::Case.defendantRefs',
+        example: '["@person-john-roe"]',
+        relatedTags: ['plaintiffRefs', 'defendantLawyers', 'respondentRef'],
+      },
+    },
+    {
+      name: 'plaintiffLawyers',
+      tier: 'refs',
+      doc: 'Attorneys representing the plaintiff(s).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'Attorneys of record for the plaintiff side.',
+        howItWorks: 'Picker is constrained to Person rows carrying the `lawyer` intrinsic marker (clients and witnesses are excluded). Filings authored by these persons are attributed to the plaintiff side.',
+        mapsTo: "tags JSON: '$.plaintiffLawyers' (array of @id strings)",
+        xetoSpec: 'cc.courtlens.legal::Case.plaintiffLawyers',
+        example: '["@person-lawyer-stuart"]',
+        relatedTags: ['plaintiffRefs', 'defendantLawyers'],
+      },
+    },
+    {
+      name: 'defendantLawyers',
+      tier: 'refs',
+      doc: 'Attorneys representing the defendant(s).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'Attorneys of record for the defendant side.',
+        howItWorks: 'Same picker semantics as plaintiffLawyers — scoped to `lawyer`-marker persons. Filings authored by these persons are attributed to the defendant side.',
+        mapsTo: "tags JSON: '$.defendantLawyers' (array of @id strings)",
+        xetoSpec: 'cc.courtlens.legal::Case.defendantLawyers',
+        example: '["@person-lawyer-rivera"]',
+        relatedTags: ['defendantRefs', 'plaintiffLawyers'],
+      },
+    },
+    {
+      name: 'courtClerkRefs',
+      tier: 'refs',
+      doc: 'Court clerks of record.',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'Court clerks who handle stamping and routing for this case.',
+        howItWorks: 'Constrained to Person rows with the `courtClerk` marker. The clerk who stamps a filing populates the courtClerkRef on the corresponding MotionEvent.',
+        mapsTo: "tags JSON: '$.courtClerkRefs' (array of @id strings)",
+        xetoSpec: 'cc.courtlens.legal::Case.courtClerkRefs',
+        example: '["@person-clerk-okeefe"]',
+        relatedTags: ['courtReporterRefs', 'judgeRefs'],
+      },
+    },
+    {
+      name: 'courtReporterRefs',
+      tier: 'refs',
+      doc: 'Court reporters of record.',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'Court reporters who transcribe hearings on this case.',
+        howItWorks: 'Constrained to Person rows with the `courtReporter` marker. The reporter who produces a transcript populates reporterRef on the resulting transcript / reportersRecord row.',
+        mapsTo: "tags JSON: '$.courtReporterRefs' (array of @id strings)",
+        xetoSpec: 'cc.courtlens.legal::Case.courtReporterRefs',
+        example: '["@person-reporter-vega"]',
+        relatedTags: ['courtClerkRefs', 'judgeRefs'],
+      },
+    },
     // values
-    { name: 'causeNo', tier: 'value', doc: 'Official cause number assigned by the court.', valueType: 'text' },
-    { name: 'causeFiledStamp', tier: 'value', doc: 'Clerk-stamp identifier from initial case filing.', valueType: 'text' },
-    { name: 'filedOn', tier: 'value', doc: 'Case-opening date (when the case was first filed).', valueType: 'date' },
+    {
+      name: 'causeNo',
+      tier: 'value',
+      doc: 'Official cause number assigned by the court.',
+      valueType: 'text',
+      info: {
+        whatItIs: 'The cause number assigned by the court clerk when the case was filed.',
+        howItWorks: 'Texas trial: D-1-FM-21-005611 (district-court-county-year-seq). Appellate: 03-24-00513-CV (court-year-seq-type). Should match the official clerk-stamped identifier.',
+        mapsTo: 'Prisma.Case.caseNumber (column)',
+        xetoSpec: 'cc.courtlens.legal::Case.causeNo',
+        example: 'D-1-FM-21-005611',
+        relatedTags: ['causeFiledStamp', 'filedOn'],
+      },
+    },
+    {
+      name: 'causeFiledStamp',
+      tier: 'value',
+      doc: 'Clerk-stamp identifier from initial case filing.',
+      valueType: 'text',
+      info: {
+        whatItIs: 'The clerk-stamp text from the very first filing that opened the case.',
+        howItWorks: 'Distinct from causeNo: the cause number may be edited / corrected later, but the stamp on the petition is immutable evidence of original filing. Used to reconcile when clerks renumber cases.',
+        mapsTo: "tags JSON: '$.causeFiledStamp'",
+        xetoSpec: 'cc.courtlens.legal::Case.causeFiledStamp',
+        example: 'D-1-FM-21-005611 (filed 09/15/2021 at 14:32)',
+        relatedTags: ['causeNo', 'filedOn'],
+      },
+    },
+    {
+      name: 'filedOn',
+      tier: 'value',
+      doc: 'Case-opening date (when the case was first filed).',
+      valueType: 'date',
+      info: {
+        whatItIs: 'Date the case was opened with the court clerk.',
+        howItWorks: 'On Case rows this is the case-opening date (date of the initial petition). On filing rows it means the date THAT filing was filed. Statute-of-limitations and aging metrics anchor on this date.',
+        mapsTo: 'computed (haystack resolver) — typically derived from the earliest MotionEvent with the courtFiled marker.',
+        xetoSpec: 'cc.courtlens.legal::Case.filedOn',
+        example: '2021-09-15',
+        relatedTags: ['causeNo', 'causeFiledStamp', 'courtFilingDate'],
+      },
+    },
   ],
 
   motion: [
     // markers
-    { name: 'motion', tier: 'marker', doc: 'Marker: this record is a Motion.', valueType: 'bool' },
+    {
+      name: 'motion',
+      tier: 'marker',
+      doc: 'Marker: this record is a Motion.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Identity marker — every Motion row carries this tag.',
+        howItWorks: 'In Project Haystack terms Motion = equip (a logical equipment record under a site). Always true on Motion rows; the `equip` marker is the internal Haystack-ontology twin.',
+        mapsTo: 'computed (haystack resolver) — Prisma row in Motion table is the source of truth.',
+        xetoSpec: 'cc.courtlens.legal::Motion',
+        example: 'true (marker)',
+        relatedTags: ['case', 'motionEvent', 'subMotion'],
+      },
+    },
     { name: 'equip', tier: 'marker', doc: 'Project Haystack equip marker — Motion = equip.', valueType: 'bool', internal: true },
-    { name: 'subMotion', tier: 'marker', doc: 'Present iff this motion has a parent motionRef (amended motion).', valueType: 'bool' },
-    { name: 'appellate', tier: 'marker', doc: 'Motion is filed at the appellate level.', valueType: 'bool' },
+    {
+      name: 'subMotion',
+      tier: 'marker',
+      doc: 'Present iff this motion has a parent motionRef (amended motion).',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Marker emitted when this motion is a child of another motion (amendment, supplement, or re-filing).',
+        howItWorks: 'Derived — present iff motionRef on this row points to a sibling Motion. You cannot toggle subMotion directly; setting motionRef causes the resolver to emit it.',
+        mapsTo: 'computed (derived from $.motionRef presence)',
+        xetoSpec: 'cc.courtlens.legal::Motion.subMotion',
+        example: 'true (marker, derived)',
+        relatedTags: ['motionRef', 'amends', 'supersedes', 'revisionSeq'],
+      },
+    },
+    {
+      name: 'appellate',
+      tier: 'marker',
+      doc: 'Motion is filed at the appellate level.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Indicates this motion was filed in an appellate court (TRAP / FRAP territory).',
+        howItWorks: 'Independent of the parent Case appellate marker — a case can transit between trial and appellate phases, and individual motions carry their own level. The deadline engine swaps TRCP for TRAP when this is set.',
+        mapsTo: "tags JSON: '$.appellate'",
+        xetoSpec: 'cc.courtlens.legal::Motion.appellate',
+        example: 'true (marker)',
+        relatedTags: ['motionType', 'caseRef'],
+      },
+    },
     // refs
-    { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent Case (site).', refTarget: 'case' },
-    { name: 'motionRef', tier: 'ref', doc: 'Parent motion (if this is a sub/amended motion).', refTarget: 'motion' },
-    { name: 'amends', tier: 'ref', doc: 'Explicit pointer to the motion this one amends.', refTarget: 'motion' },
-    { name: 'supersedes', tier: 'ref', doc: 'Explicit pointer to the motion this one supersedes.', refTarget: 'motion' },
-    { name: 'judgeRef', tier: 'ref', doc: 'The judge assigned to THIS motion.', refTarget: 'person' },
-    { name: 'movantRef', tier: 'ref', doc: 'The party making this motion.', refTarget: 'person' },
-    { name: 'respondentRef', tier: 'ref', doc: 'The party responding to this motion.', refTarget: 'person' },
+    {
+      name: 'caseRef',
+      tier: 'ref',
+      doc: 'Reference to the parent Case (site).',
+      refTarget: 'case',
+      info: {
+        whatItIs: 'Pointer to the legal Case this motion belongs to.',
+        howItWorks: 'Every Motion must belong to exactly one Case. The server derives caseRef from the Prisma caseId column when reading; you set it indirectly by associating the filing with a case.',
+        mapsTo: 'Prisma.Motion.caseId (column) — emitted as Haystack ref @<case-id>',
+        xetoSpec: 'cc.courtlens.legal::Motion.caseRef',
+        example: '@1535c622-8955-4669-8f29-884a4f2b31ea',
+        relatedTags: ['motionRef', 'amends', 'supersedes'],
+      },
+    },
+    {
+      name: 'motionRef',
+      tier: 'ref',
+      doc: 'Parent motion (if this is a sub/amended motion).',
+      refTarget: 'motion',
+      info: {
+        whatItIs: 'Pointer to a parent motion when this one is a child (amendment, supplement, sub-motion).',
+        howItWorks: 'Setting this causes subMotion to be emitted. The picker is scoped to motions in the same caseRef so you cannot cross-link motions between cases.',
+        mapsTo: "tags JSON: '$.motionRef' (Haystack ref)",
+        xetoSpec: 'cc.courtlens.legal::Motion.motionRef',
+        example: '@motion-7a3f',
+        relatedTags: ['subMotion', 'amends', 'supersedes', 'revisionSeq'],
+      },
+    },
+    {
+      name: 'amends',
+      tier: 'ref',
+      doc: 'Explicit pointer to the motion this one amends.',
+      refTarget: 'motion',
+      info: {
+        whatItIs: 'The earlier motion that this one amends (keeps the original in place but layers changes).',
+        howItWorks: 'Scoped to the same caseRef — see inferScopeFilter in tag-panel.tsx. Increment revisionSeq when chaining amendments. Differs from supersedes: amends layers on top; supersedes replaces.',
+        mapsTo: "tags JSON: '$.amends' (Haystack ref)",
+        xetoSpec: 'cc.courtlens.legal::Motion.amends',
+        example: '@motion-original-d2',
+        relatedTags: ['supersedes', 'motionRef', 'revisionSeq'],
+      },
+    },
+    {
+      name: 'supersedes',
+      tier: 'ref',
+      doc: 'Explicit pointer to the motion this one supersedes.',
+      refTarget: 'motion',
+      info: {
+        whatItIs: 'The earlier motion that this one fully replaces.',
+        howItWorks: 'Same-case scope as amends. Supersedes is stronger — the prior motion is treated as withdrawn / replaced for deadline purposes, not just amended.',
+        mapsTo: "tags JSON: '$.supersedes' (Haystack ref)",
+        xetoSpec: 'cc.courtlens.legal::Motion.supersedes',
+        example: '@motion-original-d2',
+        relatedTags: ['amends', 'motionRef', 'revisionSeq'],
+      },
+    },
+    {
+      name: 'judgeRef',
+      tier: 'ref',
+      doc: 'The judge assigned to THIS motion.',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'The judge with authority over this specific motion (may differ from case-level judgeRefs after reassignment).',
+        howItWorks: 'Picker constrained to `judge`-marker Person rows. Defaults to the case-level presiding judge; override when a motion is referred to a magistrate or visiting judge.',
+        mapsTo: "tags JSON: '$.judgeRef' (Haystack ref)",
+        xetoSpec: 'cc.courtlens.legal::Motion.judgeRef',
+        example: '@person-judge-naranjo',
+        relatedTags: ['movantRef', 'respondentRef'],
+      },
+    },
+    {
+      name: 'movantRef',
+      tier: 'ref',
+      doc: 'The party making this motion.',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'The party (person or org) that filed this motion — the moving party.',
+        howItWorks: 'Should be one of the case-level plaintiffRefs or defendantRefs. The persona engine inspects signature blocks and notice headings to suggest a movant when auto-classifying.',
+        mapsTo: 'Prisma.Motion.movantId (column) — emitted as Haystack ref',
+        xetoSpec: 'cc.courtlens.legal::Motion.movantRef',
+        example: '@person-jane-doe',
+        relatedTags: ['respondentRef', 'plaintiffRefs', 'defendantRefs'],
+      },
+    },
+    {
+      name: 'respondentRef',
+      tier: 'ref',
+      doc: 'The party responding to this motion.',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'The non-moving party — the one against whom the motion is brought.',
+        howItWorks: 'Conventionally the opposing party in the caption. The deadline engine emits a "response due" reminder targeted at this party.',
+        mapsTo: 'Prisma.Motion.respondentId (column) — emitted as Haystack ref',
+        xetoSpec: 'cc.courtlens.legal::Motion.respondentRef',
+        example: '@person-john-roe',
+        relatedTags: ['movantRef', 'plaintiffRefs', 'defendantRefs'],
+      },
+    },
     // values
-    { name: 'motionType', tier: 'value', doc: 'Kind of motion (e.g. "disqualify", "summary-judgment").', valueType: 'text' },
-    { name: 'revisionSeq', tier: 'value', doc: '1 for the original motion; increments per amendment.', valueType: 'number' },
+    {
+      name: 'motionType',
+      tier: 'value',
+      doc: 'Kind of motion (e.g. "disqualify", "summary-judgment").',
+      valueType: 'text',
+      info: {
+        whatItIs: 'The taxonomic kind of motion, drawn from the MotionType choice list.',
+        howItWorks: 'A controlled vocabulary backed by the XETO MotionType Choice spec. The MotionTypePicker UI lets you search the slug list. The classifier sets this from the document title/content during ingestion; you can override.',
+        mapsTo: "tags JSON: '$.motionType' (string slug)",
+        xetoSpec: 'cc.courtlens.legal::Motion.motionType (Choice: MotionType)',
+        example: 'summary-judgment',
+        relatedTags: ['movantRef', 'respondentRef'],
+      },
+    },
+    {
+      name: 'revisionSeq',
+      tier: 'value',
+      doc: '1 for the original motion; increments per amendment.',
+      valueType: 'number',
+      info: {
+        whatItIs: 'Sequence number tracking the amendment chain. Original = 1, first amendment = 2, etc.',
+        howItWorks: 'Set by the user when filing an amendment. The chain is reconstructed via amends/supersedes refs; revisionSeq is the human-readable order. The latest non-superseded motion in a chain is the "live" filing for deadline purposes.',
+        mapsTo: "tags JSON: '$.revisionSeq' (number)",
+        xetoSpec: 'cc.courtlens.legal::Motion.revisionSeq',
+        example: '2',
+        relatedTags: ['amends', 'supersedes', 'motionRef'],
+      },
+    },
   ],
 
   motionEvent: [
     { name: 'motionEvent', tier: 'marker', doc: 'Marker: lifecycle event on a Motion.', valueType: 'bool', internal: true },
     { name: 'point', tier: 'marker', doc: 'Project Haystack point marker — MotionEvent = point.', valueType: 'bool', internal: true },
-    { name: 'received', tier: 'marker', doc: 'Event kind: received (mutually exclusive with other kinds).', valueType: 'bool' },
-    { name: 'filed', tier: 'marker', doc: 'Event kind: party-filed (e-filed). Not the legally-operative date.', valueType: 'bool' },
-    { name: 'courtFiled', tier: 'marker', doc: 'Event kind: clerk-stamped. THIS is when the deadline clock starts.', valueType: 'bool' },
-    { name: 'responded', tier: 'marker', doc: 'Event kind: a response was filed.', valueType: 'bool' },
-    { name: 'signed', tier: 'marker', doc: 'Event kind: signed by judge.', valueType: 'bool' },
-    { name: 'granted', tier: 'marker', doc: 'Event kind: motion granted.', valueType: 'bool' },
-    { name: 'denied', tier: 'marker', doc: 'Event kind: motion denied.', valueType: 'bool' },
-    { name: 'hearingHeld', tier: 'marker', doc: 'Event kind: a hearing on this motion was held.', valueType: 'bool' },
-    { name: 'motionRef', tier: 'ref', doc: 'Reference to the parent motion.', refTarget: 'motion' },
-    { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
-    { name: 'fileRef', tier: 'ref', doc: 'Reference to the document (PDF) for this event.', refTarget: 'doc' },
-    { name: 'authoredBy', tier: 'ref', doc: 'Person who authored / filed this event.', refTarget: 'person' },
-    { name: 'judgeRef', tier: 'ref', doc: 'Judge for this event (e.g. on signed/granted/denied).', refTarget: 'person' },
-    { name: 'courtClerkRef', tier: 'ref', doc: 'Court clerk who stamped (on courtFiled events).', refTarget: 'person' },
-    { name: 'occurredOn', tier: 'value', doc: 'When the event occurred.', valueType: 'date' },
-    { name: 'courtFilingDate', tier: 'value', doc: 'Official clerk-stamp date (on courtFiled events).', valueType: 'date' },
+    {
+      name: 'received',
+      tier: 'marker',
+      doc: 'Event kind: received (mutually exclusive with other kinds).',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Event kind marker — the document was received by our system (drop-folder, email ingestion, manual upload).',
+        howItWorks: 'Mutually exclusive with the other EventKind markers (filed, courtFiled, responded, signed, granted, denied, hearingHeld). One MotionEvent = one kind. Use `received` when you have the document but no clerk stamp yet.',
+        mapsTo: "tags JSON: '$.received' (and kind=\"received\")",
+        xetoSpec: 'cc.courtlens.legal::Received (EventKind)',
+        example: 'true (marker)',
+        relatedTags: ['filed', 'courtFiled', 'kind', 'occurredOn'],
+      },
+    },
+    {
+      name: 'filed',
+      tier: 'marker',
+      doc: 'Event kind: party-filed (e-filed). Not the legally-operative date.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Event kind marker — a party submitted the filing (e-file portal, mail, hand-delivery).',
+        howItWorks: 'CRITICAL: this is NOT the operative deadline date. The clerk-stamp date (courtFiled) is what legally counts. The e-file timestamp may precede courtFiled by hours or days. Mutually exclusive with other EventKind markers.',
+        mapsTo: "tags JSON: '$.filed' (and kind=\"filed\")",
+        xetoSpec: 'cc.courtlens.legal::Filed (EventKind)',
+        example: 'true (marker)',
+        relatedTags: ['courtFiled', 'received', 'occurredOn', 'kind'],
+      },
+    },
+    {
+      name: 'courtFiled',
+      tier: 'marker',
+      doc: 'Event kind: clerk-stamped. THIS is when the deadline clock starts.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Event kind marker — the clerk stamped the filing (officially "filed of record").',
+        howItWorks: 'THIS is the legally-operative date for deadline computation. courtFilingDate stores the timestamp. The deadline engine anchors all relative dates (e.g. "response due 21 days after") on this event, not on `filed`.',
+        mapsTo: "tags JSON: '$.courtFiled' (and kind=\"courtFiled\")",
+        xetoSpec: 'cc.courtlens.legal::CourtFiled (EventKind)',
+        example: 'true (marker)',
+        relatedTags: ['filed', 'courtFilingDate', 'courtClerkRef', 'causeNoStamp'],
+      },
+    },
+    {
+      name: 'responded',
+      tier: 'marker',
+      doc: 'Event kind: a response was filed.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Event kind marker — a response/opposition was filed to the parent motion.',
+        howItWorks: 'Closes out the "response due" deadline computed from the parent motion`s courtFiled event. The actual response document is linked via fileRef; the responding party via authoredBy.',
+        mapsTo: "tags JSON: '$.responded' (and kind=\"responded\")",
+        xetoSpec: 'cc.courtlens.legal::Responded (EventKind)',
+        example: 'true (marker)',
+        relatedTags: ['filed', 'authoredBy', 'occurredOn'],
+      },
+    },
+    {
+      name: 'signed',
+      tier: 'marker',
+      doc: 'Event kind: signed by judge.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Event kind marker — a judge signed an order on this motion.',
+        howItWorks: 'judgeRef identifies which judge signed. occurredOn carries the signature date. Often precedes granted/denied — judges may sign an order then file it separately.',
+        mapsTo: "tags JSON: '$.signed' (and kind=\"signed\")",
+        xetoSpec: 'cc.courtlens.legal::Signed (EventKind)',
+        example: 'true (marker)',
+        relatedTags: ['granted', 'denied', 'judgeRef'],
+      },
+    },
+    {
+      name: 'granted',
+      tier: 'marker',
+      doc: 'Event kind: motion granted.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Event kind marker — the court granted the motion in full or in part.',
+        howItWorks: 'Terminal outcome for this motion`s lifecycle. judgeRef carries the deciding judge. occurredOn = order date. Partial grants are still represented as granted; the nuance lives in the attached order document.',
+        mapsTo: "tags JSON: '$.granted' (and kind=\"granted\")",
+        xetoSpec: 'cc.courtlens.legal::Granted (EventKind)',
+        example: 'true (marker)',
+        relatedTags: ['denied', 'signed', 'judgeRef'],
+      },
+    },
+    {
+      name: 'denied',
+      tier: 'marker',
+      doc: 'Event kind: motion denied.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Event kind marker — the court denied the motion.',
+        howItWorks: 'Terminal outcome. Mutually exclusive with granted. judgeRef + occurredOn carry the order metadata. Denials may be with or without prejudice — that detail lives in the attached order document, not on the marker.',
+        mapsTo: "tags JSON: '$.denied' (and kind=\"denied\")",
+        xetoSpec: 'cc.courtlens.legal::Denied (EventKind)',
+        example: 'true (marker)',
+        relatedTags: ['granted', 'signed', 'judgeRef'],
+      },
+    },
+    {
+      name: 'hearingHeld',
+      tier: 'marker',
+      doc: 'Event kind: a hearing on this motion was held.',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Event kind marker — a hearing on this motion took place.',
+        howItWorks: 'Used to record the act of holding a hearing. The Hearing record (separate entity) carries the full scheduling/transcript/duration data; this MotionEvent is the link back to the motion`s timeline.',
+        mapsTo: "tags JSON: '$.hearingHeld' (and kind=\"hearingHeld\")",
+        xetoSpec: 'cc.courtlens.legal::HearingHeld (EventKind)',
+        example: 'true (marker)',
+        relatedTags: ['signed', 'granted', 'denied', 'occurredOn'],
+      },
+    },
+    {
+      name: 'motionRef',
+      tier: 'ref',
+      doc: 'Reference to the parent motion.',
+      refTarget: 'motion',
+      info: {
+        whatItIs: 'Pointer to the Motion this event belongs to.',
+        howItWorks: 'Every MotionEvent is anchored to exactly one Motion. The motion`s caseRef is inherited (caseRef on the event must match motion.caseRef). Read-only after creation in normal flows.',
+        mapsTo: 'Prisma.MotionEvent.motionId (column) → Haystack ref',
+        xetoSpec: 'cc.courtlens.legal::MotionEvent.motionRef',
+        example: '@motion-7a3f',
+        relatedTags: ['caseRef', 'fileRef'],
+      },
+    },
+    {
+      name: 'caseRef',
+      tier: 'ref',
+      doc: 'Reference to the parent case.',
+      refTarget: 'case',
+      info: {
+        whatItIs: 'Pointer to the Case this event ultimately belongs to.',
+        howItWorks: 'Denormalized from the parent motion`s caseRef for query efficiency. The resolver enforces motionRef.caseRef === caseRef on write; if they disagree, the motion`s value wins.',
+        mapsTo: 'computed (inherited from motionRef.caseRef)',
+        xetoSpec: 'cc.courtlens.legal::MotionEvent.caseRef',
+        example: '@1535c622-8955-4669-8f29-884a4f2b31ea',
+        relatedTags: ['motionRef'],
+      },
+    },
+    {
+      name: 'fileRef',
+      tier: 'ref',
+      doc: 'Reference to the document (PDF) for this event.',
+      refTarget: 'doc',
+      info: {
+        whatItIs: 'Pointer to the underlying PDF document evidencing this event.',
+        howItWorks: 'For courtFiled events, this is the stamped PDF. For signed/granted/denied, the signed order. The doc row carries the actual file path, hash, and OCR results.',
+        mapsTo: "tags JSON: '$.fileRef' (Haystack ref)",
+        xetoSpec: 'cc.courtlens.legal::MotionEvent.fileRef',
+        example: '@doc-stamped-petition-a31',
+        relatedTags: ['motionRef', 'authoredBy'],
+      },
+    },
+    {
+      name: 'authoredBy',
+      tier: 'ref',
+      doc: 'Person who authored / filed this event.',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'The person who authored or initiated this event (signing lawyer, filing party, etc.).',
+        howItWorks: 'The persona engine resolves this from the signature block / e-file metadata during ingestion. You can override. For courtFiled events the clerk goes in courtClerkRef, not authoredBy.',
+        mapsTo: "tags JSON: '$.authoredBy' (Haystack ref)",
+        xetoSpec: 'cc.courtlens.legal::MotionEvent.authoredBy',
+        example: '@person-lawyer-stuart',
+        relatedTags: ['judgeRef', 'courtClerkRef'],
+      },
+    },
+    {
+      name: 'judgeRef',
+      tier: 'ref',
+      doc: 'Judge for this event (e.g. on signed/granted/denied).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'The judge associated with this event (signing judge, deciding judge).',
+        howItWorks: 'Required on signed/granted/denied events. Picker constrained to `judge`-marker Person rows. Default suggestion is the parent motion`s judgeRef.',
+        mapsTo: "tags JSON: '$.judgeRef' (Haystack ref)",
+        xetoSpec: 'cc.courtlens.legal::MotionEvent.judgeRef',
+        example: '@person-judge-naranjo',
+        relatedTags: ['signed', 'granted', 'denied'],
+      },
+    },
+    {
+      name: 'courtClerkRef',
+      tier: 'ref',
+      doc: 'Court clerk who stamped (on courtFiled events).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'The court clerk who stamped this filing (only meaningful on courtFiled events).',
+        howItWorks: 'Picker constrained to `courtClerk`-marker Person rows. Optional — many clerk stamps are illegible or anonymous; leave blank if unknown.',
+        mapsTo: "tags JSON: '$.courtClerkRef' (Haystack ref)",
+        xetoSpec: 'cc.courtlens.legal::MotionEvent.courtClerkRef',
+        example: '@person-clerk-okeefe',
+        relatedTags: ['courtFiled', 'causeNoStamp'],
+      },
+    },
+    {
+      name: 'occurredOn',
+      tier: 'value',
+      doc: 'When the event occurred.',
+      valueType: 'date',
+      info: {
+        whatItIs: 'The date (and optionally time) the event occurred.',
+        howItWorks: 'Semantics depend on the EventKind marker: for `filed` it`s the e-file submission, for `courtFiled` it duplicates courtFilingDate, for `signed` it`s the signature date, etc. This is the canonical timestamp for the event row.',
+        mapsTo: "tags JSON: '$.occurredOn' (ISO date)",
+        xetoSpec: 'cc.courtlens.legal::MotionEvent.occurredOn',
+        example: '2024-03-15T14:32:00Z',
+        relatedTags: ['courtFilingDate', 'kind'],
+      },
+    },
+    {
+      name: 'courtFilingDate',
+      tier: 'value',
+      doc: 'Official clerk-stamp date (on courtFiled events).',
+      valueType: 'date',
+      info: {
+        whatItIs: 'The clerk-stamp timestamp — the legally-operative filing date.',
+        howItWorks: 'Only populated on courtFiled events. Often equals occurredOn, but kept distinct so reports can pull "clerk-of-record date" without inspecting the kind marker. Deadline engine uses this as the anchor for all relative deadlines.',
+        mapsTo: "tags JSON: '$.courtFilingDate' (ISO date)",
+        xetoSpec: 'cc.courtlens.legal::MotionEvent.courtFilingDate',
+        example: '2024-03-15T14:32:00Z',
+        relatedTags: ['courtFiled', 'courtClerkRef', 'causeNoStamp'],
+      },
+    },
     { name: 'causeNoStamp', tier: 'value', doc: "Clerk's stamp identifier for this filing.", valueType: 'text' },
-    { name: 'kind', tier: 'value', doc: 'The EventKind value (e.g. "filed", "signed", "granted").', valueType: 'text' },
+    {
+      name: 'kind',
+      tier: 'value',
+      doc: 'The EventKind value (e.g. "filed", "signed", "granted").',
+      valueType: 'text',
+      info: {
+        whatItIs: 'String form of the EventKind marker for this row.',
+        howItWorks: 'Convenience denormalization — the marker (e.g. `courtFiled`) is the source of truth, but `kind: "courtFiled"` is easier to query in haystack filters. Always matches one of the EventKind markers exactly.',
+        mapsTo: "tags JSON: '$.kind' (string slug)",
+        xetoSpec: 'cc.courtlens.legal::MotionEvent.kind (Choice: EventKind)',
+        example: 'courtFiled',
+        relatedTags: ['received', 'filed', 'courtFiled', 'responded', 'signed', 'granted', 'denied', 'hearingHeld'],
+      },
+    },
   ],
 
   motionAttachment: [
