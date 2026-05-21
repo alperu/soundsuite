@@ -101,6 +101,9 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     { name: 'jurisdictionTx', tier: 'marker', doc: 'Texas jurisdiction.', valueType: 'bool' },
     { name: 'jurisdictionCa', tier: 'marker', doc: 'California jurisdiction.', valueType: 'bool' },
     { name: 'jurisdictionFed', tier: 'marker', doc: 'Federal jurisdiction.', valueType: 'bool' },
+    { name: 'trial', tier: 'marker', doc: 'Trial court case (district / county / family court). Scopes the courtRef picker to trial courts.', valueType: 'bool' },
+    { name: 'appellate', tier: 'marker', doc: 'Appellate case (intermediate court of appeals). Scopes the courtRef picker to appellate courts.', valueType: 'bool' },
+    { name: 'supreme', tier: 'marker', doc: 'Supreme court case (state supreme or US Supreme Court). Scopes the courtRef picker to supreme courts.', valueType: 'bool' },
     // refs
     { name: 'courtRef', tier: 'ref', doc: 'Reference to the Court record where this case is filed.', refTarget: 'court' },
     { name: 'judgeRefs', tier: 'refs', doc: 'List of judges assigned to this case (Persons).', refTarget: 'person' },
