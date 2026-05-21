@@ -59,34 +59,124 @@ const globalForXeto = globalThis as unknown as {
   __xetoBootPromise: Promise<XetoBoot> | undefined
 }
 
+/**
+ * Pods in @haxall/haxall/esm that *must* be skipped during boot.
+ *
+ * `graphicsJava.js` (line ~839 in the 4.0.4 shipped build) has a
+ * top-level declaration that triggers
+ *   ArgErr: Java types not allowed '[java]java.awt::FontMetrics'
+ * from sys.js's type resolver. The shipped fan.js / fantom.js boot()
+ * wraps every per-pod `await import(...)` in try/catch, which catches
+ * the *synchronous* rejection. But Node's async_hooks tracer still
+ * surfaces the inner rejection to the process-level
+ * `unhandledRejection` handler — Next.js's dev server kills the
+ * request (and sometimes the process) when this happens.
+ *
+ * The other entries in this set are pods that emit SyntaxError /
+ * "missing module" at import — those *are* caught cleanly, but
+ * skipping them keeps the boot log quiet.
+ *
+ * Identified by `scripts/_haxall-bisect.mjs` against
+ * @haxall/haxall@4.0.4. Revisit on every version bump.
+ */
+const HAXALL_SKIP_PODS = new Set<string>([
+  'graphicsJava.js', // ArgErr — root cause of the boot crash
+  'asn1.js',
+  'cryptoJava.js',
+  'fanc.js',
+  'fansh.js',
+  'hxDocker.js',
+  'hxFolio.js',
+  'hxMath.js',
+  'hxMqtt.js',
+  'hxPy.js',
+  'hxSedona.js',
+  'hxStore.js',
+  'hxTools.js',
+  'hxd.js',
+  'math.js',
+  'nodeJs.js',
+])
+
 async function loadHaxallModules(): Promise<{
   sys: AnyMod
   xeto: AnyMod
   haystack: AnyMod
 }> {
-  // Strip any inherited FAN_HOME before importing @haxall/haxall/fan.js.
-  // The user's shell may set FAN_HOME to a local haxall checkout (e.g.
-  // ~/fantom or ~/haxall) that is missing the bundled fantom pods. With
-  // a bad FAN_HOME, fan.js's boot() runs `checkPathEnv()` which walks the
-  // dir tree looking for `fan.props`; if one is found and malformed it
-  // throws `ArgErr {}` and crashes the Node process. (Took the dashboard
-  // offline on 2026-05-21.) Deleting the var entirely makes fan.js fall
-  // back to `node_path` (its own package directory) which has the bundled
-  // libs we ship with.
+  // 1. Strip any inherited FAN_HOME — see comment in HAXALL_SKIP_PODS for
+  //    the full crash chronology. A bad FAN_HOME can also make
+  //    fantom.js's checkPathEnv() fault on a malformed fan.props.
   const inheritedFanHome = process.env.FAN_HOME
   if (inheritedFanHome) {
     delete process.env.FAN_HOME
     // eslint-disable-next-line no-console
     console.log(
-      `[xeto-namespace] dropped inherited FAN_HOME=${inheritedFanHome}; using @haxall/haxall package default`,
+      `[xeto-namespace] dropped inherited FAN_HOME=${inheritedFanHome}`,
     )
   }
-  const fan = await dynImport<{ sys: AnyMod }>('@haxall/haxall/fan.js')
+
+  // 2. Replace fan.js / fantom.js's auto-import loop with our own that
+  //    skips known-bad pods. fan.js is a thin wrapper that calls
+  //    fantom.js boot(), which reads every .js in esm/ and tries to
+  //    import it — that's the loop that surfaces graphicsJava.js's
+  //    ArgErr to the process. Doing it ourselves keeps full control.
+  const path = await dynImport<typeof import('node:path')>('node:path')
+  const fs = await dynImport<typeof import('node:fs')>('node:fs')
+  const url = await dynImport<typeof import('node:url')>('node:url')
+
+  // Resolve the package root: `${cwd}/node_modules/@haxall/haxall/`. This
+  // is the same pattern used by scripts/xeto-smoke.mjs which is known-good.
+  const haxallRoot = path.resolve(
+    process.cwd(),
+    'node_modules/@haxall/haxall',
+  )
+  const esmDir = path.join(haxallRoot, 'esm')
+
+  // 3. Import sys.js first — it's the foundation everything imports.
+  const sys = (await dynImport<AnyMod>(
+    '@haxall/haxall/esm/sys.js',
+  )) as AnyMod
+
+  // 4. Replicate fantom.js boot()'s env setup (lines 60–67) so File/Env
+  //    paths point at the package home, where the bundled .xetolib
+  //    pre-builds live (home/lib/xeto/sys/sys-5.0.0.xetolib, etc.).
+  const { Env, File } = sys
+  const toDir = (p: string) => (p.endsWith('/') ? p : p + '/')
+  Env.cur().__homeDir = File.os(toDir(haxallRoot))
+  Env.cur().__workDir = File.os(toDir(process.cwd()))
+  Env.cur().__tempDir = File.os(
+    toDir(path.resolve(haxallRoot, 'temp')),
+  )
+  Env.cur().__loadVars({
+    'node.version': process.versions.node,
+    'node.path': haxallRoot,
+  })
+
+  // 5. Auto-discover esm/*.js — same filters fantom.js uses (skip .ts,
+  //    fan_*, test*, fantom.js, sys.js) PLUS our blocklist.
+  const files = fs.readdirSync(esmDir).filter((f: string) => {
+    if (path.extname(f) !== '.js') return false
+    if (f.startsWith('fan_')) return false
+    if (f.startsWith('test')) return false
+    if (f === 'fantom.js' || f === 'sys.js') return false
+    if (HAXALL_SKIP_PODS.has(f)) return false
+    return true
+  })
+  for (const f of files) {
+    try {
+      await dynImport<AnyMod>(url.pathToFileURL(path.join(esmDir, f)).href)
+    } catch {
+      // Same swallow as fantom.js — should be silent if HAXALL_SKIP_PODS
+      // is current. If it isn't, the bisect script catches it.
+    }
+  }
+
+  // 6. Import the two pods we actually use directly.
   const xetoMod = await dynImport<AnyMod>('@haxall/haxall/esm/xeto.js')
   const haystackMod = await dynImport<AnyMod>(
     '@haxall/haxall/esm/haystack.js',
   )
-  return { sys: fan.sys, xeto: xetoMod, haystack: haystackMod }
+  return { sys, xeto: xetoMod, haystack: haystackMod }
 }
 
 function buildNamespace(sys: AnyMod, xeto: AnyMod): AnyMod {
@@ -219,31 +309,71 @@ export async function validateTags(
   model: string,
   tagDict: Record<string, unknown> | unknown,
 ): Promise<ValidationResult> {
-  const qname = qnameForModel(model)
-  if (!qname) return { ok: true, errors: [] }
-  const boot = await getNamespace()
-  const targetSpec = specOf(boot, qname)
-
-  const d =
-    tagDict &&
-    typeof tagDict === 'object' &&
-    !(tagDict as { has?: unknown }).has
-      ? dict(boot, tagDict as Record<string, unknown>)
-      : tagDict
-
-  const opts = dict(boot, { ignoreRefs: true })
-  const ok = boot.ns.fits(d, targetSpec, opts) as boolean
-  if (ok) return { ok: true, errors: [] }
-
-  const errors: string[] = [`tags do not fit ${qname}`]
+  // Defensive wrapper: never let an internal Haxall/XETO error bubble
+  // out of this function. The Prisma extension treats us as a boolean
+  // gate; if we throw, every tag write fails with a 500. That's worse
+  // than soft-failing the validation and letting the write proceed.
+  // The user can edit tags in the panel while we investigate the
+  // underlying namespace bug (see task #7).
   try {
-    const report = boot.ns.validate(d, targetSpec, opts)
-    errors.push(String(report))
-  } catch {
-    // ns.validate() throws unless inside an XetoContext; the boolean
-    // from fits() is the load-bearing check.
+    const qname = qnameForModel(model)
+    if (!qname) return { ok: true, errors: [] }
+    const boot = await getNamespace()
+    const targetSpec = specOf(boot, qname)
+    if (!targetSpec) {
+      // Spec not loaded (lib didn't resolve, or model name mapping is
+      // stale). Don't block the write — log once and pass through.
+      logSpecMissOnce(model, qname)
+      return { ok: true, errors: [] }
+    }
+
+    const d =
+      tagDict &&
+      typeof tagDict === 'object' &&
+      !(tagDict as { has?: unknown }).has
+        ? dict(boot, tagDict as Record<string, unknown>)
+        : tagDict
+
+    const opts = dict(boot, { ignoreRefs: true })
+    const ok = boot.ns.fits(d, targetSpec, opts) as boolean
+    if (ok) return { ok: true, errors: [] }
+
+    const errors: string[] = [`tags do not fit ${qname}`]
+    try {
+      const report = boot.ns.validate(d, targetSpec, opts)
+      errors.push(String(report))
+    } catch {
+      // ns.validate() throws unless inside an XetoContext; the boolean
+      // from fits() is the load-bearing check.
+    }
+    return { ok: false, errors }
+  } catch (e) {
+    // Haxall internal error (NullErr, ArgErr, etc.) — pass through the
+    // write rather than block on broken validation.
+    logBootErrorOnce(model, e)
+    return { ok: true, errors: [] }
   }
-  return { ok: false, errors }
+}
+
+const SPEC_MISS_LOGGED = new Set<string>()
+function logSpecMissOnce(model: string, qname: string): void {
+  if (SPEC_MISS_LOGGED.has(model)) return
+  SPEC_MISS_LOGGED.add(model)
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[xeto] spec '${qname}' for model ${model} not loaded — write passes through unvalidated`,
+  )
+}
+
+const BOOT_ERR_LOGGED = new Set<string>()
+function logBootErrorOnce(model: string, e: unknown): void {
+  if (BOOT_ERR_LOGGED.has(model)) return
+  BOOT_ERR_LOGGED.add(model)
+  const msg = e instanceof Error ? `${e.constructor.name}: ${e.message}` : String(e)
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[xeto] validation passthrough for ${model} (haxall internal error: ${msg})`,
+  )
 }
 
 /**
