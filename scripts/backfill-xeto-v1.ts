@@ -19,9 +19,21 @@
  * Per §10 step 5.5 of docs/xeto-haystack-research.md.
  */
 
+import path from "node:path";
 import { PrismaClient } from "@prisma/client";
+import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
 
 const APPLY = process.argv.includes("--apply");
+
+function makePrisma(): PrismaClient {
+  const url = process.env.DATABASE_URL ?? "file:./data/sound-suite.db";
+  const stripped = url.startsWith("file:") ? url.slice("file:".length) : url;
+  const dbPath = path.isAbsolute(stripped)
+    ? stripped
+    : path.resolve(process.cwd(), "prisma", stripped);
+  const adapter = new PrismaBetterSqlite3({ url: dbPath });
+  return new PrismaClient({ adapter });
+}
 
 // Mirror of src/services/filing-detector.ts MODIFIER_WORDS — keep in sync.
 const MODIFIER_WORDS =
@@ -37,14 +49,17 @@ type Proposal = {
 };
 
 async function main() {
-  const prisma = new PrismaClient();
+  const prisma = makePrisma();
   const proposals: Proposal[] = [];
 
   try {
     // ── 1. Ensure self Person ─────────────────────────────────────────────
-    const existingSelf = await prisma.person.findFirst({
-      where: { tags: { path: ["self"], equals: true } },
-    });
+    // SQLite doesn't support Prisma's typed JSON `path` operator (Postgres/MySQL only).
+    // Query via json_extract; see research doc §3 "SQLite gets the type, not the query builder".
+    const selfRows = await prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "Person" WHERE json_extract(tags, '$.self') = 1 LIMIT 1
+    `;
+    const existingSelf = selfRows[0] ?? null;
     if (!existingSelf) {
       proposals.push({
         kind: "ensure-self",
