@@ -13,11 +13,17 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
 import type { TagSpec } from './tag-spec';
+import { pickAnchor, type PopupAnchor } from './popup-anchor';
+
+// Smaller than MotionType's 480; MarkerPicker rows are tight one-liners.
+const POPUP_WIDTH_PX = 280;
+const POPUP_MAX_HEIGHT_PX = 224; // matches max-h-56 (14rem)
 
 export interface MarkerPickerProps {
   /** Full marker spec list available for this entity kind (from tag-spec.ts). */
@@ -61,6 +67,10 @@ export function MarkerPicker({
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
+  const [anchor, setAnchor] = useState<PopupAnchor>({
+    horizontal: 'left',
+    vertical: 'below',
+  });
   const inputRef = useRef<HTMLInputElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -83,6 +93,22 @@ export function MarkerPicker({
     };
     document.addEventListener('mousedown', onDocClick);
     return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+
+  // Viewport-aware anchor: flip horizontally / vertically when there isn't
+  // room on the default side. The right-edge tag panel is the typical
+  // overflow case.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const recompute = () => {
+      const el = inputRef.current ?? rootRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      setAnchor(pickAnchor(rect, POPUP_WIDTH_PX, POPUP_MAX_HEIGHT_PX));
+    };
+    recompute();
+    window.addEventListener('resize', recompute);
+    return () => window.removeEventListener('resize', recompute);
   }, [open]);
 
   const commit = useCallback(
@@ -149,7 +175,17 @@ export function MarkerPicker({
       {showDropdown && (
         <div
           role="listbox"
-          className="absolute left-0 right-0 mt-1 z-20 bg-white border border-gray-200 rounded-lg shadow-md max-h-56 overflow-y-auto"
+          style={{
+            position: 'absolute',
+            [anchor.horizontal === 'left' ? 'left' : 'right']: 0,
+            [anchor.vertical === 'below' ? 'top' : 'bottom']: '100%',
+            width: `${POPUP_WIDTH_PX}px`,
+            maxWidth: 'calc(100vw - 16px)',
+            maxHeight: `${POPUP_MAX_HEIGHT_PX}px`,
+            marginTop: anchor.vertical === 'below' ? 4 : 0,
+            marginBottom: anchor.vertical === 'above' ? 4 : 0,
+          }}
+          className="z-20 bg-white border border-gray-200 rounded-lg shadow-md overflow-y-auto"
         >
           {results.map((spec, idx) => {
             const active = idx === highlight;
