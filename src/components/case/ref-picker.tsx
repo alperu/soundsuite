@@ -248,7 +248,15 @@ async function fetchResults(
     // attaches the bearer auth server-side; the browser never sees the key.
     // haystackRead has no AbortSignal hook, but the outer effect still drops
     // stale results via ctl.signal.aborted before applying them.
-    const grid: HaysonGrid = await haystackRead({ filter, limit: 24 });
+    //
+    // Per-target fetch cap. Courts are a small global catalogue (≈309 rows
+    // seeded incl. all US state/federal trial/appellate/supreme courts), and
+    // the default `limit: 24` truncates alphabetically — so Texas appellate
+    // courts (and most rows starting beyond the alphabet's first 24 names)
+    // never reach the picker. Bumping to 400 keeps the entire catalogue
+    // in reach for client-side substring narrowing.
+    const fetchLimit = refTarget === 'court' ? 400 : 24;
+    const grid: HaysonGrid = await haystackRead({ filter, limit: fetchLimit });
     if (signal?.aborted) {
       return { results: [], unauthorized: false };
     }

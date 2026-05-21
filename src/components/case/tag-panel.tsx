@@ -517,15 +517,28 @@ function inferScopeFilter(
   draft: HaystackRecord,
   record: HaystackRecord | null,
 ): string | undefined {
-  if (entityKind !== 'motion') return undefined;
-  if (name !== 'amends' && name !== 'supersedes') return undefined;
-  const caseRefRaw =
-    (draft && draft.caseRef) ??
-    (record && record.caseRef) ??
-    null;
-  const id = canonRefId(caseRefRaw);
-  if (!id) return undefined;
-  return `caseRef==${id}`;
+  // Motion amendment chain — keep amends/supersedes inside the same case.
+  if (entityKind === 'motion' && (name === 'amends' || name === 'supersedes')) {
+    const caseRefRaw =
+      (draft && draft.caseRef) ??
+      (record && record.caseRef) ??
+      null;
+    const id = canonRefId(caseRefRaw);
+    if (!id) return undefined;
+    return `caseRef==${id}`;
+  }
+  // Case → courtRef: narrow the court picker to the level marker set on the
+  // case. Markers can arrive as `{_kind:'marker'}`, `true`, or `'m:'`
+  // depending on serialization path — accept any non-false/non-null shape.
+  if (entityKind === 'case' && name === 'courtRef') {
+    const has = (v: unknown): boolean => v != null && v !== false;
+    const pick = (k: string): unknown =>
+      (draft && draft[k] !== undefined ? draft[k] : record?.[k]);
+    if (has(pick('appellate'))) return `courtType=="appellate"`;
+    if (has(pick('trial'))) return `courtType=="trial"`;
+    if (has(pick('supreme'))) return `courtType=="supreme"`;
+  }
+  return undefined;
 }
 
 function canonRefId(v: unknown): string | null {

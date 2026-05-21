@@ -132,6 +132,9 @@ Case: Dict {
   courtReporterRefs:  List? <of:Ref>
   filedOn:            DateTime?
   causeFiledStamp:    Str?
+  trial:              Marker?
+  appellate:          Marker?
+  supreme:            Marker?
 }
 
 //////////////////////////////////////////////////////////////////////////
