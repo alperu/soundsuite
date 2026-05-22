@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import { formatFilingLabel } from '@/lib/filings/format-filing-label';
 import { classifyFilingEntityKind } from '@/lib/filings/classify-entity-kind';
 import {
@@ -12,6 +13,19 @@ import {
 import { SelectedEntityProvider } from '@/components/case/selected-entity-context';
 import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { ExtractModal } from '@/components/personas/extract-modal';
+
+// pdfjs is heavy — lazy-load the embedded viewer only when this page renders
+const EmbeddedCourtViewer = dynamic(
+  () => import('@/components/court-viewer/embedded-court-viewer'),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex items-center justify-center border border-gray-200 rounded-lg bg-gray-50 text-sm text-gray-400" style={{ height: '60vh' }}>
+        Loading viewer…
+      </div>
+    ),
+  }
+);
 
 const FILING_TYPES = [
   'Motion', 'Notice', 'Letter', 'Order', 'Petition', 'Affidavit',
@@ -493,7 +507,7 @@ export default function FilingDetailPage() {
       </div>
 
       {/* Exhibits */}
-      <div className="p-4 border-t border-gray-100">
+      <div className="p-4 border-t border-gray-100" data-section="exhibits">
         <h3 className="text-sm font-medium text-gray-700 mb-2">Exhibits ({exhibits.length})</h3>
         {exhibits.length === 0 ? (
           <p className="text-sm text-gray-400">No exhibits attached</p>
@@ -528,6 +542,16 @@ export default function FilingDetailPage() {
           </div>
         )}
       </div>
+
+      {/* Embedded PDF viewer + TOC — reuses the case-explorer two-column layout */}
+      <div className="p-4 border-t border-gray-100">
+        <h3 className="text-sm font-medium text-gray-700 mb-2">Viewer</h3>
+        <EmbeddedCourtViewer
+          documentId={mainDocs[0]?.id ?? exhibits[0]?.id ?? null}
+          height="60vh"
+        />
+      </div>
+
       {/* Edit Filing Dialog */}
       {showEditDialog && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowEditDialog(false)}>
