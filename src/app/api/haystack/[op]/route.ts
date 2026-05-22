@@ -425,10 +425,35 @@ function tableForKind(kind: string): string {
   }
 }
 
-function stripAt(v: unknown): string | null {
-  if (typeof v !== 'string') return null
-  const s = v.startsWith('@') ? v.slice(1) : v
-  return s.length > 0 ? s : null
+/**
+ * Coerce any ref-shaped value to its bare id (no leading `@`). Accepts:
+ *   - bare string id ("abc123")
+ *   - Haystack-ish `@<id>` string
+ *   - Hayson ref object `{_kind:'ref', val:'<id>'}` (with optional leading `@`
+ *     inside `val`, since haystack-core preserves it on round-trips)
+ *   - Best-effort `{id:'<id>'}` shape from misc emitters
+ * Returns null for anything else (numbers, booleans, empty strings, etc.).
+ *
+ * Replaces the older `stripAt(v)` which only handled bare strings — that
+ * variant returned null for Hayson refs, which caused every list-valued ref
+ * (plaintiffRefs, defendantRefs, …) and any tag-stored scalar ref to be
+ * silently skipped by `inlineRefLabels`.
+ */
+function refToId(v: unknown): string | null {
+  if (v == null) return null
+  if (typeof v === 'string') {
+    const s = v.startsWith('@') ? v.slice(1) : v
+    return s.length > 0 ? s : null
+  }
+  if (typeof v === 'object') {
+    const obj = v as Record<string, unknown>
+    if (obj._kind === 'ref' && typeof obj.val === 'string') {
+      const s = obj.val.startsWith('@') ? obj.val.slice(1) : obj.val
+      return s.length > 0 ? s : null
+    }
+    if (typeof obj.id === 'string' && obj.id.length > 0) return obj.id
+  }
+  return null
 }
 
 /**
@@ -588,7 +613,11 @@ async function inlineRefLabels(row: any, _table: string): Promise<any> {
 
     const isList = Array.isArray(value)
     const rawList: unknown[] = isList ? (value as unknown[]) : [value]
-    const ids = rawList.map((r) => stripAt(r))
+    // Unwrap each element (string | `@<id>` | Hayson ref object) into a bare id.
+    // Nulls in the result represent malformed elements — we keep them in `ids`
+    // so we can re-thread them onto the same positions for list-valued refs,
+    // but skip the entire key if NONE of the elements yielded a real id.
+    const ids = rawList.map((r) => refToId(r))
     if (!ids.some((x) => x)) continue
 
     keyPlans.push({ key, target, ids, isList })
@@ -635,9 +664,17 @@ async function inlineRefLabels(row: any, _table: string): Promise<any> {
       const byId: Record<string, any> = {}
       for (const r of rows) byId[r.id] = r
       for (const id of missing) {
-        const label = formatLabelFor(target, byId[id])
+        const row = byId[id]
+        const label = formatLabelFor(target, row)
         resolved[target][id] = label
-        cacheSet(`${target}:${id}`, label)
+        // POSITIVE-ONLY caching: only cache hits, never the "(missing)"
+        // sentinel. Misses are rare (refs without an FK constraint in the
+        // schema rarely dangle), and caching them was poisoning subsequent
+        // reads after the target row was finally created — the LRU entry
+        // would hold "(missing)" for up to 60s even after `invalidateLabelCache`
+        // missed the bus-bust (e.g. created via a path that doesn't pass
+        // through `commitEntity`).
+        if (row) cacheSet(`${target}:${id}`, label)
       }
     } catch (e: any) {
       // Don't poison the row on lookup failure — emit "(missing)" and move on.
