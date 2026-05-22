@@ -266,11 +266,16 @@ function synthesizeRefsFromColumns(table: string, row: any): Record<string, unkn
       break
     case 'ClerksRecord':
       out.caseRef = ref(row.caseId)
+      // Emit both `fileRef` (universal filing ref) and `documentRef` (legacy
+      // alias on this kind) so the tag panel and any consumer still reading
+      // `documentRef` both resolve to the same Document row.
+      out.fileRef = ref(row.documentId)
       out.documentRef = ref(row.documentId)
       break
     case 'ReportersRecord':
       out.caseRef = ref(row.caseId)
       out.reporterRef = ref(row.reporterId)
+      out.fileRef = ref(row.documentId)
       out.documentRef = ref(row.documentId)
       break
     default:

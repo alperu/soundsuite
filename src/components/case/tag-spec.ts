@@ -161,6 +161,63 @@ const ORIGIN_MARKERS: TagSpec[] = [
 ]
 
 /**
+ * Shared "every filing has these" tag specs. Hoisted out of
+ * `attachmentBaseSpec` so they can be spread into kinds that don't go
+ * through that helper (Motion, MotionAttachment, ClerksRecord,
+ * ReportersRecord). Each tag carries a rich `info` block so the (?)
+ * popover renders consistently across every filing kind.
+ *
+ * Why a global helper instead of per-kind inlining: the user-facing
+ * model promises "every filing knows when it was filed, when we received
+ * it, and which PDF it lives in." Keeping one source of truth prevents
+ * drift (e.g. only Motion gets a richer howItWorks string).
+ */
+const FILING_FILE_REF_SPEC: TagSpec = {
+  name: 'fileRef',
+  tier: 'ref',
+  doc: 'Reference to the document (PDF).',
+  refTarget: 'doc',
+  info: {
+    whatItIs: 'Pointer to the underlying PDF Document this filing was extracted from.',
+    howItWorks: 'Synthesized server-side from the row\'s `documentId` foreign key on read; the Document row carries the actual file path, sha256, and OCR text. Manually overriding `fileRef` in tags JSON wins over the column when both are present.',
+    mapsTo: 'Prisma.<Model>.documentId (column) — emitted as Haystack ref @<doc-id>',
+    xetoSpec: 'cc.courtlens.legal::MotionAttachment.fileRef (inherited by every filing subtype)',
+    example: '@doc-stamped-petition-a31',
+    relatedTags: ['caseRef', 'motionRef', 'authoredBy'],
+  },
+}
+
+const FILING_FILED_ON_SPEC: TagSpec = {
+  name: 'filedOn',
+  tier: 'value',
+  doc: 'Date filed with the court.',
+  valueType: 'date',
+  info: {
+    whatItIs: 'Date this filing was filed with the court clerk (legally-operative filing date).',
+    howItWorks: 'On a filing row this is the clerk-stamp date — the date the deadline clock starts for this filing. Distinct from `receivedOn` (when WE got the PDF) and from MotionEvent.courtFilingDate (the lifecycle event\'s timestamp). When unset, the tag panel leaves it blank rather than guessing.',
+    mapsTo: "tags JSON: '$.filedOn' (ISO date) — column on ClerksRecord; tags-only elsewhere",
+    xetoSpec: 'cc.courtlens.legal::MotionAttachment.filedOn (inherited by every filing subtype)',
+    example: '2024-03-15',
+    relatedTags: ['receivedOn', 'courtFilingDate', 'courtFiled'],
+  },
+}
+
+const FILING_RECEIVED_ON_SPEC: TagSpec = {
+  name: 'receivedOn',
+  tier: 'value',
+  doc: 'Date received.',
+  valueType: 'date',
+  info: {
+    whatItIs: 'Date we received this filing into Sound Suite (drop-folder, email ingestion, manual upload).',
+    howItWorks: 'Independent of `filedOn`: a filing may be filed on day N with the clerk and received by us days later (mail delay, late forwarding from co-counsel). Used by the inbox / triage views to sort by ingestion recency; the deadline engine never anchors on this date.',
+    mapsTo: "tags JSON: '$.receivedOn' (ISO date)",
+    xetoSpec: 'cc.courtlens.legal::MotionAttachment.receivedOn (inherited by every filing subtype)',
+    example: '2024-03-17',
+    relatedTags: ['filedOn', 'received'],
+  },
+}
+
+/**
  * Helper: the common MotionAttachment-derived tag set every per-filing-type
  * entity inherits. Returns a fresh array each call (the kind marker is
  * type-specific). Order is: markers → refs → values, matching the UI grouping.
@@ -195,14 +252,14 @@ function attachmentBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
     // refs
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
     { name: 'motionRef', tier: 'ref', doc: 'Reference to the parent motion.', refTarget: 'motion' },
-    { name: 'fileRef', tier: 'ref', doc: 'Reference to the document (PDF).', refTarget: 'doc' },
+    FILING_FILE_REF_SPEC,
     { name: 'authoredBy', tier: 'ref', doc: 'Person who authored this filing.', refTarget: 'person' },
     { name: 'amends', tier: 'ref', doc: 'Attachment this one amends.', refTarget: 'motionAttachment' },
     { name: 'supersedes', tier: 'ref', doc: 'Attachment this one supersedes.', refTarget: 'motionAttachment' },
     // values
     { name: 'revisionSeq', tier: 'value', doc: 'Revision sequence number (1 for original).', valueType: 'number' },
-    { name: 'filedOn', tier: 'value', doc: 'Date filed with the court.', valueType: 'date' },
-    { name: 'receivedOn', tier: 'value', doc: 'Date received.', valueType: 'date' },
+    FILING_FILED_ON_SPEC,
+    FILING_RECEIVED_ON_SPEC,
   ];
 }
 
@@ -601,6 +658,12 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
         relatedTags: ['amends', 'supersedes', 'motionRef'],
       },
     },
+    // Universal filing tags — every filing kind carries these (see FILING_*_SPEC).
+    // NOTE: Motion has no `documentId` column in Prisma; `fileRef` is tags-only
+    // until a schema migration links Motion → Document. Phase-2 work.
+    FILING_FILE_REF_SPEC,
+    FILING_FILED_ON_SPEC,
+    FILING_RECEIVED_ON_SPEC,
   ],
 
   motionEvent: [
@@ -876,13 +939,16 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // Refs
     { name: 'motionRef', tier: 'ref', doc: 'Reference to the parent motion.', refTarget: 'motion' },
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
-    { name: 'fileRef', tier: 'ref', doc: 'Reference to the document (PDF).', refTarget: 'doc' },
+    FILING_FILE_REF_SPEC,
     { name: 'amends', tier: 'ref', doc: 'Attachment this one amends.', refTarget: 'motionAttachment' },
     { name: 'supersedes', tier: 'ref', doc: 'Attachment this one supersedes.', refTarget: 'motionAttachment' },
     { name: 'authoredBy', tier: 'ref', doc: 'Person who authored this attachment.', refTarget: 'person' },
     // Values
     { name: 'revisionSeq', tier: 'value', doc: 'Revision sequence number.', valueType: 'number' },
     { name: 'attachmentKind', tier: 'value', doc: 'The attachment-kind value (e.g. "proposedOrder").', valueType: 'text' },
+    // Universal filing tags — every filing kind carries these.
+    FILING_FILED_ON_SPEC,
+    FILING_RECEIVED_ON_SPEC,
   ],
 
   hearing: [
@@ -912,11 +978,18 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     ...ORIGIN_MARKERS,
     // refs
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
-    { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document.', refTarget: 'doc' },
+    FILING_FILE_REF_SPEC,
+    // `documentRef` is the legacy alias for this kind; kept for back-compat
+    // with consumers that still read it. Both names resolve to the same
+    // Document row server-side (see synthesizeRefsFromColumns).
+    { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document (alias of fileRef).', refTarget: 'doc' },
     { name: 'preparedBy', tier: 'ref', doc: 'Court clerk who prepared this volume.', refTarget: 'person' },
     // values
     { name: 'volume', tier: 'value', doc: 'Volume number of the clerk’s record.', valueType: 'number' },
-    { name: 'filedOn', tier: 'value', doc: 'Date the clerk’s record was filed.', valueType: 'date' },
+    { name: 'supplementalOrder', tier: 'value', doc: 'Order of this supplemental clerk’s record (1 = first supplemental, 2 = second, etc.). Only meaningful when the `supplemental` marker is set.', valueType: 'number' },
+    // Universal filing tags — every filing kind carries these.
+    FILING_FILED_ON_SPEC,
+    FILING_RECEIVED_ON_SPEC,
     { name: 'preparedOn', tier: 'value', doc: 'Date prepared by the clerk.', valueType: 'date' },
   ],
 
@@ -931,10 +1004,18 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // refs
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
     { name: 'reporterRef', tier: 'ref', doc: 'Court reporter who produced this volume.', refTarget: 'person' },
-    { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document.', refTarget: 'doc' },
+    FILING_FILE_REF_SPEC,
+    // `documentRef` is the legacy alias for this kind; kept for back-compat
+    // with consumers that still read it. Both names resolve to the same
+    // Document row server-side (see synthesizeRefsFromColumns).
+    { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document (alias of fileRef).', refTarget: 'doc' },
     // values
     { name: 'volume', tier: 'value', doc: 'Volume number of the reporter’s record.', valueType: 'number' },
+    { name: 'supplementalOrder', tier: 'value', doc: 'Order of this supplemental reporter’s record (1 = first supplemental, 2 = second, etc.). Only meaningful when the `supplemental` marker is set.', valueType: 'number' },
     { name: 'hearingDate', tier: 'value', doc: 'Date of the hearing/proceeding transcribed.', valueType: 'date' },
+    // Universal filing tags — every filing kind carries these.
+    FILING_FILED_ON_SPEC,
+    FILING_RECEIVED_ON_SPEC,
   ],
 
   notice: [
