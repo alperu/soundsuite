@@ -99,6 +99,68 @@ export interface TagSpec {
 }
 
 /**
+ * Origin (filing provenance) marker quartet. Derived server-side from
+ * `authoredBy` Person + their PersonRole; a value here is a manual
+ * override that wins over derivation (Task #27). Shared across Motion,
+ * MotionEvent, MotionAttachment, ClerksRecord, ReportersRecord, and every
+ * per-filing-type alias via `attachmentBaseSpec`.
+ */
+const ORIGIN_MARKERS: TagSpec[] = [
+  {
+    name: 'selfFiled',
+    tier: 'marker',
+    doc: 'I authored / my counsel filed this filing.',
+    valueType: 'bool',
+    info: {
+      whatItIs: 'Provenance marker — this filing came from me (or my counsel).',
+      howItWorks: 'Derived server-side from authoredBy → Person with `self: true` marker. Override by setting `selfFiled: true` in tags JSON; the override always wins over derivation.',
+      mapsTo: "tags JSON: '$.selfFiled' (override) OR computed (deriveOrigin)",
+      xetoSpec: 'cc.courtlens.legal::SelfFiled (Origin)',
+      relatedTags: ['opposingFiled', 'courtIssued', 'thirdParty', 'authoredBy'],
+    },
+  },
+  {
+    name: 'opposingFiled',
+    tier: 'marker',
+    doc: 'Opposing counsel / opposing party filed this.',
+    valueType: 'bool',
+    info: {
+      whatItIs: 'Provenance marker — this filing came from the opposing side.',
+      howItWorks: 'Derived from authoredBy + their PersonRole on this Case: when the author is plaintiff and self is defendant (or vice versa), the marker is emitted. Override by setting `opposingFiled: true` in tags JSON.',
+      mapsTo: "tags JSON: '$.opposingFiled' (override) OR computed (deriveOrigin)",
+      xetoSpec: 'cc.courtlens.legal::OpposingFiled (Origin)',
+      relatedTags: ['selfFiled', 'courtIssued', 'thirdParty', 'authoredBy'],
+    },
+  },
+  {
+    name: 'courtIssued',
+    tier: 'marker',
+    doc: 'The court (judge, clerk, or reporter) issued this filing.',
+    valueType: 'bool',
+    info: {
+      whatItIs: 'Provenance marker — this filing was issued by the court itself, not a party.',
+      howItWorks: 'Derived from authoredBy → Person with `judge`, `courtClerk`, or `courtReporter` markers. Also applied as a fast-path for MotionEvent rows with kind="signed". Override by setting `courtIssued: true` in tags JSON.',
+      mapsTo: "tags JSON: '$.courtIssued' (override) OR computed (deriveOrigin)",
+      xetoSpec: 'cc.courtlens.legal::CourtIssued (Origin)',
+      relatedTags: ['selfFiled', 'opposingFiled', 'thirdParty', 'authoredBy'],
+    },
+  },
+  {
+    name: 'thirdParty',
+    tier: 'marker',
+    doc: 'A non-party (amicus, witness, intervenor) filed this.',
+    valueType: 'bool',
+    info: {
+      whatItIs: 'Provenance marker — this filing came from someone who is neither a party to the case nor the court.',
+      howItWorks: 'Fallback derivation: authoredBy is set but the author has no self/judge/clerk/reporter marker and no plaintiff/defendant role in this case. Override by setting `thirdParty: true` in tags JSON.',
+      mapsTo: "tags JSON: '$.thirdParty' (override) OR computed (deriveOrigin)",
+      xetoSpec: 'cc.courtlens.legal::ThirdParty (Origin)',
+      relatedTags: ['selfFiled', 'opposingFiled', 'courtIssued', 'authoredBy'],
+    },
+  },
+]
+
+/**
  * Helper: the common MotionAttachment-derived tag set every per-filing-type
  * entity inherits. Returns a fresh array each call (the kind marker is
  * type-specific). Order is: markers → refs → values, matching the UI grouping.
@@ -127,6 +189,9 @@ function attachmentBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
     { name: 'amended', tier: 'marker', doc: 'This filing amends a prior one.', valueType: 'bool' },
     { name: 'confidential', tier: 'marker', doc: 'Confidential filing.', valueType: 'bool' },
     { name: 'sealed', tier: 'marker', doc: 'Sealed by court order.', valueType: 'bool' },
+    // Origin (filing provenance) — derived server-side from authoredBy;
+    // a value here is a manual override that wins over derivation.
+    ...ORIGIN_MARKERS,
     // refs
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
     { name: 'motionRef', tier: 'ref', doc: 'Reference to the parent motion.', refTarget: 'motion' },
@@ -405,6 +470,9 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
         relatedTags: ['motionType', 'caseRef'],
       },
     },
+    // Origin (filing provenance) — derived server-side from authoredBy;
+    // a value here is a manual override that wins over derivation.
+    ...ORIGIN_MARKERS,
     // refs
     {
       name: 'caseRef',
@@ -650,6 +718,9 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
         relatedTags: ['signed', 'granted', 'denied', 'occurredOn'],
       },
     },
+    // Origin (filing provenance) — derived server-side from authoredBy;
+    // a value here is a manual override that wins over derivation.
+    ...ORIGIN_MARKERS,
     {
       name: 'motionRef',
       tier: 'ref',
@@ -799,6 +870,9 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     { name: 'rfa', tier: 'marker', doc: 'Attachment kind: request for admissions.', valueType: 'bool' },
     { name: 'billOfReview', tier: 'marker', doc: 'Attachment kind: bill of review.', valueType: 'bool' },
     { name: 'petition', tier: 'marker', doc: 'Attachment kind: petition.', valueType: 'bool' },
+    // Origin (filing provenance) — derived server-side from authoredBy;
+    // a value here is a manual override that wins over derivation.
+    ...ORIGIN_MARKERS,
     // Refs
     { name: 'motionRef', tier: 'ref', doc: 'Reference to the parent motion.', refTarget: 'motion' },
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
@@ -833,6 +907,9 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     { name: 'clerksRecord', tier: 'marker', doc: "Marker: this record is a Clerk's Record (appellate compilation of trial-court papers).", valueType: 'bool' },
     { name: 'appellate', tier: 'marker', doc: 'Filed at the appellate level.', valueType: 'bool' },
     { name: 'supplemental', tier: 'marker', doc: 'Supplemental clerk’s record (added after the original).', valueType: 'bool' },
+    // Origin (filing provenance) — usually courtIssued for clerk's records,
+    // but the full quartet is offered for manual override.
+    ...ORIGIN_MARKERS,
     // refs
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
     { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document.', refTarget: 'doc' },
@@ -848,6 +925,9 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     { name: 'reportersRecord', tier: 'marker', doc: "Marker: this record is a Reporter's Record (court-reporter transcript volumes).", valueType: 'bool' },
     { name: 'appellate', tier: 'marker', doc: 'Filed at the appellate level.', valueType: 'bool' },
     { name: 'supplemental', tier: 'marker', doc: 'Supplemental reporter’s record.', valueType: 'bool' },
+    // Origin (filing provenance) — usually courtIssued for reporter's records,
+    // but the full quartet is offered for manual override.
+    ...ORIGIN_MARKERS,
     // refs
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
     { name: 'reporterRef', tier: 'ref', doc: 'Court reporter who produced this volume.', refTarget: 'person' },
