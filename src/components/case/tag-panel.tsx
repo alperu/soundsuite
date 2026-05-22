@@ -344,6 +344,7 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
                             onRemove={() =>
                               setDraft(prev => ({ ...prev, [spec.name]: false }))
                             }
+                            onInfoOpen={openInfo}
                           />
                         ))}
                     </div>
@@ -651,14 +652,19 @@ function MarkerChip({
 }
 
 function RemovableMarkerChip({
-  spec, onRemove,
-}: { spec: TagSpec; onRemove: () => void }) {
+  spec, onRemove, onInfoOpen,
+}: {
+  spec: TagSpec;
+  onRemove: () => void;
+  onInfoOpen: (spec: TagSpec, anchor: DOMRect) => void;
+}) {
   return (
     <span
       title={spec.doc}
       className="inline-flex items-center gap-1 pl-1.5 pr-0.5 py-0.5 rounded-full text-[11px] bg-emerald-100 text-emerald-800 border border-emerald-200"
     >
       {spec.name}
+      <HelpDot spec={spec} onOpen={onInfoOpen} />
       <button
         type="button"
         onClick={onRemove}
