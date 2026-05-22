@@ -132,26 +132,28 @@ export async function loadFilingTargets(
       row = null;
     }
 
-    // Primary Document = largest-by-fileSizeBytes Document on this Filing.
-    // Fall back to most-recently-updated if size is missing.
+    // Primary Document = highest-pageCount Document on this Filing (rough
+    // proxy for "main filing PDF" vs. small attachments). Tie-break by most
+    // recently updated.
     let primaryDocumentId: string | null = null;
     try {
       const docs = await (prisma as any).document.findMany({
         where: { filingId: f.id },
-        select: { id: true, fileSizeBytes: true, updatedAt: true },
+        select: { id: true, pageCount: true, updatedAt: true, createdAt: true },
       });
       if (docs.length === 1) {
         primaryDocumentId = docs[0].id;
       } else if (docs.length > 1) {
         docs.sort((a: any, b: any) => {
-          const sa = Number(a.fileSizeBytes ?? 0);
-          const sb = Number(b.fileSizeBytes ?? 0);
-          if (sb !== sa) return sb - sa;
+          const pa = Number(a.pageCount ?? 0);
+          const pb = Number(b.pageCount ?? 0);
+          if (pb !== pa) return pb - pa;
           return new Date(b.updatedAt ?? 0).getTime() - new Date(a.updatedAt ?? 0).getTime();
         });
         primaryDocumentId = docs[0].id;
       }
-    } catch {
+    } catch (err) {
+      console.warn(`[tag-fill] loadFilingTargets: document.findMany failed for filing=${f.id}: ${err instanceof Error ? err.message : String(err)}`);
       primaryDocumentId = null;
     }
 
@@ -179,10 +181,10 @@ export async function loadChunks(
 ): Promise<ChunkExcerpt[]> {
   if (!vectorStore || !documentId) return [];
   try {
-    const results = await vectorStore.search({
-      filter: { documentId },
-      limit: 60,
-    });
+    // Direct fetch by documentId — vectorStore.search({filter:{documentId}})
+    // without a vector/text query returns [] (it requires a query to drive
+    // ranking). findByDocument bypasses that and just filters the table.
+    const results = await vectorStore.findByDocument(documentId, 60);
 
     // Prefer chunks containing the highest-signal patterns first; fall back
     // to natural page order. This keeps the prompt small but biased toward
@@ -325,9 +327,18 @@ export async function extractFields(
         provider: sel.provider,
         model: sel.model,
         messages,
-        maxTokens: 1024,
+        // The schema below has 6 top-level fields, each up to ~150 tokens of
+        // payload (name + evidenceQuote). Qwen-class local models can emit
+        // 800-1500 tokens of structured JSON. 1024 was clipping responses
+        // mid-object → JSON parse failure → zero suggestions returned.
+        maxTokens: 3072,
         temperature: 0.1,
         jsonMode: true,
+        // Disable Qwen3's <think> mode — for structured extraction we want the
+        // model to go straight to the JSON. With thinking enabled Qwen burns
+        // the entire token budget inside <think>...</think>, then the strip
+        // regex leaves us with an empty string (the closing tag never arrived).
+        thinking: false,
         jsonSchema: {
           type: 'object',
           properties: {
@@ -361,10 +372,22 @@ export async function extractFields(
         },
       });
       const parsed = parseJsonLoose(response.content);
-      if (parsed) return { data: parsed, modelUsed: `${sel.provider}:${sel.model}` };
+      if (parsed) {
+        const present = Object.entries(parsed)
+          .filter(([, v]) => v != null)
+          .map(([k]) => k);
+        console.log(`[tag-fill] extractFields ok — model=${sel.provider}:${sel.model} extracted=[${present.join(',')}]`);
+        return { data: parsed, modelUsed: `${sel.provider}:${sel.model}` };
+      }
       lastError = new Error('non-json response');
+      console.warn(
+        `[tag-fill] non-json response (provider=${sel.provider} model=${sel.model}) — first 240 chars: ${(response.content || '').slice(0, 240)}`,
+      );
     } catch (err) {
       lastError = err;
+      console.warn(
+        `[tag-fill] extractFields throw (provider=${sel.provider} model=${sel.model}): ${err instanceof Error ? err.message : String(err)}`,
+      );
       // continue to fallback if applicable
     }
   }

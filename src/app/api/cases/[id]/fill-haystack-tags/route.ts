@@ -176,7 +176,12 @@ export async function POST(
 
     // ─── Per-filing extraction ─────────────────────────────────────────────
     const suggestions: FillTagSuggestion[] = [];
+    const debug = body.debug === true;
+    const diagnostics: Array<Record<string, unknown>> = [];
     for (const target of targets) {
+      const t0 = Date.now();
+      let lastError: string | null = null;
+      let suggestionCount = 0;
       try {
         const perFiling = await suggestForFiling({
           target,
@@ -185,20 +190,36 @@ export async function POST(
           primary,
           fallback,
         });
+        suggestionCount = perFiling.length;
         suggestions.push(...perFiling);
       } catch (err) {
-        console.warn(
-          `[tag-fill] filing ${target.filingId} failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        // continue with other filings
+        lastError = err instanceof Error ? err.message : String(err);
+        console.warn(`[tag-fill] filing ${target.filingId} failed: ${lastError}`);
+      }
+      if (debug) {
+        diagnostics.push({
+          filingId: target.filingId,
+          filingTitle: target.filingTitle,
+          kind: target.kind,
+          model: target.model,
+          primaryDocumentId: target.primaryDocumentId,
+          durationMs: Date.now() - t0,
+          suggestionCount,
+          error: lastError,
+        });
       }
     }
 
     // ─── DRY RUN: return suggestions only ──────────────────────────────────
     if (dryRun) {
-      return NextResponse.json({ ok: true, scanned: targets.length, suggestions });
+      const payload: Record<string, unknown> = { ok: true, scanned: targets.length, suggestions };
+      if (debug) {
+        payload.diagnostics = diagnostics;
+        payload.vectorStoreInitialized = vectorStore !== null;
+        payload.primary = { provider: primary.provider, model: primary.model };
+        payload.fallback = fallback ? { provider: fallback.provider, model: fallback.model } : null;
+      }
+      return NextResponse.json(payload);
     }
 
     // ─── APPLY: persist accepted (filing, field) tuples ────────────────────
@@ -361,9 +382,16 @@ async function suggestForFiling(args: {
       target,
       chunks,
     });
-    if (!proposal) continue;
+    if (!proposal) {
+      console.log(`[tag-fill] filing=${target.filingId} field=${field} → map returned null (no data or invalid)`);
+      continue;
+    }
 
-    if (valuesEqual(proposal.proposedValue, proposal.currentValue)) continue;
+    if (valuesEqual(proposal.proposedValue, proposal.currentValue)) {
+      console.log(`[tag-fill] filing=${target.filingId} field=${field} → skipped (current==proposed: ${JSON.stringify(proposal.currentValue)})`);
+      continue;
+    }
+    console.log(`[tag-fill] filing=${target.filingId} field=${field} → suggesting ${JSON.stringify(proposal.proposedValue).slice(0,80)}`);
     out.push(proposal);
   }
 

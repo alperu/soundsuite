@@ -412,6 +412,12 @@ export default function CaseDetailPage() {
   }, [caseNumberParam]);
 
   useEffect(() => { if (caseRecord) loadFiles(caseRecord.id); }, [caseRecord]);
+  // Without this, the page's local `filings` state stays empty on mount
+  // (the existing `loadFilings()` calls only fire from action handlers) and
+  // toolbar buttons that gate on `filings.length > 0` (Fill haystack tags, …)
+  // stay disabled forever.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (caseRecord) loadFilings(); }, [caseRecord]);
 
   // Notify the layout's right-hand TagPanel that we're viewing a Case.
   useEffect(() => {

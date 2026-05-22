@@ -566,6 +566,7 @@ export function TagPanel({ entityKind, entityId, entityLabel, onRename }: Props)
           multi={pickerFor.spec.tier === 'refs'}
           personMarker={inferPersonMarker(pickerFor.spec.name)}
           scopeFilter={inferScopeFilter(pickerFor.spec.name, pickerFor.spec.refTarget as RefTarget | undefined, entityKind, draft, record)}
+          scopeCaseId={inferScopeCaseId(pickerFor.spec.refTarget as RefTarget | undefined, draft, record)}
           excludeIds={selfExcludeIds(pickerFor.spec.refTarget as RefTarget, entityKind, entityId)}
           value={refValueToPickerValue(
             (editMode ? draft[pickerFor.spec.name] : record?.[pickerFor.spec.name]) as unknown,
@@ -638,36 +639,17 @@ function inferScopeFilter(
   draft: HaystackRecord,
   record: HaystackRecord | null,
 ): string | undefined {
-  // Generic case-scoping for in-case-only ref targets. Motions, documents,
-  // attachments, and hearings always belong to exactly one case — there is
-  // no scenario where a motion on case A should reference a motion on case B.
-  const inCaseTargets: ReadonlySet<RefTarget> = new Set<RefTarget>([
-    'motion',
-    'doc',
-    'motionAttachment',
-    'hearing',
-  ]);
-  if (refTarget && inCaseTargets.has(refTarget)) {
-    const caseRefRaw =
-      (draft && draft.caseRef) ??
-      (record && record.caseRef) ??
-      null;
-    const id = canonRefId(caseRefRaw);
-    if (id) return `caseRef==${id}`;
-  }
-
-  // Motion amendment chain — keep amends/supersedes inside the same case.
-  // (Already covered by the generic rule above when the entity has caseRef,
-  // but keep this explicit for cases that fall through.)
-  if (entityKind === 'motion' && (name === 'amends' || name === 'supersedes')) {
-    const caseRefRaw =
-      (draft && draft.caseRef) ??
-      (record && record.caseRef) ??
-      null;
-    const id = canonRefId(caseRefRaw);
-    if (!id) return undefined;
-    return `caseRef==${id}`;
-  }
+  // NOTE: generic case-scoping (motion/doc/motionAttachment/hearing → current
+  // case) is NOT done here. A server-side Haystack `caseRef==@<id>` filter
+  // compiles to `json_extract(tags, '$.caseRef') = '@<id>'`, but those tables
+  // store the case linkage on the `caseId` FK column, not in `tags` — the
+  // synthesized `caseRef` is layered post-read by `synthesizeRefsFromColumns`
+  // in `src/app/api/haystack/[op]/route.ts`. The route's filter would never
+  // match any row.
+  //
+  // Case scoping is instead applied client-side via the `scopeCaseId` prop on
+  // RefPicker. See `inferScopeCaseId` below.
+  void refTarget;
   // Case → courtRef: narrow the court picker to the level marker set on the
   // case. Markers can arrive as `{_kind:'marker'}`, `true`, or `'m:'`
   // depending on serialization path — accept any non-false/non-null shape.
@@ -680,6 +662,37 @@ function inferScopeFilter(
     if (has(pick('supreme'))) return `courtType=="supreme"`;
   }
   return undefined;
+}
+
+/**
+ * Client-side case scope for ref pickers that should only show entities in
+ * the current case (motion / doc / motionAttachment / hearing). Returns the
+ * canonical `@<caseId>` derived from the entity's own `caseRef`, or undefined
+ * when not applicable (no case context or wrong ref target).
+ *
+ * This is applied in RefPicker after fetching, since the server-side Haystack
+ * filter compiler can't reach the `caseId` FK column. See `inferScopeFilter`
+ * above for the rationale.
+ */
+function inferScopeCaseId(
+  refTarget: RefTarget | undefined,
+  draft: HaystackRecord,
+  record: HaystackRecord | null,
+): string | undefined {
+  if (!refTarget) return undefined;
+  const inCaseTargets: ReadonlySet<RefTarget> = new Set<RefTarget>([
+    'motion',
+    'doc',
+    'motionAttachment',
+    'hearing',
+  ]);
+  if (!inCaseTargets.has(refTarget)) return undefined;
+  const caseRefRaw =
+    (draft && draft.caseRef) ??
+    (record && record.caseRef) ??
+    null;
+  const id = canonRefId(caseRefRaw);
+  return id ?? undefined;
 }
 
 function canonRefId(v: unknown): string | null {
@@ -997,12 +1010,27 @@ function ValueRow({
   onChange: (v: unknown) => void;
   onInfoOpen: (spec: TagSpec, anchor: DOMRect) => void;
 }) {
-  const display = value == null ? '' : String(value);
-  if (!editMode && !display) return null;
   const inputType =
     spec.valueType === 'number' ? 'number' :
     spec.valueType === 'date' ? 'date' :
     'text';
+  // Haystack scalar values can arrive as Hayson objects (`{_kind:'date',val:'…'}`
+  // / `{_kind:'dateTime',val:'…+00:00'}`) or as raw strings/numbers. Unwrap for
+  // both the display string and the date-input value. `String(haysonObj)` would
+  // otherwise emit `[object Object]`.
+  const rawString =
+    value == null ? '' :
+    typeof value === 'object'
+      ? (() => {
+          const obj = value as { _kind?: unknown; val?: unknown };
+          return obj && typeof obj.val === 'string' ? obj.val : '';
+        })() :
+    String(value);
+  const display = inputType === 'date' && rawString
+    // YYYY-MM-DD for the date input + display chip; trim any time portion.
+    ? rawString.slice(0, 10)
+    : rawString;
+  if (!editMode && !display) return null;
   return (
     <div className="flex items-start gap-2 text-[11px]">
       <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">

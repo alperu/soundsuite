@@ -984,6 +984,11 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // Document row server-side (see synthesizeRefsFromColumns).
     { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document (alias of fileRef).', refTarget: 'doc' },
     { name: 'preparedBy', tier: 'ref', doc: 'Court clerk who prepared this volume.', refTarget: 'person' },
+    // Multi-person attributions for the volume — courts often list several
+    // clerks/reporters on an appellate Clerk's Record cover sheet. Constrained
+    // to Person rows with the matching intrinsic marker.
+    { name: 'courtClerkRefs', tier: 'refs', doc: 'Court clerks attributed on this volume.', refTarget: 'person' },
+    { name: 'courtReporterRefs', tier: 'refs', doc: 'Court reporters attributed on this volume.', refTarget: 'person' },
     // values
     { name: 'volume', tier: 'value', doc: 'Volume number of the clerk’s record.', valueType: 'number' },
     { name: 'supplementalOrder', tier: 'value', doc: 'Order of this supplemental clerk’s record (1 = first supplemental, 2 = second, etc.). Only meaningful when the `supplemental` marker is set.', valueType: 'number' },
@@ -1004,6 +1009,10 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // refs
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
     { name: 'reporterRef', tier: 'ref', doc: 'Court reporter who produced this volume.', refTarget: 'person' },
+    // Multi-person attributions — hearings can list multiple reporters or
+    // clerks on the cover sheet.
+    { name: 'courtReporterRefs', tier: 'refs', doc: 'Court reporters attributed on this volume.', refTarget: 'person' },
+    { name: 'courtClerkRefs', tier: 'refs', doc: 'Court clerks attributed on this volume.', refTarget: 'person' },
     FILING_FILE_REF_SPEC,
     // `documentRef` is the legacy alias for this kind; kept for back-compat
     // with consumers that still read it. Both names resolve to the same

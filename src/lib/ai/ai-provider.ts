@@ -844,7 +844,8 @@ export async function completeAI(req: AICompletionRequest): Promise<AICompletion
   // Ollama uses host URL, not API key. Prefer the dedicated completion host,
   // fall back to the shared embedding host for backward compatibility.
   if (req.provider === 'ollama') {
-    let host = config.ollamaCompletionHost || config.ollamaHost;
+    const directHost = config.ollamaCompletionHost || config.ollamaHost;
+    let host = directHost;
 
     // Fleet router: resolve completion host dynamically if orchestrator is enabled for completion
     if (config.completionUseOrchestrator) {
@@ -858,7 +859,11 @@ export async function completeAI(req: AICompletionRequest): Promise<AICompletion
         releaseEndpoint('completion', ep.sidecarUrl);
         return result;
       } catch (err) {
-        console.warn(`[completeAI] Orchestrator completion failed, falling back to direct host:`, (err as Error).message);
+        // Reset `host` to the operator-configured direct host so the
+        // fallback below actually points at a working endpoint, not the
+        // broken orchestrator URL we just overwrote.
+        host = directHost;
+        console.warn(`[completeAI] Orchestrator completion failed, falling back to direct host ${directHost ?? '<unset>'}:`, (err as Error).message);
       }
     }
 

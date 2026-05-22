@@ -573,6 +573,27 @@ export class VectorStore {
   }
 
   /**
+   * Fetch chunks for a specific document without requiring a vector or text
+   * query. Used by code paths that just want to read the indexed text (e.g.
+   * tag-fill extractor) — `search()` requires either a vector or FTS input
+   * and returns [] otherwise. This method bypasses that constraint.
+   */
+  async findByDocument(documentId: string, limit = 60): Promise<SearchResult[]> {
+    if (!this.db || !this.table) return [];
+    try {
+      const rows = await this.table
+        .query()
+        .where(`document_id = "${documentId}"`)
+        .limit(limit)
+        .toArray();
+      return rows.map((r) => this.rowToSearchResult(r));
+    } catch (error) {
+      console.warn(`[VectorStore] findByDocument(${documentId}) failed: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    }
+  }
+
+  /**
    * Delete all chunks associated with a specific document.
    */
   async deleteByDocument(documentId: string): Promise<void> {

@@ -56,19 +56,31 @@ export async function GET() {
       // Redis not available, proceed without cache
     }
 
-    // Fetch from Ollama
-    const res = await fetch(`${host}/api/tags`, {
-      signal: AbortSignal.timeout(5000),
-    });
-
-    if (!res.ok) {
+    // Fetch from Ollama — try the resolved host first, then fall back to the
+    // statically-configured `ollamaCompletionHost`. Fleet-router sometimes
+    // returns a host:port combo that isn't actually serving Ollama (e.g.
+    // host-Ollama mode where the container port differs from the host port);
+    // when that happens we should still surface models from the
+    // operator-configured host so the admin UI is usable.
+    const tryFetchTags = async (h: string) => {
+      try {
+        const r = await fetch(`${h}/api/tags`, { signal: AbortSignal.timeout(4000) });
+        if (r.ok) return await r.json();
+      } catch { /* fall through */ }
+      return null;
+    };
+    const fallbackHost = config.ollamaCompletionHost || config.ollamaHost || 'http://localhost:11434';
+    let data = await tryFetchTags(host);
+    if (!data && host !== fallbackHost) {
+      data = await tryFetchTags(fallbackHost);
+      if (data) host = fallbackHost;
+    }
+    if (!data) {
       return NextResponse.json(
-        { error: `Ollama returned ${res.status}`, models: [] },
+        { error: `Ollama unreachable at ${host}`, models: [] },
         { status: 502 },
       );
     }
-
-    const data = await res.json();
     // Filter out embedding-only models (they can't be used for chat/completion)
     const allModels = (data.models || []) as any[];
     const models: Array<{ id: string; label: string; size?: number }> = allModels
