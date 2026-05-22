@@ -158,6 +158,13 @@ Motion: Amendable {
   movantRef:      Ref?
   respondentRef:  Ref?
   appellate:      Marker?
+  // Universal filing slots — every filing kind carries these. Optional per
+  // slot-optionality policy: real entity identity lives in Prisma columns
+  // (Motion has no documentId column yet — `fileRef` is tags-only here
+  // until a future migration; see tag-spec.ts FILING_FILE_REF_SPEC).
+  fileRef:        Ref?
+  filedOn:        DateTime?
+  receivedOn:     DateTime?
 }
 
 //////////////////////////////////////////////////////////////////////////
