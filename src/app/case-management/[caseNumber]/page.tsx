@@ -7,6 +7,11 @@ import { getSharedDocumentMenuItems, type DocumentTarget, type DocumentContextMe
 import { getFiles, setFiles as idbSetFiles, getCachedFilings, setCachedFilings, getCachedTrackedFiles, setCachedTrackedFiles, setPreference, getPreference } from '@/lib/indexed-db';
 import { persistActionLog } from '@/lib/action-log';
 import { SelectedEntityProvider } from '@/components/case/selected-entity-context';
+import { TagFillReviewPanel } from '@/components/case/tag-fill-review-panel';
+import type {
+  FillTagSuggestion,
+  FillTagsResponse,
+} from '@/app/api/cases/[id]/fill-haystack-tags/route';
 
 interface ActionLog {
   id: string;
@@ -140,6 +145,11 @@ export default function CaseDetailPage() {
   const [filesLoading, setFilesLoading] = useState(false);
   const [parseLoading, setParseLoading] = useState(false);
   const [fillTagsLoading, setFillTagsLoading] = useState(false);
+  // Phase-2 tag-fill review panel state. Lifted here so the panel can sit
+  // alongside the file tree without re-running the extractor on every render.
+  const [tagFillSuggestions, setTagFillSuggestions] = useState<FillTagSuggestion[] | null>(null);
+  const [tagFillNote, setTagFillNote] = useState<string | undefined>(undefined);
+  const [tagFillScanned, setTagFillScanned] = useState<number | undefined>(undefined);
   const [refreshFolderLoading, setRefreshFolderLoading] = useState(false);
   const [fixPathsLoading, setFixPathsLoading] = useState(false);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
@@ -509,6 +519,23 @@ export default function CaseDetailPage() {
     };
     window.addEventListener('select-filing-documents', handler);
     return () => window.removeEventListener('select-filing-documents', handler);
+  }, []);
+
+  // Open the tag-fill review panel when the toolbar's "Fill haystack tags"
+  // dispatches its result. Only open when suggestions are present — an empty
+  // array (e.g. Phase-1 stub) leaves the actionLog summary as the sole feedback.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const data = (e as CustomEvent).detail as FillTagsResponse | undefined;
+      if (!data) return;
+      const list = Array.isArray(data.suggestions) ? data.suggestions : [];
+      if (list.length === 0) return;
+      setTagFillSuggestions(list);
+      setTagFillNote(data.note);
+      setTagFillScanned(typeof data.scanned === 'number' ? data.scanned : undefined);
+    };
+    window.addEventListener('haystack-tags-suggestions', handler);
+    return () => window.removeEventListener('haystack-tags-suggestions', handler);
   }, []);
 
   const loadFiles = async (caseId: string) => {
@@ -1975,6 +2002,24 @@ export default function CaseDetailPage() {
           </div>
         )}
       </div>
+      {tagFillSuggestions && tagFillSuggestions.length > 0 && (
+        <TagFillReviewPanel
+          caseId={caseRecord.id}
+          suggestions={tagFillSuggestions}
+          note={tagFillNote}
+          scanned={tagFillScanned}
+          onClose={() => {
+            setTagFillSuggestions(null);
+            setTagFillNote(undefined);
+            setTagFillScanned(undefined);
+          }}
+          onApplied={({ accepted }) => {
+            const logId = addLog('Tag fill', `applied ${accepted} change${accepted === 1 ? '' : 's'}`);
+            updateLog(logId, 'success');
+            window.dispatchEvent(new Event('filings-changed'));
+          }}
+        />
+      )}
     </SelectedEntityProvider>
   );
 }
