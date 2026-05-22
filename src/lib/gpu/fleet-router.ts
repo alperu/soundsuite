@@ -719,6 +719,17 @@ const ROLE_PORTS: Record<GpuRole, number> = {
 export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: string[] }): Promise<ResolvedEndpoint> {
   const fleet = await getFleetStatus();
   const port = ROLE_PORTS[role];
+  // Per-sidecar port lookup: the role catalog (buildRoleCatalog) advertises
+  // a different port for host-Ollama mode (11434, native macOS) vs. the
+  // Docker container modes (11435/6 on Linux). ROLE_PORTS is the Linux-only
+  // default; the actual cached container config carries the right value for
+  // the sidecar's actual runtime. Fall back to ROLE_PORTS when the sidecar
+  // hasn't reported state yet.
+  const portFor = (sidecar: FleetSidecar): number => {
+    const cached = statusCache.getSidecarStatus(sidecar.url);
+    const cfgPort = cached?.containers?.[role]?.config?.port;
+    return typeof cfgPort === 'number' && cfgPort > 0 ? cfgPort : port;
+  };
   const exclude = new Set(options?.excludeHosts ?? []);
   const isExcluded = (sidecarUrl: string): boolean => {
     if (exclude.size === 0) return false;
@@ -865,6 +876,7 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
 
   if (bestSidecar) {
     const hostname = new URL(bestSidecar.url).hostname;
+    const resolvedPort = portFor(bestSidecar);
     // Send acquire to register the request + reset idle timer
     try {
       await sendToSidecar(bestSidecar.url, '/acquire', { role });
@@ -872,16 +884,16 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
       // Non-critical — container already running
     }
     const gpuInfo = bestGpuPct >= 0 ? `, gpu=${bestGpuPct}%` : '';
-    logger.info(`Route resolved: ${role} → ${bestSidecar.hostname} (${hostname}:${port}), container=running, load=${bestLoad}${gpuInfo}`, {
+    logger.info(`Route resolved: ${role} → ${bestSidecar.hostname} (${hostname}:${resolvedPort}), container=running, load=${bestLoad}${gpuInfo}`, {
       phase: 1,
       role,
       sidecar: bestSidecar.hostname,
-      host: `http://${hostname}:${port}`,
+      host: `http://${hostname}:${resolvedPort}`,
       containerStatus: 'running',
       activeRequests: bestLoad,
       gpuPercent: bestGpuPct,
     });
-    return { host: `http://${hostname}:${port}`, sidecarUrl: bestSidecar.url, role };
+    return { host: `http://${hostname}:${resolvedPort}`, sidecarUrl: bestSidecar.url, role };
   }
 
   // Phase 2: No running container — pick first reachable sidecar and acquire
@@ -891,14 +903,15 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
       const result = await sendToSidecar(sidecar.url, '/acquire', { role });
       if (!result.error) {
         const hostname = new URL(sidecar.url).hostname;
-        logger.info(`Route resolved: ${role} → ${sidecar.hostname} (${hostname}:${port}), container=acquired, action=${result.action}`, {
+        const resolvedPort = portFor(sidecar);
+        logger.info(`Route resolved: ${role} → ${sidecar.hostname} (${hostname}:${resolvedPort}), container=acquired, action=${result.action}`, {
           phase: 2,
           role,
           sidecar: sidecar.hostname,
-          host: `http://${hostname}:${port}`,
+          host: `http://${hostname}:${resolvedPort}`,
           action: result.action,
         });
-        return { host: `http://${hostname}:${port}`, sidecarUrl: sidecar.url, role };
+        return { host: `http://${hostname}:${resolvedPort}`, sidecarUrl: sidecar.url, role };
       }
       // Sidecar returned a result with an error field
       const errMsg = `${sidecar.hostname}: ${String(result.error).slice(0, 200)}`;
@@ -917,14 +930,15 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
       const result = await sendToSidecar(sidecar.url, '/acquire', { role });
       if (!result.error) {
         const hostname = new URL(sidecar.url).hostname;
-        logger.info(`Route resolved: ${role} → ${sidecar.hostname} (${hostname}:${port}), container=acquired (was disconnected)`, {
+        const resolvedPort = portFor(sidecar);
+        logger.info(`Route resolved: ${role} → ${sidecar.hostname} (${hostname}:${resolvedPort}), container=acquired (was disconnected)`, {
           phase: 3,
           role,
           sidecar: sidecar.hostname,
-          host: `http://${hostname}:${port}`,
+          host: `http://${hostname}:${resolvedPort}`,
           action: result.action,
         });
-        return { host: `http://${hostname}:${port}`, sidecarUrl: sidecar.url, role };
+        return { host: `http://${hostname}:${resolvedPort}`, sidecarUrl: sidecar.url, role };
       }
       const errMsg = `${sidecar.hostname}: ${String(result.error).slice(0, 200)}`;
       errors.push(errMsg);
