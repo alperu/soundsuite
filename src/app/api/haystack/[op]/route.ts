@@ -750,10 +750,17 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
       // Read-by-id: skip the filter compiler entirely. ClerksRecord/ReportersRecord
       // are not in the Kysely DB type map (yet), so go through Prisma for those.
       if (table === ('ClerksRecord' as any)) {
-        const row = await (prisma as any).clerksRecord.findUnique({ where: { id: idValue } })
+        let row = await (prisma as any).clerksRecord.findUnique({ where: { id: idValue } })
+        // Mirror Motion / MotionAttachment: when the panel reads a Clerk's
+        // Record filing by Filing.id and no ClerksRecord row exists, auto-
+        // upsert one from the Filing so the panel sees an empty-but-real
+        // record (with caseRef synthesized from the FK column) instead of
+        // an empty grid.
+        if (!row) row = await ensureClerksRecordForFiling(idValue)
         rows = row ? [row] : []
       } else if (table === ('ReportersRecord' as any)) {
-        const row = await (prisma as any).reportersRecord.findUnique({ where: { id: idValue } })
+        let row = await (prisma as any).reportersRecord.findUnique({ where: { id: idValue } })
+        if (!row) row = await ensureReportersRecordForFiling(idValue)
         rows = row ? [row] : []
       } else {
         rows = await (db as any)
@@ -1056,6 +1063,72 @@ async function ensureMotionAttachmentForFiling(
 }
 
 /**
+ * Auto-upsert a `ReportersRecord` row mirroring a Reporter's Record-typed
+ * Filing. Parallel to `ensureMotionForFiling` / `ensureMotionAttachmentForFiling`.
+ *
+ * `ReportersRecord` has its own dedicated Prisma table (not the
+ * `MotionAttachment` umbrella). We adopt the same convention as Motion:
+ * `ReportersRecord.id === Filing.id`, so the panel can read/commit tags
+ * against the Filing id without the caller needing to know whether the row
+ * has been materialized yet.
+ *
+ * Required FK on the Prisma model is `caseId`, which we copy from
+ * `Filing.caseId`. Seeds the `reportersRecord` XETO marker in tags so the
+ * row passes any future validator hooks. Idempotent — catches unique-
+ * violation races and re-reads.
+ *
+ * Returns the row, or null if no Filing exists for `filingId`. Does NOT
+ * gate on filingType: callers (the read+commit paths) only reach this
+ * helper after the panel resolved the Filing to entityKind=reportersRecord,
+ * so the filingType check is redundant noise that would prevent legitimate
+ * reads if a Filing's `filingType` string didn't pass a regex.
+ */
+async function ensureReportersRecordForFiling(filingId: string): Promise<any | null> {
+  const existing = await (prisma as any).reportersRecord.findUnique({ where: { id: filingId } })
+  if (existing) return existing
+  const filing = await (prisma as any).filing.findUnique({ where: { id: filingId } })
+  if (!filing) return null
+  try {
+    return await (prisma as any).reportersRecord.create({
+      data: {
+        id: filing.id,
+        caseId: filing.caseId,
+        tags: { reportersRecord: { _kind: 'marker' } } as any,
+      },
+    })
+  } catch (e: any) {
+    const row = await (prisma as any).reportersRecord.findUnique({ where: { id: filingId } })
+    if (row) return row
+    throw e
+  }
+}
+
+/**
+ * Auto-upsert a `ClerksRecord` row mirroring a Clerk's Record-typed Filing.
+ * Twin of `ensureReportersRecordForFiling`. Same id-mirroring convention
+ * and idempotency.
+ */
+async function ensureClerksRecordForFiling(filingId: string): Promise<any | null> {
+  const existing = await (prisma as any).clerksRecord.findUnique({ where: { id: filingId } })
+  if (existing) return existing
+  const filing = await (prisma as any).filing.findUnique({ where: { id: filingId } })
+  if (!filing) return null
+  try {
+    return await (prisma as any).clerksRecord.create({
+      data: {
+        id: filing.id,
+        caseId: filing.caseId,
+        tags: { clerksRecord: { _kind: 'marker' } } as any,
+      },
+    })
+  } catch (e: any) {
+    const row = await (prisma as any).clerksRecord.findUnique({ where: { id: filingId } })
+    if (row) return row
+    throw e
+  }
+}
+
+/**
  * commit — single source of truth for Case and Filing data.
  *
  * Accepts `{ id, kind, patch }` (panel shape) or a Haystack-style grid row
@@ -1304,6 +1377,12 @@ export async function commitEntity(input: {
       // on first save so the panel doesn't have to pre-create it.
       const ak = KIND_TO_ATTACHMENT_KIND[kind]
       if (ak) existing = await ensureMotionAttachmentForFiling(id, ak)
+    }
+    if (!existing && kind === 'reportersRecord') {
+      existing = await ensureReportersRecordForFiling(id)
+    }
+    if (!existing && kind === 'clerksRecord') {
+      existing = await ensureClerksRecordForFiling(id)
     }
     if (!existing) {
       return { ok: false, errGridJson: errGrid(`${kind} ${id} not found`) }
