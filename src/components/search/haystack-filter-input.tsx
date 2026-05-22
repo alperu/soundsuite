@@ -25,7 +25,15 @@
  * proposes `judge:` / `judgeBy:`) because it doesn't take a partial value yet.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   FilterChip,
   TOKEN_MAP,
@@ -90,9 +98,32 @@ export interface HaystackFilterInputProps {
    */
   pickerHighlight?: number;
   onPickerHighlightChange?: (next: number) => void;
+  /**
+   * Token-name suggestions (e.g. typing `fi` proposes `filedAfter`,
+   * `filedBefore`, `fileRef`). Surfaced to the parent so the left rail can
+   * render TokenNameSuggestions instead of the legacy floating dropdown.
+   * Empty array when no partial-name match.
+   */
+  onTokenSuggestionsChange?: (suggestions: string[]) => void;
+  /** Highlight index for the token-name list. */
+  onTokenHighlightChange?: (next: number) => void;
 }
 
-export function HaystackFilterInput({
+/**
+ * Imperative handle exposed via forwardRef so the parent (search-interface)
+ * can drive token-completion from a click on the left-rail panel — the input
+ * ref lives in this component and we need focus + setSelectionRange to keep
+ * post-pick typing landing at the right cursor position.
+ */
+export interface HaystackFilterInputHandle {
+  completeToken: (token: string) => void;
+  focus: () => void;
+}
+
+export const HaystackFilterInput = forwardRef<
+  HaystackFilterInputHandle,
+  HaystackFilterInputProps
+>(function HaystackFilterInput({
   chips,
   onChipsChange,
   freetext,
@@ -106,7 +137,9 @@ export function HaystackFilterInput({
   pickerOptions = [],
   pickerHighlight = 0,
   onPickerHighlightChange,
-}: HaystackFilterInputProps) {
+  onTokenSuggestionsChange,
+  onTokenHighlightChange,
+}: HaystackFilterInputProps, ref) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [cursor, setCursor] = useState<number>(0);
 
@@ -191,17 +224,46 @@ export function HaystackFilterInput({
     return matches.slice(0, 8);
   }, [freetext, activeToken]);
 
-  const [tokenHighlight, setTokenHighlight] = useState(0);
+  const [tokenHighlight, setTokenHighlightState] = useState(0);
+  const setTokenHighlight = useCallback(
+    (updater: number | ((prev: number) => number)) => {
+      setTokenHighlightState((prev) => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        onTokenHighlightChange?.(next);
+        return next;
+      });
+    },
+    [onTokenHighlightChange],
+  );
   useEffect(() => {
-    setTokenHighlight(0);
-  }, [tokenSuggestions.length]);
+    setTokenHighlightState(0);
+    onTokenHighlightChange?.(0);
+  }, [tokenSuggestions.length, onTokenHighlightChange]);
+
+  // Bubble the token-name suggestion list up to the parent so it can render
+  // TokenNameSuggestions in the left rail. We compare a joined signature so
+  // we don't re-fire on identical lists.
+  const lastTokenSuggestionsSig = useRef('');
+  useEffect(() => {
+    const sig = tokenSuggestions.join('|');
+    if (sig === lastTokenSuggestionsSig.current) return;
+    lastTokenSuggestionsSig.current = sig;
+    onTokenSuggestionsChange?.(tokenSuggestions);
+  }, [tokenSuggestions, onTokenSuggestionsChange]);
 
   const completeToken = useCallback(
     (token: string) => {
-      const next = freetext.replace(/(?:^|\s)(\w+)$/, (m) => {
-        const ws = m.match(/^\s/) ? ' ' : '';
-        return `${ws}${token}:`;
-      });
+      // When called from the left-rail panel, the freetext may not end in a
+      // bare partial (the user could have advanced past it). Fall back to
+      // appending `<token>:` with a leading space in that case so clicks from
+      // the panel still work even when the regex doesn't match.
+      const re = /(?:^|\s)(\w+)$/;
+      const next = re.test(freetext)
+        ? freetext.replace(re, (m) => {
+            const ws = m.match(/^\s/) ? ' ' : '';
+            return `${ws}${token}:`;
+          })
+        : `${freetext.replace(/\s+$/, '')}${freetext.trim() ? ' ' : ''}${token}:`;
       onFreetextChange(next);
       // Move cursor to end so activeTokenAtCursor picks up the new prefix.
       requestAnimationFrame(() => {
@@ -215,6 +277,18 @@ export function HaystackFilterInput({
       });
     },
     [freetext, onFreetextChange],
+  );
+
+  // Imperative handle — parent calls this from a click on the left-rail
+  // TokenNameSuggestions panel. Keeping focus + cursor sync inside this
+  // component avoids leaking inputRef through props.
+  useImperativeHandle(
+    ref,
+    () => ({
+      completeToken,
+      focus: () => inputRef.current?.focus(),
+    }),
+    [completeToken],
   );
 
   // ---------------------------------------------------------------------------
@@ -390,38 +464,12 @@ export function HaystackFilterInput({
         />
       </div>
 
-      {/* Inline token-prefix suggester (still floats — it's a tiny list of
-          token names, not a full picker). Only shows when no active token is
-          under the cursor. */}
-      {tokenSuggestions.length > 0 && (
-        <div className="absolute z-30 left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg">
-          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500 bg-gray-50 border-b border-gray-100">
-            Filter tokens
-          </div>
-          {tokenSuggestions.map((tok, i) => {
-            const def = TOKEN_MAP[tok];
-            return (
-              <button
-                key={tok}
-                type="button"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  completeToken(tok);
-                }}
-                className={`block w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50 ${
-                  i === tokenHighlight ? 'bg-purple-100' : ''
-                }`}
-              >
-                <span className="font-mono">{tok}:</span>
-                <span className="ml-2 text-xs text-gray-500">{def.category}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
+      {/* Token-name suggester used to float here; it now renders in the left
+          rail via TokenNameSuggestions (see search-interface.tsx). Keyboard
+          nav + Enter/Tab commit still live in handleKeyDown above. */}
     </div>
   );
-}
+});
 
 // Re-export the helper + types so callers (search-interface) can share them.
 export { activeTokenAtCursor } from './active-token-suggestions';

@@ -23,8 +23,12 @@ import { AIThinkingLog, type AIProgressEntry } from './search/ai-thinking-log';
 import { WorkflowsPanel } from './search/workflows-panel';
 import { HistoryPanel } from './search/history-panel';
 import { ChatAttachmentsStrip } from './chat-attachments';
-import { HaystackFilterInput } from './search/haystack-filter-input';
+import {
+  HaystackFilterInput,
+  type HaystackFilterInputHandle,
+} from './search/haystack-filter-input';
 import { SampleQueryPanel } from './search/sample-query-panel';
+import { TokenNameSuggestions } from './search/token-name-suggestions';
 import {
   ActiveTokenSuggestions,
   type ActiveToken,
@@ -358,6 +362,16 @@ export default function SearchInterface({
   const [activeToken, setActiveToken] = useState<ActiveToken | null>(null);
   const [pickerOptions, setPickerOptions] = useState<PickedSuggestion[]>([]);
   const [pickerHighlight, setPickerHighlight] = useState(0);
+
+  // Token-name suggestions (e.g. `fi` → `filedAfter` / `filedBefore`). Mirrors
+  // the partial-name list from HaystackFilterInput so the left rail can render
+  // TokenNameSuggestions when no active token is under the cursor but the
+  // user has typed a partial token name. Keyboard nav still lives in the
+  // input via its existing handleKeyDown branch; the ref lets a panel click
+  // run completeToken with proper input focus + cursor sync.
+  const [tokenSuggestions, setTokenSuggestions] = useState<string[]>([]);
+  const [tokenSuggestionHighlight, setTokenSuggestionHighlight] = useState(0);
+  const haystackInputRef = useRef<HaystackFilterInputHandle>(null);
 
   // Commit a chip from the picker: appends to chips + strips the matching
   // `token:partial` substring out of freetext. The HaystackFilterInput's own
@@ -1635,6 +1649,12 @@ export default function SearchInterface({
                 onOptionsChange={setPickerOptions}
                 onHighlightReset={() => setPickerHighlight(0)}
               />
+            ) : tokenSuggestions.length > 0 ? (
+              <TokenNameSuggestions
+                suggestions={tokenSuggestions}
+                highlight={tokenSuggestionHighlight}
+                onPick={(tok) => haystackInputRef.current?.completeToken(tok)}
+              />
             ) : (
               <SampleQueryPanel
                 onSelectQuery={handleSampleQuery}
@@ -1918,6 +1938,7 @@ export default function SearchInterface({
                   }} className="flex items-end gap-3">
                     {haystackMode ? (
                       <HaystackFilterInput
+                        ref={haystackInputRef}
                         chips={haystackChips}
                         onChipsChange={setHaystackChips}
                         freetext={aiQuery}
@@ -1937,6 +1958,8 @@ export default function SearchInterface({
                         pickerOptions={pickerOptions}
                         pickerHighlight={pickerHighlight}
                         onPickerHighlightChange={setPickerHighlight}
+                        onTokenSuggestionsChange={setTokenSuggestions}
+                        onTokenHighlightChange={setTokenSuggestionHighlight}
                       />
                     ) : (
                       <textarea
