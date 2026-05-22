@@ -35,6 +35,13 @@ interface Props {
   entityKind: EntityKind | null;
   entityId: string | null;
   entityLabel?: string;
+  /**
+   * If provided, the entityLabel subheader becomes click-to-edit. The
+   * callback is invoked with the trimmed new title; the caller is
+   * responsible for PATCHing the right model and refreshing state.
+   * Throws on failure to surface error to the input.
+   */
+  onRename?: (newTitle: string) => Promise<void>;
 }
 
 type HaystackRecord = Record<string, unknown> & { id?: string };
@@ -43,10 +50,58 @@ type HaystackRecord = Record<string, unknown> & { id?: string };
  * Right-column context-aware tag panel.
  * Consumes /api/haystack/read (Agent 3) — gracefully degrades if 404.
  */
-export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
+export function TagPanel({ entityKind, entityId, entityLabel, onRename }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const [width, setWidth] = useState<number>(TAG_PANEL_DEFAULT_WIDTH);
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Inline-rename state for the entityLabel subheader.
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const [savingTitle, setSavingTitle] = useState(false);
+  const [titleError, setTitleError] = useState<string | null>(null);
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  // Reset rename state when the selected entity changes.
+  useEffect(() => {
+    setEditingTitle(false);
+    setTitleError(null);
+  }, [entityKind, entityId]);
+
+  const beginRename = () => {
+    if (!onRename) return;
+    setTitleDraft(entityLabel || '');
+    setTitleError(null);
+    setEditingTitle(true);
+    setTimeout(() => titleInputRef.current?.select(), 0);
+  };
+
+  const commitRename = async () => {
+    if (!onRename) {
+      setEditingTitle(false);
+      return;
+    }
+    const next = titleDraft.trim();
+    if (!next || next === (entityLabel || '').trim()) {
+      setEditingTitle(false);
+      setTitleError(null);
+      return;
+    }
+    setSavingTitle(true);
+    setTitleError(null);
+    try {
+      await onRename(next);
+      setEditingTitle(false);
+    } catch (e) {
+      setTitleError(e instanceof Error ? e.message : 'Rename failed');
+    } finally {
+      setSavingTitle(false);
+    }
+  };
+
+  const cancelRename = () => {
+    setEditingTitle(false);
+    setTitleError(null);
+  };
 
   // Load persisted panel width from IndexedDB preferences (once).
   useEffect(() => {
@@ -306,10 +361,46 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
         )}
       </div>
 
-      {/* Subheader: entity label */}
+      {/* Subheader: entity label (click-to-rename when onRename is provided) */}
       {entityLabel && (
-        <div className="px-3 py-1.5 text-[11px] text-gray-500 truncate border-b border-gray-100 bg-white" title={entityLabel}>
-          {entityLabel}
+        <div className="px-3 py-1.5 border-b border-gray-100 bg-white">
+          {editingTitle ? (
+            <div className="flex items-center gap-1">
+              <input
+                ref={titleInputRef}
+                value={titleDraft}
+                onChange={e => setTitleDraft(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+                  else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+                }}
+                onBlur={commitRename}
+                disabled={savingTitle}
+                className="w-full text-[11px] text-gray-800 bg-white border border-blue-400 rounded px-1.5 py-0.5 outline-none focus:ring-2 focus:ring-blue-200 disabled:opacity-50"
+                placeholder="Title"
+              />
+              {savingTitle && (
+                <svg className="w-3 h-3 text-blue-500 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
+                  <path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="4" className="opacity-75" />
+                </svg>
+              )}
+            </div>
+          ) : onRename ? (
+            <button
+              type="button"
+              onClick={beginRename}
+              title="Click to rename"
+              className="block w-full text-left text-[11px] text-gray-500 truncate px-1 -mx-1 rounded hover:bg-blue-50 hover:text-blue-700 transition-colors"
+            >
+              {entityLabel}
+            </button>
+          ) : (
+            <div className="text-[11px] text-gray-500 truncate" title={entityLabel}>{entityLabel}</div>
+          )}
+          {titleError && (
+            <div className="mt-1 text-[10px] text-red-600">{titleError}</div>
+          )}
         </div>
       )}
 
@@ -474,7 +565,8 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
           refTarget={pickerFor.spec.refTarget as RefTarget}
           multi={pickerFor.spec.tier === 'refs'}
           personMarker={inferPersonMarker(pickerFor.spec.name)}
-          scopeFilter={inferScopeFilter(pickerFor.spec.name, entityKind, draft, record)}
+          scopeFilter={inferScopeFilter(pickerFor.spec.name, pickerFor.spec.refTarget as RefTarget | undefined, entityKind, draft, record)}
+          excludeIds={selfExcludeIds(pickerFor.spec.refTarget as RefTarget, entityKind, entityId)}
           value={refValueToPickerValue(
             (editMode ? draft[pickerFor.spec.name] : record?.[pickerFor.spec.name]) as unknown,
             pickerFor.spec.tier === 'refs',
@@ -499,6 +591,25 @@ export function TagPanel({ entityKind, entityId, entityLabel }: Props) {
   );
 }
 
+/**
+ * Exclude the current entity from a same-kind ref picker — e.g. a motion's
+ * `motionRef` shouldn't list the motion itself, only other motions it nests
+ * under.
+ */
+function selfExcludeIds(
+  refTarget: RefTarget,
+  entityKind: EntityKind | null,
+  entityId: string | null,
+): string[] | undefined {
+  if (!entityKind || !entityId) return undefined;
+  // RefTarget values mirror EntityKind for same-kind refs.
+  if (refTarget === entityKind) {
+    const canon = entityId.startsWith('@') ? entityId : `@${entityId}`;
+    return [canon];
+  }
+  return undefined;
+}
+
 /** Infer a sub-marker constraint for person refs from the tag name. */
 function inferPersonMarker(name: string): PersonMarker | undefined {
   if (name === 'judgeRef' || name === 'judgeRefs') return 'judge';
@@ -511,14 +622,43 @@ function inferPersonMarker(name: string): PersonMarker | undefined {
   return undefined;
 }
 
-/** Infer a scope filter for amendment-style refs on a motion record. */
+/**
+ * Infer a Haystack scope filter for the ref picker.
+ *
+ * Generic rule: motion / file / motionAttachment / hearing refs always
+ * scope to the entity's current case when one is known — picking a motion
+ * across cases is almost never what the user wants (Task #4). Special cases
+ * (amends/supersedes within an attachment chain, case→courtRef narrowing by
+ * court level) layer on top.
+ */
 function inferScopeFilter(
   name: string,
+  refTarget: RefTarget | undefined,
   entityKind: EntityKind | null,
   draft: HaystackRecord,
   record: HaystackRecord | null,
 ): string | undefined {
+  // Generic case-scoping for in-case-only ref targets. Motions, documents,
+  // attachments, and hearings always belong to exactly one case — there is
+  // no scenario where a motion on case A should reference a motion on case B.
+  const inCaseTargets: ReadonlySet<RefTarget> = new Set<RefTarget>([
+    'motion',
+    'doc',
+    'motionAttachment',
+    'hearing',
+  ]);
+  if (refTarget && inCaseTargets.has(refTarget)) {
+    const caseRefRaw =
+      (draft && draft.caseRef) ??
+      (record && record.caseRef) ??
+      null;
+    const id = canonRefId(caseRefRaw);
+    if (id) return `caseRef==${id}`;
+  }
+
   // Motion amendment chain — keep amends/supersedes inside the same case.
+  // (Already covered by the generic rule above when the entity has caseRef,
+  // but keep this explicit for cases that fall through.)
   if (entityKind === 'motion' && (name === 'amends' || name === 'supersedes')) {
     const caseRefRaw =
       (draft && draft.caseRef) ??
@@ -751,6 +891,16 @@ function RefRow({
                 </span>
               );
             })}
+            {editMode && hasTypedRefTarget && rawList.length > 0 && (
+              <button
+                type="button"
+                title="Clear all references"
+                onClick={() => onChange(null)}
+                className="px-1.5 py-0.5 text-[10px] rounded border border-gray-300 text-gray-500 bg-white hover:bg-gray-100 transition-colors flex-shrink-0"
+              >
+                ×
+              </button>
+            )}
             {editMode && hasTypedRefTarget && (
               <button
                 ref={btnRef}
@@ -794,6 +944,16 @@ function RefRow({
               >
                 {display || <span className="text-gray-400">—</span>}
               </div>
+              {value != null && value !== '' && (
+                <button
+                  type="button"
+                  title="Clear reference"
+                  onClick={() => onChange(null)}
+                  className="px-1.5 py-0.5 text-[10px] rounded border border-gray-300 text-gray-500 bg-white hover:bg-gray-100 transition-colors flex-shrink-0"
+                >
+                  ×
+                </button>
+              )}
               <button
                 ref={btnRef}
                 type="button"
@@ -851,19 +1011,31 @@ function ValueRow({
       </div>
       <div className="flex-1 min-w-0">
         {editMode ? (
-          <input
-            type={inputType}
-            value={display}
-            onChange={e => {
-              const v = e.target.value;
-              if (spec.valueType === 'number') {
-                onChange(v === '' ? null : Number(v));
-              } else {
-                onChange(v || null);
-              }
-            }}
-            className="w-full px-1.5 py-0.5 border border-gray-300 rounded text-[11px] focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
+          <div className="flex items-center gap-1">
+            <input
+              type={inputType}
+              value={display}
+              onChange={e => {
+                const v = e.target.value;
+                if (spec.valueType === 'number') {
+                  onChange(v === '' ? null : Number(v));
+                } else {
+                  onChange(v || null);
+                }
+              }}
+              className="flex-1 min-w-0 px-1.5 py-0.5 border border-gray-300 rounded text-[11px] focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+            {value != null && value !== '' && (
+              <button
+                type="button"
+                title="Clear value"
+                onClick={() => onChange(null)}
+                className="px-1.5 py-0.5 text-[10px] rounded border border-gray-300 text-gray-500 bg-white hover:bg-gray-100 transition-colors flex-shrink-0"
+              >
+                ×
+              </button>
+            )}
+          </div>
         ) : (
           <span className="text-gray-800 break-words">{display}</span>
         )}

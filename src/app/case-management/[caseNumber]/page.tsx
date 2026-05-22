@@ -140,6 +140,7 @@ export default function CaseDetailPage() {
   const [filesLoading, setFilesLoading] = useState(false);
   const [parseLoading, setParseLoading] = useState(false);
   const [refreshFolderLoading, setRefreshFolderLoading] = useState(false);
+  const [fixPathsLoading, setFixPathsLoading] = useState(false);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
@@ -1012,6 +1013,37 @@ export default function CaseDetailPage() {
     }
   };
 
+  /**
+   * Rebase every Document.filePath in this case to match a file actually
+   * on disk under Case.path. Use after a folder rename/trim when documents
+   * still reference the old path (Task #35/#37 follow-up).
+   */
+  const handleFixPaths = async () => {
+    if (!caseRecord) return;
+    const logId = addLog('Fix paths', caseRecord.path);
+    setFixPathsLoading(true);
+    try {
+      const res = await fetch(`/api/cases/${caseRecord.id}/fix-paths`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        updateLog(logId, 'error', data?.error || `HTTP ${res.status}`);
+        return;
+      }
+      const t = data.totals || {};
+      const parts: string[] = [];
+      if (typeof t.updated === 'number') parts.push(`${t.updated} rebased`);
+      if (typeof t.alreadyOk === 'number') parts.push(`${t.alreadyOk} ok`);
+      if (typeof t.notFound === 'number' && t.notFound > 0) parts.push(`${t.notFound} missing`);
+      if (typeof t.multipleAmbiguous === 'number' && t.multipleAmbiguous > 0) parts.push(`${t.multipleAmbiguous} ambiguous`);
+      updateLog(logId, 'success', parts.join(' · ') || 'no changes');
+      try { await loadFiles(caseRecord.id); } catch { /* best-effort */ }
+    } catch (err) {
+      updateLog(logId, 'error', (err as Error).message);
+    } finally {
+      setFixPathsLoading(false);
+    }
+  };
+
   // Filing queue polling
   const filingQueuePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -1525,43 +1557,84 @@ export default function CaseDetailPage() {
       {/* Header */}
       <div className="border-b border-gray-200">
         <div className="p-4 pb-2">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900">{caseRecord.name}</h2>
-            <p className="text-xs text-gray-400 truncate" title={caseRecord.path}>{caseRecord.path}</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer px-2 py-1 rounded hover:bg-gray-100">
-              <input type="checkbox" checked={autoAddFilings} onChange={toggleAutoAddFilings}
-                className="h-3.5 w-3.5 rounded text-blue-600" />
-              Auto Add Filings
-            </label>
-            {filingQueueProcessing ? (
-              <button onClick={handleCancelFilingQueue}
-                className="px-3 py-1.5 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700 transition-colors">
-                Cancel Queue
-              </button>
-            ) : (
-              <button onClick={handleAddToFilingQueue} disabled={selectedFiles.size === 0}
-                className="px-3 py-1.5 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-                Filing Queue ({selectedFiles.size})
-              </button>
-            )}
-            <button onClick={handleSelectAll} className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded">Select All</button>
-            <button onClick={handleDeselectAll} className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded">Deselect All</button>
-            <button onClick={handleRefreshFolder} disabled={refreshFolderLoading}
-              className="px-3 py-1.5 bg-slate-600 text-white text-sm rounded-lg hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-              title="Re-scan the case folder for renames or new files">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">{caseRecord.name}</h2>
+          <p className="text-xs text-gray-400 truncate" title={caseRecord.path}>{caseRecord.path}</p>
+        </div>
+        {/* Toolbar — uniform icon-button row below the path. */}
+        <div className="mt-2 flex items-center gap-0.5 border border-gray-200 bg-gray-50 rounded-md px-1 py-1 overflow-x-auto">
+          {/* Group: folder ops */}
+          <button onClick={handleRefreshFolder} disabled={refreshFolderLoading}
+            title="Refresh folder — rescan case directory for renames or new files"
+            className="inline-flex items-center gap-1 h-7 px-2 text-xs text-gray-700 rounded hover:bg-white hover:shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+            <svg className={`w-3.5 h-3.5 ${refreshFolderLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            <span className="hidden md:inline">{refreshFolderLoading ? 'Refreshing' : 'Refresh'}</span>
+          </button>
+          <button onClick={handleFixPaths} disabled={fixPathsLoading}
+            title="Fix paths — rebase Document.filePath rows to match files actually on disk under Case.path. Use after a folder rename or trim."
+            className="inline-flex items-center gap-1 h-7 px-2 text-xs text-gray-700 rounded hover:bg-white hover:shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+            <svg className={`w-3.5 h-3.5 ${fixPathsLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            <span className="hidden md:inline">{fixPathsLoading ? 'Fixing' : 'Fix paths'}</span>
+          </button>
+          <label className="inline-flex items-center gap-1 h-7 px-2 text-xs text-gray-700 rounded hover:bg-white hover:shadow-sm cursor-pointer transition-colors"
+            title="Auto Add Filings — when on, newly discovered PDFs are queued for filing detection automatically">
+            <input type="checkbox" checked={autoAddFilings} onChange={toggleAutoAddFilings}
+              className="h-3.5 w-3.5 rounded text-blue-600" />
+            <span className="hidden md:inline">Auto-add</span>
+          </label>
+          <span className="mx-1 h-5 w-px bg-gray-300" aria-hidden />
+          {/* Group: selection */}
+          <button onClick={handleSelectAll}
+            title="Select all files in the current view"
+            className="inline-flex items-center gap-1 h-7 px-2 text-xs text-gray-700 rounded hover:bg-white hover:shadow-sm transition-colors">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span className="hidden md:inline">Select all</span>
+          </button>
+          <button onClick={handleDeselectAll}
+            title="Clear current file selection"
+            className="inline-flex items-center gap-1 h-7 px-2 text-xs text-gray-700 rounded hover:bg-white hover:shadow-sm transition-colors">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+            <span className="hidden md:inline">Deselect</span>
+          </button>
+          <span className="mx-1 h-5 w-px bg-gray-300" aria-hidden />
+          {/* Group: actions */}
+          {filingQueueProcessing ? (
+            <button onClick={handleCancelFilingQueue}
+              title="Cancel the running filing-queue job"
+              className="inline-flex items-center gap-1 h-7 px-2.5 text-xs font-medium text-white bg-red-600 rounded hover:bg-red-700 transition-colors">
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              {refreshFolderLoading ? 'Refreshing...' : 'Refresh folder'}
+              Cancel queue
             </button>
-            <button onClick={handleParseSelected} disabled={selectedFiles.size === 0 || parseLoading}
-              className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-              {parseLoading ? 'Parsing...' : `Parse Selected (${selectedFiles.size})`}
+          ) : (
+            <button onClick={handleAddToFilingQueue} disabled={selectedFiles.size === 0}
+              title="Filing Queue — run filing detection on the selected PDFs"
+              className="inline-flex items-center gap-1 h-7 px-2.5 text-xs font-medium text-white bg-purple-600 rounded hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+              </svg>
+              Filing queue ({selectedFiles.size})
             </button>
-          </div>
+          )}
+          <button onClick={handleParseSelected} disabled={selectedFiles.size === 0 || parseLoading}
+            title="Parse Selected — extract text, OCR, and index the selected PDFs"
+            className="inline-flex items-center gap-1 h-7 px-2.5 text-xs font-medium text-white bg-green-600 rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+            <svg className={`w-3.5 h-3.5 ${parseLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            {parseLoading ? 'Parsing' : `Parse selected (${selectedFiles.size})`}
+          </button>
         </div>
           {/* Status filter bar */}
           <div className="flex items-center gap-1.5 mt-3">

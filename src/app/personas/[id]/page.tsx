@@ -138,18 +138,25 @@ export default function PersonaDetailPage() {
     if (!confirm(`Delete persona "${persona.displayName}"?`)) return;
     try {
       const res = await fetch(`/api/personas/${encodeURIComponent(persona.id)}`, { method: 'DELETE' });
-      if (res.status === 405) {
-        const body = await res.json().catch(() => null);
-        const msg = (body && typeof body === 'object' && 'error' in body)
-          ? String((body as { error: unknown }).error)
-          : 'Delete is not allowed';
-        showToast(msg);
-      } else if (res.ok) {
+      if (res.ok) {
         showToast('Deleted');
         router.push('/personas');
-      } else {
-        showToast(`HTTP ${res.status}`);
+        return;
       }
+      const body = await res.json().catch(() => null) as Record<string, unknown> | null;
+      if (res.status === 409 && body?.error === 'persona_has_roles') {
+        const n = typeof body.roleCount === 'number' ? body.roleCount : null;
+        showToast(n != null
+          ? `Persona has ${n} role binding${n === 1 ? '' : 's'}. Merge instead.`
+          : 'Persona has role bindings. Merge instead.');
+        return;
+      }
+      const msg = typeof body?.message === 'string'
+        ? body.message
+        : typeof body?.error === 'string'
+          ? body.error
+          : `HTTP ${res.status}`;
+      showToast(msg);
     } catch {
       showToast('Network error');
     }
@@ -351,7 +358,7 @@ export default function PersonaDetailPage() {
             </button>
           </div>
           <div className="flex items-center justify-between gap-2">
-            <div className="text-xs text-gray-700">Delete this persona (backend currently returns 405).</div>
+            <div className="text-xs text-gray-700">Delete this persona. Disallowed if any role bindings exist — merge first.</div>
             <button
               type="button"
               onClick={handleDelete}

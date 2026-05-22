@@ -98,7 +98,7 @@ export async function POST(
 
       const docs = await prisma.document.findMany({
         where: { caseId: id },
-        select: { id: true, filePath: true, status: true, errorMessage: true },
+        select: { id: true, filePath: true, status: true, errorMessage: true, filingId: true },
       });
       // Normalize case path for prefix checks (handle trailing slash).
       const casePathPrefix = caseRecord.path.endsWith(path.sep)
@@ -140,6 +140,13 @@ export async function POST(
           });
           relocated++;
         } else if (d.status !== 'ERROR') {
+          // Orphan rows (DISCOVERED, never filed) are exempt — they were
+          // surfaced by FileWatcher but the operator never chose to file
+          // them. A missing file under that condition is routine cleanup,
+          // not an error worth surfacing on the home page.
+          if (!d.filingId) {
+            continue;
+          }
           // 0 or multiple matches — mark ERROR so operator can disambiguate
           const reason = candidates.length === 0
             ? 'File not found on disk — folder may have been renamed. Right-click → Update file path.'

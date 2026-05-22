@@ -128,25 +128,33 @@ export default function FilingDetailPage() {
     if (!caseId || !filing) return;
     setEditLoading(true);
     try {
-      const { entityKind } = classifyFilingEntityKind(editType);
-      const patch: Record<string, unknown> = {
-        title: editTitle.trim(),
-        filingType: editType,
-        description: editDescription.trim() || null,
-        volumeNumber: editVolume.trim() ? parseInt(editVolume, 10) : null,
-      };
-      const grid = await hsCommit({ id: filing.id, kind: entityKind, patch });
-      const gridErr = hsGridHasError(grid);
-      if (gridErr) {
-        console.error('Edit filing failed:', gridErr);
+      // Filing-level columns (title/filingType/description/volumeNumber)
+      // live on the Prisma `Filing` table. Routing through hsCommit with the
+      // per-type entityKind (e.g. 'order') lands on the `motionAttachment`
+      // model, which has no `title` column — the patch silently disappears
+      // into its `tags` JSON and Filing.title never updates. Use the
+      // dedicated Filing PATCH endpoint instead; it also regenerates the
+      // slug, invalidates the Redis cache, and fires the SSE event.
+      const res = await fetch(`/api/cases/${caseId}/filings/${filing.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: editTitle.trim(),
+          filingType: editType,
+          description: editDescription.trim() || null,
+          volumeNumber: editVolume.trim() ? parseInt(editVolume, 10) : null,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        console.error('Edit filing failed:', err);
         return;
       }
-      const row = hsFirstRow<{ slug?: string | null }>(grid);
+      const data = await res.json() as { filing: { slug?: string | null } };
       setShowEditDialog(false);
       window.dispatchEvent(new Event('filings-changed'));
-      // If slug changed, navigate to new URL
-      if (row?.slug && row.slug !== filingSlugParam) {
-        router.push(`/case-management/${encodeURIComponent(caseNumberParam)}/${encodeURIComponent(row.slug)}`);
+      if (data.filing?.slug && data.filing.slug !== filingSlugParam) {
+        router.push(`/case-management/${encodeURIComponent(caseNumberParam)}/${encodeURIComponent(data.filing.slug)}`);
       } else {
         fetchFiling();
       }

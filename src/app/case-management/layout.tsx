@@ -514,27 +514,35 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
     if (!activeCase || !editFilingId) return;
     setEditFilingLoading(true);
     try {
-      const { entityKind } = classifyFilingEntityKind(editFilingType);
-      const patch: Record<string, unknown> = {
-        title: editFilingTitle.trim(),
-        filingType: editFilingType,
-        volumeNumber: editFilingVolume.trim() ? parseInt(editFilingVolume, 10) : null,
-        isSupplemental: editFilingSupplemental,
-        supplementalOrder: editFilingSupplementalOrder.trim() ? parseInt(editFilingSupplementalOrder, 10) : null,
-      };
-      const grid = await hsCommit({ id: editFilingId, kind: entityKind, patch });
-      const gridErr = hsGridHasError(grid);
-      if (gridErr) {
-        console.error('Edit filing failed:', gridErr);
+      // Filing-level columns must go to the dedicated PATCH route — hsCommit
+      // routes per-type kinds (e.g. 'order') to the motionAttachment table,
+      // which has no title/filingType/etc columns, so the patch silently
+      // disappears into its `tags` JSON and Filing.title never updates.
+      const res = await fetch(`/api/cases/${activeCase.id}/filings/${editFilingId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: editFilingTitle.trim(),
+          filingType: editFilingType,
+          volumeNumber: editFilingVolume.trim() ? parseInt(editFilingVolume, 10) : null,
+          isSupplemental: editFilingSupplemental,
+          supplementalOrder: editFilingSupplementalOrder.trim()
+            ? parseInt(editFilingSupplementalOrder, 10)
+            : null,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        console.error('Edit filing failed:', err);
         return;
       }
-      const row = hsFirstRow<{ slug?: string | null }>(grid);
+      const data = await res.json() as { filing: { slug?: string | null } };
       setShowEditFilingDialog(false);
       await loadFilings(activeCase.id);
       window.dispatchEvent(new Event('filings-changed'));
-      // If slug changed and we're on this filing's page, navigate to new slug
-      if (row?.slug && pathname.includes(editFilingId)) {
-        router.push(`/case-management/${encodeURIComponent(activeCaseNumber!)}/${encodeURIComponent(row.slug)}`);
+      // If slug changed and we're on this filing's page, navigate to the new slug.
+      if (data.filing?.slug && pathname.includes(editFilingId)) {
+        router.push(`/case-management/${encodeURIComponent(activeCaseNumber!)}/${encodeURIComponent(data.filing.slug)}`);
       }
     } catch (err) {
       console.error('Edit filing error:', err);
@@ -1088,7 +1096,46 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
             label = `${activeCase.name}${activeCase.caseNumber ? ` — ${activeCase.caseNumber}` : ''}`;
           }
         }
-        return <TagPanel entityKind={kind} entityId={id} entityLabel={label} />;
+        const handleRename = async (newTitle: string): Promise<void> => {
+          if (!id || !kind) throw new Error('No entity selected');
+          if (kind === 'case') {
+            const res = await fetch(`/api/cases/${encodeURIComponent(id)}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: newTitle }),
+            });
+            if (!res.ok) {
+              const b = await res.json().catch(() => null) as { error?: string } | null;
+              throw new Error(b?.error || `HTTP ${res.status}`);
+            }
+            await loadCases();
+            return;
+          }
+          // Filing rename — kind is one of the per-type EntityKinds.
+          if (!activeCase) throw new Error('No active case');
+          const res = await fetch(
+            `/api/cases/${encodeURIComponent(activeCase.id)}/filings/${encodeURIComponent(id)}`,
+            {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ title: newTitle }),
+            },
+          );
+          if (!res.ok) {
+            const b = await res.json().catch(() => null) as { error?: string } | null;
+            throw new Error(b?.error || `HTTP ${res.status}`);
+          }
+          const data = await res.json().catch(() => null) as { filing?: { slug?: string } } | null;
+          await loadFilings(activeCase.id, true);
+          // If the slug changed, route to the new URL so the page reloads
+          // its filing data.
+          const newSlug = data?.filing?.slug;
+          const currentSlug = pathParts.length > 2 ? decodeURIComponent(pathParts[2]) : null;
+          if (newSlug && currentSlug && newSlug !== currentSlug) {
+            router.replace(`/case-management/${encodeURIComponent(pathParts[1])}/${encodeURIComponent(newSlug)}`);
+          }
+        };
+        return <TagPanel entityKind={kind} entityId={id} entityLabel={label} onRename={handleRename} />;
       })()}
 
       {/* Sidebar Context Menu */}

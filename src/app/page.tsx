@@ -94,6 +94,7 @@ async function getCasesWithStats(partialIds: Set<string>): Promise<CaseWithStats
   const cases = await prisma.case.findMany({
     include: {
       documents: {
+        where: { filingId: { not: null } },
         select: {
           id: true,
           status: true,
@@ -135,6 +136,7 @@ async function getCasesWithStats(partialIds: Set<string>): Promise<CaseWithStats
 
 async function getInitialDocuments(): Promise<Record<string, Document[]>> {
   const documents = await prisma.document.findMany({
+    where: { filingId: { not: null } },
     select: {
       id: true,
       fileName: true,

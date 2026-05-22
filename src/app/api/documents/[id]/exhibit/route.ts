@@ -68,6 +68,24 @@ export async function POST(
       );
     }
 
+    // Reporter's/Clerk's Record filings are whole-volume case records — they
+    // don't host exhibits, and treating their cover PDF as "Exhibit A" was
+    // the root data-shape bug behind Task #2. Reject the request so the
+    // wrong-class state can't be re-created from any caller.
+    const normType = filing.filingType
+      ?.toLowerCase()
+      .replace(/['’`]/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+    if (normType === 'reporters record' || normType === 'clerks record' || normType === 'rr' || normType === 'cr') {
+      return NextResponse.json(
+        {
+          error: `Cannot attach an exhibit to a ${filing.filingType} filing — RR/CR filings are whole-volume records, not exhibit hosts.`,
+        },
+        { status: 400 }
+      );
+    }
+
     const label = exhibitLabel || await nextExhibitLabel(filingId);
 
     const updated = await prisma.document.update({

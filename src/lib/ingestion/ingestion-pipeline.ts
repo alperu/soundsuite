@@ -1598,10 +1598,26 @@ export class IngestionPipeline {
         });
       }
 
-      // Assign document to filing
+      // Assign document to filing. When the filing is a Reporter's/Clerk's
+      // Record (whole-volume case record), also explicitly clear any
+      // exhibitLabel: those filings don't host exhibits, and a stale label
+      // from a prior misclassification would otherwise hide the document
+      // under "Exhibits" instead of the main documents list (Task #2).
+      const normType = (filing.filingType ?? '')
+        .toLowerCase()
+        .replace(/['’`]/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+      const isWholeRecord =
+        normType === 'reporters record' ||
+        normType === 'clerks record' ||
+        normType === 'rr' ||
+        normType === 'cr';
       await this.database.document.update({
         where: { id: documentId },
-        data: { filingId: filing.id },
+        data: isWholeRecord
+          ? { filingId: filing.id, exhibitLabel: null }
+          : { filingId: filing.id },
       });
 
       this.logger.info('Auto-assigned document to filing', {

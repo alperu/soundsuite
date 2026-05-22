@@ -974,6 +974,35 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
       }
       return out
     })
+    // Backfill auto-fileRef for MotionAttachment rows that pre-date the
+    // ensure() fix that sets documentId at creation time (Task #3). Batched
+    // single Prisma query so this is cheap for list reads too.
+    if (table === 'MotionAttachment') {
+      const missingIds: string[] = []
+      for (const r of inlined) {
+        if (!r.documentId && r.fileRef == null && typeof r.id === 'string') {
+          missingIds.push(r.id)
+        }
+      }
+      if (missingIds.length > 0) {
+        const docs = await (prisma as any).document.findMany({
+          where: { filingId: { in: missingIds } },
+          orderBy: { createdAt: 'asc' },
+          select: { id: true, filingId: true },
+        })
+        const byFiling: Record<string, string> = {}
+        for (const d of docs) {
+          if (d.filingId && !(d.filingId in byFiling)) byFiling[d.filingId] = d.id
+        }
+        for (const r of inlined) {
+          const did = byFiling[r.id as string]
+          if (did) {
+            r.documentId = did
+            if (r.fileRef == null) r.fileRef = `@${did}`
+          }
+        }
+      }
+    }
     // Resolve every ref-shaped value (caseRef, judgeRef, ...) into a
     // sibling `<refName>Label` string the panel can render in read mode.
     // Batched per-target so we issue at most one Prisma query per table.
@@ -1184,6 +1213,16 @@ async function ensureMotionAttachmentForFiling(
   const motion = await ensureMotionForFiling(filingId, { anyFilingType: true })
   if (!motion) return null
 
+  // Auto-link the Filing's primary indexed Document into documentId so the
+  // tag-panel's `fileRef` field shows the actual PDF without manual picking
+  // (Task #3). Typical filings have exactly one PDF; we pick the oldest by
+  // createdAt to be deterministic.
+  const primaryDoc = await (prisma as any).document.findFirst({
+    where: { filingId },
+    orderBy: { createdAt: 'asc' },
+    select: { id: true },
+  })
+
   try {
     return await (prisma as any).motionAttachment.create({
       data: {
@@ -1192,6 +1231,7 @@ async function ensureMotionAttachmentForFiling(
         caseId: filing.caseId,
         attachmentKind,
         revisionSeq: filing.supplementalOrder ?? 1,
+        documentId: primaryDoc?.id ?? null,
         // Seed XETO markers so the row passes any future validator hooks. The
         // `attachment` umbrella marker plus the specific kind marker mirror
         // what the tag-spec entries for each kind define.
@@ -1409,9 +1449,15 @@ async function applyCaseSideEffects(
   before: { path?: string | null } | null,
   after: { id?: string | null; path?: string | null } | null,
 ): Promise<void> {
-  const afterPath = typeof after?.path === 'string' ? after.path.trim() : null
+  const afterRaw = typeof after?.path === 'string' ? after.path : null
+  const afterPath = afterRaw?.trim() || null
   if (!afterPath) return
-  const beforePath = typeof before?.path === 'string' ? before.path.trim() : null
+  const beforeRaw = typeof before?.path === 'string' ? before.path : null
+  const beforePath = beforeRaw?.trim() || null
+  // Migrator trigger uses raw before vs raw after so that whitespace-only
+  // edits (e.g. trimming a trailing space) still rebase Document.filePath.
+  // Watcher uses the trimmed paths.
+  const rawChanged = !!beforeRaw && beforeRaw !== afterRaw
   try {
     const { getServicesManager } = await import('@/lib/services-manager')
     const fileWatcher = getServicesManager().getFileWatcher()
@@ -1424,13 +1470,18 @@ async function applyCaseSideEffects(
     if (!before) {
       console.log(`[haystack/commit] case create: attaching file-watcher (case=${after?.id ?? '?'} path=${JSON.stringify(afterPath)})`)
       await fileWatcher.reattachCase({ oldPath: null, newPath: afterPath, caseId: after?.id ?? null })
-    } else if (beforePath && beforePath !== afterPath) {
-      console.log(`[haystack/commit] case-path changed, reattach: ${JSON.stringify(beforePath)} -> ${JSON.stringify(afterPath)} (case=${after?.id ?? '?'})`)
-      await fileWatcher.reattachCase({ oldPath: beforePath, newPath: afterPath, caseId: after?.id ?? null })
-      if (after?.id) {
+    } else if (rawChanged) {
+      const oldForWatcher = beforePath && beforePath !== afterPath ? beforePath : null
+      if (oldForWatcher) {
+        console.log(`[haystack/commit] case-path changed, reattach: ${JSON.stringify(beforePath)} -> ${JSON.stringify(afterPath)} (case=${after?.id ?? '?'})`)
+        await fileWatcher.reattachCase({ oldPath: oldForWatcher, newPath: afterPath, caseId: after?.id ?? null })
+      } else {
+        console.log(`[haystack/commit] case-path whitespace-only edit: ${JSON.stringify(beforeRaw)} -> ${JSON.stringify(afterRaw)} (case=${after?.id ?? '?'}); skipping watcher reattach, running doc-migrate`)
+      }
+      if (after?.id && beforeRaw) {
         try {
           const { migrateDocumentsForCasePath } = await import('@/services/document-path-migrator')
-          const result = await migrateDocumentsForCasePath(after.id, beforePath, afterPath)
+          const result = await migrateDocumentsForCasePath(after.id, beforeRaw, afterPath)
           console.log(`[doc-migrate] case=${after.id} updated=${result.updated} skipped=${result.skipped}`)
         } catch (e) {
           console.warn(`[doc-migrate] failed case=${after?.id ?? '?'}: ${e instanceof Error ? e.message : e}`)

@@ -44,12 +44,27 @@ export interface RefPickerProps {
   personMarker?: PersonMarker;
   /** Additional Haystack filter to AND into the entity query. */
   scopeFilter?: string;
+  /**
+   * Client-side scope: canonical '@<caseId>' to restrict results to rows whose
+   * synthesized `caseRef` equals this id. Used for motion/doc/motionAttachment/
+   * hearing pickers that should only surface entities in the current case.
+   *
+   * We filter client-side because the underlying Motion/MotionAttachment/Hearing
+   * tables store the case linkage on the `caseId` FK column, not in `tags`. The
+   * Haystack filter compiler only knows about `json_extract(tags, '$.X')`, so a
+   * server-side `caseRef==@<id>` clause matches zero rows. The route synthesizes
+   * `caseRef` post-read from `row.caseId`, so filtering after the fetch works.
+   */
+  scopeCaseId?: string;
   /** Current value. For multi, an array of '@<id>' strings. */
   value: string | string[] | null;
   onChange(next: string | string[] | null): void;
   onClose(): void;
   /** Anchor element rect so the popover can position itself. */
   anchorRect?: DOMRect | null;
+  /** Canonical '@<id>' values to exclude from results — e.g. the entity
+   *  currently being edited shouldn't appear in its own motionRef picker. */
+  excludeIds?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +74,7 @@ interface RefResult {
   id: string; // canonical '@<id>'
   primary: string;
   secondary?: string;
+  tertiary?: string;
   raw: Record<string, unknown>;
 }
 
@@ -112,9 +128,10 @@ function cacheKey(
   refTarget: RefTarget,
   personMarker: PersonMarker | undefined,
   scopeFilter: string | undefined,
+  scopeCaseId: string | undefined,
   q: string,
 ): string {
-  return `${refTarget}|${personMarker ?? ''}|${scopeFilter ?? ''}|${q}`;
+  return `${refTarget}|${personMarker ?? ''}|${scopeFilter ?? ''}|${scopeCaseId ?? ''}|${q}`;
 }
 
 function cacheGet(key: string): RefResult[] | null {
@@ -165,6 +182,31 @@ function canonId(raw: unknown): string {
   return s.startsWith('@') ? s : `@${s}`;
 }
 
+/**
+ * The read endpoint resolves ref-shaped fields and inlines a sibling
+ * `<refName>Label` value. That sibling is sometimes a bare string, sometimes
+ * an array (for list-valued refs). Pluck the first usable string.
+ */
+function firstLabel(v: unknown): string | undefined {
+  if (v == null) return undefined;
+  if (typeof v === 'string') return v || undefined;
+  if (Array.isArray(v)) {
+    for (const item of v) {
+      const s = typeof item === 'string' ? item : asString(item);
+      if (s) return s;
+    }
+    return undefined;
+  }
+  return asString(v);
+}
+
+function shortIdLabel(kind: string, id: string): string {
+  // '@bbe7c991-64e9-…'  →  'Motion bbe7c991'
+  const stripped = id.startsWith('@') ? id.slice(1) : id;
+  const head = stripped.split('-')[0] || stripped.slice(0, 8);
+  return `${kind} ${head}`;
+}
+
 function labelRow(refTarget: RefTarget, row: Record<string, unknown>): RefResult {
   const id = canonId(row.id);
   switch (refTarget) {
@@ -177,16 +219,27 @@ function labelRow(refTarget: RefTarget, row: Record<string, unknown>): RefResult
       return { id, primary, secondary, raw: row };
     }
     case 'motion': {
-      const primary = asString(row.motionType) ?? asString(row.name) ?? id;
+      // Fall back through every plausible human-readable field before giving
+      // up to a UUID. Many motions in practice lack `motionType` (it's set by
+      // the classifier and may not run yet) — so we try title/name/dis/label
+      // and finally show a short id like "Motion bbe7c991" rather than the
+      // full uuid which is unreadable.
+      const primary =
+        asString(row.title) ??
+        asString(row.motionType) ??
+        asString(row.name) ??
+        asString(row.dis) ??
+        asString(row.label) ??
+        shortIdLabel('Motion', id);
+      // Read op inlines `<refName>Label` siblings — caseRefLabel resolves to
+      // the case display name so the user can tell which case the motion is
+      // from at a glance.
+      const caseLabel = firstLabel(row.caseRefLabel) ?? asString(row.caseRef);
       const causeNo = asString(row.causeNo);
-      const caseLabel = asString(row.caseRef);
-      const secondary = causeNo ? ` · ${causeNo}` : caseLabel ? ` · ${caseLabel}` : undefined;
-      return {
-        id,
-        primary,
-        secondary: secondary ? secondary.replace(/^ · /, '') : undefined,
-        raw: row,
-      };
+      const filedOn = asString(row.filedOn);
+      const secondary = caseLabel ?? causeNo ?? filedOn;
+      const tertiary = caseLabel && causeNo && caseLabel !== causeNo ? causeNo : undefined;
+      return { id, primary, secondary, tertiary, raw: row };
     }
     case 'case': {
       const primary = asString(row.causeNo) ?? asString(row.name) ?? id;
@@ -198,10 +251,25 @@ function labelRow(refTarget: RefTarget, row: Record<string, unknown>): RefResult
         raw: row,
       };
     }
+    case 'doc':
+    case 'motionAttachment': {
+      // For file/attachment pickers the user needs to know which filing &
+      // case the document belongs to — top line = filename/title, second =
+      // case label, third = file path (when available).
+      const primary =
+        asString(row.fileName) ??
+        asString(row.title) ??
+        asString(row.attachmentKind) ??
+        asString(row.displayName) ??
+        asString(row.name) ??
+        asString(row.dis) ??
+        shortIdLabel('File', id);
+      const caseLabel = firstLabel(row.caseRefLabel) ?? asString(row.caseRef);
+      const filePath = asString(row.filePath);
+      return { id, primary, secondary: caseLabel, tertiary: filePath, raw: row };
+    }
     case 'court':
     case 'hearing':
-    case 'doc':
-    case 'motionAttachment':
     default: {
       const primary =
         asString(row.displayName) ??
@@ -222,6 +290,7 @@ function clientSideQueryMatch(r: RefResult, q: string): boolean {
   const needle = q.toLowerCase();
   if (r.primary.toLowerCase().includes(needle)) return true;
   if (r.secondary && r.secondary.toLowerCase().includes(needle)) return true;
+  if (r.tertiary && r.tertiary.toLowerCase().includes(needle)) return true;
   if (r.id.toLowerCase().includes(needle)) return true;
   return false;
 }
@@ -250,12 +319,18 @@ async function fetchResults(
     // stale results via ctl.signal.aborted before applying them.
     //
     // Per-target fetch cap. Courts are a small global catalogue (≈309 rows
-    // seeded incl. all US state/federal trial/appellate/supreme courts), and
-    // the default `limit: 24` truncates alphabetically — so Texas appellate
-    // courts (and most rows starting beyond the alphabet's first 24 names)
-    // never reach the picker. Bumping to 400 keeps the entire catalogue
-    // in reach for client-side substring narrowing.
-    const fetchLimit = refTarget === 'court' ? 400 : 24;
+    // seeded incl. all US state/federal trial/appellate/supreme courts), so
+    // bump to 400 to keep the entire catalogue reachable by substring narrow.
+    // motion/doc/motionAttachment/hearing are now case-scoped via scopeFilter
+    // (Task #4), so the candidate set is bounded by case size (typically
+    // <100). Lift the cap to 200 so all in-case rows fit. Person is global
+    // but small in practice (judges/lawyers per case), 100 is plenty.
+    const fetchLimit =
+      refTarget === 'court' ? 400 :
+      refTarget === 'motion' || refTarget === 'doc' ||
+        refTarget === 'motionAttachment' || refTarget === 'hearing' ? 200 :
+      refTarget === 'person' ? 100 :
+      50;
     const grid: HaysonGrid = await haystackRead({ filter, limit: fetchLimit });
     if (signal?.aborted) {
       return { results: [], unauthorized: false };
@@ -389,7 +464,9 @@ export function RefPicker({
   onChange,
   onClose,
   anchorRect,
+  excludeIds,
 }: RefPickerProps) {
+  const excludeKey = (excludeIds ?? []).join(',');
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
   const [results, setResults] = useState<RefResult[]>([]);
@@ -442,15 +519,22 @@ export function RefPicker({
       .then((out) => {
         if (ctl.signal.aborted) return;
         setUnauthorized(out.unauthorized);
-        setResults(out.results);
+        const excludeSet = new Set(excludeIds ?? []);
+        const filtered = excludeSet.size > 0
+          ? out.results.filter((r) => !excludeSet.has(r.id))
+          : out.results;
+        setResults(filtered);
         setHighlight(0);
+        // Cache the unfiltered set so a sibling picker without the same
+        // exclusion still benefits.
         if (!out.unauthorized) cachePut(key, out.results);
       })
       .finally(() => {
         if (!ctl.signal.aborted) setLoading(false);
       });
     return () => ctl.abort();
-  }, [refTarget, personMarker, scopeFilter, debounced]);
+    // excludeKey changes whenever excludeIds set membership changes.
+  }, [refTarget, personMarker, scopeFilter, debounced, excludeKey, excludeIds]);
 
   // Click-outside
   useEffect(() => {
@@ -643,7 +727,10 @@ export function RefPicker({
                   {r.secondary && (
                     <span className="text-[10px] text-gray-500 truncate">{r.secondary}</span>
                   )}
-                  <span className="text-[10px] text-gray-400 truncate">{r.id}</span>
+                  {r.tertiary && (
+                    <span className="text-[10px] text-gray-400 truncate">{r.tertiary}</span>
+                  )}
+                  <span className="text-[10px] text-gray-300 truncate">{r.id}</span>
                 </button>
               </li>
             ))}

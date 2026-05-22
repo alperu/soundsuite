@@ -134,6 +134,13 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
 
 export async function DELETE(_req: NextRequest, { params }: Ctx) {
   const { id } = await params
+  const existing = await prisma.person.findUnique({ where: { id }, select: { id: true } })
+  if (!existing) {
+    return NextResponse.json(
+      { error: 'persona_not_found' },
+      { status: 404 },
+    )
+  }
   const roleCount = await prisma.personRole.count({ where: { personId: id } })
   if (roleCount > 0) {
     return NextResponse.json(
@@ -145,8 +152,13 @@ export async function DELETE(_req: NextRequest, { params }: Ctx) {
       { status: 409 },
     )
   }
-  return NextResponse.json(
-    { error: 'method_not_allowed', message: 'Persona deletion not supported in v1' },
-    { status: 405 },
-  )
+  try {
+    await prisma.person.delete({ where: { id } })
+    return NextResponse.json({ ok: true })
+  } catch (e) {
+    return NextResponse.json(
+      { error: 'delete_failed', message: e instanceof Error ? e.message : 'delete failed' },
+      { status: 500 },
+    )
+  }
 }
