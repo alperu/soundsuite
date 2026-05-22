@@ -20,6 +20,13 @@ export interface AppConfig {
   ollamaModel?: string;
   ollamaCompletionHost?: string;
   ollamaCompletionModel?: string;
+  // AI Services — primary/fallback selection used by MCP tools, AI search,
+  // document summarization, analysis, and the tag-fill feature.
+  aiPrimaryProvider?: string;
+  aiPrimaryModel?: string;
+  aiFallbackEnabled?: boolean;
+  aiFallbackProvider?: string;
+  aiFallbackModel?: string;
   enableDocumentSummary?: boolean;
   workerPoolSize: number;
   minUiWorkers: number;
@@ -135,6 +142,12 @@ export async function getConfig(): Promise<AppConfig> {
     ollamaModel: configMap.get('embedding.ollamaModel'),
     ollamaCompletionHost: configMap.get('ai.ollamaCompletionHost'),
     ollamaCompletionModel: configMap.get('ai.ollamaCompletionModel'),
+    // AI Services selection
+    aiPrimaryProvider: configMap.get('ai.primaryProvider'),
+    aiPrimaryModel: configMap.get('ai.primaryModel'),
+    aiFallbackEnabled: configMap.get('ai.fallbackEnabled') === 'true',
+    aiFallbackProvider: configMap.get('ai.fallbackProvider'),
+    aiFallbackModel: configMap.get('ai.fallbackModel'),
     enableDocumentSummary: configMap.get('embedding.enableDocumentSummary') !== 'false',
     workerPoolSize: parseInt(configMap.get('workers.poolSize') || process.env.WORKER_POOL_SIZE || '20', 10),
     minUiWorkers: parseInt(configMap.get('workers.minUi') || process.env.MIN_UI_WORKERS || '3', 10),
@@ -345,6 +358,23 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
 
   if (config.ollamaCompletionModel !== undefined) {
     updates.push({ key: 'ai.ollamaCompletionModel', value: config.ollamaCompletionModel });
+  }
+
+  // AI Services — primary/fallback selection
+  if (config.aiPrimaryProvider !== undefined) {
+    updates.push({ key: 'ai.primaryProvider', value: config.aiPrimaryProvider });
+  }
+  if (config.aiPrimaryModel !== undefined) {
+    updates.push({ key: 'ai.primaryModel', value: config.aiPrimaryModel });
+  }
+  if (config.aiFallbackEnabled !== undefined) {
+    updates.push({ key: 'ai.fallbackEnabled', value: String(config.aiFallbackEnabled) });
+  }
+  if (config.aiFallbackProvider !== undefined) {
+    updates.push({ key: 'ai.fallbackProvider', value: config.aiFallbackProvider });
+  }
+  if (config.aiFallbackModel !== undefined) {
+    updates.push({ key: 'ai.fallbackModel', value: config.aiFallbackModel });
   }
 
   if (config.enableDocumentSummary !== undefined) {
