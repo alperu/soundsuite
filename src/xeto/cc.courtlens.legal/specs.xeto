@@ -475,3 +475,20 @@ Email: MotionAttachment {
 
 Evidence:      MotionAttachment { evidence }
 SupportingDoc: MotionAttachment { supportingDoc }
+
+//////////////////////////////////////////////////////////////////////////
+// Origin — Choice catalogue for filing provenance
+//////////////////////////////////////////////////////////////////////////
+
+// Origin. Where a filing came from. Derived server-side from authoredBy
+// (Person.self → selfFiled, judge/clerk → courtIssued, opposing party →
+// opposingFiled) with a manual override persisted in tags JSON. The four
+// markers (selfFiled / opposingFiled / courtIssued / thirdParty) are
+// materialized on each row's read-emit, and any one set in tags JSON
+// wins over derivation.
+Origin: Choice
+
+SelfFiled:     Origin { selfFiled }
+OpposingFiled: Origin { opposingFiled }
+CourtIssued:   Origin { courtIssued }
+ThirdParty:    Origin { thirdParty }

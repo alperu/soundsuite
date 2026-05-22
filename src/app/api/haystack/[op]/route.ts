@@ -568,6 +568,143 @@ function formatLabelFor(target: string, row: any): string {
   return computeDis(target, row) || row.id || '(missing)'
 }
 
+//////////////////////////////////////////////////////////////////////////
+// Origin derivation (Task #27)
+//////////////////////////////////////////////////////////////////////////
+
+type Origin = 'selfFiled' | 'opposingFiled' | 'courtIssued' | 'thirdParty'
+const ORIGIN_KEYS: readonly Origin[] = ['selfFiled', 'opposingFiled', 'courtIssued', 'thirdParty']
+
+const ORIGIN_RELEVANT_TABLES = new Set([
+  'Motion', 'MotionEvent', 'MotionAttachment', 'ClerksRecord', 'ReportersRecord',
+])
+
+/**
+ * Resolve the bare id of the "self" Person (the one with `tags.self = true`)
+ * once per request. The same Person is referenced by every deriveOrigin call,
+ * so memoize at the caller and pass it in.
+ */
+async function getSelfPersonId(): Promise<string | null> {
+  try {
+    const rows = await (prisma as any).$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "Person" WHERE json_extract(tags, '$.self') = 1 LIMIT 1
+    `
+    return rows && rows[0]?.id ? rows[0].id : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Derive a provenance Origin for a Motion / MotionEvent / MotionAttachment /
+ * ClerksRecord / ReportersRecord row.
+ *
+ * Resolution ladder (first match wins):
+ *  1. Manual override — one of the four marker keys set true in tags JSON.
+ *  2. MotionEvent special case — kind === 'signed' with judge-marker Person
+ *     authoredBy ⇒ courtIssued (handled by step 4 once authoredBy is set,
+ *     but kept as a fast-path when authoredBy isn't populated yet but the
+ *     event kind is unambiguous).
+ *  3. No authoredBy ⇒ null (cannot decide).
+ *  4. Person.tags.self      ⇒ selfFiled
+ *     Person.tags.judge / courtClerk / courtReporter ⇒ courtIssued
+ *  5. PersonRole in this case vs self's PersonRole:
+ *     opposing side (plaintiff vs defendant / movant vs respondent)
+ *                              ⇒ opposingFiled
+ *     same side               ⇒ selfFiled (co-counsel)
+ *  6. Fallback                 ⇒ thirdParty
+ *
+ * Returns null when the row isn't an Origin-bearing kind, or when no signal
+ * is available. Manual overrides in tags JSON always win, by step 1.
+ */
+async function deriveOrigin(
+  row: any,
+  table: string,
+  selfPersonId: string | null,
+): Promise<Origin | null> {
+  if (!row || typeof row !== 'object') return null
+  if (!ORIGIN_RELEVANT_TABLES.has(table)) return null
+
+  const tags = recoverTagObject(row.tags)
+
+  // 1. Manual override wins over derivation. Accept bare bool, numeric 1,
+  // and the Hayson marker form `{_kind: 'marker'}`.
+  const isMarkerTruth = (v: unknown): boolean => {
+    if (v === true || v === 1) return true
+    if (v && typeof v === 'object') {
+      const k = (v as Record<string, unknown>)._kind
+      if (k === 'marker') return true
+    }
+    return false
+  }
+  for (const o of ORIGIN_KEYS) {
+    if (isMarkerTruth((row as Record<string, unknown>)[o])) return o
+    if (isMarkerTruth((tags as Record<string, unknown>)[o])) return o
+  }
+
+  // 2 & 3. Need authoredBy to derive anything else.
+  const authoredByRaw = (row as any).authoredById ?? (tags as any).authoredBy ?? null
+  const authoredById = refToId(authoredByRaw)
+  if (!authoredById) {
+    // Special case: a MotionEvent with kind='signed' is by convention a
+    // court action even when authoredBy isn't yet attributed.
+    if (table === 'MotionEvent') {
+      const kind = (row as any).kind ?? (tags as any).kind ?? null
+      if (kind === 'signed') return 'courtIssued'
+    }
+    return null
+  }
+
+  // 4. Person-marker driven origins.
+  const person = await (prisma as any).person.findUnique({ where: { id: authoredById } })
+  if (!person) return null
+  const pTags = recoverTagObject(person.tags as unknown)
+  if (isMarkerTruth(pTags.self)) return 'selfFiled'
+  if (isMarkerTruth(pTags.judge) || isMarkerTruth(pTags.courtClerk) || isMarkerTruth(pTags.courtReporter)) {
+    return 'courtIssued'
+  }
+
+  // 5. Role-in-case detection.
+  const caseId = refToId((row as any).caseId ?? (tags as any).caseRef ?? null)
+  if (caseId && selfPersonId) {
+    const [selfRole, theirRole] = await Promise.all([
+      (prisma as any).personRole.findFirst({
+        where: { personId: selfPersonId, scopeKind: 'case', scopeId: caseId },
+      }),
+      (prisma as any).personRole.findFirst({
+        where: { personId: person.id, scopeKind: 'case', scopeId: caseId },
+      }),
+    ])
+    const sTags = selfRole ? recoverTagObject(selfRole.tags as unknown) : {}
+    const tTags = theirRole ? recoverTagObject(theirRole.tags as unknown) : {}
+    const selfIsPlaintiff = isMarkerTruth(sTags.plaintiff) || isMarkerTruth(sTags.movant)
+    const selfIsDefendant = isMarkerTruth(sTags.defendant) || isMarkerTruth(sTags.respondent)
+    const otherIsPlaintiff = isMarkerTruth(tTags.plaintiff) || isMarkerTruth(tTags.movant)
+    const otherIsDefendant = isMarkerTruth(tTags.defendant) || isMarkerTruth(tTags.respondent)
+    if ((selfIsPlaintiff && otherIsDefendant) || (selfIsDefendant && otherIsPlaintiff)) {
+      return 'opposingFiled'
+    }
+    if ((selfIsPlaintiff && otherIsPlaintiff) || (selfIsDefendant && otherIsDefendant)) {
+      return 'selfFiled'
+    }
+  }
+
+  // 6. Fallback — authored by someone with no actionable role.
+  return 'thirdParty'
+}
+
+/**
+ * Apply a derived Origin to a row in-place. Emits the bare marker (so a
+ * Haystack filter `motion and selfFiled` works) and a single scalar `origin`
+ * for clients that prefer the discriminator form.
+ */
+function applyOrigin(row: any, origin: Origin | null): any {
+  if (!row || typeof row !== 'object' || !origin) return row
+  ;(row as any)[origin] = true
+  ;(row as any).origin = origin
+  return row
+}
+
 /**
  * Resolve a polymorphic scopeRef on a PersonRole row. Looks at the parent
  * row's `scopeKind` to know which table to hit. Falls back to no lookup if
@@ -834,6 +971,15 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
     // sibling `<refName>Label` string the panel can render in read mode.
     // Batched per-target so we issue at most one Prisma query per table.
     const withLabels = await Promise.all(inlined.map((r: any) => inlineRefLabels(r, table)))
+    // Materialize the filing-provenance Origin marker (Task #27). No-op when
+    // `table` isn't one of the Origin-bearing kinds. selfPersonId is hoisted
+    // out of the per-row loop so we do one lookup per request, not per row.
+    if (ORIGIN_RELEVANT_TABLES.has(table)) {
+      const selfPersonId = await getSelfPersonId()
+      await Promise.all(
+        withLabels.map(async (r: any) => applyOrigin(r, await deriveOrigin(r, table, selfPersonId))),
+      )
+    }
     const grid = encodeGrid(withLabels, { table: table as any })
     console.log(`[haystack/read] filter=${JSON.stringify(filter)} id=${idValue ?? '-'} table=${table} rows=${inlined.length}`)
     return grid
@@ -1146,6 +1292,11 @@ function splitPatch(
     if (k.endsWith('Label')) continue
     // `dis` is server-synthesized on read (via computeDis) — never persist it.
     if (k === 'dis') continue
+    // `origin` is server-synthesized on read (via deriveOrigin) — never
+    // persist the scalar discriminator. The four marker keys (selfFiled,
+    // opposingFiled, courtIssued, thirdParty) still flow through to tagPatch
+    // below — that's the manual-override persistence path.
+    if (k === 'origin') continue
     if (colSet.has(k)) {
       let v = vRaw
       // Normalize empty strings on nullable columns to null so the form's
@@ -1286,6 +1437,12 @@ export async function commitEntity(input: {
       // Inline ref labels into the response so the panel can render display
       // names immediately after save (without forcing a follow-up read).
       const row = await inlineRefLabels(inlineRow(created), tableForKind(kind))
+      // Materialize Origin marker on the commit response so the panel sees
+      // the freshly-derived provenance without a follow-up read.
+      const tableForOrigin = tableForKind(kind)
+      if (ORIGIN_RELEVANT_TABLES.has(tableForOrigin)) {
+        applyOrigin(row, await deriveOrigin(row, tableForOrigin, await getSelfPersonId()))
+      }
       return { ok: true, row }
     } catch (e: any) {
       return { ok: false, errGridJson: prismaErrToGrid(e, kind) }
@@ -1342,6 +1499,12 @@ export async function commitEntity(input: {
     // after `hsCommit` lands rows with `<refName>Label` arrays present — the
     // bug that made plaintiffRefs render as UUIDs immediately post-save.
     const row = await inlineRefLabels(inlineRow(updated), tableForKind(kind))
+    // Materialize Origin marker on update response too — keeps panel rendering
+    // identical to a follow-up read.
+    const tableForOrigin = tableForKind(kind)
+    if (ORIGIN_RELEVANT_TABLES.has(tableForOrigin)) {
+      applyOrigin(row, await deriveOrigin(row, tableForOrigin, await getSelfPersonId()))
+    }
     return { ok: true, row }
   } catch (e: any) {
     return { ok: false, errGridJson: prismaErrToGrid(e, kind) }
