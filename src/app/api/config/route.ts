@@ -13,10 +13,20 @@ import { invalidateRerankCache } from '@/lib/search/reranker';
 
 /**
  * GET /api/config
- * Get current configuration
+ * Get current configuration.
+ *
+ * When called with `?key=<dotted.key>` returns only that single Config-table
+ * value as `{ key, value }` — useful for round-trip verification of writes
+ * without pulling the full config blob.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const url = new URL(request.url);
+    const singleKey = url.searchParams.get('key');
+    if (singleKey) {
+      const row = await prisma.config.findUnique({ where: { key: singleKey } });
+      return NextResponse.json({ key: singleKey, value: row?.value ?? null });
+    }
     const config = await getConfig();
     return NextResponse.json(config);
   } catch (error: any) {
@@ -107,6 +117,12 @@ export async function POST(request: NextRequest) {
       ollamaModel,
       ollamaCompletionHost: body.ollamaCompletionHost,
       ollamaCompletionModel: body.ollamaCompletionModel,
+      // AI Services — primary/fallback selection
+      aiPrimaryProvider: body.aiPrimaryProvider,
+      aiPrimaryModel: body.aiPrimaryModel,
+      aiFallbackEnabled: body.aiFallbackEnabled,
+      aiFallbackProvider: body.aiFallbackProvider,
+      aiFallbackModel: body.aiFallbackModel,
       ocrProvider: body.ocrProvider,
       ocrOllamaHost: body.ocrOllamaHost,
       ocrOllamaModel: body.ocrOllamaModel,

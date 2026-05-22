@@ -14,6 +14,7 @@ import GpuFleetPanel from '@/components/admin-gpu-fleet';
 import AdminRoleTypes from '@/components/admin-role-types';
 import AdminRoleAssignments from '@/components/admin-role-assignments';
 import AdminHostProvisioning from '@/components/admin-host-provisioning';
+import AdminAIServices from '@/components/admin-ai-services';
 import CacheManager from '@/components/admin/cache-manager';
 import { CopyButton } from '@/components/copy-button';
 import { AppConfig, ModelDownloadInfo } from '@/lib/db/config';
@@ -24,7 +25,7 @@ interface Props {
   initialTab?: TabKey;
 }
 
-type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'hostprov' | 'ocr' | 'localai' | 'aikeys' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts';
+type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'hostprov' | 'ocr' | 'localai' | 'aikeys' | 'aiservices' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts';
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'general', label: 'General', icon: '⊞' },
@@ -38,6 +39,7 @@ const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'ocr', label: 'OCR', icon: '◉' },
   { key: 'localai', label: 'Local AI', icon: '⊚' },
   { key: 'aikeys', label: 'AI Keys $', icon: '⚷' },
+  { key: 'aiservices', label: 'AI Services', icon: '✦' },
   { key: 'workers', label: 'Workers', icon: '⚙' },
   { key: 'redis', label: 'Redis Cache', icon: '⧫' },
   { key: 'cache', label: 'Cache Manager', icon: '⟲' },
@@ -169,6 +171,17 @@ const TAB_DOCS: Record<TabKey, { title: string; description: string; details: st
       'If Local AI (Ollama) is configured, it takes priority over cloud providers',
     ],
   },
+  aiservices: {
+    title: 'AI Services',
+    description: 'Pick the AI model used for MCP tools, AI search, document summarization, analysis, and the upcoming tag-fill feature.',
+    details: [
+      'Primary: an installed sidecar Ollama model (free, private, local)',
+      'Recommended local model: Qwen 3.5 9B (8 GB VRAM)',
+      'Optional cloud fallback when the local model is unavailable or rate-limited',
+      'Fallback providers: OpenAI, Anthropic, Groq, Grok — keys configured under AI Keys $',
+      'Settings persist under ai.primaryProvider / ai.primaryModel / ai.fallback* config keys',
+    ],
+  },
   workers: {
     title: 'Worker Pool & PID Controller',
     description: 'Monitor and tune the PID-controlled worker pool that dynamically allocates resources between UI and background tasks.',
@@ -290,6 +303,7 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
           {activeTab === 'ocr' && <OCRProviderPanel initialConfig={initialConfig} />}
           {activeTab === 'localai' && <LocalAIPanel />}
           {activeTab === 'aikeys' && <AIKeysPanel />}
+          {activeTab === 'aiservices' && <AdminAIServices />}
           {activeTab === 'workers' && <WorkersPanel />}
           {activeTab === 'redis' && <RedisCachePanel />}
           {activeTab === 'cache' && <CacheManager />}
