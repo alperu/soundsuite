@@ -139,6 +139,7 @@ export default function CaseDetailPage() {
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [filesLoading, setFilesLoading] = useState(false);
   const [parseLoading, setParseLoading] = useState(false);
+  const [fillTagsLoading, setFillTagsLoading] = useState(false);
   const [refreshFolderLoading, setRefreshFolderLoading] = useState(false);
   const [fixPathsLoading, setFixPathsLoading] = useState(false);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
@@ -1187,6 +1188,32 @@ export default function CaseDetailPage() {
     } finally { setParseLoading(false); }
   };
 
+  const handleFillHaystackTags = async () => {
+    if (!caseRecord || fillTagsLoading) return;
+    setFillTagsLoading(true);
+    const logId = addLog('Tag-fill', `${filings.length} filing(s)`);
+    try {
+      const res = await fetch(`/api/cases/${caseRecord.id}/fill-haystack-tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const scanned = typeof data?.scanned === 'number' ? data.scanned : 0;
+        const suggestions = Array.isArray(data?.suggestions) ? data.suggestions.length : 0;
+        updateLog(logId, 'success', `scanned ${scanned} filings, ${suggestions} suggestions ready`);
+        window.dispatchEvent(new CustomEvent('haystack-tags-suggestions', { detail: data }));
+      } else {
+        let detail = 'API error';
+        try { const d = await res.json(); if (d?.error) detail = String(d.error); } catch { /* noop */ }
+        updateLog(logId, 'error', detail);
+      }
+    } catch (e: any) {
+      updateLog(logId, 'error', e?.message || 'Network error');
+    } finally { setFillTagsLoading(false); }
+  };
+
   const formatSize = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -1634,6 +1661,20 @@ export default function CaseDetailPage() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
             {parseLoading ? 'Parsing' : `Parse selected (${selectedFiles.size})`}
+          </button>
+          <button onClick={handleFillHaystackTags} disabled={filings.length === 0 || fillTagsLoading}
+            title="Fill haystack tags — extract filedOn / receivedOn / judgeRef / movantRef / respondentRef / reporterRef from indexed text using the configured AI model."
+            className="inline-flex items-center gap-1 h-7 px-2.5 text-xs font-medium text-white bg-indigo-600 rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+            {fillTagsLoading ? (
+              <svg className="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            ) : (
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.091 3.091ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
+              </svg>
+            )}
+            <span className="hidden md:inline">{fillTagsLoading ? 'Filling' : 'Fill haystack tags'}</span>
           </button>
         </div>
           {/* Status filter bar */}
