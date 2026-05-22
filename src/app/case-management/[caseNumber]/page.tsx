@@ -150,6 +150,8 @@ export default function CaseDetailPage() {
   const [tagFillSuggestions, setTagFillSuggestions] = useState<FillTagSuggestion[] | null>(null);
   const [tagFillNote, setTagFillNote] = useState<string | undefined>(undefined);
   const [tagFillScanned, setTagFillScanned] = useState<number | undefined>(undefined);
+  const [tagFillSavedAt, setTagFillSavedAt] = useState<string | null>(null);
+  const [tagFillHasSaved, setTagFillHasSaved] = useState(false);
   const [refreshFolderLoading, setRefreshFolderLoading] = useState(false);
   const [fixPathsLoading, setFixPathsLoading] = useState(false);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
@@ -543,6 +545,50 @@ export default function CaseDetailPage() {
     window.addEventListener('haystack-tags-suggestions', handler);
     return () => window.removeEventListener('haystack-tags-suggestions', handler);
   }, []);
+
+  // Per-case persistence of the last tag-fill suggestion batch. Lets the user
+  // re-open the review panel later (via "Show Haystack Suggestions") without
+  // re-running the AI extractor. Cleared explicitly when the user closes the
+  // panel via the X button.
+  const tagFillStorageKey = useCallback(
+    (caseId: string) => `case-management.tagFillSuggestions.${caseId}`,
+    [],
+  );
+  // Load persisted batch when the case changes.
+  useEffect(() => {
+    if (!caseRecord) return;
+    try {
+      const raw = localStorage.getItem(tagFillStorageKey(caseRecord.id));
+      if (!raw) {
+        setTagFillHasSaved(false);
+        return;
+      }
+      const parsed = JSON.parse(raw) as {
+        suggestions: FillTagSuggestion[];
+        scanned?: number;
+        savedAt: string;
+      };
+      if (Array.isArray(parsed.suggestions) && parsed.suggestions.length > 0) {
+        setTagFillHasSaved(true);
+        setTagFillSavedAt(parsed.savedAt);
+      }
+    } catch { /* ignore corrupt storage */ }
+  }, [caseRecord, tagFillStorageKey]);
+  // Persist the current batch whenever it changes (skip during apply/clear).
+  useEffect(() => {
+    if (!caseRecord) return;
+    try {
+      if (tagFillSuggestions && tagFillSuggestions.length > 0) {
+        const savedAt = new Date().toISOString();
+        localStorage.setItem(
+          tagFillStorageKey(caseRecord.id),
+          JSON.stringify({ suggestions: tagFillSuggestions, scanned: tagFillScanned, savedAt }),
+        );
+        setTagFillSavedAt(savedAt);
+        setTagFillHasSaved(true);
+      }
+    } catch { /* localStorage quota or disabled */ }
+  }, [tagFillSuggestions, tagFillScanned, caseRecord, tagFillStorageKey]);
 
   const loadFiles = async (caseId: string) => {
     setFilesLoading(true);
@@ -1224,27 +1270,84 @@ export default function CaseDetailPage() {
   const handleFillHaystackTags = async () => {
     if (!caseRecord || fillTagsLoading) return;
     setFillTagsLoading(true);
-    const logId = addLog('Tag-fill', `${filings.length} filing(s)`);
+    // Process one filing at a time so the user sees progress + suggestions
+    // arrive incrementally instead of waiting 3+ minutes for the full batch.
+    const ids = filings.map(f => f.id);
+    const total = ids.length;
+    const logId = addLog('Tag-fill', `0/${total} processed`);
+    // Reset accumulator and open the review panel immediately (it will
+    // populate as suggestions stream in).
+    setTagFillSuggestions([]);
+    setTagFillNote(undefined);
+    setTagFillScanned(total);
+    let acc: FillTagSuggestion[] = [];
+    let errorCount = 0;
     try {
-      const res = await fetch(`/api/cases/${caseRecord.id}/fill-haystack-tags`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const scanned = typeof data?.scanned === 'number' ? data.scanned : 0;
-        const suggestions = Array.isArray(data?.suggestions) ? data.suggestions.length : 0;
-        updateLog(logId, 'success', `scanned ${scanned} filings, ${suggestions} suggestions ready`);
-        window.dispatchEvent(new CustomEvent('haystack-tags-suggestions', { detail: data }));
-      } else {
-        let detail = 'API error';
-        try { const d = await res.json(); if (d?.error) detail = String(d.error); } catch { /* noop */ }
-        updateLog(logId, 'error', detail);
+      for (let i = 0; i < ids.length; i++) {
+        const fid = ids[i];
+        const filingTitle = filings[i]?.title || fid.slice(0, 8);
+        // Update the pending log entry's text without flipping its status —
+        // updateLog only accepts terminal states (success/error).
+        setActionLogs(prev =>
+          prev.map(l => l.id === logId
+            ? { ...l, file: `${i + 1}/${total} — ${filingTitle.slice(0, 40)}` }
+            : l,
+          ),
+        );
+        try {
+          const res = await fetch(`/api/cases/${caseRecord.id}/fill-haystack-tags`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filingIds: [fid], dryRun: true }),
+          });
+          if (res.ok) {
+            const data = await res.json() as FillTagsResponse;
+            const list = Array.isArray(data?.suggestions) ? data.suggestions : [];
+            if (list.length) {
+              acc = [...acc, ...list];
+              setTagFillSuggestions(acc);
+            }
+          } else {
+            errorCount++;
+          }
+        } catch {
+          errorCount++;
+        }
       }
-    } catch (e: any) {
-      updateLog(logId, 'error', e?.message || 'Network error');
+      const status = errorCount === 0 ? 'success' : (acc.length > 0 ? 'success' : 'error');
+      updateLog(
+        logId,
+        status,
+        `${total} processed, ${acc.length} suggestions${errorCount ? `, ${errorCount} errors` : ''}`,
+      );
+      // Late event dispatch (kept for any external listeners) — the in-page
+      // panel already updated incrementally via setTagFillSuggestions.
+      window.dispatchEvent(new CustomEvent('haystack-tags-suggestions', {
+        detail: { ok: true, scanned: total, suggestions: acc },
+      }));
     } finally { setFillTagsLoading(false); }
+  };
+
+  /**
+   * Reopen the review panel from the last persisted batch (no AI call). The
+   * user can run the extractor once and come back to finish review later.
+   */
+  const handleShowSavedSuggestions = () => {
+    if (!caseRecord) return;
+    try {
+      const raw = localStorage.getItem(tagFillStorageKey(caseRecord.id));
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        suggestions: FillTagSuggestion[];
+        scanned?: number;
+        savedAt: string;
+      };
+      if (!Array.isArray(parsed.suggestions) || parsed.suggestions.length === 0) return;
+      setTagFillSuggestions(parsed.suggestions);
+      setTagFillScanned(parsed.scanned);
+      setTagFillSavedAt(parsed.savedAt);
+      setTagFillNote(undefined);
+    } catch { /* ignore */ }
   };
 
   const formatSize = (bytes: number) => {
@@ -1708,6 +1811,17 @@ export default function CaseDetailPage() {
               </svg>
             )}
             <span className="hidden md:inline">{fillTagsLoading ? 'Filling' : 'Fill haystack tags'}</span>
+          </button>
+          <button onClick={handleShowSavedSuggestions}
+            disabled={!tagFillHasSaved || (tagFillSuggestions != null && tagFillSuggestions.length > 0)}
+            title={tagFillHasSaved
+              ? `Show last batch of AI suggestions (saved ${tagFillSavedAt ? new Date(tagFillSavedAt).toLocaleString() : 'recently'}). No new AI call — re-open the review panel to finish accepting / denying.`
+              : 'No saved suggestions yet — run "Fill haystack tags" first.'}
+            className="inline-flex items-center gap-1 h-7 px-2.5 text-xs font-medium text-indigo-700 bg-white border border-indigo-300 rounded hover:bg-indigo-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 4h18M3 8h18M3 12h18M3 16h18M3 20h18" />
+            </svg>
+            <span className="hidden md:inline">Show suggestions</span>
           </button>
         </div>
           {/* Status filter bar */}

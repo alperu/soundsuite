@@ -59,6 +59,8 @@ export interface FillTagsRequest {
   dryRun?: boolean;
   /** Phase 2 — required when dryRun=false. List of (filing, field) tuples to persist. */
   accept?: Array<{ filingId: string; field: HaystackTagField }>;
+  /** When true, response includes per-filing diagnostics (durationMs, primaryDocumentId, error). */
+  debug?: boolean;
 }
 
 /**
@@ -76,13 +78,20 @@ export interface FillTagSuggestion {
   field: HaystackTagField | string;
   /** Present value on the row (likely null/undefined for un-tagged filings). */
   currentValue: unknown;
-  /** Value the extractor wants to write (ref payload or ISO date string). */
+  /** Value the extractor wants to write (ref payload or ISO date string). When
+   * a person ref is proposed but the underlying Person doesn't exist yet, this
+   * stays null and `personSeed` carries the name to upsert at apply time. */
   proposedValue: unknown;
   /** Optional human-readable form (e.g. "Hon. Roberts" for a judge ref). */
   proposedDisplay?: string;
   /** Optional excerpt from the indexed text that supports the proposal. */
   sourceExcerpt?: string;
   confidence: 'high' | 'medium' | 'low';
+  /** When set, accepting the suggestion will resolve-or-create a Person with
+   * this name + intrinsic marker, and the resulting id becomes the ref value.
+   * Keeps dryRun writes-free: no Person rows are upserted until the user
+   * explicitly accepts. */
+  personSeed?: { name: string; marker: 'judge' | 'courtReporter' | null };
 }
 
 /**
@@ -138,9 +147,15 @@ export async function POST(
     }
 
     const dryRun = body.dryRun !== false;
+    // fileRef is managed by the ingestion pipeline (Document.filePath +
+    // FK on the entity's documentId column). The "Fix paths" toolbar action
+    // handles rebases on rename. AI proposals for fileRef were noisy and
+    // duplicative — exclude from the default field set. Callers can still
+    // request it explicitly via `fields:['fileRef']`.
+    const defaultFields = HAYSTACK_TAG_FIELDS.filter((f) => f !== 'fileRef');
     const requestedFields: HaystackTagField[] = Array.isArray(body.fields) && body.fields.length > 0
       ? body.fields.filter((f) => HAYSTACK_TAG_FIELDS.includes(f as HaystackTagField))
-      : HAYSTACK_TAG_FIELDS.slice();
+      : defaultFields;
 
     // ─── Resolve targets ───────────────────────────────────────────────────
     const targets = await loadFilingTargets(id, body.filingIds);
@@ -212,7 +227,12 @@ export async function POST(
 
     // ─── DRY RUN: return suggestions only ──────────────────────────────────
     if (dryRun) {
-      const payload: Record<string, unknown> = { ok: true, scanned: targets.length, suggestions };
+      const payload: FillTagsResponse & {
+        diagnostics?: unknown;
+        vectorStoreInitialized?: boolean;
+        primary?: unknown;
+        fallback?: unknown;
+      } = { ok: true, scanned: targets.length, suggestions };
       if (debug) {
         payload.diagnostics = diagnostics;
         payload.vectorStoreInitialized = vectorStore !== null;
@@ -255,7 +275,24 @@ export async function POST(
       if (field === 'fileRef' && target.kind === 'motion') continue;
 
       const beforeValue = suggestion.currentValue ?? null;
-      const afterValue = suggestion.proposedValue;
+      // Resolve the proposedValue at apply time. For person refs the dryRun
+      // pass leaves proposedValue null and stores a personSeed{name, marker} —
+      // resolveOrCreatePerson runs HERE, so no Person rows are written until
+      // the user explicitly accepts.
+      let afterValue: unknown = suggestion.proposedValue;
+      if (afterValue == null && suggestion.personSeed) {
+        const person = await resolveOrCreatePerson(
+          suggestion.personSeed.name,
+          suggestion.personSeed.marker,
+        );
+        if (!person) {
+          console.warn(
+            `[tag-fill] personSeed resolve failed filing=${target.filingId} field=${field} name="${suggestion.personSeed.name}"`,
+          );
+          continue;
+        }
+        afterValue = { _kind: 'ref', val: person.id };
+      }
 
       try {
         const commitResult = await commitEntity({
@@ -444,15 +481,15 @@ async function mapFieldFromExtraction(args: {
     case 'judgeRef': {
       const name = data.judge?.name;
       if (!isLikelyValidName(name)) return null;
-      const person = await resolveOrCreatePerson(name!, 'judge');
-      if (!person) return null;
+      // Defer Person upsert to apply-time so dryRun stays write-free.
       return {
         filingId: target.filingId,
         filingTitle: target.filingTitle,
         field,
         currentValue: current,
-        proposedValue: { _kind: 'ref', val: person.id },
-        proposedDisplay: person.displayName,
+        proposedValue: null,
+        proposedDisplay: name!,
+        personSeed: { name: name!, marker: 'judge' },
         sourceExcerpt:
           data.judge?.evidenceQuote ?? pickExcerpt(chunks, name),
         confidence: (data.judge?.confidence as 'high' | 'medium' | 'low') ?? 'medium',
@@ -461,16 +498,15 @@ async function mapFieldFromExtraction(args: {
     case 'movantRef': {
       const name = data.movant?.name;
       if (!isLikelyValidName(name)) return null;
-      // Movant role is contextual (not intrinsic) — pass marker=null.
-      const person = await resolveOrCreatePerson(name!, null);
-      if (!person) return null;
+      // Movant role is contextual (not intrinsic) — no intrinsic marker.
       return {
         filingId: target.filingId,
         filingTitle: target.filingTitle,
         field,
         currentValue: current,
-        proposedValue: { _kind: 'ref', val: person.id },
-        proposedDisplay: person.displayName,
+        proposedValue: null,
+        proposedDisplay: name!,
+        personSeed: { name: name!, marker: null },
         sourceExcerpt: data.movant?.evidenceQuote ?? pickExcerpt(chunks, name),
         confidence: 'medium',
       };
@@ -478,15 +514,14 @@ async function mapFieldFromExtraction(args: {
     case 'respondentRef': {
       const name = data.respondent?.name;
       if (!isLikelyValidName(name)) return null;
-      const person = await resolveOrCreatePerson(name!, null);
-      if (!person) return null;
       return {
         filingId: target.filingId,
         filingTitle: target.filingTitle,
         field,
         currentValue: current,
-        proposedValue: { _kind: 'ref', val: person.id },
-        proposedDisplay: person.displayName,
+        proposedValue: null,
+        proposedDisplay: name!,
+        personSeed: { name: name!, marker: null },
         sourceExcerpt: data.respondent?.evidenceQuote ?? pickExcerpt(chunks, name),
         confidence: 'medium',
       };
@@ -494,17 +529,17 @@ async function mapFieldFromExtraction(args: {
     case 'reporterRef': {
       const name = data.reporter?.name;
       if (!isLikelyValidName(name)) return null;
-      const person = await resolveOrCreatePerson(name!, 'courtReporter');
-      if (!person) return null;
+      const display = data.reporter?.csrNumber
+        ? `${name} (CSR ${data.reporter.csrNumber})`
+        : name!;
       return {
         filingId: target.filingId,
         filingTitle: target.filingTitle,
         field,
         currentValue: current,
-        proposedValue: { _kind: 'ref', val: person.id },
-        proposedDisplay: data.reporter?.csrNumber
-          ? `${person.displayName} (CSR ${data.reporter.csrNumber})`
-          : person.displayName,
+        proposedValue: null,
+        proposedDisplay: display,
+        personSeed: { name: name!, marker: 'courtReporter' },
         sourceExcerpt: data.reporter?.evidenceQuote ?? pickExcerpt(chunks, name),
         confidence: 'high',
       };
