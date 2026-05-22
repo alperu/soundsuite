@@ -25,6 +25,11 @@ import { HistoryPanel } from './search/history-panel';
 import { ChatAttachmentsStrip } from './chat-attachments';
 import { HaystackFilterInput } from './search/haystack-filter-input';
 import { SampleQueryPanel } from './search/sample-query-panel';
+import {
+  ActiveTokenSuggestions,
+  type ActiveToken,
+  type PickedSuggestion,
+} from './search/active-token-suggestions';
 import type { SampleQuery } from '@/lib/search/sample-queries';
 import {
   buildHaystackFilter,
@@ -344,6 +349,39 @@ export default function SearchInterface({
     haystackCount?: number;
     note?: string;
   } | null>(null);
+
+  // Task #36: in-place combo-box state for the left rail. When the user types
+  // `motionType:` / `judge:` / etc., `activeToken` turns non-null and the rail
+  // swaps from SampleQueryPanel → ActiveTokenSuggestions. `pickerOptions` is
+  // mirrored from the suggestions component so HaystackFilterInput's Enter
+  // handler can commit the highlighted row.
+  const [activeToken, setActiveToken] = useState<ActiveToken | null>(null);
+  const [pickerOptions, setPickerOptions] = useState<PickedSuggestion[]>([]);
+  const [pickerHighlight, setPickerHighlight] = useState(0);
+
+  // Commit a chip from the picker: appends to chips + strips the matching
+  // `token:partial` substring out of freetext. The HaystackFilterInput's own
+  // commitChip path covers Enter-to-commit; this callback handles mouse clicks
+  // on rows in the rail (where the input doesn't have focus during the click).
+  const handlePickActiveToken = useCallback(
+    (picked: PickedSuggestion) => {
+      if (!activeToken) return;
+      setHaystackChips((prev) => [
+        ...prev,
+        { key: activeToken.prefix, value: picked.value, label: picked.label },
+      ]);
+      setAiQuery((prev) => {
+        const before = prev.slice(0, activeToken.startIndex);
+        const after = prev.slice(activeToken.endIndex);
+        return (before + after).replace(/\s+$/, '');
+      });
+      setActiveToken(null);
+      setPickerHighlight(0);
+      setPickerOptions([]);
+      requestAnimationFrame(() => aiQueryRef.current?.focus());
+    },
+    [activeToken],
+  );
 
   // Run the haystack-aware search whenever the user submits while in
   // structured mode. Sends both the compiled filter and any residual freetext
@@ -1587,10 +1625,20 @@ export default function SearchInterface({
               The chat column itself is always flex-col with the scrollable
               conversation + fixed input. */}
           {mode === 'ai' && haystackMode && (
-            <SampleQueryPanel
-              onSelectQuery={handleSampleQuery}
-              onSelectToken={handleSampleToken}
-            />
+            activeToken ? (
+              <ActiveTokenSuggestions
+                active={activeToken}
+                highlight={pickerHighlight}
+                onPick={handlePickActiveToken}
+                onOptionsChange={setPickerOptions}
+                onHighlightReset={() => setPickerHighlight(0)}
+              />
+            ) : (
+              <SampleQueryPanel
+                onSelectQuery={handleSampleQuery}
+                onSelectToken={handleSampleToken}
+              />
+            )
           )}
           {mode === 'ai' && (
             <div className={haystackMode ? 'flex-1 flex flex-col overflow-hidden min-w-0' : 'contents'}>
@@ -1883,6 +1931,10 @@ export default function SearchInterface({
                         disabled={aiLoading || haystackBusy}
                         className="flex-1"
                         style={{ minHeight: inputHeight }}
+                        onActiveTokenChange={setActiveToken}
+                        pickerOptions={pickerOptions}
+                        pickerHighlight={pickerHighlight}
+                        onPickerHighlightChange={setPickerHighlight}
                       />
                     ) : (
                       <textarea

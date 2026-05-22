@@ -3,24 +3,26 @@
 /**
  * Haystack-style filter input with token autocomplete.
  *
- * Users type `judge:` (or any recognized token from TOKEN_MAP) and an inline
- * picker pops up; selecting a value inserts a structured chip into the input
- * which compiles to a Haystack filter via haystack-query-builder.
+ * Users type `judge:` (or any recognized token from TOKEN_MAP) and the parent
+ * renders an in-place picker in the left rail (see ActiveTokenSuggestions).
+ * Selecting a value inserts a structured chip into the input which compiles
+ * to a Haystack filter via haystack-query-builder.
  *
  * Modes coexist:
  *   - Plain text (residual freetext that survives along the chips)
  *   - Filter chips (rendered as pills with category-colored borders)
  *
  * Keyboard:
- *   - `<token>:` opens the picker for that token
- *   - Arrow up/down navigates picker options
+ *   - `<token>:` activates the left-rail picker for that token
+ *   - Arrow up/down navigates the picker's highlight (mirrored in parent state)
  *   - Enter selects the focused option (or submits on plain text when picker closed)
- *   - Escape closes the picker
+ *   - Escape clears the active token
  *   - Backspace at column 0 with empty text removes the last chip
  *
- * The component is intentionally hand-rolled (no cmdk / react-aria dep) since
- * the project's dependency surface (per CLAUDE.md) prefers no new heavy UI
- * libraries here.
+ * The floating dropdown that used to render here was removed in Task #36 —
+ * the left rail is now the authoritative suggestion surface. A small token-
+ * prefix suggester remains inline beneath the input (e.g. typing `jud`
+ * proposes `judge:` / `judgeBy:`) because it doesn't take a partial value yet.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -28,9 +30,12 @@ import {
   FilterChip,
   TOKEN_MAP,
   TOKEN_KEYS,
-  ENUM_VALUES,
-  personFilterForToken,
 } from '@/lib/search/haystack-query-builder';
+import {
+  activeTokenAtCursor,
+  type ActiveToken,
+  type PickedSuggestion,
+} from './active-token-suggestions';
 
 // ---------------------------------------------------------------------------
 // Visual helpers
@@ -44,58 +49,15 @@ const categoryClasses: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Person fetcher — calls the Haystack read endpoint. Returns [] in dev when
-// the haystack server isn't live (the route returns a stub).
+// Helpers
 
-interface PersonOption {
-  id: string;
-  label: string;
-}
-
-async function fetchPersons(filter: string, query: string): Promise<PersonOption[]> {
-  try {
-    const url = `/api/haystack/read?filter=${encodeURIComponent(filter)}${
-      query ? `&q=${encodeURIComponent(query)}` : ''
-    }`;
-    const res = await fetch(url, { method: 'GET' });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { results?: Array<{ id: string; displayName?: string; name?: string }> };
-    const rows = data.results ?? [];
-    return rows.map((r) => ({
-      id: r.id.startsWith('@') ? r.id : `@${r.id}`,
-      label: r.displayName ?? r.name ?? r.id,
-    }));
-  } catch {
-    return [];
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Picker mode types
-
-type PickerKind = 'person' | 'date' | 'enum' | 'number' | 'case' | null;
-
-interface PickerState {
-  kind: PickerKind;
-  /** Surface token key driving the picker (e.g. `judge`, `hearingDate`). */
-  token: string;
-  /** Current query text typed after the colon. */
-  query: string;
-  /** Highlighted option index. */
-  highlight: number;
-  /** Async options for person/case. */
-  options: PersonOption[];
-}
-
-function pickerKindFor(token: string): PickerKind {
-  const def = TOKEN_MAP[token];
-  if (!def) return null;
-  if (token === 'case') return 'case';
-  if (def.category === 'ref') return 'person';
-  if (def.category === 'date') return 'date';
-  if (def.category === 'enum') return 'enum';
-  if (def.category === 'number') return 'number';
-  return null;
+/** Strip a trailing `token:partial` from freetext when a chip is committed. */
+export function stripActiveTokenFromText(text: string, active: ActiveToken): string {
+  // Cut [startIndex, endIndex) and trim any trailing whitespace introduced.
+  const before = text.slice(0, active.startIndex);
+  const after = text.slice(active.endIndex);
+  const joined = (before + after).replace(/\s+$/, '');
+  return joined;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,8 +72,24 @@ export interface HaystackFilterInputProps {
   placeholder?: string;
   disabled?: boolean;
   className?: string;
-  /** Height of the inner text region. */
   style?: React.CSSProperties;
+  /**
+   * Notifies the parent whenever the active token under the cursor changes.
+   * The parent renders ActiveTokenSuggestions in the left rail keyed off this.
+   * Called with `null` when the cursor isn't in a recognized token.
+   */
+  onActiveTokenChange?: (active: ActiveToken | null) => void;
+  /**
+   * Visible options for the current active token, surfaced by
+   * ActiveTokenSuggestions so this input can drive Enter/↑/↓ keyboard nav.
+   */
+  pickerOptions?: PickedSuggestion[];
+  /**
+   * Highlight index for the picker. Lifted to parent so keyboard nav here
+   * stays in sync with the visible list in the rail.
+   */
+  pickerHighlight?: number;
+  onPickerHighlightChange?: (next: number) => void;
 }
 
 export function HaystackFilterInput({
@@ -124,74 +102,56 @@ export function HaystackFilterInput({
   disabled,
   className,
   style,
+  onActiveTokenChange,
+  pickerOptions = [],
+  pickerHighlight = 0,
+  onPickerHighlightChange,
 }: HaystackFilterInputProps) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const [picker, setPicker] = useState<PickerState | null>(null);
+  const [cursor, setCursor] = useState<number>(0);
 
-  // Detect a recognized token-prefix in the current freetext (e.g. `judge:roberts`)
-  // and open the picker for that token.
-  useEffect(() => {
-    const m = freetext.match(/(?:^|\s)(\w+):([^\s]*)$/);
-    if (!m) {
-      if (picker) setPicker(null);
-      return;
-    }
-    const token = m[1];
-    const query = m[2];
-    if (!TOKEN_MAP[token]) {
-      if (picker) setPicker(null);
-      return;
-    }
-    const kind = pickerKindFor(token);
-    if (!kind) return;
-    // If the picker is already for this token, just update the query
-    if (picker && picker.token === token) {
-      setPicker({ ...picker, query, highlight: 0 });
-    } else {
-      setPicker({ kind, token, query, highlight: 0, options: [] });
-    }
-  }, [freetext]); // eslint-disable-line react-hooks/exhaustive-deps
+  // ---------------------------------------------------------------------------
+  // Active-token detection — runs on every freetext / cursor change.
+  // Notifies the parent so it can render the in-place suggestions panel.
+  //
+  // The cursor index is tracked from the input's selectionEnd; for a single-
+  // line <input type="text"> this equals freetext.length while the user is
+  // typing at the end (the common case).
 
-  // Load async options for person/case pickers. Debounced 150ms so the API
-  // isn't hit on every keystroke as the user types into the inline typeahead.
-  useEffect(() => {
-    if (!picker) return;
-    if (picker.kind !== 'person' && picker.kind !== 'case') return;
-    const filter =
-      picker.kind === 'case' ? 'case' : (personFilterForToken(picker.token) ?? 'person');
-    let cancelled = false;
-    const handle = setTimeout(() => {
-      fetchPersons(filter, picker.query).then((opts) => {
-        if (cancelled) return;
-        setPicker((p) =>
-          p && p.token === picker.token ? { ...p, options: opts, highlight: 0 } : p,
-        );
-      });
-    }, 150);
-    return () => {
-      cancelled = true;
-      clearTimeout(handle);
-    };
-  }, [picker?.token, picker?.query]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Strip the trailing `token:partial` from the freetext when a chip is committed.
-  const stripTokenPrefix = useCallback(
-    (text: string, token: string): string => {
-      const re = new RegExp(`(?:^|\\s)${token}:[^\\s]*$`);
-      return text.replace(re, '').trimEnd();
-    },
-    [],
+  const activeToken = useMemo<ActiveToken | null>(
+    () => activeTokenAtCursor(freetext, cursor),
+    [freetext, cursor],
   );
 
+  // Bubble changes up. We compare a stringified summary so we don't double-fire
+  // on identical states.
+  const lastEmittedRef = useRef<string>('');
+  useEffect(() => {
+    const sig = activeToken
+      ? `${activeToken.prefix}|${activeToken.partial}|${activeToken.startIndex}|${activeToken.endIndex}`
+      : 'null';
+    if (sig === lastEmittedRef.current) return;
+    lastEmittedRef.current = sig;
+    onActiveTokenChange?.(activeToken);
+  }, [activeToken, onActiveTokenChange]);
+
+  // ---------------------------------------------------------------------------
+  // Chip commit — called from parent (via prop) AND from inline keyboard Enter.
+
   const commitChip = useCallback(
-    (token: string, value: string, label?: string) => {
+    (token: string, value: string, label?: string, srcActive?: ActiveToken) => {
       onChipsChange([...chips, { key: token, value, label }]);
-      onFreetextChange(stripTokenPrefix(freetext, token));
-      setPicker(null);
-      // Keep focus
+      // Strip the matching `token:partial` substring out of the freetext.
+      const a =
+        srcActive ?? activeTokenAtCursor(freetext, cursor) ?? null;
+      if (a) {
+        onFreetextChange(stripActiveTokenFromText(freetext, a));
+      }
+      lastEmittedRef.current = 'null';
+      onActiveTokenChange?.(null);
       requestAnimationFrame(() => inputRef.current?.focus());
     },
-    [chips, freetext, onChipsChange, onFreetextChange, stripTokenPrefix],
+    [chips, freetext, cursor, onChipsChange, onFreetextChange, onActiveTokenChange],
   );
 
   const removeChipAt = useCallback(
@@ -202,46 +162,22 @@ export function HaystackFilterInput({
   );
 
   // ---------------------------------------------------------------------------
-  // Picker option list (memoized per kind)
-
-  const pickerOptions: { value: string; label: string }[] = useMemo(() => {
-    if (!picker) return [];
-    switch (picker.kind) {
-      case 'enum': {
-        const all = ENUM_VALUES[picker.token] ?? [];
-        const q = picker.query.toLowerCase();
-        return all
-          .filter((v) => v.toLowerCase().includes(q))
-          .map((v) => ({ value: v, label: v }));
-      }
-      case 'person':
-      case 'case':
-        return picker.options.map((o) => ({ value: o.id, label: o.label }));
-      case 'date':
-      case 'number':
-        // Free-form value; show the typed query as the lone confirmable option.
-        return picker.query ? [{ value: picker.query, label: picker.query }] : [];
-      default:
-        return [];
-    }
-  }, [picker]);
-
-  // ---------------------------------------------------------------------------
-  // Token-prefix suggester: when user types `j` (no colon yet), suggest tokens.
+  // Token-prefix suggester: when user types `j` (no colon yet), suggest tokens
+  // inline as a tiny tag list below the input. Kept inline — it's just token
+  // names, not values.
 
   const tokenSuggestions = useMemo(() => {
-    if (picker) return [];
+    if (activeToken) return [];
     const m = freetext.match(/(?:^|\s)(\w+)$/);
     if (!m) return [];
     const partial = m[1].toLowerCase();
     if (partial.length < 1) return [];
     const matches = TOKEN_KEYS.filter((k) => k.toLowerCase().startsWith(partial));
-    // Only suggest if there's no exact match (otherwise user has finished typing the token).
     if (matches.length === 0 || (matches.length === 1 && matches[0].toLowerCase() === partial)) {
       return [];
     }
     return matches.slice(0, 8);
-  }, [freetext, picker]);
+  }, [freetext, activeToken]);
 
   const [tokenHighlight, setTokenHighlight] = useState(0);
   useEffect(() => {
@@ -250,45 +186,81 @@ export function HaystackFilterInput({
 
   const completeToken = useCallback(
     (token: string) => {
-      // Replace the trailing `\w+` with `token:`.
       const next = freetext.replace(/(?:^|\s)(\w+)$/, (m) => {
-        // preserve leading whitespace if any
         const ws = m.match(/^\s/) ? ' ' : '';
         return `${ws}${token}:`;
       });
       onFreetextChange(next);
+      // Move cursor to end so activeTokenAtCursor picks up the new prefix.
+      requestAnimationFrame(() => {
+        const el = inputRef.current;
+        if (el) {
+          el.focus();
+          const pos = next.length;
+          el.setSelectionRange(pos, pos);
+          setCursor(pos);
+        }
+      });
     },
     [freetext, onFreetextChange],
   );
+
+  // ---------------------------------------------------------------------------
+  // Picker-Enter commit (used when an option is highlighted in the rail).
+
+  const commitHighlightedOption = useCallback(() => {
+    if (!activeToken) return false;
+    const opt = pickerOptions[pickerHighlight];
+    if (!opt) return false;
+    commitChip(activeToken.prefix, opt.value, opt.label, activeToken);
+    return true;
+  }, [activeToken, pickerOptions, pickerHighlight, commitChip]);
 
   // ---------------------------------------------------------------------------
   // Keyboard
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
-      // Picker open: arrow / enter / escape
-      if (picker && pickerOptions.length > 0) {
+      // Active-token picker open: arrow / enter / escape
+      if (activeToken && pickerOptions.length > 0) {
         if (e.key === 'ArrowDown') {
           e.preventDefault();
-          setPicker((p) =>
-            p ? { ...p, highlight: Math.min(p.highlight + 1, pickerOptions.length - 1) } : p,
+          onPickerHighlightChange?.(
+            Math.min(pickerHighlight + 1, pickerOptions.length - 1),
           );
           return;
         }
         if (e.key === 'ArrowUp') {
           e.preventDefault();
-          setPicker((p) => (p ? { ...p, highlight: Math.max(p.highlight - 1, 0) } : p));
+          onPickerHighlightChange?.(Math.max(pickerHighlight - 1, 0));
           return;
         }
         if (e.key === 'Enter') {
           e.preventDefault();
-          const opt = pickerOptions[picker.highlight];
-          if (opt) commitChip(picker.token, opt.value, opt.label);
-          return;
+          if (commitHighlightedOption()) return;
         }
         if (e.key === 'Escape') {
           e.preventDefault();
-          setPicker(null);
+          // Clear the partial so activeToken goes null.
+          onFreetextChange(stripActiveTokenFromText(freetext, activeToken));
+          onActiveTokenChange?.(null);
+          lastEmittedRef.current = 'null';
+          return;
+        }
+      }
+
+      // Active token but no list (date/number/empty refs): Enter commits the
+      // user's typed partial verbatim as the chip value.
+      if (activeToken && pickerOptions.length === 0 && e.key === 'Enter') {
+        const def = TOKEN_MAP[activeToken.prefix];
+        if (def && (def.category === 'date' || def.category === 'number') && activeToken.partial.trim()) {
+          e.preventDefault();
+          commitChip(
+            activeToken.prefix,
+            activeToken.partial.trim(),
+            activeToken.partial.trim(),
+            activeToken,
+          );
           return;
         }
       }
@@ -305,7 +277,7 @@ export function HaystackFilterInput({
           setTokenHighlight((h) => Math.max(h - 1, 0));
           return;
         }
-        if (e.key === 'Tab' || (e.key === 'Enter' && !picker)) {
+        if (e.key === 'Tab' || (e.key === 'Enter' && !activeToken)) {
           e.preventDefault();
           completeToken(tokenSuggestions[tokenHighlight]);
           return;
@@ -320,19 +292,24 @@ export function HaystackFilterInput({
       }
 
       // Plain Enter → submit.
-      if (e.key === 'Enter' && !e.shiftKey && !picker) {
+      if (e.key === 'Enter' && !e.shiftKey && !activeToken) {
         e.preventDefault();
         onSubmit?.();
       }
     },
     [
-      picker,
+      activeToken,
       pickerOptions,
+      pickerHighlight,
+      onPickerHighlightChange,
+      commitHighlightedOption,
+      commitChip,
+      freetext,
+      onFreetextChange,
+      onActiveTokenChange,
       tokenSuggestions,
       tokenHighlight,
-      freetext,
       chips,
-      commitChip,
       completeToken,
       onChipsChange,
       onSubmit,
@@ -340,15 +317,18 @@ export function HaystackFilterInput({
   );
 
   // ---------------------------------------------------------------------------
+  // Cursor tracking — update on every selection change so activeToken is fresh.
+
+  const syncCursor = useCallback(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const pos = el.selectionEnd ?? el.value.length;
+    setCursor(pos);
+  }, []);
+
+  // ---------------------------------------------------------------------------
   // Render
 
-  const showPicker = !!picker && pickerOptions.length > 0;
-  const showTokens = tokenSuggestions.length > 0 && !showPicker;
-
-  // The caller passes `style={{ minHeight }}` so the chip container matches the
-  // legacy textarea's user-resizable height. We forward it to the inner
-  // bordered box (not the outer positioning wrapper) so the visible input
-  // never collapses below the textarea baseline when toggling Haystack mode.
   return (
     <div className={`relative ${className ?? ''}`}>
       <div
@@ -382,53 +362,26 @@ export function HaystackFilterInput({
           ref={inputRef}
           type="text"
           value={freetext}
-          onChange={(e) => onFreetextChange(e.target.value)}
+          onChange={(e) => {
+            onFreetextChange(e.target.value);
+            // Defer to next frame so selectionEnd reflects the new value.
+            requestAnimationFrame(syncCursor);
+          }}
           onKeyDown={handleKeyDown}
+          onKeyUp={syncCursor}
+          onClick={syncCursor}
+          onSelect={syncCursor}
+          onFocus={syncCursor}
           placeholder={chips.length === 0 ? placeholder : ''}
           disabled={disabled}
           className="flex-1 min-w-[120px] px-1 py-1 text-sm bg-transparent outline-none border-0"
         />
       </div>
 
-      {showPicker && (
-        <div className="absolute z-30 left-0 right-0 mt-1 max-h-64 overflow-y-auto bg-white border border-gray-200 rounded-lg shadow-lg">
-          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500 bg-gray-50 border-b border-gray-100">
-            {picker!.kind === 'person'
-              ? `Person · ${personFilterForToken(picker!.token) ?? 'person'}`
-              : picker!.kind === 'case'
-              ? 'Case'
-              : picker!.kind === 'date'
-              ? 'Date (YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD)'
-              : picker!.kind === 'enum'
-              ? `${picker!.token} (enum)`
-              : 'Value'}
-          </div>
-          {pickerOptions.map((opt, i) => (
-            <button
-              key={`${opt.value}-${i}`}
-              type="button"
-              onMouseDown={(e) => {
-                // mousedown (not click) so the input keeps focus
-                e.preventDefault();
-                commitChip(picker!.token, opt.value, opt.label);
-              }}
-              className={`block w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50 ${
-                i === picker!.highlight ? 'bg-purple-100' : ''
-              }`}
-            >
-              <span className="font-medium">{opt.label}</span>
-              {opt.value !== opt.label && (
-                <span className="ml-2 text-xs text-gray-500">{opt.value}</span>
-              )}
-            </button>
-          ))}
-          {pickerOptions.length === 0 && (
-            <div className="px-3 py-2 text-xs text-gray-500">No matches</div>
-          )}
-        </div>
-      )}
-
-      {showTokens && (
+      {/* Inline token-prefix suggester (still floats — it's a tiny list of
+          token names, not a full picker). Only shows when no active token is
+          under the cursor. */}
+      {tokenSuggestions.length > 0 && (
         <div className="absolute z-30 left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg">
           <div className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500 bg-gray-50 border-b border-gray-100">
             Filter tokens
@@ -457,3 +410,7 @@ export function HaystackFilterInput({
     </div>
   );
 }
+
+// Re-export the helper + types so callers (search-interface) can share them.
+export { activeTokenAtCursor } from './active-token-suggestions';
+export type { ActiveToken, PickedSuggestion } from './active-token-suggestions';
