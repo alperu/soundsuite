@@ -467,14 +467,301 @@ export async function quickExtractHeader(filePath: string): Promise<string> {
 /**
  * Full detection pipeline: extract header + detect type + extract title.
  * Uses filename, parent folder name, and PDF header text as signals.
+ *
+ * Detection is **header-aware**: the document's first-page title is the
+ * authoritative signal when present. The filename is the fallback for the
+ * (common) case where PDF text extraction fails or the header is ambiguous.
+ * See classifyFilingHybrid() for the resolution rules.
  */
 export async function detectFiling(filePath: string): Promise<FilingDetection> {
   const fileName = path.basename(filePath);
   const folderName = getParentFolderName(filePath);
   const headerText = await quickExtractHeader(filePath);
 
-  const { type, confidence } = detectFilingType(fileName, headerText, folderName);
+  const hybrid = classifyFilingHybrid({ fileName, headerText, folderName });
   const title = extractFilingTitle(fileName, headerText, folderName);
 
-  return { filingType: type, title, confidence };
+  return { filingType: hybrid.filingType, title, confidence: hybrid.confidence };
+}
+
+// ── Header-text-aware classifier ────────────────────────────────────
+//
+// The filename classifier above is fooled by documents that *mention* a
+// different filing type (e.g. a Response that names the Petition it opposes).
+// `classifyFilingFromHeader` scans the first ~1000 chars of extracted page-1
+// text for a strong **title** pattern (top of the document, not a body
+// reference). When it returns `high` confidence, the hybrid wrapper trusts
+// it over the filename signal.
+
+/** Lowercase kind tokens emitted by the header classifier. */
+export type HeaderClassifierKind =
+  | 'response'
+  | 'motion'
+  | 'notice'
+  | 'order'
+  | 'proposedOrder'
+  | 'brief'
+  | 'reportersRecord'
+  | 'clerksRecord'
+  | 'affidavit'
+  | 'subpoena'
+  | 'judgment'
+  | 'rfa'
+  | 'petition'
+  | 'billOfReview';
+
+export interface HeaderClassifierResult {
+  kind: HeaderClassifierKind;
+  confidence: 'high' | 'medium' | 'low';
+  matched: string;
+}
+
+/**
+ * Strip the caption/cause-number block off the top of a header so the
+ * pattern-scanner doesn't match party-role nouns or court names. Each
+ * pattern is bounded so it can't eat past the line it lives on — the
+ * actual title (RESPONSE / MOTION / …) is usually a few lines below.
+ */
+function stripHeaderPreamble(text: string): string {
+  return text
+    // "NO. D-1-FM-25-004488" / "CAUSE NO. 12345" — strict token shape, single
+    // line. Require `.` or whitespace after `NO` so we don't eat "NOTICE".
+    .replace(/\b(?:CAUSE\s+)?NO(?:\.\s*|\s+)[A-Z0-9][A-Z0-9-]{2,}/gi, ' ')
+    // "IN THE … COURT OF … TEXAS" — single line, terminates at "TEXAS" or newline.
+    .replace(/\bIN\s+THE\b[^\n]*?\b(?:DISTRICT|COUNTY|JUDICIAL|APPELLATE|SUPREME)\b[^\n]*?\bTEXAS\b/gi, ' ')
+    // Trailing court-name fragments on their own line ("…COURT OF TRAVIS COUNTY, TEXAS")
+    .replace(/^[^\n]*\bCOURT\s+OF\s+[A-Z][A-Z\s,'-]*\bTEXAS\b/gim, ' ')
+    // Common caption tokens followed by separator (RESPONDENT, / PLAINTIFF§ / …)
+    .replace(/\b(?:PETITIONER|RESPONDENT|PLAINTIFF|DEFENDANT|APPELLANT|APPELLEE)\s*[,§]/gi, ' ')
+    // Section markers used in TX captions
+    .replace(/[§]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Ordered rule table — first match wins. Strong title patterns are scanned
+ * BEFORE generic petition/bill-of-review fallbacks (those are the most
+ * common "wrong" classification when a Response mentions a Petition in its
+ * title). Patterns are case-insensitive and anchored near the top of the
+ * document; we only feed the first ~1000 chars after caption stripping.
+ */
+const HEADER_RULES: Array<{
+  re: RegExp;
+  kind: HeaderClassifierKind;
+  confidence: 'high' | 'medium' | 'low';
+}> = [
+  // Responses & replies — match FIRST so "RESPONSE … TO … PETITION" wins.
+  { re: /\bRESPONDENT'?S?\s+RESPONSE\b/i, kind: 'response', confidence: 'high' },
+  { re: /\bRESPONSE\s+IN\s+OPPOSITION\s+TO\b/i, kind: 'response', confidence: 'high' },
+  { re: /\bRESPONSE\s+TO\b/i, kind: 'response', confidence: 'high' },
+  { re: /\bREPLY\s+(?:TO|IN\s+SUPPORT)\b/i, kind: 'response', confidence: 'high' },
+  { re: /\bSUR-?REPLY\b/i, kind: 'response', confidence: 'high' },
+
+  // Motions
+  { re: /\bOPPOSED\s+MOTION\b/i, kind: 'motion', confidence: 'high' },
+  { re: /\bEMERGENCY\s+MOTION\b/i, kind: 'motion', confidence: 'high' },
+  { re: /\bMOTION\s+TO\s+\w+/i, kind: 'motion', confidence: 'high' },
+  { re: /\bMOTION\s+FOR\s+\w+/i, kind: 'motion', confidence: 'high' },
+  { re: /\bMOTION\s+IN\s+LIMINE\b/i, kind: 'motion', confidence: 'high' },
+
+  // Orders — proposed first (more specific)
+  { re: /\bPROPOSED\s+ORDER\b/i, kind: 'proposedOrder', confidence: 'high' },
+  { re: /\bORDER\s+ON\b/i, kind: 'order', confidence: 'high' },
+  { re: /\bORDER\s+GRANTING\b/i, kind: 'order', confidence: 'high' },
+  { re: /\bORDER\s+DENYING\b/i, kind: 'order', confidence: 'high' },
+  { re: /(^|[\s>])ORDER(?:\s|$)/i, kind: 'order', confidence: 'medium' },
+
+  // Briefs
+  { re: /\bAPPELLANT'?S?\s+BRIEF\b/i, kind: 'brief', confidence: 'high' },
+  { re: /\bAPPELLEE'?S?\s+BRIEF\b/i, kind: 'brief', confidence: 'high' },
+  { re: /\bBRIEF\s+(?:OF|FOR|IN)\b/i, kind: 'brief', confidence: 'high' },
+
+  // Records
+  { re: /\bREPORTER'?S?\s+RECORD\b/i, kind: 'reportersRecord', confidence: 'high' },
+  { re: /\bCOURT\s+REPORTER\b/i, kind: 'reportersRecord', confidence: 'high' },
+  { re: /\bCLERK'?S?\s+RECORD\b/i, kind: 'clerksRecord', confidence: 'high' },
+
+  // Affidavits / declarations / subpoenas / judgments
+  { re: /\bSUBPOENA\b/i, kind: 'subpoena', confidence: 'high' },
+  { re: /\bAFFIDAVIT\s+(?:OF|IN\s+SUPPORT)\b/i, kind: 'affidavit', confidence: 'medium' },
+  { re: /\bDECLARATION\s+OF\b/i, kind: 'affidavit', confidence: 'medium' },
+  { re: /\bJUDGMENT\b/i, kind: 'judgment', confidence: 'medium' },
+
+  // Notice — must NOT be preceded by "in support of" within ~30 chars.
+  // We approximate the lookbehind by post-filtering in matchOnce.
+  { re: /\bNOTICE\s+OF\s+\w+/i, kind: 'notice', confidence: 'high' },
+
+  // Request for admissions / RFAs
+  { re: /\bREQUEST\s+FOR\s+ADMISSIONS?\b/i, kind: 'rfa', confidence: 'high' },
+  { re: /\bDEEMED\s+ADMISSIONS?\b/i, kind: 'rfa', confidence: 'high' },
+  { re: /\bRFA\b/i, kind: 'rfa', confidence: 'medium' },
+
+  // Generic fallbacks LAST — only matched if nothing stronger fired.
+  { re: /\bBILL\s+OF\s+REVIEW\b/i, kind: 'billOfReview', confidence: 'medium' },
+  { re: /(^|[\s>])PETITION(?:\s|$)/i, kind: 'petition', confidence: 'medium' },
+];
+
+/**
+ * Scan the top of a document's extracted text for a strong title pattern.
+ * Returns null when no rule matches. The caller decides whether to trust
+ * the result over the filename signal (see classifyFilingHybrid).
+ */
+export function classifyFilingFromHeader(
+  text: string,
+): HeaderClassifierResult | null {
+  if (!text || typeof text !== 'string') return null;
+
+  // Limit scan to the first ~1000 chars after stripping the caption block.
+  // The caption block (cause number, party names, court name) at the top of
+  // every TX filing would otherwise generate false positives.
+  const raw = text.slice(0, 2000);
+  const stripped = stripHeaderPreamble(raw).slice(0, 1000);
+  if (stripped.length < 5) return null;
+
+  // Strategy: scan every rule, take the EARLIEST position match. Ties on
+  // position go to the rule that appears first in HEADER_RULES (i.e. the
+  // more specific one, since the table is ordered specific → generic).
+  // This is what fixes "ORDER GRANTING MOTION FOR SUMMARY JUDGMENT" — both
+  // ORDER and MOTION patterns match, but ORDER's position (0) wins.
+  let bestIdx = -1;
+  let bestPos = Number.POSITIVE_INFINITY;
+  let bestMatch = '';
+
+  for (let i = 0; i < HEADER_RULES.length; i++) {
+    const rule = HEADER_RULES[i];
+    const m = stripped.match(rule.re);
+    if (!m || m.index === undefined) continue;
+
+    // Special-case NOTICE: skip if preceded by "in support of" within 30 chars.
+    if (rule.kind === 'notice') {
+      const before = stripped.slice(Math.max(0, m.index - 30), m.index);
+      if (/\bin\s+support\s+of\b/i.test(before)) continue;
+    }
+
+    if (m.index < bestPos) {
+      bestPos = m.index;
+      bestIdx = i;
+      bestMatch = m[0].trim();
+    }
+  }
+
+  if (bestIdx === -1) return null;
+  const rule = HEADER_RULES[bestIdx];
+  return { kind: rule.kind, confidence: rule.confidence, matched: bestMatch };
+}
+
+/**
+ * Map a HeaderClassifierKind (lowercase token) to the PascalCase
+ * `Filing.filingType` value stored in the database. Keep in sync with the
+ * canonical list in FILING_TYPES above and FILING_TYPE_TO_KIND in
+ * src/lib/filings/classify-entity-kind.ts.
+ *
+ * Notes:
+ *   - `rfa` collapses to 'Request' (closest existing canonical type).
+ *   - `proposedOrder` collapses to 'Order' (downstream EntityKind routing
+ *     uses the per-Motion attachment kind for the proposed-order distinction).
+ */
+export function kindToFilingType(kind: HeaderClassifierKind): string {
+  switch (kind) {
+    case 'response': return 'Response';
+    case 'motion': return 'Motion';
+    case 'notice': return 'Notice';
+    case 'order': return 'Order';
+    case 'proposedOrder': return 'Order';
+    case 'brief': return 'Brief';
+    case 'reportersRecord': return "Reporter's Record";
+    case 'clerksRecord': return "Clerk's Record";
+    case 'affidavit': return 'Affidavit';
+    case 'subpoena': return 'Subpoena';
+    case 'judgment': return 'Judgment';
+    case 'rfa': return 'Request';
+    case 'petition': return 'Petition';
+    case 'billOfReview': return 'Bill of Review';
+  }
+}
+
+/** Source attribution for a hybrid classification result. */
+export type HybridSource = 'header' | 'filename' | 'hybrid';
+
+export interface HybridClassification {
+  /** PascalCase canonical Filing.filingType (e.g. 'Response', 'Motion'). */
+  filingType: string;
+  source: HybridSource;
+  confidence: number;
+  /** When the header rule fired, the matched substring (debug aid). */
+  matched?: string;
+}
+
+/**
+ * Resolve the filing type using both the filename signal (existing
+ * `detectFilingType`) and the document's first-page text. Header wins on
+ * `high` confidence; on `medium` it only wins if the filename produced a
+ * generic fallback (`petition` / `billOfReview`) that's most often the
+ * misclassification we're trying to fix.
+ */
+export function classifyFilingHybrid(args: {
+  fileName: string;
+  headerText?: string;
+  folderName?: string;
+}): HybridClassification {
+  const { fileName, headerText, folderName } = args;
+
+  // Filename signal: existing detector (unchanged).
+  const filenameSignal = detectFilingType(fileName, undefined, folderName);
+  const filenameType = filenameSignal.type;
+  const filenameConfidence = filenameSignal.confidence;
+
+  // Header signal (if any).
+  const headerResult = headerText ? classifyFilingFromHeader(headerText) : null;
+
+  if (!headerResult) {
+    // No header signal — pure filename path (back-compat with PDFs that
+    // failed text extraction).
+    return {
+      filingType: filenameType,
+      source: 'filename',
+      confidence: filenameConfidence,
+    };
+  }
+
+  const headerType = kindToFilingType(headerResult.kind);
+
+  // High-confidence header always wins. This is THE fix for the bug:
+  // "RESPONDENT'S RESPONSE IN OPPOSITION TO PETITION TO ENFORCE…"
+  // → header says Response (high), filename says Petition → Response wins.
+  if (headerResult.confidence === 'high') {
+    return {
+      filingType: headerType,
+      source: 'header',
+      confidence: 0.95,
+      matched: headerResult.matched,
+    };
+  }
+
+  // Medium-confidence header — only override when filename produced a
+  // generic fallback that's prone to misclassification (petition / bill of
+  // review). Other filename kinds (Motion, Order, etc.) keep their signal.
+  if (headerResult.confidence === 'medium') {
+    const filenameIsFallback =
+      filenameType === 'Petition' ||
+      filenameType === 'Bill of Review' ||
+      filenameType === 'Other';
+    if (filenameIsFallback && headerType !== filenameType) {
+      return {
+        filingType: headerType,
+        source: 'hybrid',
+        confidence: Math.max(0.7, filenameConfidence),
+        matched: headerResult.matched,
+      };
+    }
+  }
+
+  // Otherwise filename wins.
+  return {
+    filingType: filenameType,
+    source: 'filename',
+    confidence: filenameConfidence,
+    matched: headerResult.matched,
+  };
 }
