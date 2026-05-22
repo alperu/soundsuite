@@ -1276,6 +1276,15 @@ async function applyCaseSideEffects(
     } else if (beforePath && beforePath !== afterPath) {
       console.log(`[haystack/commit] case-path changed, reattach: ${JSON.stringify(beforePath)} -> ${JSON.stringify(afterPath)} (case=${after?.id ?? '?'})`)
       await fileWatcher.reattachCase({ oldPath: beforePath, newPath: afterPath, caseId: after?.id ?? null })
+      if (after?.id) {
+        try {
+          const { migrateDocumentsForCasePath } = await import('@/services/document-path-migrator')
+          const result = await migrateDocumentsForCasePath(after.id, beforePath, afterPath)
+          console.log(`[doc-migrate] case=${after.id} updated=${result.updated} skipped=${result.skipped}`)
+        } catch (e) {
+          console.warn(`[doc-migrate] failed case=${after?.id ?? '?'}: ${e instanceof Error ? e.message : e}`)
+        }
+      }
     }
   } catch (e: any) {
     console.log(`[haystack/commit] file-watcher reattach failed (case=${after?.id ?? '?'}): ${e?.message ?? e}`)
