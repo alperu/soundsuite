@@ -1641,26 +1641,29 @@ export default function SearchInterface({
               The chat column itself is always flex-col with the scrollable
               conversation + fixed input. */}
           {mode === 'ai' && haystackMode && (
-            activeToken ? (
-              <ActiveTokenSuggestions
-                active={activeToken}
-                highlight={pickerHighlight}
-                onPick={handlePickActiveToken}
-                onOptionsChange={setPickerOptions}
-                onHighlightReset={() => setPickerHighlight(0)}
-              />
-            ) : tokenSuggestions.length > 0 ? (
-              <TokenNameSuggestions
-                suggestions={tokenSuggestions}
-                highlight={tokenSuggestionHighlight}
-                onPick={(tok) => haystackInputRef.current?.completeToken(tok)}
-              />
-            ) : (
-              <SampleQueryPanel
-                onSelectQuery={handleSampleQuery}
-                onSelectToken={handleSampleToken}
-              />
-            )
+            <div className="flex flex-col min-w-0 gap-2">
+              {activeToken ? (
+                <ActiveTokenSuggestions
+                  active={activeToken}
+                  highlight={pickerHighlight}
+                  onPick={handlePickActiveToken}
+                  onOptionsChange={setPickerOptions}
+                  onHighlightReset={() => setPickerHighlight(0)}
+                />
+              ) : (
+                <SampleQueryPanel
+                  onSelectQuery={handleSampleQuery}
+                  onSelectToken={handleSampleToken}
+                />
+              )}
+              {tokenSuggestions.length > 0 && (
+                <TokenNameSuggestions
+                  suggestions={tokenSuggestions}
+                  highlight={tokenSuggestionHighlight}
+                  onPick={(tok) => haystackInputRef.current?.completeToken(tok)}
+                />
+              )}
+            </div>
           )}
           {mode === 'ai' && (
             <div className={haystackMode ? 'flex-1 flex flex-col overflow-hidden min-w-0' : 'contents'}>

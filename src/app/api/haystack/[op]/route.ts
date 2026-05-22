@@ -211,6 +211,64 @@ function normalizeFilter(filter: string): string {
  * Returned object uses Haystack-ish ref strings (`@<id>`). Callers layer JSON
  * `tags` AFTER these so explicit tag values still win.
  */
+/**
+ * Coerce a ref-shaped value into a bare id string.
+ *   - string '@abc'          → 'abc'
+ *   - string 'abc'           → 'abc'
+ *   - Hayson { _kind:'ref', val:'abc' } → 'abc'
+ * Anything else → null.
+ */
+function refValueToId(v: unknown): string | null {
+  if (typeof v === 'string') {
+    if (!v) return null
+    return v.startsWith('@') ? v.slice(1) : v
+  }
+  if (v && typeof v === 'object') {
+    const obj = v as { _kind?: unknown; val?: unknown }
+    if (obj._kind === 'ref' && typeof obj.val === 'string') {
+      return obj.val.startsWith('@') ? obj.val.slice(1) : obj.val
+    }
+  }
+  return null
+}
+
+/**
+ * Remove self-referential ref tags from a merged record. A row should never
+ * reference itself via *Ref / amends / supersedes / authoredBy / respondingTo
+ * / motionRefV / personRef / scopeRef etc. We detect by name suffix + a small
+ * allowlist so we don't accidentally strip legitimate non-ref tags.
+ */
+function stripSelfRefs(out: Record<string, unknown>): void {
+  const selfId = typeof out.id === 'string' ? out.id : null
+  if (!selfId) return
+  const refLikeExact = new Set([
+    'amends', 'supersedes', 'authoredBy', 'respondingTo',
+    'motionRefV', 'caseRefV', 'fileRefV', 'amendsV', 'supersedesV',
+  ])
+  for (const k of Object.keys(out)) {
+    if (!k.endsWith('Ref') && !k.endsWith('Refs') && !refLikeExact.has(k)) continue
+    const v = out[k]
+    // List-valued refs: array of refs.
+    if (Array.isArray(v)) {
+      const filtered = v.filter(x => refValueToId(x) !== selfId)
+      if (filtered.length !== v.length) {
+        if (filtered.length === 0) delete out[k]
+        else out[k] = filtered
+      }
+      continue
+    }
+    // motionRefV is a stringified JSON of the ref — handle that too.
+    if (k.endsWith('V') && typeof v === 'string') {
+      try {
+        const parsed = JSON.parse(v)
+        if (refValueToId(parsed) === selfId) delete out[k]
+      } catch { /* not JSON — ignore */ }
+      continue
+    }
+    if (refValueToId(v) === selfId) delete out[k]
+  }
+}
+
 function synthesizeRefsFromColumns(table: string, row: any): Record<string, unknown> {
   if (!row || typeof row !== 'object') return {}
   const ref = (id: unknown): string | undefined =>
@@ -240,7 +298,15 @@ function synthesizeRefsFromColumns(table: string, row: any): Record<string, unkn
       out.hearingRef = ref(row.hearingId)
       break
     case 'MotionAttachment':
-      out.motionRef = ref(row.motionId)
+      // `MotionAttachment.motionId` is a required FK that
+      // `ensureMotionAttachmentForFiling` seeds equal to the row's own id
+      // to satisfy the constraint (no real parent yet — see route.ts:1227
+      // and the schema comment on the shadow Motion). Only surface
+      // motionRef when it points at a *different* row, i.e. a real parent
+      // motion the user actually picked.
+      if (typeof row.motionId === 'string' && row.motionId !== row.id) {
+        out.motionRef = ref(row.motionId)
+      }
       out.caseRef = ref(row.caseId)
       out.fileRef = ref(row.documentId)
       out.amends = ref(row.amendsId)
@@ -316,6 +382,12 @@ const REF_TARGET_TABLE: Record<string, 'Case' | 'Motion' | 'Person' | 'Court' | 
   defendantRefs: 'Person',
   plaintiffLawyers: 'Person',
   defendantLawyers: 'Person',
+  // Notice / Letter / Demand-letter sender + recipient refs. Without these
+  // entries `inlineRefLabels` would skip them and the panel would render the
+  // raw cuid (e.g. `cmpfjm2i800009zuu5uieqzcu`) instead of the resolved
+  // person name (Task #6).
+  from: 'Person',
+  to: 'Person',
   courtRef: 'Court',
   hearingRef: 'Hearing',
   fileRef: 'Document',
@@ -962,6 +1034,12 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
       } else if (r?.tags && typeof r.tags === 'object') {
         Object.assign(out, r.tags)
       }
+      // Drop self-referential refs: any *Ref / amends / supersedes / authoredBy
+      // / respondingTo whose target id equals this row's id. These are leftover
+      // self-loops from the shadow-Motion FK convention (see
+      // ensureMotionAttachmentForFiling) or from prior commits that
+      // round-tripped the seeded motionRef. They are never semantically valid.
+      stripSelfRefs(out)
       // Synthesize `dis` (Haystack display-string convention) so ref pickers
       // have a single canonical label field to render. The pickers fall back to
       // entity-specific fields (name/title/displayName), but `dis` lets them
@@ -1616,6 +1694,14 @@ export async function commitEntity(input: {
     const merged: Record<string, unknown> = { ...currentTags, ...tagPatch }
     for (const k of Object.keys(merged)) {
       if (merged[k] == null) delete merged[k]
+    }
+    // Drop self-referential refs (motionRef: @<own-id>, etc.) before persisting.
+    // Same guard as the read path — keeps tags JSON free of self-loops so
+    // future reads don't have to filter them.
+    if (id) {
+      (merged as Record<string, unknown>).id = id
+      stripSelfRefs(merged as Record<string, unknown>)
+      delete (merged as Record<string, unknown>).id
     }
 
     const data: any = { ...columnPatch }
