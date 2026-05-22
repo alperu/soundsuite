@@ -119,7 +119,19 @@ export function HaystackFilterInput({
   // typing at the end (the common case).
 
   const activeToken = useMemo<ActiveToken | null>(
-    () => activeTokenAtCursor(freetext, cursor),
+    () => {
+      const primary = activeTokenAtCursor(freetext, cursor);
+      if (primary) return primary;
+      // Fallback: when freetext changes from OUTSIDE the input (parent calls
+      // setAiQuery via a sample-query glossary-chip click), the stale `cursor`
+      // from useState is still 0 — so the primary slice never matches. Probe
+      // the end of the new string so externally-injected `judge:` opens the
+      // picker without requiring a manual click into the input.
+      if (cursor !== freetext.length) {
+        return activeTokenAtCursor(freetext, freetext.length);
+      }
+      return null;
+    },
     [freetext, cursor],
   );
 

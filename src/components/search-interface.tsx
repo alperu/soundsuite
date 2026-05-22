@@ -378,7 +378,9 @@ export default function SearchInterface({
       setActiveToken(null);
       setPickerHighlight(0);
       setPickerOptions([]);
-      requestAnimationFrame(() => aiQueryRef.current?.focus());
+      // The row's onMouseDown calls e.preventDefault() which keeps focus in
+      // the input — no manual refocus needed. The legacy aiQueryRef points
+      // at the <textarea> path and isn't valid in haystack mode anyway.
     },
     [activeToken],
   );
