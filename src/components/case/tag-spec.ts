@@ -107,6 +107,20 @@ function attachmentBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
   return [
     // markers
     { name: kindMarker, tier: 'marker', doc: kindDoc, valueType: 'bool' },
+    {
+      name: 'motion',
+      tier: 'marker',
+      doc: 'This filing is procedurally a motion (in addition to its specific type).',
+      valueType: 'bool',
+      info: {
+        whatItIs: 'Marker indicating this filing is structurally a motion — asks the court to do something — in addition to whatever specific type it is.',
+        howItWorks: 'Many filings are simultaneously a motion and something else: "Motion for Entry of Order" is both a motion AND an order, "Brief in Support of Motion to Disqualify" is both a brief AND a motion. Setting `motion: true` lets the filing surface in motion-shaped searches like `motion and signed`.',
+        mapsTo: "tags JSON: '$.motion'",
+        xetoSpec: 'cc.courtlens.legal::Motion (cross-applies as marker on attachments)',
+        example: 'true (marker)',
+        relatedTags: ['motionRef', 'amends', 'motionType'],
+      },
+    },
     { name: 'attachment', tier: 'marker', doc: 'Marker: attachment to a Motion.', internal: true, valueType: 'bool' },
     { name: 'appellate', tier: 'marker', doc: 'Filed at the appellate level.', valueType: 'bool' },
     { name: 'urgent', tier: 'marker', doc: 'Flagged as urgent.', valueType: 'bool' },
