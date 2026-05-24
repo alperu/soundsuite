@@ -97,6 +97,47 @@ if [ "$USE_DOCKER" = "1" ]; then
   [ -n "${SOUND_SUITE_MASTER_URL:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SOUND_SUITE_MASTER_URL=$SOUND_SUITE_MASTER_URL"
   [ -n "${SERVER_URL:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SERVER_URL=$SERVER_URL"
   DOCKER_ARGS="$DOCKER_ARGS -e SIDECAR_HOSTNAME=$(hostname)"
+
+  # Auto-detect the host's LAN IP and pass it as EXTERNAL_IP so the sidecar
+  # self-registers with an address the master can actually reach. Inside
+  # Docker Desktop on Mac (and Linux containers under default bridge
+  # networking on any host), os.networkInterfaces() inside the container only
+  # sees the Docker bridge (172.17.x.x) — the master then can't reach
+  # http://172.17.0.2:8098 because that subnet only exists inside the Mac.
+  # Operator override: set EXTERNAL_IP in the parent shell to skip detection.
+  if [ -z "${EXTERNAL_IP:-}" ]; then
+    DETECTED_IP=""
+    case "$(uname)" in
+      Darwin)
+        # Try each network interface in turn until one returns a non-empty IP.
+        # en0 = built-in Wi-Fi on most Macs; en1 = first Ethernet on Mac mini
+        # / Mac Pro; en2-3 = USB / Thunderbolt adapters. `ipconfig getifaddr`
+        # prints nothing on inactive interfaces so a clean `for` loop works.
+        for IF in en0 en1 en2 en3 en4 en5; do
+          IP=$(ipconfig getifaddr "$IF" 2>/dev/null || true)
+          if [ -n "$IP" ]; then DETECTED_IP="$IP"; break; fi
+        done
+        ;;
+      Linux)
+        # Best-effort: ask `ip route` which interface owns the default route,
+        # then read its v4 address. Falls back to hostname -I's first IP.
+        IFACE=$(ip route 2>/dev/null | awk '/^default/ { print $5; exit }') || true
+        if [ -n "$IFACE" ]; then
+          DETECTED_IP=$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet / { print $2 }' | cut -d/ -f1 | head -1)
+        fi
+        if [ -z "$DETECTED_IP" ]; then
+          DETECTED_IP=$(hostname -I 2>/dev/null | awk '{ print $1 }')
+        fi
+        ;;
+    esac
+    if [ -n "$DETECTED_IP" ]; then
+      EXTERNAL_IP="$DETECTED_IP"
+      echo "[INFO] Detected host LAN IP: $EXTERNAL_IP (passing as EXTERNAL_IP so sidecar registers with this address)"
+    else
+      echo "[WARN] Could not auto-detect host LAN IP. Sidecar will self-detect (may fall back to Docker bridge 172.17.x.x — unreachable from master). Override: EXTERNAL_IP=<your-lan-ip> ./start.sh ..."
+    fi
+  fi
+  [ -n "${EXTERNAL_IP:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e EXTERNAL_IP=$EXTERNAL_IP"
   # Host-Ollama mode — only path that delivers GPU acceleration for embedding/
   # completion/ocr on Mac (Docker Desktop VM can't reach Metal). Auto-default
   # on Mac when the operator hasn't set it explicitly: enable for the three
