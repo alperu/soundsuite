@@ -109,6 +109,60 @@ export default function DocsViewer() {
 
   const rendered = useMemo(() => substitute(content, info, selectedMasterUrl), [content, info, selectedMasterUrl]);
   const activeDoc = DOCS.find(d => d.slug === activeSlug);
+
+  // Build the right-column TOC by scanning the rendered markdown for ## / ###
+  // headings. Slugs match the id we attach via the ReactMarkdown overrides
+  // below so anchor clicks scroll to the right spot. Skips headings inside
+  // fenced code blocks (a `## ` line inside ```...``` shouldn't appear in TOC).
+  const toc = useMemo(() => {
+    const lines = rendered.split('\n');
+    const items: Array<{ slug: string; text: string; level: 2 | 3 }> = [];
+    let inFence = false;
+    const used = new Set<string>();
+    const slugify = (s: string) =>
+      s.toLowerCase().trim()
+        .replace(/[`*_~]/g, '')
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+    for (const raw of lines) {
+      if (/^\s*```/.test(raw)) { inFence = !inFence; continue; }
+      if (inFence) continue;
+      const m = raw.match(/^(#{2,3})\s+(.+?)\s*$/);
+      if (!m) continue;
+      const level = m[1].length as 2 | 3;
+      const text = m[2].replace(/<[^>]+>/g, '').trim();
+      let slug = slugify(text);
+      if (!slug) continue;
+      let n = 1;
+      while (used.has(slug)) { slug = `${slugify(text)}-${++n}`; }
+      used.add(slug);
+      items.push({ slug, text, level });
+    }
+    return items;
+  }, [rendered]);
+
+  const [activeAnchor, setActiveAnchor] = useState<string>('');
+  useEffect(() => {
+    if (typeof window === 'undefined' || toc.length === 0) return;
+    const headingEls = toc
+      .map(t => document.getElementById(t.slug))
+      .filter((el): el is HTMLElement => !!el);
+    if (headingEls.length === 0) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter(e => e.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible[0]) setActiveAnchor(visible[0].target.id);
+      },
+      { rootMargin: '-80px 0px -60% 0px' },
+    );
+    headingEls.forEach(el => observer.observe(el));
+    return () => observer.disconnect();
+  }, [toc, rendered]);
+
   const effectiveHost = (() => {
     try { return selectedMasterUrl ? new URL(selectedMasterUrl).host : info?.masterHost ?? ''; } catch { return info?.masterHost ?? ''; }
   })();
@@ -187,6 +241,16 @@ export default function DocsViewer() {
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{
+                  h2: ({ children }) => {
+                    const text = String(children ?? '').replace(/<[^>]+>/g, '').trim();
+                    const slug = text.toLowerCase().replace(/[`*_~]/g, '').replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+                    return <h2 id={slug} className="scroll-mt-20">{children}</h2>;
+                  },
+                  h3: ({ children }) => {
+                    const text = String(children ?? '').replace(/<[^>]+>/g, '').trim();
+                    const slug = text.toLowerCase().replace(/[`*_~]/g, '').replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+                    return <h3 id={slug} className="scroll-mt-20">{children}</h3>;
+                  },
                   pre: ({ children }) => {
                     // ReactMarkdown wraps <code> inside <pre>. Extract the raw text for copy.
                     const codeNode = (children as any)?.props?.children ?? '';
@@ -269,6 +333,40 @@ export default function DocsViewer() {
           )}
         </div>
       </main>
+
+      {/* Right rail — TOC of the active doc. Hidden when there are fewer than
+          two anchorable sections (very short docs). */}
+      {toc.length >= 2 && (
+        <aside className="hidden xl:block w-60 flex-shrink-0 border-l border-gray-200 bg-gray-50 overflow-y-auto py-4 px-3">
+          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 px-2">On this page</div>
+          <nav className="space-y-0.5">
+            {toc.map(item => (
+              <a
+                key={item.slug}
+                href={`#${item.slug}`}
+                onClick={(e) => {
+                  e.preventDefault();
+                  const el = document.getElementById(item.slug);
+                  if (el) {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    window.history.replaceState(null, '', `#${item.slug}`);
+                    setActiveAnchor(item.slug);
+                  }
+                }}
+                className={`block text-[11px] leading-snug px-2 py-1 rounded transition-colors ${
+                  item.level === 3 ? 'pl-5' : ''
+                } ${
+                  activeAnchor === item.slug
+                    ? 'bg-blue-50 text-blue-700 font-medium'
+                    : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                }`}
+              >
+                {item.text}
+              </a>
+            ))}
+          </nav>
+        </aside>
+      )}
     </div>
   );
 }

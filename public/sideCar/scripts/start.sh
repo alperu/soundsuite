@@ -8,6 +8,17 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 PORT="${PORT:-8098}"
 VER="$( [ -f "$DIR/VERSION" ] && cat "$DIR/VERSION" || echo unknown )"
 
+# Pull --docker / -d out of the positional args first so they don't get
+# mistaken for the master URL (which is the first remaining positional arg).
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --docker|-d) FORCE_DOCKER=1 ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+set -- "${ARGS[@]:-}"
+
 # Master URL: positional arg > SOUND_SUITE_MASTER_URL > legacy SERVER_URL
 if [ -n "${1:-}" ]; then
   export SOUND_SUITE_MASTER_URL="$1"
@@ -36,13 +47,9 @@ fi
 echo "[OK] Docker"
 
 # Mode selection: --docker / FORCE_DOCKER=1 always wins. Otherwise prefer Node
-# when a usable version exists, else fall back to Docker.
+# when a usable version exists, else fall back to Docker. (--docker was parsed
+# out of "$@" above so it sets FORCE_DOCKER without consuming the URL arg.)
 USE_DOCKER=0
-for arg in "$@"; do
-  if [ "$arg" = "--docker" ] || [ "$arg" = "-d" ]; then
-    FORCE_DOCKER=1
-  fi
-done
 if [ "${FORCE_DOCKER:-0}" = "1" ]; then
   echo "[INFO] FORCE_DOCKER=1 (or --docker flag) — running in Docker mode."
   USE_DOCKER=1

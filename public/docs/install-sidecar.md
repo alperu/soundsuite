@@ -34,14 +34,47 @@ cd ./sidecar
 
 The sidecar opens its admin UI on **`http://localhost:{{SIDECAR_PORT}}`** and connects back to **{{MASTER_URL}}** via WebSocket.
 
-> **macOS — want Docker mode instead of Node?** `start.sh` defaults to Node when a recent Node is installed. Force the Docker container path:
->
-> ```bash
-> cd ./sidecar
-> ./start.sh --docker {{MASTER_URL}}
-> ```
->
-> On Mac the script auto-enables host-Ollama mode (sets `SS_HOST_OLLAMA=1`, `SS_HOST_OLLAMA_ROLES=embedding,completion,ocr`, `HOST_OS=darwin`) when you don't pass them explicitly. You still need native Ollama installed on the Mac — see the **"macOS host with native Ollama"** section below for the one-time Ollama setup.
+### macOS in Docker mode (with host-Ollama)
+
+On a Mac you usually want the sidecar inside Docker but the actual models served by **native Ollama** on the host — that's the only path that gets Metal GPU acceleration. The launcher supports this with one flag plus an auto-default.
+
+```bash
+# 1. One-time: install native Ollama (this is what unlocks the Metal GPU)
+brew install ollama
+brew services start ollama
+launchctl setenv OLLAMA_HOST 0.0.0.0:11434
+brew services restart ollama
+curl -s http://localhost:11434/api/version    # sanity check
+
+# 2. Optional but recommended: pre-pull the models so first-call doesn't wait
+ollama pull qwen3-embedding:0.6b
+ollama pull qwen3.5:9b
+ollama pull richardyoung/olmocr2:7b-q8
+
+# 3. Refresh the launcher so it knows --docker (older copies don't)
+cd ./sidecar
+curl -fsSL {{MASTER_URL}}/sideCar/scripts/start.sh -o start.sh
+chmod +x start.sh
+
+# 4. Start in Docker mode — auto-sets SS_HOST_OLLAMA on Mac
+./start.sh --docker {{MASTER_URL}}
+```
+
+What `--docker` does that bare `./start.sh` doesn't:
+1. Forces the Docker container path even when Node ≥18 is installed (otherwise the launcher prefers Node and runs the sidecar as a Node process, not in Docker).
+2. On macOS, when `SS_HOST_OLLAMA` isn't set explicitly, the launcher auto-defaults `SS_HOST_OLLAMA=1`, `SS_HOST_OLLAMA_ROLES=embedding,completion,ocr`, `HOST_OS=darwin` so the gossip planner doesn't trim the registry to "utility roles only" on first connect.
+
+Override the defaults from the parent shell if needed:
+
+```bash
+SS_HOST_OLLAMA_ROLES=embedding,completion \
+SS_HOST_OLLAMA_BUDGET_MB=16384 \
+./start.sh --docker {{MASTER_URL}}
+```
+
+To explicitly disable host-Ollama mode (you'll want this on Linux/Windows where Docker has GPU passthrough): `SS_HOST_OLLAMA=0 ./start.sh --docker {{MASTER_URL}}`.
+
+See the **"macOS host with native Ollama"** section below for full env-var reference, verification, troubleshooting, and the optional host-stats helper.
 
 ### Windows — one-liner (PowerShell)
 
@@ -99,6 +132,14 @@ The launcher reads `SOUND_SUITE_MASTER_URL` from its first argument or env var a
 ## Docker install
 
 If you prefer running the sidecar in a container:
+
+### macOS — one-liner
+
+```bash
+curl -fsSL {{MASTER_URL}}/sideCar/scripts/install.sh -o install.sh && chmod +x install.sh && ./install.sh {{MASTER_URL}} && cd sidecar && ./start.sh --docker {{MASTER_URL}}
+```
+
+This installs the sidecar tarball, then launches `start.sh --docker` which builds `ss-sidecar:v{{SIDECAR_VERSION}}` from `Dockerfile.run` and runs it. The `--docker` flag forces the container path (Node mode would win otherwise on any Mac with Node ≥18 installed) and on macOS auto-defaults `SS_HOST_OLLAMA=1` + roles for embedding/completion/ocr so the gossip planner doesn't trim the registry. Install native Ollama first (see the **macOS host with native Ollama** section below) so those roles actually have a Metal-backed engine to serve them.
 
 ### Linux
 
