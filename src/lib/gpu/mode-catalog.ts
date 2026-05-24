@@ -30,7 +30,7 @@
  *   three modes work on linux/mac-docker-ollama/windows-docker-wsl2 via Ollama (host or container).
  */
 
-export type ModeName = 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker';
+export type ModeName = 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker' | 'ss-rlm';
 export type HostOs = 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2';
 
 export const ALL_MODES: readonly ModeName[] = [
@@ -38,6 +38,7 @@ export const ALL_MODES: readonly ModeName[] = [
   'ss-completion',
   'ss-ocr',
   'ss-reranker',
+  'ss-rlm',
 ];
 
 export interface ModeCatalogEntry {
@@ -83,6 +84,19 @@ export const MODE_METADATA: ModeMetadata[] = [
     description:
       'vLLM cross-encoder reranker. Linux native or Windows Docker (WSL2) with NVIDIA GPU passthrough. Mac unsupported — vllm-metal lacks cross-encoder support (see vllm-metal#361).',
   },
+  {
+    name: 'ss-rlm',
+    label: 'RLM (recursive reasoning)',
+    // Mac excluded by default: Docker vLLM has no Metal passthrough on macOS,
+    // and DMR's vllm-metal only loads MLX-format safetensors — but no MLX
+    // conversion of mit-oasys/rlm-qwen3-8b-v0.1 exists on HuggingFace yet
+    // (no mlx-community/rlm-* variant). An operator can unblock Mac by
+    // converting the model with mlx-lm and pointing /admin/rlm's model
+    // override at the local MLX path, then re-enabling Mac here.
+    availableOn: ['linux', 'windows-docker-wsl2'],
+    description:
+      'Recursive Language Model (Qwen3-8B post-trained) for deep long-context reasoning across many documents. Served via Docker vLLM on Linux/Windows+NVIDIA. Mac is not supported out-of-the-box: vllm-metal needs an MLX conversion of the weights and none has been published. AWQ-INT4 @ 32K context fits in ~10 GB VRAM.',
+  },
 ];
 
 /**
@@ -95,6 +109,7 @@ const STATIC_FALLBACK_MODEL: Record<ModeName, string> = {
   'ss-completion': 'qwen3.5:9b',
   'ss-ocr': 'minicpm-v:latest',
   'ss-reranker': 'Qwen/Qwen3-Reranker-8B',
+  'ss-rlm': 'mit-oasys/rlm-qwen3-8b-v0.1',
 };
 
 function buildDefaultModelMap(
@@ -145,6 +160,8 @@ export function settingsPageForMode(
       return { label: 'OCR settings', href: '/admin/ocr', configKey: 'pipeline.ocrOllamaModel' };
     case 'ss-reranker':
       return { label: 'Reranking settings', href: '/admin/reranking', configKey: 'rerank.model' };
+    case 'ss-rlm':
+      return { label: 'RLM AI settings', href: '/admin/rlm', configKey: 'rlm.model' };
     default:
       return null;
   }
@@ -189,6 +206,9 @@ export function resolveModelFromConfig(
       break;
     case 'ss-reranker':
       v = cfg?.rerankModel;
+      break;
+    case 'ss-rlm':
+      v = cfg?.rlmModel;
       break;
   }
   if (v && typeof v === 'string' && v.trim()) return v.trim();

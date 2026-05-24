@@ -52,11 +52,14 @@ export type { ModeName, ModeCatalogEntry, HostOs };
 /**
  * Allowed runtime values for a HostRoleAssignment row. Mirrors the sidecar's
  * `RuntimeChoice` in mode-templates.ts.
- *   'host'         — native Ollama via host.docker.internal:11434 (Mac primary)
- *   'docker-ollama' — sidecar runs `ollama/ollama` container w/ GPU passthrough
- *   'docker-vllm'  — sidecar runs `vllm/vllm-openai` container (CUDA only)
+ *   'host'                — native Ollama via host.docker.internal:11434 (Mac primary)
+ *   'docker-ollama'       — sidecar runs `ollama/ollama` container w/ GPU passthrough
+ *   'docker-vllm'         — sidecar runs `vllm/vllm-openai` container (CUDA only)
+ *   'docker-model-runner' — Docker Model Runner (vllm-metal on Apple Silicon,
+ *                           DMR on Linux). Used by ss-rlm on Mac since plain
+ *                           docker-vllm has no GPU on macOS.
  */
-export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm';
+export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner';
 
 export interface AssignmentInput {
   sidecarUrl: string;
@@ -67,9 +70,10 @@ export interface AssignmentInput {
   modelOverride?: string | null;
   /**
    * Where the role runs on the sidecar:
-   *   'host'         — native Ollama via host.docker.internal:11434 (Mac primary)
-   *   'docker-ollama' — sidecar runs `ollama/ollama` container w/ GPU passthrough
-   *   'docker-vllm'  — sidecar runs `vllm/vllm-openai` container (CUDA only)
+   *   'host'                — native Ollama via host.docker.internal:11434 (Mac primary)
+   *   'docker-ollama'       — sidecar runs `ollama/ollama` container w/ GPU passthrough
+   *   'docker-vllm'         — sidecar runs `vllm/vllm-openai` container (CUDA only)
+   *   'docker-model-runner' — Docker Model Runner / vllm-metal (Mac primary for ss-rlm)
    * Backward-compat: rows pre-dating this field default to 'docker-ollama'
    * on linux/win32 and 'host' on darwin (resolved client-side).
    */

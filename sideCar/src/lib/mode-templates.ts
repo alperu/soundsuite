@@ -27,8 +27,8 @@
  */
 import { CONTAINER_PREFIX, dockerSupportsGpu, state, type ContainerDef } from './state';
 
-export type ModeName = 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker';
-export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker'];
+export type ModeName = 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker' | 'ss-rlm';
+export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker', 'ss-rlm'];
 export type HostOs = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | 'unknown';
 export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner';
 
@@ -187,6 +187,24 @@ export function resolveMode(
         runtime: 'docker',
       };
 
+    case 'ss-rlm':
+      // Mac unsupported by default: Docker vLLM has no Metal passthrough on
+      // macOS, and DMR's vllm-metal only serves MLX-format weights — no MLX
+      // conversion of mit-oasys/rlm-qwen3-8b-v0.1 exists on HuggingFace yet.
+      // Use a Linux or Windows+NVIDIA sidecar for RLM.
+      if (!isLinux) return null;
+      return {
+        image: 'vllm/vllm-openai',
+        model: 'mit-oasys/rlm-qwen3-8b-v0.1',
+        port: 8100,
+        vram: 10000,
+        type: 'vllm',
+        modes: ['searching'],
+        containerName,
+        priority: 'high',
+        runtime: 'docker',
+      };
+
     default:
       return null;
   }
@@ -259,6 +277,9 @@ function resolveModeForRuntime(
       case 'ss-reranker':
         // No host-vLLM path today.
         return null;
+      case 'ss-rlm':
+        // No host-vLLM path today; RLM only runs via docker-vllm or DMR.
+        return null;
     }
   }
 
@@ -309,26 +330,116 @@ function resolveModeForRuntime(
       case 'ss-reranker':
         // vLLM, not Ollama, runs the reranker.
         return null;
+      case 'ss-rlm':
+        // vLLM, not Ollama, runs RLM.
+        return null;
     }
   }
 
   if (runtime === 'docker-vllm') {
     if (!dockerSupportsGpu()) return null;
-    if (mode !== 'ss-reranker') return null;
-    return {
-      image: 'vllm/vllm-openai',
-      model: 'Qwen/Qwen3-Reranker-8B',
-      port: 8099,
-      vram: 7000,
-      type: 'vllm',
-      modes: ['searching'],
-      containerName,
-      priority: 'normal',
-      runtime: 'docker',
-    };
+    if (mode === 'ss-reranker') {
+      return {
+        image: 'vllm/vllm-openai',
+        model: 'Qwen/Qwen3-Reranker-8B',
+        port: 8099,
+        vram: 7000,
+        type: 'vllm',
+        modes: ['searching'],
+        containerName,
+        priority: 'normal',
+        runtime: 'docker',
+      };
+    }
+    if (mode === 'ss-rlm') {
+      return {
+        image: 'vllm/vllm-openai',
+        model: 'mit-oasys/rlm-qwen3-8b-v0.1',
+        port: 8100,
+        vram: 10000,
+        type: 'vllm',
+        modes: ['searching'],
+        containerName,
+        priority: 'high',
+        runtime: 'docker',
+      };
+    }
+    return null;
   }
 
-  // docker-model-runner: reserved for forward-compat; not exposed in the
-  // operator UI yet. Refuse here so callers fall through.
+  // docker-model-runner: Apple Silicon vllm-metal (and Linux DMR) reachable at
+  // dmrHost:dmrPort. Resolves a ContainerDef for ss-embedding / ss-completion
+  // / ss-ocr / ss-reranker so the master's "Docker Model Runner" column on
+  // /admin/roleassign produces a working route for these roles when picked.
+  //
+  // Refusals (returns null):
+  //   ss-rlm — no MLX conversion of mit-oasys/rlm-qwen3-8b-v0.1 is published;
+  //            vllm-metal needs MLX weights, not stock HF safetensors. RLM
+  //            stays on docker-vllm for Linux/Windows+NVIDIA hosts.
+  //   ss-reranker on mac-docker-ollama — vllm-metal lacks cross-encoder head
+  //            (vllm-metal#361); the master's mode.availableOn already filters
+  //            Mac out, this is just belt-and-suspenders.
+  //
+  // image is the sentinel 'docker-model-runner' — the sidecar's start handler
+  // does NOT docker-run for runtime==='docker-model-runner'; it forwards to
+  // DMR's OpenAI-compatible API on dmrHost:dmrPort. The port here is the
+  // role's logical port; the master rewrites it to state.dmrPort at routing
+  // time (see fleet-router pushModelRegistry).
+  if (runtime === 'docker-model-runner') {
+    if (mode === 'ss-rlm') return null;
+    if (mode === 'ss-reranker' && hostOs === 'mac-docker-ollama') return null;
+    switch (mode) {
+      case 'ss-embedding':
+        return {
+          image: 'docker-model-runner',
+          model: 'qwen3-embedding:0.6b',
+          port: 11434,
+          vram: 1200,
+          type: 'vllm',
+          modes: ['indexing', 'searching'],
+          containerName,
+          priority: 'high',
+          runtime: 'docker-model-runner',
+        };
+      case 'ss-completion':
+        return {
+          image: 'docker-model-runner',
+          model: 'qwen3.5:9b',
+          port: 11435,
+          vram: 10000,
+          type: 'vllm',
+          modes: ['searching'],
+          containerName,
+          priority: 'normal',
+          runtime: 'docker-model-runner',
+        };
+      case 'ss-ocr':
+        return {
+          image: 'docker-model-runner',
+          model: 'minicpm-v:latest',
+          port: 11436,
+          vram: 5000,
+          type: 'vllm',
+          modes: ['indexing'],
+          containerName,
+          priority: 'critical',
+          runtime: 'docker-model-runner',
+        };
+      case 'ss-reranker':
+        return {
+          image: 'docker-model-runner',
+          model: 'Qwen/Qwen3-Reranker-8B',
+          port: 8099,
+          vram: 7000,
+          type: 'vllm',
+          modes: ['searching'],
+          containerName,
+          priority: 'normal',
+          runtime: 'docker-model-runner',
+        };
+    }
+    return null;
+  }
+
   return null;
 }

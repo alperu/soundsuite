@@ -142,9 +142,9 @@ interface FleetData {
   sidecars: FleetSidecar[];
   wsRelayPort: number;
   connectedViaWs: number;
-  idleTimeouts: { embedding: number; completion: number; ocr: number; reranker: number };
-  minOnline: { embedding: number; completion: number; ocr: number; reranker: number };
-  peakDemand: { embedding: number; completion: number; ocr: number; reranker: number };
+  idleTimeouts: { embedding: number; completion: number; ocr: number; reranker: number; rlm?: number };
+  minOnline: { embedding: number; completion: number; ocr: number; reranker: number; rlm?: number };
+  peakDemand: { embedding: number; completion: number; ocr: number; reranker: number; rlm?: number };
   sidecarTimeoutOverrides?: Record<string, Record<string, number>>;
   gpuMode: string;
   gpuAutoManage: boolean;
@@ -152,7 +152,7 @@ interface FleetData {
   latestBuildVersion: string | null;
 }
 
-const ROLES = ['embedding', 'completion', 'ocr', 'reranker'] as const;
+const ROLES = ['embedding', 'completion', 'ocr', 'reranker', 'rlm'] as const;
 
 type LoadedModel = NonNullable<ContainerState['loadedModels']>[number];
 
@@ -379,12 +379,14 @@ export default function GpuFleetPanel() {
   const [idleCompletion, setIdleCompletion] = useState(10);
   const [idleOcr, setIdleOcr] = useState(5);
   const [idleReranker, setIdleReranker] = useState(5);
+  const [idleRlm, setIdleRlm] = useState(10);
 
   // Minimum online instances
   const [minEmbedding, setMinEmbedding] = useState(0);
   const [minCompletion, setMinCompletion] = useState(0);
   const [minOcr, setMinOcr] = useState(0);
   const [minReranker, setMinReranker] = useState(0);
+  const [minRlm, setMinRlm] = useState(0);
 
   // Per-sidecar idle timeout overrides
   const [sidecarTimeouts, setSidecarTimeouts] = useState<Record<string, number>>({ embedding: 0, completion: 10, ocr: 5, reranker: 5 });
@@ -417,11 +419,13 @@ export default function GpuFleetPanel() {
       setIdleCompletion(data.idleTimeouts.completion);
       setIdleOcr(data.idleTimeouts.ocr);
       setIdleReranker(data.idleTimeouts.reranker);
+      if (typeof data.idleTimeouts.rlm === 'number') setIdleRlm(data.idleTimeouts.rlm);
       if (data.minOnline) {
         setMinEmbedding(data.minOnline.embedding);
         setMinCompletion(data.minOnline.completion);
         setMinOcr(data.minOnline.ocr);
         setMinReranker(data.minOnline.reranker);
+        if (typeof data.minOnline.rlm === 'number') setMinRlm(data.minOnline.rlm);
       }
       setGpuAutoManage(data.gpuAutoManage);
       setError(null);
@@ -584,6 +588,7 @@ export default function GpuFleetPanel() {
       gpuIdleCompletionMin: idleCompletion,
       gpuIdleOcrMin: idleOcr,
       gpuIdleRerankerMin: idleReranker,
+      gpuIdleRlmMin: idleRlm,
     });
     if (!saved) return;
     const connected = fleet?.sidecars.filter(s => s.status === 'connected') || [];
@@ -591,7 +596,7 @@ export default function GpuFleetPanel() {
     for (const s of connected) {
       const r = await doAction('config', {
         url: s.url,
-        idleTimeouts: { embedding: idleEmbedding, completion: idleCompletion, ocr: idleOcr, reranker: idleReranker },
+        idleTimeouts: { embedding: idleEmbedding, completion: idleCompletion, ocr: idleOcr, reranker: idleReranker, rlm: idleRlm },
       });
       if (r) pushed++;
     }
@@ -604,6 +609,7 @@ export default function GpuFleetPanel() {
       gpuMinCompletion: minCompletion,
       gpuMinOcr: minOcr,
       gpuMinReranker: minReranker,
+      gpuMinRlm: minRlm,
     });
     if (saved) {
       setActionMsg({ type: 'success', text: 'Minimum online settings saved. Enforcement runs every 30s.' });
@@ -1208,11 +1214,12 @@ export default function GpuFleetPanel() {
       <div className="bg-white shadow rounded-lg p-6">
         <h2 className="text-xl font-semibold text-gray-900 mb-2">Per-Model Idle Timeouts</h2>
         <p className="text-sm text-gray-600 mb-4">Auto-stop containers after idle to free GPU VRAM. Set 0 to never auto-stop.</p>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
           <TimeoutInput label="Embedding" value={idleEmbedding} onChange={setIdleEmbedding} hint="0 = never" />
           <TimeoutInput label="Completion" value={idleCompletion} onChange={setIdleCompletion} />
           <TimeoutInput label="OCR" value={idleOcr} onChange={setIdleOcr} />
           <TimeoutInput label="Reranker" value={idleReranker} onChange={setIdleReranker} />
+          <TimeoutInput label="RLM" value={idleRlm} onChange={setIdleRlm} />
         </div>
         <button onClick={handleSaveTimeouts} disabled={actionLoading !== null}
           className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 disabled:opacity-50">
@@ -1224,11 +1231,12 @@ export default function GpuFleetPanel() {
       <div className="bg-white shadow rounded-lg p-6">
         <h2 className="text-xl font-semibold text-gray-900 mb-2">Minimum Online Instances</h2>
         <p className="text-sm text-gray-600 mb-4">Ensure N sidecar(s) keep each role&apos;s container running. Enforcement runs every 30s.</p>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
           <NumberInput label="Embedding" value={minEmbedding} onChange={setMinEmbedding} />
           <NumberInput label="Completion" value={minCompletion} onChange={setMinCompletion} />
           <NumberInput label="OCR" value={minOcr} onChange={setMinOcr} />
           <NumberInput label="Reranker" value={minReranker} onChange={setMinReranker} />
+          <NumberInput label="RLM" value={minRlm} onChange={setMinRlm} />
         </div>
         <button onClick={handleSaveMinOnline} disabled={actionLoading !== null}
           className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 disabled:opacity-50">

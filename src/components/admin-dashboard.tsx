@@ -25,7 +25,7 @@ interface Props {
   initialTab?: TabKey;
 }
 
-type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'hostprov' | 'ocr' | 'localai' | 'aikeys' | 'aiservices' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts';
+type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'hostprov' | 'ocr' | 'localai' | 'rlm' | 'aikeys' | 'aiservices' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts';
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'general', label: 'General', icon: '⊞' },
@@ -38,6 +38,7 @@ const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'hostprov', label: 'Host Provisioning', icon: '⌂' },
   { key: 'ocr', label: 'OCR', icon: '◉' },
   { key: 'localai', label: 'Local AI', icon: '⊚' },
+  { key: 'rlm', label: 'RLM AI', icon: '∞' },
   { key: 'aikeys', label: 'AI Keys $', icon: '⚷' },
   { key: 'aiservices', label: 'AI Services', icon: '✦' },
   { key: 'workers', label: 'Workers', icon: '⚙' },
@@ -49,7 +50,7 @@ const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'drafts', label: 'Drafts', icon: '✎' },
 ];
 
-const TAB_DOCS: Record<TabKey, { title: string; description: string; details: string[] }> = {
+const TAB_DOCS: Record<TabKey, { title: string; description: string; details: string[]; extras?: () => React.ReactNode }> = {
   general: {
     title: 'General',
     description: 'Server identity, network addresses, and MCP endpoint information.',
@@ -120,11 +121,74 @@ const TAB_DOCS: Record<TabKey, { title: string; description: string; details: st
     title: 'Role Assignments',
     description: 'Pick which modes each sidecar should run. Per-host model and runtime overrides.',
     details: [
-      'Click a chip to toggle a mode on/off — auto-syncs within a few seconds',
-      'Unavailable modes (e.g. ss-reranker on macOS) are greyed out with a tooltip',
-      'Click the gear on an enabled chip to override model / minOnline / idle timeout',
+      'Click a runtime cell to toggle a mode on/off — auto-syncs within a few seconds',
+      'Unavailable cells are greyed out with a tooltip explaining why',
+      'Click the gear on an enabled row to override model / minOnline / idle timeout',
       'Reset to defaults restores per-OS sensible assignments for a sidecar',
+      'Port column shows the default port the role binds on the sidecar',
     ],
+    extras: () => (
+      <div className="border-t border-gray-200 pt-3 space-y-3">
+        <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide mb-2">Runtime columns</h4>
+        <p className="text-[11px] text-gray-500 leading-relaxed">
+          A cell is clickable only when the runtime supports the role on that host&apos;s OS.
+        </p>
+        {[
+          {
+            label: 'Ollama (native)',
+            engine: 'Ollama (llama.cpp) · GGUF',
+            where: 'Native process on host (Metal/CUDA direct)',
+            macGpu: true,
+            uses: 'embedding, completion, ocr',
+          },
+          {
+            label: 'Docker Ollama',
+            engine: 'Ollama (llama.cpp) · GGUF',
+            where: 'Inside a sidecar-managed container',
+            macGpu: false,
+            uses: 'embedding, completion, ocr — Linux/Win only with usable speed',
+          },
+          {
+            label: 'Docker vLLM',
+            engine: 'vLLM (PyTorch + CUDA) · HF safetensors',
+            where: 'vllm/vllm-openai container, NVIDIA passthrough',
+            macGpu: false,
+            uses: 'reranker (cross-encoder), rlm',
+          },
+          {
+            label: 'Docker Model Runner',
+            engine: 'vLLM (Metal on Mac / CUDA on Linux) · MLX format on Mac, HF safetensors on Linux',
+            where: 'On host via DMR scheduler (lazy load, no public unload)',
+            macGpu: true,
+            uses: 'Reranker excluded on Mac (vllm-metal lacks cross-encoder). RLM excluded on Mac until an MLX conversion of mit-oasys/rlm-qwen3-8b-v0.1 is published',
+          },
+        ].map((r) => (
+          <div key={r.label} className="border border-gray-200 rounded-md p-2 bg-white">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <div className="font-mono text-[11px] font-semibold text-gray-800">{r.label}</div>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded ${r.macGpu ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                {r.macGpu ? 'Mac GPU ✓' : 'Mac GPU ✗'}
+              </span>
+            </div>
+            <div className="text-[11px] text-gray-600 leading-snug"><span className="text-gray-400">Engine:</span> {r.engine}</div>
+            <div className="text-[11px] text-gray-600 leading-snug"><span className="text-gray-400">Where:</span> {r.where}</div>
+            <div className="text-[11px] text-gray-600 leading-snug"><span className="text-gray-400">Used by:</span> {r.uses}</div>
+          </div>
+        ))}
+        <div className="border border-gray-200 rounded-md p-2 bg-gray-50">
+          <div className="text-[11px] font-semibold text-gray-700 mb-1">Engine in one line</div>
+          <div className="text-[11px] text-gray-600 leading-snug">
+            Ollama = small quantized GGUFs you stream tokens from. vLLM = batched safetensors with rerank / recursive-call serving.
+          </div>
+        </div>
+        <div className="border border-gray-200 rounded-md p-2 bg-gray-50">
+          <div className="text-[11px] font-semibold text-gray-700 mb-1">Lifecycle</div>
+          <div className="text-[11px] text-gray-600 leading-snug">
+            Container runtimes (Docker Ollama / Docker vLLM) start/stop on the sidecar&apos;s idle timer. DMR has no public unload — its own scheduler evicts.
+          </div>
+        </div>
+      </div>
+    ),
   },
   hostprov: {
     title: 'Host Provisioning',
@@ -158,6 +222,18 @@ const TAB_DOCS: Record<TabKey, { title: string; description: string; details: st
       'All data stays on your network — fully private',
       'When configured, Ollama is used as the primary AI provider',
       'Install models: ollama pull qwen3.5:14b',
+    ],
+  },
+  rlm: {
+    title: 'RLM AI (Recursive Language Model)',
+    description: 'Pick the long-context recursive-reasoning model served via vLLM and exposed as the ss-rlm mode.',
+    details: [
+      'RLM-Qwen3-8B is post-trained for recursive, multi-step reasoning over very long inputs (paper: arXiv 2512.24601)',
+      'Effective context far beyond the native window — the model writes Python that slices the prompt and recursively calls itself',
+      'Designed for deep multi-document questions (procedural history, contradictions, "list every X across all filings")',
+      'AWQ-INT4 @ 32K context fits in ~10 GB VRAM; FP16 needs ~20 GB',
+      'Runs only on Linux or Windows+NVIDIA via Docker vLLM — Mac is not yet supported (no MLX conversion of the weights exists for vllm-metal)',
+      'Assign to a sidecar in /admin/roleassign as the ss-rlm mode',
     ],
   },
   aikeys: {
@@ -302,6 +378,7 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
           {activeTab === 'hostprov' && <AdminHostProvisioning />}
           {activeTab === 'ocr' && <OCRProviderPanel initialConfig={initialConfig} />}
           {activeTab === 'localai' && <LocalAIPanel />}
+{activeTab === 'rlm' && <RLMPanel />}
           {activeTab === 'aikeys' && <AIKeysPanel />}
           {activeTab === 'aiservices' && <AdminAIServices />}
           {activeTab === 'workers' && <WorkersPanel />}
@@ -331,6 +408,7 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
                 ))}
               </ul>
             </div>
+            {docs.extras && docs.extras()}
           </div>
         </aside>
       </div>
@@ -1390,6 +1468,255 @@ function LocalAIPanel() {
               </svg>
             )}
             {modelSaving ? 'Saving…' : 'Save changes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ──────────────────────────── RLM AI Panel ──────────────────────────── */
+
+const RLM_MODELS = [
+  {
+    id: 'mit-oasys/rlm-qwen3-8b-v0.1',
+    label: 'RLM-Qwen3-8B v0.1 — Recommended',
+    context: '32K (recursive ≫ 1M effective)',
+    vram: '~10 GB (AWQ-INT4) / ~20 GB (FP16)',
+    desc: 'First natively recursive LM. Qwen3-8B post-trained on 1k LongBenchPro trajectories. +28% over base Qwen3-8B on long-context tasks; approaches GPT-5 on three of them.',
+  },
+  {
+    id: 'Qwen/Qwen3-8B',
+    label: 'Qwen3-8B (base, non-recursive)',
+    context: '32K',
+    vram: '~10 GB (AWQ-INT4) / ~16 GB (FP16)',
+    desc: 'Plain Qwen3-8B without RLM post-training. Useful as A/B baseline to measure the recursive lift on your own cases.',
+  },
+];
+
+const RLM_QUANTS = [
+  { id: 'awq-int4', label: 'AWQ-INT4 — Recommended (~10 GB @ 32K)' },
+  { id: 'awq-int8', label: 'AWQ-INT8 (~12 GB @ 32K)' },
+  { id: 'fp16', label: 'FP16 / BF16 (~20 GB @ 32K)' },
+];
+
+const RLM_CONTEXT_PRESETS = [
+  { value: 8192, label: '8K — fast, cheap sub-calls' },
+  { value: 16384, label: '16K' },
+  { value: 32768, label: '32K — Recommended' },
+  { value: 65536, label: '64K — large per-call slices' },
+  { value: 131072, label: '128K — max; needs ~16 GB even at INT4' },
+];
+
+function RLMPanel() {
+  const [model, setModel] = useState('');
+  const [savedModel, setSavedModel] = useState('');
+  const [quant, setQuant] = useState<'fp16' | 'awq-int8' | 'awq-int4'>('awq-int4');
+  const [savedQuant, setSavedQuant] = useState<'fp16' | 'awq-int8' | 'awq-int4'>('awq-int4');
+  const [maxContext, setMaxContext] = useState(32768);
+  const [savedMaxContext, setSavedMaxContext] = useState(32768);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [, setTick] = useState(0);
+
+  const loadConfig = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/config');
+      if (res.ok) {
+        const cfg = await res.json();
+        const m = cfg.rlmModel || 'mit-oasys/rlm-qwen3-8b-v0.1';
+        const q = (cfg.rlmQuant as 'fp16' | 'awq-int8' | 'awq-int4') || 'awq-int4';
+        const c = typeof cfg.rlmMaxContext === 'number' ? cfg.rlmMaxContext : 32768;
+        setModel(m); setSavedModel(m);
+        setQuant(q); setSavedQuant(q);
+        setMaxContext(c); setSavedMaxContext(c);
+      }
+    } catch { /* silent */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { loadConfig(); }, [loadConfig]);
+
+  // Re-render "Saved Ns ago" every 5s.
+  useEffect(() => {
+    if (!savedAt) return;
+    const id = setInterval(() => setTick(t => t + 1), 5000);
+    return () => clearInterval(id);
+  }, [savedAt]);
+
+  const dirty = model !== savedModel || quant !== savedQuant || maxContext !== savedMaxContext;
+
+  const handleSave = async () => {
+    if (!dirty || saving) return;
+    setSaving(true);
+    setSaveError(null);
+    const previous = { model: savedModel, quant: savedQuant, maxContext: savedMaxContext };
+    try {
+      // Overlay onto current config so we don't clobber unrelated keys
+      // (POST /api/config replaces by key set, like LocalAIPanel does).
+      const cfgRes = await fetch('/api/config');
+      const cfg = cfgRes.ok ? await cfgRes.json() : {};
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...cfg,
+          rlmModel: model,
+          rlmQuant: quant,
+          rlmMaxContext: maxContext,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setSavedModel(model); setSavedQuant(quant); setSavedMaxContext(maxContext);
+      setSavedAt(Date.now());
+    } catch (e) {
+      setModel(previous.model); setQuant(previous.quant); setMaxContext(previous.maxContext);
+      setSaveError(e instanceof Error ? e.message : 'Save failed');
+    }
+    setSaving(false);
+  };
+
+  const handleDiscard = () => {
+    setModel(savedModel); setQuant(savedQuant); setMaxContext(savedMaxContext);
+    setSaveError(null);
+  };
+
+  const savedAgoLabel = (() => {
+    if (dirty || !savedAt) return null;
+    const secs = Math.max(1, Math.floor((Date.now() - savedAt) / 1000));
+    if (secs < 60) return `Saved ${secs}s ago`;
+    return `Saved ${Math.floor(secs / 60)}m ago`;
+  })();
+
+  if (loading) return <Spinner />;
+
+  const selected = RLM_MODELS.find(m => m.id === model);
+
+  return (
+    <div className="space-y-6">
+      {/* About RLM */}
+      <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+        <h3 className="text-sm font-semibold text-purple-900 mb-1">What is RLM?</h3>
+        <p className="text-xs text-purple-800 leading-relaxed">
+          A <strong>Recursive Language Model</strong> treats the long prompt as a Python variable and writes code that
+          slices it, runs regex, and <em>recursively calls itself</em> on snippets. The orchestrator routes the model&apos;s
+          emitted Python through a sandboxed runtime (Pyodide-in-worker), so a single user query can effectively reason
+          over millions of tokens with 8B-class weights. Wired into the deep-search path; opt-in via <code className="px-1 bg-purple-100 rounded">mode: &quot;rlm&quot;</code> on
+          <code className="px-1 ml-1 bg-purple-100 rounded">/api/search/ai</code> until the Python sandbox lands.
+        </p>
+      </div>
+
+      {/* Model picker */}
+      <div className="bg-white shadow rounded-lg p-5">
+        <h3 className="text-lg font-semibold text-gray-900 mb-2">RLM Model</h3>
+        <p className="text-sm text-gray-600 mb-3">
+          Served by vLLM (Linux/Windows + NVIDIA) or Docker Model Runner&apos;s vllm-metal (Mac). Assign to a sidecar in
+          {' '}<a href="/admin/roleassign" className="text-blue-600 hover:underline">Role Assignments</a> as the
+          {' '}<code className="px-1 py-0.5 bg-gray-100 rounded text-gray-700">ss-rlm</code> mode.
+        </p>
+        <select
+          value={model}
+          onChange={e => setModel(e.target.value)}
+          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          {/* Surface unknown DB values as "(custom)" so this page agrees with what's actually saved. */}
+          {model && !RLM_MODELS.some(m => m.id === model) && (
+            <option key={model} value={model}>{model} (custom)</option>
+          )}
+          {RLM_MODELS.map(m => (
+            <option key={m.id} value={m.id}>{m.label}</option>
+          ))}
+        </select>
+
+        {selected && (
+          <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex gap-2">
+              <svg className="h-5 w-5 text-blue-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <div className="flex-1">
+                <h4 className="text-sm font-semibold text-blue-800">{selected.id}</h4>
+                <p className="text-xs text-blue-700 mt-1">{selected.desc}</p>
+                <div className="flex gap-4 mt-2">
+                  <span className="text-xs text-blue-600"><span className="font-medium">Context:</span> {selected.context}</span>
+                  <span className="text-xs text-blue-600"><span className="font-medium">VRAM:</span> {selected.vram}</span>
+                </div>
+                <p className="text-xs text-blue-700 mt-2 font-medium">Pull on a vLLM host:</p>
+                <pre className="mt-1 px-3 py-2 bg-gray-900 text-green-400 text-sm rounded font-mono select-all">
+                  docker run --gpus all -p 8100:8000 vllm/vllm-openai:latest --model {selected.id}
+                </pre>
+                <p className="text-xs text-blue-700 mt-2 font-medium">Or pull on Docker Model Runner (Mac vllm-metal):</p>
+                <pre className="mt-1 px-3 py-2 bg-gray-900 text-green-400 text-sm rounded font-mono select-all">
+                  docker model pull {selected.id}
+                </pre>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Quant + context */}
+      <div className="bg-white shadow rounded-lg p-5">
+        <h3 className="text-lg font-semibold text-gray-900 mb-3">Serving</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="text-sm font-medium text-gray-700 mb-1 block">Quantization</label>
+            <select
+              value={quant}
+              onChange={e => setQuant(e.target.value as 'fp16' | 'awq-int8' | 'awq-int4')}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {RLM_QUANTS.map(q => (
+                <option key={q.id} value={q.id}>{q.label}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-gray-500">
+              Quant is a hint pushed to the sidecar — vLLM still needs the matching weights variant available locally.
+            </p>
+          </div>
+
+          <div>
+            <label className="text-sm font-medium text-gray-700 mb-1 block">Per-sub-call max context</label>
+            <select
+              value={maxContext}
+              onChange={e => setMaxContext(parseInt(e.target.value, 10))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {RLM_CONTEXT_PRESETS.map(p => (
+                <option key={p.value} value={p.value}>{p.label}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-gray-500">
+              Per individual recursive call. Whole-query effective context is far larger because the model decomposes the prompt.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Save bar */}
+      <div className="sticky bottom-0 bg-white border-t border-gray-200 px-4 py-3 -mx-4 flex items-center justify-between">
+        <div className="text-xs">
+          {saveError && <span className="text-red-600">{saveError}</span>}
+          {!saveError && dirty && <span className="text-amber-600">Unsaved changes</span>}
+          {!saveError && !dirty && savedAgoLabel && <span className="text-gray-500">{savedAgoLabel}</span>}
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={handleDiscard}
+            disabled={!dirty || saving}
+            className="px-3 py-1.5 border border-gray-300 text-gray-700 text-sm rounded-lg hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Discard
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={!dirty || saving}
+            className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {saving ? 'Saving...' : 'Save'}
           </button>
         </div>
       </div>

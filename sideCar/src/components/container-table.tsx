@@ -299,12 +299,16 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
 
                       // Docker runtime: Start handles created/exited/not_found
                       // (drift detection from task #37 auto-recreates). Pull
-                      // & Load are also offered for ollama-type rows
-                      // regardless of running state so the operator can
+                      // & Load are also offered for ollama- and vllm-type
+                      // rows regardless of running state so the operator can
                       // pull/load a model on demand — sidecar handlers will
                       // auto-start the container if needed before invoking
-                      // `ollama pull`/`ollama run` inside it.
-                      const hasModel = isOllamaType && !!container.config?.model;
+                      // `ollama pull`/`ollama run` inside it. For vLLM rows
+                      // (reranker, rlm) `Pull` triggers handlePullModel which
+                      // pulls the image, ensures the container, and starts
+                      // it; vLLM then downloads the HF model on first request.
+                      const isVllmType = container.config?.type === 'vllm';
+                      const hasModel = (isOllamaType || isVllmType) && !!container.config?.model;
                       if (container.status === 'running') {
                         return (
                           <>

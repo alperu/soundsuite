@@ -82,6 +82,18 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     containerName: `${CONTAINER_PREFIX}reranker`,
     priority: 'normal',
   },
+  rlm: {
+    image: 'vllm/vllm-openai',
+    model: 'mit-oasys/rlm-qwen3-8b-v0.1',
+    port: 8100,
+    vram: 10000, // AWQ-INT4 @ 32K context; FP16 would be ~20 GB
+    type: 'vllm',
+    modes: ['searching'],
+    containerName: `${CONTAINER_PREFIX}rlm`,
+    // Evicts ss-completion (normal) on a constrained GPU; both roles answer the
+    // user's question and are mutually exclusive on a 24 GB card by design.
+    priority: 'high',
+  },
   cuda: {
     image: 'nvidia/cuda:12.4.1-base-ubuntu22.04',
     model: null,
@@ -271,6 +283,7 @@ export const state = {
     completion: 10 * 60 * 1000,
     ocr: 5 * 60 * 1000,
     reranker: 5 * 60 * 1000,
+    rlm: 10 * 60 * 1000,
     cuda: 0,
   } as Record<string, number>,
 
@@ -282,6 +295,7 @@ export const state = {
     completion: 1,
     ocr: 1,
     reranker: 1,
+    rlm: 0,
   } as Record<string, number>,
 
   // Timestamp (epoch ms) of the last /config POST from master. Surfaced in

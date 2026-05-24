@@ -49,6 +49,7 @@ export async function GET() {
         completion: config.gpuIdleCompletionMin,
         ocr: config.gpuIdleOcrMin,
         reranker: config.gpuIdleRerankerMin,
+        rlm: config.gpuIdleRlmMin,
       },
       sidecarTimeoutOverrides,
       minOnline: {
@@ -56,6 +57,7 @@ export async function GET() {
         completion: config.gpuMinCompletion,
         ocr: config.gpuMinOcr,
         reranker: config.gpuMinReranker,
+        rlm: config.gpuMinRlm,
       },
       peakDemand,
       gpuMode: config.gpuMode,
@@ -172,12 +174,14 @@ export async function POST(request: NextRequest) {
           gpuIdleCompletionMin,
           gpuIdleOcrMin,
           gpuIdleRerankerMin,
+          gpuIdleRlmMin,
         } = body;
         await Promise.all([
           setConfigValue('gpu.idle.embedding', String(gpuIdleEmbeddingMin ?? 0)),
           setConfigValue('gpu.idle.completion', String(gpuIdleCompletionMin ?? 10)),
           setConfigValue('gpu.idle.ocr', String(gpuIdleOcrMin ?? 5)),
           setConfigValue('gpu.idle.reranker', String(gpuIdleRerankerMin ?? 5)),
+          setConfigValue('gpu.idle.rlm', String(gpuIdleRlmMin ?? 10)),
         ]);
         return NextResponse.json({ saved: true });
       }
@@ -216,6 +220,7 @@ export async function POST(request: NextRequest) {
           setConfigValue('gpu.min.completion', String(body.gpuMinCompletion ?? 0)),
           setConfigValue('gpu.min.ocr', String(body.gpuMinOcr ?? 0)),
           setConfigValue('gpu.min.reranker', String(body.gpuMinReranker ?? 0)),
+          setConfigValue('gpu.min.rlm', String(body.gpuMinRlm ?? 0)),
         ]);
         // Push the new policy to every reachable sidecar immediately so they
         // start respecting min=0 on the next mode switch / orchestrator tick
@@ -229,6 +234,7 @@ export async function POST(request: NextRequest) {
               completion: body.gpuMinCompletion ?? 0,
               ocr: body.gpuMinOcr ?? 0,
               reranker: body.gpuMinReranker ?? 0,
+              rlm: body.gpuMinRlm ?? 0,
             },
           }, 'POST').catch(() => null)));
         } catch { /* best-effort — orchestrator will re-push on next tick */ }

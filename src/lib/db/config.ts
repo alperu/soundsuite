@@ -20,6 +20,11 @@ export interface AppConfig {
   ollamaModel?: string;
   ollamaCompletionHost?: string;
   ollamaCompletionModel?: string;
+  // RLM (Recursive Language Model) — long-context recursive reasoning role
+  // served by vLLM. Picked on /admin/rlm and exposed as the ss-rlm mode.
+  rlmModel?: string;
+  rlmQuant?: 'fp16' | 'awq-int8' | 'awq-int4';
+  rlmMaxContext?: number;
   // AI Services — primary/fallback selection used by MCP tools, AI search,
   // document summarization, analysis, and the tag-fill feature.
   aiPrimaryProvider?: string;
@@ -64,11 +69,13 @@ export interface AppConfig {
   gpuIdleCompletionMin: number;
   gpuIdleOcrMin: number;
   gpuIdleRerankerMin: number;
+  gpuIdleRlmMin: number;
   // Per-model minimum online instances (0 = no minimum)
   gpuMinEmbedding: number;
   gpuMinCompletion: number;
   gpuMinOcr: number;
   gpuMinReranker: number;
+  gpuMinRlm: number;
   // Registered GPU sidecars (JSON string)
   gpuSidecars: string;
   /** URL each sidecar uses to connect back to this master. Pushed via /config
@@ -142,6 +149,11 @@ export async function getConfig(): Promise<AppConfig> {
     ollamaModel: configMap.get('embedding.ollamaModel'),
     ollamaCompletionHost: configMap.get('ai.ollamaCompletionHost'),
     ollamaCompletionModel: configMap.get('ai.ollamaCompletionModel'),
+    rlmModel: configMap.get('rlm.model'),
+    rlmQuant: (configMap.get('rlm.quant') as AppConfig['rlmQuant']) || undefined,
+    rlmMaxContext: configMap.has('rlm.maxContext')
+      ? parseInt(configMap.get('rlm.maxContext') || '32768', 10)
+      : undefined,
     // AI Services selection
     aiPrimaryProvider: configMap.get('ai.primaryProvider'),
     aiPrimaryModel: configMap.get('ai.primaryModel'),
@@ -209,11 +221,13 @@ export async function getConfig(): Promise<AppConfig> {
     gpuIdleCompletionMin: parseInt(configMap.get('gpu.idle.completion') || '10', 10),
     gpuIdleOcrMin: parseInt(configMap.get('gpu.idle.ocr') || '5', 10),
     gpuIdleRerankerMin: parseInt(configMap.get('gpu.idle.reranker') || '5', 10),
+    gpuIdleRlmMin: parseInt(configMap.get('gpu.idle.rlm') || '10', 10),
     // Per-model minimum online instances
     gpuMinEmbedding: parseInt(configMap.get('gpu.min.embedding') || '0', 10),
     gpuMinCompletion: parseInt(configMap.get('gpu.min.completion') || '0', 10),
     gpuMinOcr: parseInt(configMap.get('gpu.min.ocr') || '0', 10),
     gpuMinReranker: parseInt(configMap.get('gpu.min.reranker') || '0', 10),
+    gpuMinRlm: parseInt(configMap.get('gpu.min.rlm') || '0', 10),
     // Registered sidecars
     gpuSidecars: configMap.get('gpu.sidecars') || '[]',
     masterUrl: configMap.get('master.url') || process.env.SOUND_SUITE_MASTER_URL || '',
@@ -360,6 +374,16 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
     updates.push({ key: 'ai.ollamaCompletionModel', value: config.ollamaCompletionModel });
   }
 
+  if (config.rlmModel !== undefined) {
+    updates.push({ key: 'rlm.model', value: config.rlmModel });
+  }
+  if (config.rlmQuant !== undefined) {
+    updates.push({ key: 'rlm.quant', value: config.rlmQuant });
+  }
+  if (config.rlmMaxContext !== undefined) {
+    updates.push({ key: 'rlm.maxContext', value: String(config.rlmMaxContext) });
+  }
+
   // AI Services — primary/fallback selection
   if (config.aiPrimaryProvider !== undefined) {
     updates.push({ key: 'ai.primaryProvider', value: config.aiPrimaryProvider });
@@ -469,6 +493,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   if (config.gpuIdleRerankerMin !== undefined) {
     updates.push({ key: 'gpu.idle.reranker', value: String(config.gpuIdleRerankerMin) });
   }
+  if (config.gpuIdleRlmMin !== undefined) {
+    updates.push({ key: 'gpu.idle.rlm', value: String(config.gpuIdleRlmMin) });
+  }
   // Per-model minimum online instances
   if (config.gpuMinEmbedding !== undefined) {
     updates.push({ key: 'gpu.min.embedding', value: String(config.gpuMinEmbedding) });
@@ -481,6 +508,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.gpuMinReranker !== undefined) {
     updates.push({ key: 'gpu.min.reranker', value: String(config.gpuMinReranker) });
+  }
+  if (config.gpuMinRlm !== undefined) {
+    updates.push({ key: 'gpu.min.rlm', value: String(config.gpuMinRlm) });
   }
   if (config.gpuSidecars !== undefined) {
     updates.push({ key: 'gpu.sidecars', value: config.gpuSidecars });
