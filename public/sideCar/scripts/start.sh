@@ -5,6 +5,14 @@
 #   SOUND_SUITE_MASTER_URL=http://172.16.16.9:3000 ./start.sh
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
+# Auto-rescue: if start.sh was downloaded standalone next to the install dir
+# (./sidecar/), re-exec from inside that subdir so Dockerfile.run resolves.
+# This stops the "no such Dockerfile" trap when operators curl start.sh into
+# the parent of their install dir.
+if [ ! -f "$DIR/Dockerfile.run" ] && [ -f "$DIR/sidecar/Dockerfile.run" ]; then
+  echo "[INFO] Dockerfile.run not here but found in $DIR/sidecar/ — re-execing from there."
+  exec "$DIR/sidecar/start.sh" "$@"
+fi
 PORT="${PORT:-8098}"
 VER="$( [ -f "$DIR/VERSION" ] && cat "$DIR/VERSION" || echo unknown )"
 
@@ -74,7 +82,19 @@ docker rm -f ss-sidecar 2>/dev/null || true
 if [ "$USE_DOCKER" = "1" ]; then
   echo "Starting in Docker mode on port $PORT..."
   if [ ! -f "$DIR/Dockerfile.run" ]; then
-    echo "[ERROR] Dockerfile.run not found in $DIR. Re-run install.sh or use Node mode."
+    echo "[ERROR] Dockerfile.run not found in $DIR."
+    echo ""
+    echo "  This usually means start.sh was downloaded into the parent of"
+    echo "  the install dir. Try either:"
+    echo ""
+    echo "    cd $DIR/sidecar 2>/dev/null && ./start.sh $*"
+    echo ""
+    echo "  or re-run install.sh from scratch (it places start.sh in the"
+    echo "  right dir automatically):"
+    echo ""
+    echo "    curl -fsSL ${SOUND_SUITE_MASTER_URL:-<master-url>}/sideCar/scripts/install.sh -o install.sh \\"
+    echo "      && chmod +x install.sh \\"
+    echo "      && ./install.sh --docker ${SOUND_SUITE_MASTER_URL:-<master-url>}"
     exit 1
   fi
   # macOS shim trap: /usr/bin/git is an Xcode-CLT stub that pops the

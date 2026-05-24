@@ -36,33 +36,44 @@ The sidecar opens its admin UI on **`http://localhost:{{SIDECAR_PORT}}`** and co
 
 ### macOS in Docker mode (with host-Ollama)
 
-On a Mac you usually want the sidecar inside Docker but the actual models served by **native Ollama** on the host — that's the only path that gets Metal GPU acceleration. The launcher supports this with one flag plus an auto-default.
+On a Mac you usually want the sidecar inside Docker but the actual models served by **native Ollama** on the host — that's the only path that gets Metal GPU acceleration.
+
+**Single-line install + start:**
 
 ```bash
-# 1. One-time: install native Ollama (this is what unlocks the Metal GPU)
+curl -fsSL {{MASTER_URL}}/sideCar/scripts/install.sh -o install.sh && chmod +x install.sh && ./install.sh --docker {{MASTER_URL}}
+```
+
+That one command downloads `install.sh`, extracts the tarball into `./sidecar/`, and (because of `--docker`) chains straight into `./sidecar/start.sh --docker {{MASTER_URL}}` which builds the container image and starts it.
+
+**One-time Ollama prerequisite** (do this once on the Mac, before the install line above):
+
+```bash
 brew install ollama
 brew services start ollama
 launchctl setenv OLLAMA_HOST 0.0.0.0:11434
 brew services restart ollama
-curl -s http://localhost:11434/api/version    # sanity check
+curl -s http://localhost:11434/api/version    # sanity check — should print {"version":"..."}
+```
 
-# 2. Optional but recommended: pre-pull the models so first-call doesn't wait
+**Optional — pre-pull the models** so the first inference call doesn't wait on a multi-GB download:
+
+```bash
 ollama pull qwen3-embedding:0.6b
 ollama pull qwen3.5:9b
 ollama pull richardyoung/olmocr2:7b-q8
-
-# 3. Refresh the launcher so it knows --docker (older copies don't)
-cd ./sidecar
-curl -fsSL {{MASTER_URL}}/sideCar/scripts/start.sh -o start.sh
-chmod +x start.sh
-
-# 4. Start in Docker mode — auto-sets SS_HOST_OLLAMA on Mac
-./start.sh --docker {{MASTER_URL}}
 ```
 
-What `--docker` does that bare `./start.sh` doesn't:
-1. Forces the Docker container path even when Node ≥18 is installed (otherwise the launcher prefers Node and runs the sidecar as a Node process, not in Docker).
-2. On macOS, when `SS_HOST_OLLAMA` isn't set explicitly, the launcher auto-defaults `SS_HOST_OLLAMA=1`, `SS_HOST_OLLAMA_ROLES=embedding,completion,ocr`, `HOST_OS=darwin` so the gossip planner doesn't trim the registry to "utility roles only" on first connect.
+**What the one-liner actually does under the hood** (for debugging — you don't need to type these):
+
+1. `install.sh` downloads `sidecar-latest.tar.gz`, verifies SHA-256 against the manifest, extracts to `./sidecar/`, preserves any existing `./sidecar/config/`.
+2. The `--docker` flag makes `install.sh` `cd ./sidecar && exec ./start.sh --docker {{MASTER_URL}}` after install completes.
+3. Inside `start.sh --docker`:
+   - **Forces the container path** even when Node ≥18 is installed (otherwise Node mode would win — the sidecar would run as a Node process directly, not in Docker).
+   - **Auto-detects the Mac's LAN IP** (`ipconfig getifaddr en0`/`en1`/...) and passes it as `EXTERNAL_IP` so the sidecar self-registers with a master-reachable address instead of Docker's bridge IP `172.17.x.x`.
+   - **Auto-enables `SS_HOST_OLLAMA=1`** + `SS_HOST_OLLAMA_ROLES=embedding,completion,ocr` + `HOST_OS=darwin` so the master's gossip planner doesn't trim the role registry to "utility only".
+   - Builds `ss-sidecar:v{{SIDECAR_VERSION}}` from `Dockerfile.run` (uses `DOCKER_BUILDKIT=0` to skip Docker Desktop's git-rev-parse probe, which on macOS triggers the Xcode CLT install prompt).
+   - Runs `docker run -d --name ss-sidecar --restart unless-stopped` with `/var/run/docker.sock` mounted, the `ss-sidecar-config` named volume mounted at `/app/config`, and all the env vars wired up.
 
 Override the defaults from the parent shell if needed:
 
@@ -136,10 +147,20 @@ If you prefer running the sidecar in a container:
 ### macOS — one-liner
 
 ```bash
-curl -fsSL {{MASTER_URL}}/sideCar/scripts/install.sh -o install.sh && chmod +x install.sh && ./install.sh {{MASTER_URL}} && cd sidecar && ./start.sh --docker {{MASTER_URL}}
+curl -fsSL {{MASTER_URL}}/sideCar/scripts/install.sh -o install.sh && chmod +x install.sh && ./install.sh --docker {{MASTER_URL}}
 ```
 
-This installs the sidecar tarball, then launches `start.sh --docker` which builds `ss-sidecar:v{{SIDECAR_VERSION}}` from `Dockerfile.run` and runs it. The `--docker` flag forces the container path (Node mode would win otherwise on any Mac with Node ≥18 installed) and on macOS auto-defaults `SS_HOST_OLLAMA=1` + roles for embedding/completion/ocr so the gossip planner doesn't trim the registry. Install native Ollama first (see the **macOS host with native Ollama** section below) so those roles actually have a Metal-backed engine to serve them.
+That single command:
+
+1. Downloads `install.sh` and extracts the sidecar tarball into `./sidecar/`.
+2. Auto-chains into `cd ./sidecar && ./start.sh --docker {{MASTER_URL}}` (because of the `--docker` flag — without it `install.sh` just installs and prints a hint).
+3. Inside `start.sh --docker`:
+   - Forces the container path (otherwise Node mode would win on any Mac with Node ≥18 installed).
+   - Auto-detects the Mac's LAN IP and passes it as `EXTERNAL_IP` so the sidecar registers with a master-reachable address (instead of the Docker bridge `172.17.x.x`).
+   - Auto-enables `SS_HOST_OLLAMA=1` + roles=embedding,completion,ocr + `HOST_OS=darwin` so the gossip planner doesn't trim the registry to utility-only.
+   - Builds `ss-sidecar:v{{SIDECAR_VERSION}}` from `Dockerfile.run` and runs it with `--restart unless-stopped`.
+
+Install native Ollama first (see the **macOS host with native Ollama** section below) so the assigned roles actually have a Metal-backed engine to serve them.
 
 ### Linux
 
