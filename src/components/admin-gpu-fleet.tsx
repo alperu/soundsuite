@@ -827,10 +827,27 @@ export default function GpuFleetPanel() {
                       >{s.url}</a>
                     </td>
                     <td className="py-2 px-3">
-                      {/* Connection mode (WS/direct) — operational mode pill removed. */}
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                        s.mode === 'websocket' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
-                      }`}>{s.mode === 'websocket' ? 'WS' : s.mode}</span>
+                      {/* Transport (WS/direct) — represents capability/last-used, NOT
+                          live connection state. When the sidecar is disconnected, mute
+                          the pill and prefix "last:" so it doesn't look like "connected direct". */}
+                      {(() => {
+                        const live = s.status === 'connected' || s.sidecarStatus?.wsConnected;
+                        const modeLabel = s.mode === 'websocket' ? 'WS' : (s.mode || '—');
+                        return (
+                          <span
+                            title={live
+                              ? `Live transport: ${s.mode}`
+                              : `Last-known transport when disconnected: ${s.mode || 'never connected'}`}
+                            className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                              !live ? 'bg-gray-100 text-gray-400 border border-gray-200'
+                              : s.mode === 'websocket' ? 'bg-purple-100 text-purple-800'
+                              : 'bg-blue-100 text-blue-800'
+                            }`}
+                          >
+                            {!live ? `last: ${modeLabel}` : modeLabel}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td className="py-2 px-3">
                       <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${

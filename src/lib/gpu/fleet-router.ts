@@ -345,17 +345,57 @@ export async function updateSidecarNote(url: string, note: string): Promise<bool
   return true;
 }
 
-/** Remove a sidecar from the fleet registry. */
+/** Remove a sidecar from the fleet registry.
+ *
+ *  Removing from the persisted list alone isn't enough — a still-running
+ *  sidecar will reconnect via WebSocket on its next heartbeat (~5s) and the
+ *  `register` handler in ws-relay will auto-add it back to the list, making
+ *  the delete look like it failed. To make deletes actually stick:
+ *
+ *    1. Close the active WS connection so the sidecar gets disconnected now.
+ *    2. Add the agentUrl to a transient block-list so any immediate reconnect
+ *       is refused for ~60 s. That gives the operator a window to stop the
+ *       sidecar process or remove the master URL from its config.
+ *    3. Drop the status-cache entry so the UI doesn't keep showing a stale
+ *       "disconnected" pill for a sidecar the operator just deleted.
+ */
 export async function removeSidecar(url: string): Promise<boolean> {
   const list = await readSidecarList();
   const normalized = url.replace(/\/+$/, '');
   const filtered = list.filter(s => s.url !== normalized);
 
-  if (filtered.length === list.length) return false;
+  // Even if the URL wasn't in the persisted list, the sidecar may still be
+  // in the live WS map / status cache (e.g. it auto-registered without being
+  // explicitly added). Run the disconnect path regardless so the entry truly
+  // disappears from the UI.
+  let listChanged = filtered.length !== list.length;
 
-  await writeSidecarList(filtered);
-  logger.info('Sidecar removed from fleet', { url: normalized });
-  return true;
+  try {
+    const wsRelay = await import('./ws-relay');
+    if (typeof wsRelay.closeSidecarConnection === 'function') {
+      const closed = wsRelay.closeSidecarConnection(normalized);
+      if (closed) listChanged = true;
+    }
+    if (typeof wsRelay.blockAgent === 'function') {
+      wsRelay.blockAgent(normalized);
+    }
+  } catch (err) {
+    logger.warn('Sidecar WS disconnect step failed (continuing)', {
+      url: normalized, error: (err as Error).message,
+    });
+  }
+
+  try {
+    const { removeSidecarFromCache } = await import('./status-cache');
+    if (typeof removeSidecarFromCache === 'function') removeSidecarFromCache(normalized);
+  } catch { /* status-cache optional */ }
+
+  if (listChanged) {
+    await writeSidecarList(filtered);
+    logger.info('Sidecar removed from fleet (WS closed + blocked for 60s)', { url: normalized });
+    return true;
+  }
+  return false;
 }
 
 // ─── Per-Sidecar Operations ──────────────────────────────────────────────────

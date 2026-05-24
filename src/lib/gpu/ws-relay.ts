@@ -46,11 +46,51 @@ const g = globalThis as any;
 if (!g.__ss_ws_sidecars__) g.__ss_ws_sidecars__ = new Map<string, SidecarConnection>();
 if (!g.__ss_ws_pending__) g.__ss_ws_pending__ = new Map<string, PendingCommand>();
 if (!g.__ss_ws_cmdCounter__) g.__ss_ws_cmdCounter__ = { value: 0 };
+// Transient block-list — when an operator deletes a sidecar from /admin/gpu,
+// add its agentUrl here with an expiry timestamp. Incoming register/heartbeat
+// messages from a blocked agentUrl are refused (and the WS closed with a
+// reason) so a still-running sidecar can't immediately reconnect and undo the
+// deletion. Operators get ~60 s to stop the sidecar process or unconfigure
+// its master URL before the block expires.
+if (!g.__ss_ws_blocked__) g.__ss_ws_blocked__ = new Map<string, number>();
 
 const sidecars: Map<string, SidecarConnection> = g.__ss_ws_sidecars__;
 const pendingCommands: Map<string, PendingCommand> = g.__ss_ws_pending__;
 const cmdCounter: { value: number } = g.__ss_ws_cmdCounter__;
+const blockedAgents: Map<string, number> = g.__ss_ws_blocked__;
 let wss: WebSocketServer | null = g.__ss_wss__ || null;
+
+const BLOCK_DURATION_MS = 60_000;
+
+function normalizeUrl(u: string): string { return u.replace(/\/+$/, ''); }
+
+function isBlocked(agentUrl: string): boolean {
+  const expiry = blockedAgents.get(normalizeUrl(agentUrl));
+  if (!expiry) return false;
+  if (Date.now() >= expiry) { blockedAgents.delete(normalizeUrl(agentUrl)); return false; }
+  return true;
+}
+
+/** Block an agent from re-registering for BLOCK_DURATION_MS. Idempotent. */
+export function blockAgent(agentUrl: string, ttlMs: number = BLOCK_DURATION_MS): void {
+  blockedAgents.set(normalizeUrl(agentUrl), Date.now() + ttlMs);
+}
+
+/** Close any live WS for this agent and drop it from the in-memory map.
+ *  Called by removeSidecar to make /admin/gpu deletes actually stick. */
+export function closeSidecarConnection(agentUrl: string): boolean {
+  const url = normalizeUrl(agentUrl);
+  const conn = sidecars.get(agentUrl) || sidecars.get(url);
+  if (!conn) return false;
+  try {
+    if (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING) {
+      conn.ws.close(1000, 'evicted-by-master');
+    }
+  } catch { /* ignore */ }
+  sidecars.delete(conn.agentUrl);
+  logger.info('Sidecar connection closed by master', { agentUrl: conn.agentUrl });
+  return true;
+}
 
 /** Generate unique command ID */
 function nextCommandId(): string {
@@ -96,6 +136,16 @@ export function startWsRelay(): WebSocketServer {
       }
 
       if (msg.type === 'register') {
+        // Refuse register from a recently-deleted agent so /admin/gpu deletes
+        // actually stick. The sidecar will see the close reason and back off.
+        if (isBlocked(msg.agentUrl)) {
+          logger.warn('Sidecar register refused — agent is in cooldown block-list', {
+            agentUrl: msg.agentUrl,
+            hostname: msg.hostname,
+          });
+          try { ws.close(1008, 'agent-blocked-by-master'); } catch { /* ignore */ }
+          return;
+        }
         registeredUrl = msg.agentUrl;
         sidecars.set(msg.agentUrl, {
           ws,
