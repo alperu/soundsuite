@@ -34,6 +34,15 @@ cd ./sidecar
 
 The sidecar opens its admin UI on **`http://localhost:{{SIDECAR_PORT}}`** and connects back to **{{MASTER_URL}}** via WebSocket.
 
+> **macOS — want Docker mode instead of Node?** `start.sh` defaults to Node when a recent Node is installed. Force the Docker container path:
+>
+> ```bash
+> cd ./sidecar
+> ./start.sh --docker {{MASTER_URL}}
+> ```
+>
+> On Mac the script auto-enables host-Ollama mode (sets `SS_HOST_OLLAMA=1`, `SS_HOST_OLLAMA_ROLES=embedding,completion,ocr`, `HOST_OS=darwin`) when you don't pass them explicitly. You still need native Ollama installed on the Mac — see the **"macOS host with native Ollama"** section below for the one-time Ollama setup.
+
 ### Windows — one-liner (PowerShell)
 
 ```powershell

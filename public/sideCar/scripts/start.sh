@@ -35,16 +35,25 @@ if ! docker info &>/dev/null; then
 fi
 echo "[OK] Docker"
 
-# Node check
+# Mode selection: --docker / FORCE_DOCKER=1 always wins. Otherwise prefer Node
+# when a usable version exists, else fall back to Docker.
 USE_DOCKER=0
-if command -v node &>/dev/null; then
+for arg in "$@"; do
+  if [ "$arg" = "--docker" ] || [ "$arg" = "-d" ]; then
+    FORCE_DOCKER=1
+  fi
+done
+if [ "${FORCE_DOCKER:-0}" = "1" ]; then
+  echo "[INFO] FORCE_DOCKER=1 (or --docker flag) — running in Docker mode."
+  USE_DOCKER=1
+elif command -v node &>/dev/null; then
   NODE_VER=$(node -v)
   NODE_MAJOR=$(echo "$NODE_VER" | sed 's/v//' | cut -d. -f1)
   if [ "$NODE_MAJOR" -lt 18 ]; then
     echo "[WARN] Node.js $NODE_VER too old (need 18+) — falling back to Docker mode."
     USE_DOCKER=1
   else
-    echo "[OK] Node.js $NODE_VER"
+    echo "[OK] Node.js $NODE_VER (pass --docker to force container mode)"
   fi
 else
   echo "[INFO] Node.js not found — running in Docker mode."
@@ -81,6 +90,27 @@ if [ "$USE_DOCKER" = "1" ]; then
   [ -n "${SOUND_SUITE_MASTER_URL:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SOUND_SUITE_MASTER_URL=$SOUND_SUITE_MASTER_URL"
   [ -n "${SERVER_URL:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SERVER_URL=$SERVER_URL"
   DOCKER_ARGS="$DOCKER_ARGS -e SIDECAR_HOSTNAME=$(hostname)"
+  # Host-Ollama mode — only path that delivers GPU acceleration for embedding/
+  # completion/ocr on Mac (Docker Desktop VM can't reach Metal). Auto-default
+  # on Mac when the operator hasn't set it explicitly: enable for the three
+  # Ollama-backed roles. Reranker + rlm stay on a Linux+NVIDIA sidecar.
+  if [ -z "${SS_HOST_OLLAMA:-}" ] && [ "$(uname)" = "Darwin" ]; then
+    echo "[INFO] Mac detected — defaulting to SS_HOST_OLLAMA=1 with roles=embedding,completion,ocr."
+    echo "       Override by setting SS_HOST_OLLAMA=0 explicitly. Install Ollama on the host:"
+    echo "       brew install ollama && brew services start ollama && launchctl setenv OLLAMA_HOST 0.0.0.0:11434"
+    SS_HOST_OLLAMA=1
+    : "${SS_HOST_OLLAMA_ROLES:=embedding,completion,ocr}"
+    : "${HOST_OS:=darwin}"
+  fi
+  [ -n "${SS_HOST_OLLAMA:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SS_HOST_OLLAMA=$SS_HOST_OLLAMA"
+  [ -n "${SS_HOST_OLLAMA_ROLES:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SS_HOST_OLLAMA_ROLES=$SS_HOST_OLLAMA_ROLES"
+  [ -n "${SS_HOST_OLLAMA_HOST:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SS_HOST_OLLAMA_HOST=$SS_HOST_OLLAMA_HOST"
+  [ -n "${SS_HOST_OLLAMA_BUDGET_MB:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SS_HOST_OLLAMA_BUDGET_MB=$SS_HOST_OLLAMA_BUDGET_MB"
+  [ -n "${SS_DMR:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SS_DMR=$SS_DMR"
+  [ -n "${SS_DMR_ROLES:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SS_DMR_ROLES=$SS_DMR_ROLES"
+  [ -n "${SS_DMR_HOST:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SS_DMR_HOST=$SS_DMR_HOST"
+  [ -n "${SS_DMR_PORT:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SS_DMR_PORT=$SS_DMR_PORT"
+  [ -n "${HOST_OS:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e HOST_OS=$HOST_OS"
 
   docker build -t "ss-sidecar:v$VER" -f "$DIR/Dockerfile.run" "$DIR"
   echo "Launching: docker run $DOCKER_ARGS ss-sidecar:v$VER"
