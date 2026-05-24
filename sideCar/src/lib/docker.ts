@@ -456,7 +456,7 @@ export function buildExpectedConfig(role: string): ExpectedConfig {
   }
 
   if (def.type === 'vllm' && def.model) {
-    config.Cmd = buildVllmCmd(def.model, def.port);
+    config.Cmd = buildVllmCmd(def.model, def.port, def.vllmArgs);
   }
 
   // Only docker-runtime roles need GPU/Init drift checks. host and
@@ -473,8 +473,11 @@ export function buildExpectedConfig(role: string): ExpectedConfig {
   return config;
 }
 
-/** Build vLLM command args for a model. Shared by buildExpectedConfig and createContainer. */
-function buildVllmCmd(model: string, port: number): string[] {
+/** Build vLLM command args for a model. Shared by buildExpectedConfig and createContainer.
+ *  `extra` comes from ContainerDef.vllmArgs — operator/registry-supplied flags
+ *  appended after the per-model heuristics below. Use it to set
+ *  --gpu-memory-utilization, --max-model-len, --quantization, etc. */
+function buildVllmCmd(model: string, port: number, extra?: string[]): string[] {
   // vLLM 0.8+: model is a positional arg (--model flag deprecated and removed in future)
   const cmd = [model, '--host', '0.0.0.0', '--port', String(port)];
   if (/qwen3-reranker/i.test(model)) {
@@ -498,6 +501,7 @@ function buildVllmCmd(model: string, port: number): string[] {
       classifier_from_token: ['no', 'yes'],
     }));
   }
+  if (extra && extra.length) cmd.push(...extra);
   return cmd;
 }
 
@@ -593,7 +597,7 @@ export async function createContainer(role: string): Promise<{ Id?: string; exis
   }
 
   if (def.type === 'vllm' && def.model) {
-    (config as Record<string, unknown>).Cmd = buildVllmCmd(def.model, def.port);
+    (config as Record<string, unknown>).Cmd = buildVllmCmd(def.model, def.port, def.vllmArgs);
     const hc = config.HostConfig as Record<string, unknown>;
     hc.Binds = (hc.Binds as string[]) || [];
     (hc.Binds as string[]).push('huggingface-cache:/root/.cache/huggingface');

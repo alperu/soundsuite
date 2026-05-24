@@ -1181,7 +1181,7 @@ export default function GpuFleetPanel() {
                     </button>
                   )}
                 </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">
                   {ROLES.map((role) => (
                     <div key={role}>
                       <label className="block text-xs text-gray-500 capitalize mb-1">{role}</label>
@@ -1191,12 +1191,12 @@ export default function GpuFleetPanel() {
                           className="w-16 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
                         />
                         <span className="text-xs text-gray-400">min</span>
-                        {cachedStatus.idleTimeouts && (
-                          <span className="text-xs text-gray-300 ml-1">
-                            (active: {(cachedStatus.idleTimeouts[role] ?? 0) === 0 ? 'never' : `${Math.round((cachedStatus.idleTimeouts[role] as number) / 60_000)}m`})
-                          </span>
-                        )}
                       </div>
+                      {cachedStatus.idleTimeouts && (
+                        <div className="text-[10px] text-gray-300 mt-0.5">
+                          active: {(cachedStatus.idleTimeouts[role] ?? 0) === 0 ? 'never' : `${Math.round((cachedStatus.idleTimeouts[role] as number) / 60_000)}m`}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

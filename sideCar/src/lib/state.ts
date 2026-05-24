@@ -31,6 +31,12 @@ export interface ContainerDef {
   // from env. 'host' is only meaningful for type==='ollama' roles;
   // 'docker-model-runner' works for any OpenAI-API role (incl. vllm rerank).
   runtime?: RoleRuntime;
+  // Extra args appended to the vLLM `vllm serve <model>` command (after
+  // --host / --port). Use for --gpu-memory-utilization, --max-model-len,
+  // --quantization, --dtype, --trust-remote-code, etc. Without explicit caps
+  // vLLM defaults to gpu_memory_utilization=0.9 and grabs the whole GPU,
+  // evicting other roles. Only honored by type==='vllm' roles.
+  vllmArgs?: string[];
 }
 
 export interface PerRoleState {
@@ -86,13 +92,24 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     image: 'vllm/vllm-openai',
     model: 'mit-oasys/rlm-qwen3-8b-v0.1',
     port: 8100,
-    vram: 10000, // AWQ-INT4 @ 32K context; FP16 would be ~20 GB
+    // Operator-assigned 34 GB on a 48 GB A6000. BF16 weights (~16 GB) +
+    // KV cache (~16 GB at 32K context, ~512 concurrent tokens) + overhead.
+    // No AWQ build of mit-oasys/rlm-qwen3-8b-v0.1 is published — running BF16.
+    vram: 34000,
     type: 'vllm',
     modes: ['searching'],
     containerName: `${CONTAINER_PREFIX}rlm`,
     // Evicts ss-completion (normal) on a constrained GPU; both roles answer the
     // user's question and are mutually exclusive on a 24 GB card by design.
     priority: 'high',
+    // Cap vLLM at 70% of the host GPU (34/48 ≈ 0.71). Without this, vLLM's
+    // default --gpu-memory-utilization=0.9 fills ~43 GB on a 48 GB card,
+    // evicting embedding + ocr. --max-model-len bounds KV-cache pre-allocation.
+    vllmArgs: [
+      '--gpu-memory-utilization', '0.7',
+      '--max-model-len', '32768',
+      '--dtype', 'bfloat16',
+    ],
   },
   cuda: {
     image: 'nvidia/cuda:12.4.1-base-ubuntu22.04',
