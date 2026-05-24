@@ -1,5 +1,5 @@
 import { state, HOST_STATS_TTL_MS, ensureSet } from './state';
-import { getContainerState, startContainer, stopContainer, removeContainer, createContainer, pullImage, getDockerMode, buildExpectedConfig, detectConfigDrift, isPortConflict, findContainerOnPort, dockerRequest } from './docker';
+import { getContainerState, startContainer, stopContainer, removeContainer, createContainer, pullImage, getDockerMode, isDockerAvailable, buildExpectedConfig, detectConfigDrift, isPortConflict, findContainerOnPort, dockerRequest } from './docker';
 import { ollamaList, ollamaShow, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama } from './ollama-api';
 import { loadGpuOnly, ensureContainerForRole } from './containers';
 import { clearIdleTimerForRole, clearAllIdleTimers, startIdleTimerForRole, startIdleTimer } from './idle-timers';
@@ -25,7 +25,13 @@ const log = createLogger('handlers');
  * container was run without `-v /var/run/docker.sock:/var/run/docker.sock`.
  */
 function preflightDockerError(role: string | undefined): string | null {
-  if (getDockerMode() === 'none') {
+  // Don't trust getDockerMode() alone — it caches whatever initDocker()
+  // resolved at sidecar startup. If the daemon was momentarily unreachable
+  // during boot but the socket exists / Docker recovered, dockerMode stays
+  // 'none' even though subsequent operations (image pulls via the default
+  // socket fallback in dockerConnectionOpts) succeed. Use isDockerAvailable()
+  // which also checks the socket file as a fallback signal.
+  if (!isDockerAvailable()) {
     return (
       `Sidecar lacks /var/run/docker.sock mount — host Docker is unreachable` +
       (role ? ` (role: ${role})` : '') + `. ` +
@@ -33,6 +39,8 @@ function preflightDockerError(role: string | undefined): string | null {
       `docker run ... -v /var/run/docker.sock:/var/run/docker.sock soundsuite-sidecar:<version>`
     );
   }
+  // Avoid TS6133 since we kept the import for diagnostics callers elsewhere.
+  void getDockerMode;
   return null;
 }
 

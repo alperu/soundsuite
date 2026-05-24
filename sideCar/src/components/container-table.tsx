@@ -1,5 +1,7 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+
 interface ContainerConfig {
   image: string;
   model: string | null;
@@ -208,11 +210,13 @@ function StatusBadge({ status }: { status: string }) {
 
 export default function ContainerTable({ containers, onStart, onStop, onLoad, onPull, onPullAndLoad }: ContainerTableProps) {
   const entries = Object.entries(containers);
+  const [logsRole, setLogsRole] = useState<string | null>(null);
 
   return (
     <div className="rounded-xl bg-white p-6 shadow-sm mb-6">
       <h2 className="text-lg font-semibold text-slate-900 mb-4">Containers</h2>
       <PsSummaryLine containers={containers} />
+      {logsRole && <LogsModal role={logsRole} onClose={() => setLogsRole(null)} />}
 
       {entries.length === 0 ? (
         <p className="text-sm text-slate-400">No containers configured.</p>
@@ -275,6 +279,14 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
                         <button key="stop" onClick={() => onStop(role)}
                           className="bg-red-500 hover:bg-red-600 text-white rounded-md px-2 py-1 text-xs font-medium">Stop</button>
                       );
+                      // Logs button — available on every docker-runtime row
+                      // regardless of running/stopped state. host / DMR rows
+                      // hide it (no sidecar-managed container to read from).
+                      const isManagedDocker = !isHostOllama && container.config?.image !== 'docker-model-runner';
+                      const btnLogs = isManagedDocker && (
+                        <button key="logs" onClick={() => setLogsRole(role)}
+                          className="bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-md px-2 py-1 text-xs font-medium">Logs</button>
+                      );
                       const btnPull = onPull && (
                         <button key="pull" onClick={() => onPull(role)}
                           className="bg-purple-500 hover:bg-purple-600 text-white rounded-md px-2 py-1 text-xs font-medium">Pull</button>
@@ -313,6 +325,7 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
                         return (
                           <>
                             {btnStop}
+                            {btnLogs}
                             {hasModel && btnPull}
                             {hasModel && btnPullLoad}
                             {hasModel && (!container.loadedModels || container.loadedModels.length === 0) && btnLoad}
@@ -326,6 +339,7 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
                       return (
                         <>
                           {btnStart}
+                          {btnLogs}
                           {hasModel && btnPull}
                           {hasModel && btnPullLoad}
                         </>
@@ -339,6 +353,61 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ─────────────────────────── Logs modal ─────────────────────────── */
+
+function LogsModal({ role, onClose }: { role: string; onClose: () => void }) {
+  const [logs, setLogs] = useState<string>('');
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [tail, setTail] = useState(200);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setErr(null);
+    fetch(`/api/logs?role=${encodeURIComponent(role)}&tail=${tail}`)
+      .then(async r => {
+        const j = await r.json();
+        if (cancelled) return;
+        if (!r.ok) setErr(j.error || `HTTP ${r.status}`);
+        else setLogs(j.logs || '(empty)');
+      })
+      .catch(e => { if (!cancelled) setErr(String(e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [role, tail]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
+          <div className="flex items-center gap-3">
+            <h3 className="text-sm font-semibold text-slate-800">Logs: <span className="font-mono">{role}</span></h3>
+            <label className="text-xs text-slate-500">
+              tail&nbsp;
+              <select value={tail} onChange={e => setTail(parseInt(e.target.value, 10))}
+                className="border border-slate-300 rounded px-1 py-0.5 text-xs">
+                <option value={50}>50</option>
+                <option value={200}>200</option>
+                <option value={500}>500</option>
+                <option value={2000}>2000</option>
+                <option value={5000}>5000</option>
+              </select>
+            </label>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700 text-xl leading-none">×</button>
+        </div>
+        <div className="flex-1 overflow-auto p-3 bg-slate-900">
+          {loading && <div className="text-slate-300 text-xs">Loading...</div>}
+          {err && <div className="text-red-400 text-xs whitespace-pre-wrap">{err}</div>}
+          {!loading && !err && (
+            <pre className="text-[11px] font-mono text-green-300 whitespace-pre-wrap leading-relaxed">{logs}</pre>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

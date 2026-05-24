@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { streamAI } from '@/lib/ai/ai-provider';
+import { streamRlm } from '@/lib/ai/stream-rlm';
 import { AIProviderKey, AI_PROVIDERS, AI_PROVIDER_KEYS } from '@/lib/ai/models';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 import { extractPatternKeywords } from '@/lib/search/deep-search';
@@ -32,6 +33,7 @@ export async function POST(request: NextRequest) {
       thinking,
       maxTokens: reqMaxTokens,
       effort,
+      useRlm,
     } = body as {
       query: string;
       provider: string;
@@ -46,6 +48,7 @@ export async function POST(request: NextRequest) {
       thinking?: boolean;
       maxTokens?: number;
       effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+      useRlm?: boolean;
     };
 
     if (!query?.trim()) {
@@ -255,20 +258,31 @@ ${contextChunks || '(No relevant documents found)'}`;
           messages.push({ role: 'user', content: query.trim() });
 
           let fullContent = '';
-          for await (const event of streamAI({
-            provider: provider as AIProviderKey,
-            model,
-            messages,
-            maxTokens: reqMaxTokens ?? 2048,
-            temperature: 0.3,
-            thinking,
-            effort,
-          })) {
+          // When useRlm is set, route to ss-rlm's vLLM container via the
+          // fleet-router's first-available sidecar. Falls back to streamAI
+          // if no rlm sidecar is reachable (handler emits an error event).
+          const stream = useRlm
+            ? streamRlm({
+                messages,
+                maxTokens: reqMaxTokens ?? 2048,
+                temperature: 0.3,
+                signal: request.signal,
+              })
+            : streamAI({
+                provider: provider as AIProviderKey,
+                model,
+                messages,
+                maxTokens: reqMaxTokens ?? 2048,
+                temperature: 0.3,
+                thinking,
+                effort,
+              });
+          for await (const event of stream) {
             if (event.type === 'token') {
               fullContent += event.text;
               send({ type: 'token', text: event.text });
             } else if (event.type === 'done') {
-              console.log(`[AI Search] Completed in ${Date.now() - t0}ms — ${event.usage.outputTokens} output tokens`);
+              console.log(`[AI Search] Completed in ${Date.now() - t0}ms — ${event.usage?.outputTokens ?? 0} output tokens`);
               send({
                 type: 'result',
                 data: {

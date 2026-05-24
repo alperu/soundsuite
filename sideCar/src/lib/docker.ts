@@ -244,6 +244,58 @@ export function dockerRequest(method: string, reqPath: string): Promise<DockerRe
   });
 }
 
+/**
+ * Fetch the last `tail` lines of a container's stdout+stderr as plain text.
+ *
+ * Docker's /containers/{id}/logs endpoint returns an 8-byte-headered
+ * multiplexed stream for non-tty containers (stream-type byte + 3 zeros +
+ * big-endian uint32 payload length, then payload). All our managed
+ * containers are non-tty, but we lenient-demux anyway: if the header doesn't
+ * look like a Docker frame we fall through to treating the bytes as raw text.
+ */
+export function getContainerLogs(containerName: string, tail = 200): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const qs = `stdout=1&stderr=1&follow=0&tail=${Math.max(1, Math.min(tail, 5000))}&timestamps=1`;
+    const req = http.request(
+      { ...dockerConnectionOpts(), method: 'GET', path: `/containers/${containerName}/logs?${qs}` },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          const status = res.statusCode!;
+          if (status >= 400) {
+            resolve({ status, text: buf.toString('utf8') });
+            return;
+          }
+          // Lenient demux: walk the buffer expecting 8-byte frames; fall back
+          // to raw text if the first frame header looks bogus.
+          let out = '';
+          let i = 0;
+          const looksLikeFrame =
+            buf.length >= 8 && buf[0] <= 2 && buf[1] === 0 && buf[2] === 0 && buf[3] === 0;
+          if (!looksLikeFrame) {
+            resolve({ status, text: buf.toString('utf8') });
+            return;
+          }
+          while (i + 8 <= buf.length) {
+            const len = buf.readUInt32BE(i + 4);
+            const start = i + 8;
+            const end = start + len;
+            if (end > buf.length) break;
+            out += buf.slice(start, end).toString('utf8');
+            i = end;
+          }
+          resolve({ status, text: out });
+        });
+      },
+    );
+    req.on('error', reject);
+    req.setTimeout(30_000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.end();
+  });
+}
+
 export function dockerRequestWithBody(method: string, reqPath: string, body: unknown): Promise<DockerResponse> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);

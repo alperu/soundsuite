@@ -320,6 +320,11 @@ export default function SearchInterface({
   const [aiSearchTime, setAiSearchTime] = useState<number | null>(null);
   const [compareMode, setCompareMode] = usePersistedState<boolean>('search.compareMode', hasExplicitPath ? initialCompareMode : false);
   const [deepSearchMode, setDeepSearchMode] = usePersistedState<boolean>('search.deepSearchMode', hasExplicitPath ? initialDeepMode : false);
+  // Route the answer through ss-rlm (Recursive Language Model) instead of the
+  // default completion model. Adds N recursive sub-calls so wall time jumps
+  // from ~5s to 30s–3min; reserve for deep multi-document questions where
+  // standard RAG silently under-recalls. Default off; persisted across reloads.
+  const [useRlm, setUseRlm] = usePersistedState<boolean>('search.useRlm', false);
   const [thinkingMode, setThinkingMode] = usePersistedState<boolean>('search.thinkingMode', true);
   const [maxTokens, setMaxTokens] = usePersistedState<number>('search.maxTokens', 2048);
   const [effort, setEffort] = usePersistedState<'low' | 'medium' | 'high' | 'xhigh' | 'max'>('search.effort', 'medium');
@@ -821,6 +826,7 @@ export default function SearchInterface({
         thinking: thinkingMode,
         maxTokens,
         effort,
+        useRlm,
         ...(history && history.length > 0 ? { history } : {}),
         ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
       }),
@@ -1558,6 +1564,15 @@ export default function SearchInterface({
                       <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${deepSearchMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
                     </button>
                   </div>
+                  <div className="flex items-center gap-2" title="Route the answer through ss-rlm (Recursive Language Model). Higher latency (30s–3min), much higher recall for deep multi-document questions.">
+                    <label className="text-xs font-medium text-gray-500">RLM</label>
+                    <button type="button" onClick={() => setUseRlm(!useRlm)}
+                      className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${useRlm ? 'bg-emerald-600' : 'bg-gray-200'}`}
+                    >
+                      <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${useRlm ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                    </button>
+                  </div>
+
                   <div className="flex items-center gap-2">
                     <label className="text-xs font-medium text-gray-500">Compare</label>
                     <button type="button" onClick={() => {
@@ -2383,6 +2398,35 @@ function SearchDocsPanel({ mode, embeddingInfo, directMode }: { mode: SearchMode
         </div>
 
         <div>
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Tool Chain</h4>
+          <p className="text-[11px] text-gray-500 mb-2 leading-relaxed">
+            Each step runs on a sidecar role. Assign on{' '}
+            <a href="/admin/roleassign" className="text-blue-600 hover:underline">/admin/roleassign</a>; monitor on{' '}
+            <a href="/admin/gpu" className="text-blue-600 hover:underline">/admin/gpu</a>.
+          </p>
+          {[
+            { step: '1', title: 'Embed the query', role: 'ss-embedding', detail: 'Qwen3-Embedding-0.6B via Ollama. ~6 GB VRAM. Turns your text into a vector for LanceDB lookup.' },
+            { step: '2', title: 'Vector + keyword search', role: 'LanceDB + Postgres FTS', detail: 'Hybrid mode blends vector cosine + keyword BM25. No GPU. Returns top-N chunks with citation metadata.' },
+            { step: '3', title: 'Rerank candidates', role: 'ss-reranker', detail: 'Qwen3-Reranker-8B cross-encoder via vLLM on Linux/Windows+NVIDIA. Re-scores each (query, chunk) pair.' },
+            { step: '4a', title: 'Answer (standard)', role: 'ss-completion or cloud API', detail: 'Single-shot LLM call with reranked chunks. ~5 s. Used when the RLM toggle is off.' },
+            { step: '4b', title: 'Answer (RLM toggle on)', role: 'ss-rlm', detail: 'RLM-Qwen3-8B via vLLM. Higher recall on multi-document questions. Phase B adds Pyodide for true recursive sub-calls.' },
+            { step: '5', title: 'Citation extraction', role: 'master process', detail: 'Parses [N] markers in the answer, maps each to its source chunk + page, and surfaces clickable citations.' },
+          ].map(s => (
+            <div key={s.step} className="border-l-2 border-gray-200 pl-2 pb-2 mb-2 last:mb-0 last:pb-0">
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-[9px] font-mono text-gray-400">{s.step}</span>
+                <span className="text-[11px] font-semibold text-gray-800">{s.title}</span>
+              </div>
+              <div className="text-[9px] font-mono text-gray-500 mt-0.5">{s.role}</div>
+              <div className="text-[11px] text-gray-600 mt-0.5 leading-relaxed">{s.detail}</div>
+            </div>
+          ))}
+          <div className="border border-amber-200 bg-amber-50 rounded p-2 mt-2 text-[10px] text-amber-800 leading-relaxed">
+            <span className="font-semibold">Cold start:</span> if a role isn&apos;t loaded the orchestrator queues your request and starts the container on demand (~5–60 s for Ollama, longer for vLLM&apos;s first model download).
+          </div>
+        </div>
+
+        <div>
           <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Tips</h4>
           <ul className="space-y-1.5">
             <li className="text-[11px] text-gray-600 flex gap-1.5">
@@ -2988,3 +3032,4 @@ const DeepSearchResultCard = React.memo(function DeepSearchResultCard({ result, 
     </div>
   );
 });
+
