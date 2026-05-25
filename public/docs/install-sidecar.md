@@ -9,6 +9,11 @@ There are two ways to install it:
 
 The native install is the same script the auto-updater uses; the published version is **v{{SIDECAR_VERSION}}**.
 
+> **Two rules that will save you an hour of debugging:**
+>
+> 1. **Always `cd` into the install directory before running `start.sh` / `start.bat`.** `install.sh` drops the tarball into `./sidecar/` *relative to your current directory*. The launcher must be invoked from inside that folder (or with its absolute path) because it builds `Dockerfile.run` from its own location. As a safety net, `start.sh` will auto-`cd` into a sibling `sidecar/` if it can't find `Dockerfile.run` next to itself, but don't rely on that — `cd ./sidecar` first.
+> 2. **On macOS, always use Docker mode + host-Ollama.** Docker Desktop on Mac has no GPU passthrough, so vanilla containerized Ollama is CPU-only. The `--docker` install flag auto-enables `SS_HOST_OLLAMA=1` so the sidecar runs in Docker but routes model calls to native Ollama on the host (which uses Metal). Do not run plain `./install.sh {{MASTER_URL}}` on a Mac — use `./install.sh --docker {{MASTER_URL}}`.
+
 ### Download scripts directly
 
 [install.sh]({{MASTER_URL}}/sideCar/scripts/install.sh) [install.bat]({{MASTER_URL}}/sideCar/scripts/install.bat) [start.sh]({{MASTER_URL}}/sideCar/scripts/start.sh) [start.bat]({{MASTER_URL}}/sideCar/scripts/start.bat) [start-docker-agent.sh]({{MASTER_URL}}/sideCar/scripts/start-docker-agent.sh) [start-docker-agent.bat]({{MASTER_URL}}/sideCar/scripts/start-docker-agent.bat)
@@ -164,9 +169,13 @@ Install native Ollama first (see the **macOS host with native Ollama** section b
 
 ### Linux
 
+Same one-liner as Mac — the `--docker` flag is portable. On Linux it skips host-Ollama mode (Docker has GPU passthrough via the NVIDIA Container Toolkit, so containerized Ollama / vLLM works directly):
+
 ```bash
-curl -fsSL {{MASTER_URL}}/sideCar/scripts/start-docker-agent.sh -o start-docker-agent.sh && chmod +x start-docker-agent.sh && ./start-docker-agent.sh
+curl -fsSL {{MASTER_URL}}/sideCar/scripts/install.sh -o install.sh && chmod +x install.sh && ./install.sh --docker {{MASTER_URL}}
 ```
+
+> **Note:** `start-docker-agent.sh` used to be the recommended path here. It's now a deprecation shim — it tried to `docker build` from a checked-out source tree using the default `Dockerfile` name, but the published tarball ships `Dockerfile.run`, so the legacy script silently produced an empty image. Use the `install.sh --docker` line above instead. The shim will print this same hint if you run it.
 
 The script builds a `sound-suite-agent` image from a checked-out sidecar source tree and runs it with `--restart unless-stopped`, mounting `/var/run/docker.sock` so the sidecar can manage GPU containers.
 
@@ -178,21 +187,32 @@ Invoke-WebRequest -Uri {{MASTER_URL}}/sideCar/scripts/start-docker-agent.bat -Ou
 
 ### Manual `docker run` with env-var bootstrap
 
-If you want to roll your own (no script):
+If you want to roll your own (no script). **There is no published `ss-sidecar:latest` image** — you must build it locally from the tarball first. The `install.sh` one-liner above does this automatically; the manual path is:
 
 ```bash
+# 1. Download + extract the tarball (this is what install.sh does for you)
+curl -fsSL {{MASTER_URL}}/sideCar/builds/sidecar-latest.tar.gz | tar xz
+cd sidecar
+
+# 2. Build the image locally from Dockerfile.run
+docker build -f Dockerfile.run -t ss-sidecar:latest .
+
+# 3. Run it
 docker run -d \
   --name ss-sidecar \
   --restart unless-stopped \
   --gpus all \
   -p {{SIDECAR_PORT}}:{{SIDECAR_PORT}} \
   -e SOUND_SUITE_MASTER_URL={{MASTER_URL}} \
+  -e EXTERNAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}') \
   -v ss-sidecar-config:/app/config \
   -v /var/run/docker.sock:/var/run/docker.sock \
   ss-sidecar:latest
 ```
 
 The `SOUND_SUITE_MASTER_URL` env var is the safety net — even if `/app/config/` is wiped between runs, the sidecar reads this on boot and reconnects to **{{MASTER_URL}}** automatically. Master then pushes the rest of the config back over the WebSocket.
+
+`EXTERNAL_IP` is the LAN IP master should reach this host on. Without it, the sidecar advertises its Docker bridge IP (often `172.17.0.2`) which is unreachable from other machines. On Mac substitute `$(ipconfig getifaddr en0)`. `start.sh --docker` does this auto-detection for you.
 
 ---
 
