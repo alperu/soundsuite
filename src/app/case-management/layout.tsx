@@ -7,7 +7,7 @@ import { SearchableCombo } from '@/components/searchable-combo';
 import { getCachedCases, setCachedCases, getCachedFilings, setCachedFilings } from '@/lib/indexed-db';
 import { formatFilingLabel } from '@/lib/filings/format-filing-label';
 import { TagPanel } from '@/components/case/tag-panel';
-import type { EntityKind } from '@/components/case/tag-spec';
+import { TAG_SPEC_BY_KIND, type EntityKind } from '@/components/case/tag-spec';
 import {
   read as hsRead,
   commit as hsCommit,
@@ -15,6 +15,28 @@ import {
   gridHasError as hsGridHasError,
 } from '@/lib/haystack-client';
 import { classifyFilingEntityKind } from '@/lib/filings/classify-entity-kind';
+
+/**
+ * Mirror Filing-row volume/supplemental fields onto the per-type entity's
+ * tags JSON. Only writes keys whose tag spec exists on `entityKind`
+ * (today: `volume` + `supplemental` live on clerksRecord / reportersRecord;
+ * `supplementalOrder` is not a spec on any kind, so it's always dropped).
+ * Returns null when no relevant spec exists so the caller can skip the
+ * hsCommit altogether.
+ */
+function buildFilingEntityTagPatch(
+  entityKind: EntityKind,
+  vals: { volume: number | null; isSupplemental: boolean; supplementalOrder: number | null },
+): Record<string, unknown> | null {
+  const specs = TAG_SPEC_BY_KIND[entityKind];
+  if (!specs) return null;
+  const names = new Set(specs.map(s => s.name));
+  const patch: Record<string, unknown> = {};
+  if (names.has('volume')) patch.volume = vals.volume;
+  if (names.has('supplemental')) patch.supplemental = vals.isSupplemental ? { _kind: 'marker' } : null;
+  if (names.has('supplementalOrder')) patch.supplementalOrder = vals.supplementalOrder;
+  return Object.keys(patch).length ? patch : null;
+}
 
 interface CaseRecord {
   id: string;
@@ -518,19 +540,43 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
       // routes per-type kinds (e.g. 'order') to the motionAttachment table,
       // which has no title/filingType/etc columns, so the patch silently
       // disappears into its `tags` JSON and Filing.title never updates.
-      const res = await fetch(`/api/cases/${activeCase.id}/filings/${editFilingId}`, {
+      const volume = editFilingVolume.trim() ? parseInt(editFilingVolume, 10) : null;
+      const suppOrder = editFilingSupplementalOrder.trim()
+        ? parseInt(editFilingSupplementalOrder, 10)
+        : null;
+      // Mirror volume/supplemental/supplementalOrder onto the per-type
+      // entity's tags JSON so the right-hand tag panel reflects the
+      // dialog edit without a refresh. Filing-level columns remain the
+      // source of truth (don't roll back the Filing PATCH on tag-sync
+      // failure — surface a non-blocking warning instead).
+      const { entityKind: targetEntityKind } = classifyFilingEntityKind(editFilingType);
+      const tagPatch = buildFilingEntityTagPatch(targetEntityKind, {
+        volume,
+        isSupplemental: editFilingSupplemental,
+        supplementalOrder: suppOrder,
+      });
+      const filingPatchP = fetch(`/api/cases/${activeCase.id}/filings/${editFilingId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: editFilingTitle.trim(),
           filingType: editFilingType,
-          volumeNumber: editFilingVolume.trim() ? parseInt(editFilingVolume, 10) : null,
+          volumeNumber: volume,
           isSupplemental: editFilingSupplemental,
-          supplementalOrder: editFilingSupplementalOrder.trim()
-            ? parseInt(editFilingSupplementalOrder, 10)
-            : null,
+          supplementalOrder: suppOrder,
         }),
       });
+      const tagPatchP = tagPatch
+        ? hsCommit({ id: editFilingId, kind: targetEntityKind, patch: tagPatch }).then(grid => {
+            const err = hsGridHasError(grid);
+            if (err) console.warn('Edit filing: entity-tag sync failed:', err);
+            return grid;
+          }).catch(err => {
+            console.warn('Edit filing: entity-tag sync error:', err);
+            return null;
+          })
+        : Promise.resolve(null);
+      const [res] = await Promise.all([filingPatchP, tagPatchP]);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         console.error('Edit filing failed:', err);

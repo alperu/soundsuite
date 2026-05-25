@@ -5,7 +5,7 @@
 export type Node =
   | { op: 'AND' | 'OR'; children: Node[] }
   | { op: 'NOT'; child: Node }
-  | { op: 'TERM'; value: string; phrase: boolean };
+  | { op: 'TERM'; value: string; phrase: boolean; field?: string };
 
 export type ParseResult =
   | { ok: true; ast: Node; hasOperators: boolean }
@@ -13,7 +13,7 @@ export type ParseResult =
 
 type Tok =
   | { kind: 'AND' | 'OR' | 'NOT' | 'LP' | 'RP' | 'DASH'; pos: number; text: string }
-  | { kind: 'TERM'; pos: number; text: string; value: string; phrase: boolean };
+  | { kind: 'TERM'; pos: number; text: string; value: string; phrase: boolean; field?: string };
 
 const OP_WORDS = new Set(['AND', 'OR', 'NOT', 'and', 'or', 'not']);
 
@@ -89,6 +89,65 @@ function tokenize(input: string): { ok: true; tokens: Tok[]; hasOperators: boole
     if (buf.length === 0) {
       return { ok: false, error: `Unexpected character '${c}'`, position: i };
     }
+
+    // Field-qualified term detection.
+    // Match the FIRST `:` in the bare term where the prefix is a valid ident.
+    // - Leading `:` (no prefix) → not a field; emit as bare term.
+    // - Trailing `:` (no inline value): if next char is `"`, consume the phrase as the value.
+    //   If next char is whitespace/EOF/paren, parse error (no value).
+    // - Otherwise, value is whatever follows the first `:`.
+    // Note: `case: "23-CV-1234"` (space after colon) hits the trailing-colon branch
+    // and is reported as a parse error — that's the chosen consistent behavior.
+    let fieldQualified = false;
+    if (buf.length > 0 && buf[0] !== ':') {
+      const colonIdx = buf.indexOf(':');
+      if (colonIdx > 0) {
+        const fieldName = buf.slice(0, colonIdx);
+        if (/^[A-Za-z][A-Za-z0-9_]*$/.test(fieldName)) {
+          const rest = buf.slice(colonIdx + 1);
+          if (rest.length > 0) {
+            // Inline value: `field:value`
+            tokens.push({ kind: 'TERM', pos: start, text: buf, value: rest, phrase: false, field: fieldName });
+            atWordBoundary = false;
+            fieldQualified = true;
+          } else {
+            // Trailing colon — look for a quoted phrase immediately following
+            if (i < n && input[i] === '"') {
+              const phraseStart = i;
+              i++;
+              let pbuf = '';
+              let closed = false;
+              while (i < n) {
+                const ch = input[i];
+                if (ch === '\\' && i + 1 < n) {
+                  const nx = input[i + 1];
+                  if (nx === '"' || nx === '\\') { pbuf += nx; i += 2; continue; }
+                  pbuf += ch; i++; continue;
+                }
+                if (ch === '"') { closed = true; i++; break; }
+                pbuf += ch;
+                i++;
+              }
+              if (!closed) {
+                return { ok: false, error: 'Unclosed quoted phrase', position: phraseStart };
+              }
+              tokens.push({ kind: 'TERM', pos: start, text: input.slice(start, i), value: pbuf, phrase: true, field: fieldName });
+              hasOperators = true; // phrase counts as operator marker (matches existing behavior for quoted strings)
+              atWordBoundary = false;
+              fieldQualified = true;
+            } else {
+              // No value after field — parse error at the colon position
+              return { ok: false, error: `Expected value after field '${fieldName}:'`, position: start + colonIdx };
+            }
+          }
+        }
+      }
+    }
+
+    if (fieldQualified) {
+      continue;
+    }
+
     // Operator keyword? Only if surrounded by whitespace/parens (which our tokenizer guarantees, since we're at a word boundary)
     if (OP_WORDS.has(buf)) {
       const upper = buf.toUpperCase() as 'AND' | 'OR' | 'NOT';
@@ -185,7 +244,10 @@ function parsePrimary(s: PState): Node | null {
   }
   if (t.kind === 'TERM') {
     eat(s);
-    return { op: 'TERM', value: (t as Extract<Tok, { kind: 'TERM' }>).value, phrase: (t as Extract<Tok, { kind: 'TERM' }>).phrase };
+    const tt = t as Extract<Tok, { kind: 'TERM' }>;
+    const node: Extract<Node, { op: 'TERM' }> = { op: 'TERM', value: tt.value, phrase: tt.phrase };
+    if (tt.field !== undefined) node.field = tt.field;
+    return node;
   }
   if (t.kind === 'RP') {
     setErr(s, 'Unbalanced parenthesis', t.pos);
@@ -224,11 +286,12 @@ export function parseBooleanQuery(input: string): ParseResult {
 // as a string the parser can round-trip.
 export function astSerialize(node: Node): string {
   if (node.op === 'TERM') {
+    const prefix = node.field ? `${node.field}:` : '';
     if (node.phrase) {
       const escaped = node.value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      return `"${escaped}"`;
+      return `${prefix}"${escaped}"`;
     }
-    return node.value;
+    return `${prefix}${node.value}`;
   }
   if (node.op === 'NOT') {
     return `NOT ${wrapIfCompound(node.child)}`;

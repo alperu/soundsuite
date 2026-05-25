@@ -331,3 +331,96 @@ describe('astSerialize — round-trip', () => {
     if (r2.ok) expect(r2.ast).toEqual(r1.ast);
   });
 });
+
+describe('parseBooleanQuery — field-qualified terms', () => {
+  test('F1. simple field:value', () => {
+    const r = ok('motionType:disqualification');
+    expect(r.hasOperators).toBe(false);
+    expect(r.ast).toEqual({ op: 'TERM', value: 'disqualification', phrase: false, field: 'motionType' });
+  });
+
+  test('F2. field:"quoted phrase"', () => {
+    const r = ok('case:"23-CV-1234"');
+    expect(r.ast).toEqual({ op: 'TERM', value: '23-CV-1234', phrase: true, field: 'case' });
+  });
+
+  test('F3. two field terms OR-combined', () => {
+    const r = ok('motionType:disqualification OR case:23-CV-1234');
+    expect(r.hasOperators).toBe(true);
+    expect(r.ast).toEqual({
+      op: 'OR',
+      children: [
+        { op: 'TERM', value: 'disqualification', phrase: false, field: 'motionType' },
+        { op: 'TERM', value: '23-CV-1234', phrase: false, field: 'case' },
+      ],
+    });
+  });
+
+  test('F4. trailing colon → parse error', () => {
+    const r = parseBooleanQuery('motionType:');
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toMatch(/Expected value after field 'motionType:'/);
+    }
+  });
+
+  test('F5. leading colon → bare term (no field)', () => {
+    const r = ok(':bare');
+    expect(r.ast).toEqual({ op: 'TERM', value: ':bare', phrase: false });
+  });
+
+  test('F6. field term AND -bareNegated', () => {
+    const r = ok('motionType:disqualification AND -dismissed');
+    expect(r.ast).toEqual({
+      op: 'AND',
+      children: [
+        { op: 'TERM', value: 'disqualification', phrase: false, field: 'motionType' },
+        { op: 'NOT', child: term('dismissed') },
+      ],
+    });
+  });
+
+  test('F7. field:"motion to compel" (phrase value)', () => {
+    const r = ok('case:"motion to compel"');
+    expect(r.ast).toEqual({ op: 'TERM', value: 'motion to compel', phrase: true, field: 'case' });
+  });
+
+  test('F8. and:foo is a field term, not an operator', () => {
+    const r = ok('and:foo');
+    expect(r.hasOperators).toBe(false);
+    expect(r.ast).toEqual({ op: 'TERM', value: 'foo', phrase: false, field: 'and' });
+  });
+
+  test('F9. caseAnd:foo — ident isn\'t split mid-token', () => {
+    const r = ok('caseAnd:foo');
+    expect(r.ast).toEqual({ op: 'TERM', value: 'foo', phrase: false, field: 'caseAnd' });
+  });
+
+  test('F10. case: "23-CV-1234" (space after colon) → parse error', () => {
+    // Chosen behavior: trailing colon followed by whitespace is a parse error
+    // (consistent with the bare-trailing-colon rule). Document the choice here.
+    const r = parseBooleanQuery('case: "23-CV-1234"');
+    expect(r.ok).toBe(false);
+  });
+
+  test('F11. single field term → hasOperators=false', () => {
+    const r = ok('case:X');
+    expect(r.hasOperators).toBe(false);
+  });
+
+  test('F12. bare-value case:23-CV-1234 (no quotes)', () => {
+    const r = ok('case:23-CV-1234');
+    expect(r.ast).toEqual({ op: 'TERM', value: '23-CV-1234', phrase: false, field: 'case' });
+  });
+
+  test('F13. field-term round-trips through astSerialize', () => {
+    const r1 = parseBooleanQuery('motionType:disqualification OR case:"23-CV-1234"');
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const ser = astSerialize(r1.ast);
+    const r2 = parseBooleanQuery(ser);
+    expect(r2.ok).toBe(true);
+    if (r2.ok) expect(r2.ast).toEqual(r1.ast);
+  });
+});
+

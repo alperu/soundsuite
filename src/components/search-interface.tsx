@@ -28,6 +28,13 @@ import {
   type HaystackFilterInputHandle,
 } from './search/haystack-filter-input';
 import { SampleQueryPanel } from './search/sample-query-panel';
+import { FilterLogicPanel, isLikelyMidTyping } from './search/filter-logic-panel';
+import BooleanChipComposer from './search/boolean-chip-composer';
+
+// Known boolean-query field names (kept in sync with FIELD_RESOLVERS in
+// src/lib/search/boolean-to-fts.ts; replicated here to avoid pulling the
+// LanceDB server-only module into the client bundle).
+const BOOLEAN_FIELD_NAMES = ['case', 'caseNumber', 'caseId', 'documentId', 'filingId', 'filingType', 'documentType', 'motionType'];
 import { parseBooleanQuery, type ParseResult } from '@/lib/search/boolean-query';
 import { TokenNameSuggestions } from './search/token-name-suggestions';
 import {
@@ -311,9 +318,26 @@ export default function SearchInterface({
   const [aiQuery, setAiQuery] = useState('');
   // Boolean ("Advanced") query mode — enables AND/OR/NOT/-foo/"phrase"/(group) parsing server-side
   const [booleanMode, setBooleanMode] = usePersistedState<boolean>('search.booleanMode', false);
+  const [chipComposer, setChipComposer] = usePersistedState<boolean>('boolean-chip-composer', false);
   const [boolParseResult, setBoolParseResult] = useState<ParseResult | null>(null);
   const [boolHintDismissed, setBoolHintDismissed] = usePersistedState<boolean>('search.boolHintDismissed', false);
   const [boolHintVisible, setBoolHintVisible] = useState(false);
+  // Filter-logic left-rail collapsed state. Read from localStorage on mount to
+  // stay SSR-safe (useEffect, not a useState initializer).
+  const [filterLogicCollapsed, setFilterLogicCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem('filter-logic-panel-collapsed');
+      if (raw === '1' || raw === 'true') setFilterLogicCollapsed(true);
+    } catch {}
+  }, []);
+  const toggleFilterLogicCollapsed = useCallback(() => {
+    setFilterLogicCollapsed(prev => {
+      const next = !prev;
+      try { window.localStorage.setItem('filter-logic-panel-collapsed', next ? '1' : '0'); } catch {}
+      return next;
+    });
+  }, []);
   const [aiCaseId, setAiCaseId] = usePersistedState<string>('search.aiCaseId', '');
   const [aiProvider, setAiProvider] = usePersistedState<string>('search.aiProvider', '');
   const [aiModel, setAiModel] = usePersistedState<string>('search.aiModel', '');
@@ -1435,6 +1459,20 @@ export default function SearchInterface({
       <ResizableDivider side="left" onResizeStart={startResize} />
 
       {/* ================================================================= */}
+      {/* FILTER LOGIC COLUMN — appears in AI mode when Advanced (boolean) is on */}
+      {/* ================================================================= */}
+      {mode === 'ai' && booleanMode && (
+        <FilterLogicPanel
+          collapsed={filterLogicCollapsed}
+          onToggleCollapsed={toggleFilterLogicCollapsed}
+          onInsertExample={(text) => {
+            setAiQuery(prev => (prev && !prev.endsWith(' ') ? prev + ' ' : prev) + text);
+            aiQueryRef.current?.focus();
+          }}
+        />
+      )}
+
+      {/* ================================================================= */}
       {/* ANALYSIS TOOLS COLUMN — appears when analysis mode is active */}
       {/* ================================================================= */}
       {mode === 'analysis' && (
@@ -2022,6 +2060,20 @@ export default function SearchInterface({
                         onTokenSuggestionsChange={setTokenSuggestions}
                         onTokenHighlightChange={setTokenSuggestionHighlight}
                       />
+                    ) : booleanMode && chipComposer ? (
+                      <div className="flex-1">
+                        <BooleanChipComposer
+                          value={aiQuery}
+                          onChange={setAiQuery}
+                          onSubmit={() => {
+                            if (aiQuery.trim() && !aiLoading) {
+                              handleAISearch(new Event('submit') as unknown as React.FormEvent);
+                            }
+                          }}
+                          fieldNames={BOOLEAN_FIELD_NAMES}
+                          placeholder={hasConversation ? 'Ask a follow-up…' : 'Build a boolean query (AND / OR / NOT / phrases / fields)…'}
+                        />
+                      </div>
                     ) : (
                       <textarea
                         id="ai-query"
@@ -2064,9 +2116,17 @@ export default function SearchInterface({
                   {/* Boolean (advanced) query syntax — toggle, live syntax check, examples */}
                   <div className="mt-1.5">
                     {boolParseResult && !boolParseResult.ok && booleanMode && aiQuery.trim() && (
-                      <div className="text-[10px] font-mono text-red-700 bg-red-50 border border-red-200 px-2 py-1 rounded mb-1">
-                        <span className="font-sans font-medium">Syntax:</span> {boolParseResult.error} <span className="text-red-500">(col {boolParseResult.position + 1})</span>
-                      </div>
+                      isLikelyMidTyping(aiQuery, boolParseResult.position) ? (
+                        <div className="mb-1">
+                          <span className="inline-block text-[10px] font-mono px-2 py-0.5 border border-gray-200 bg-gray-50 text-gray-500 rounded">
+                            incomplete…
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="text-[10px] font-mono text-red-700 bg-red-50 border border-red-200 px-2 py-1 rounded mb-1">
+                          <span className="font-sans font-medium">Syntax:</span> {boolParseResult.error} <span className="text-red-500">(col {boolParseResult.position + 1})</span>
+                        </div>
+                      )
                     )}
                     {boolHintVisible && (
                       <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 px-2 py-1 rounded mb-1 flex items-center gap-2">
@@ -2129,6 +2189,17 @@ export default function SearchInterface({
                       />
                       Advanced (boolean)
                     </label>
+                    {booleanMode && (
+                      <label className="inline-flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={chipComposer}
+                          onChange={e => setChipComposer(e.target.checked)}
+                          className="w-3 h-3"
+                        />
+                        Chip composer
+                      </label>
+                    )}
                     <label className="inline-flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
                       <input
                         type="checkbox"
@@ -2509,17 +2580,9 @@ function SearchDocsPanel({ mode, embeddingInfo, directMode }: { mode: SearchMode
 
         <div>
           <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Boolean query syntax</h4>
-          <p className="text-[11px] text-gray-600 leading-relaxed mb-2">
-            Toggle <em>Advanced (boolean)</em> under the input to enable explicit operators on the
-            keyword arm of the search. The vector arm continues to run on the original query.
+          <p className="text-[11px] text-gray-600 leading-relaxed">
+            See <strong>Filter Logic</strong> panel on the left for full reference.
           </p>
-          <ul className="text-[11px] text-gray-600 space-y-1">
-            <li><code className="bg-gray-100 px-1 rounded">A AND B</code> — both terms must match (implicit between adjacent words)</li>
-            <li><code className="bg-gray-100 px-1 rounded">A OR B</code> — either term matches</li>
-            <li><code className="bg-gray-100 px-1 rounded">NOT B</code> or <code className="bg-gray-100 px-1 rounded">-B</code> — exclude documents matching B</li>
-            <li><code className="bg-gray-100 px-1 rounded">&quot;motion to compel&quot;</code> — exact phrase</li>
-            <li><code className="bg-gray-100 px-1 rounded">(A AND B) OR C</code> — group with parentheses; AND binds tighter than OR</li>
-          </ul>
         </div>
 
         <div>

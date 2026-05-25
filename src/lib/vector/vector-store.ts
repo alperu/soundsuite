@@ -668,6 +668,14 @@ export class VectorStore {
       conditions.push(`document_type = "${filter.documentType}"`);
     }
 
+    // Escape hatch: raw SQL conditions injected by the boolean-query
+    // field-filter extractor. Already SQL-escaped at the call site.
+    if (Array.isArray(filter._rawWhere)) {
+      for (const c of filter._rawWhere) {
+        if (typeof c === 'string' && c.length > 0) conditions.push(c);
+      }
+    }
+
     return conditions.join(' AND ');
   }
 

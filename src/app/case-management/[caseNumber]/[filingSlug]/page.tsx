@@ -5,11 +5,35 @@ import { useParams, useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { formatFilingLabel } from '@/lib/filings/format-filing-label';
 import { classifyFilingEntityKind } from '@/lib/filings/classify-entity-kind';
+import { TAG_SPEC_BY_KIND, type EntityKind } from '@/components/case/tag-spec';
 import {
   commit as hsCommit,
-  firstRow as hsFirstRow,
   gridHasError as hsGridHasError,
 } from '@/lib/haystack-client';
+
+/**
+ * Build a tag-side patch for the Filing's per-type entity (clerksRecord,
+ * reportersRecord, motion, motionAttachment-kinds, ...). The Edit Filing
+ * dialog writes volume/isSupplemental/supplementalOrder to the Filing row,
+ * but the right-hand tag panel reads from the entity's tags JSON — so we
+ * mirror the values here. Keys whose tag spec doesn't exist on the entity
+ * kind are dropped (e.g. `volume` is not a spec on motion-style kinds, and
+ * `supplementalOrder` isn't a spec on any kind today). This keeps writes
+ * scoped so future spec renames don't strand orphan tags.
+ */
+function buildFilingEntityTagPatch(
+  entityKind: EntityKind,
+  vals: { volume: number | null; isSupplemental: boolean; supplementalOrder: number | null },
+): Record<string, unknown> | null {
+  const specs = TAG_SPEC_BY_KIND[entityKind];
+  if (!specs) return null;
+  const names = new Set(specs.map(s => s.name));
+  const patch: Record<string, unknown> = {};
+  if (names.has('volume')) patch.volume = vals.volume;
+  if (names.has('supplemental')) patch.supplemental = vals.isSupplemental ? { _kind: 'marker' } : null;
+  if (names.has('supplementalOrder')) patch.supplementalOrder = vals.supplementalOrder;
+  return Object.keys(patch).length ? patch : null;
+}
 import { SelectedEntityProvider } from '@/components/case/selected-entity-context';
 import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { ExtractModal } from '@/components/personas/extract-modal';
@@ -149,16 +173,39 @@ export default function FilingDetailPage() {
       // into its `tags` JSON and Filing.title never updates. Use the
       // dedicated Filing PATCH endpoint instead; it also regenerates the
       // slug, invalidates the Redis cache, and fires the SSE event.
-      const res = await fetch(`/api/cases/${caseId}/filings/${filing.id}`, {
+      const volume = editVolume.trim() ? parseInt(editVolume, 10) : null;
+      // Mirror tag-side values onto the per-type entity row so the right-hand
+      // tag panel reflects the dialog edit without a refresh. This dialog
+      // only edits Volume (no supplemental controls), so we sync just
+      // `volume`; preserve any existing `supplemental`/`supplementalOrder`
+      // by passing the current filing values through unchanged.
+      const { entityKind: targetEntityKind } = classifyFilingEntityKind(editType);
+      const tagPatch = buildFilingEntityTagPatch(targetEntityKind, {
+        volume,
+        isSupplemental: !!filing.isSupplemental,
+        supplementalOrder: filing.supplementalOrder ?? null,
+      });
+      const filingPatchP = fetch(`/api/cases/${caseId}/filings/${filing.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: editTitle.trim(),
           filingType: editType,
           description: editDescription.trim() || null,
-          volumeNumber: editVolume.trim() ? parseInt(editVolume, 10) : null,
+          volumeNumber: volume,
         }),
       });
+      const tagPatchP = tagPatch
+        ? hsCommit({ id: filing.id, kind: targetEntityKind, patch: tagPatch }).then(grid => {
+            const err = hsGridHasError(grid);
+            if (err) console.warn('Edit filing: entity-tag sync failed:', err);
+            return grid;
+          }).catch(err => {
+            console.warn('Edit filing: entity-tag sync error:', err);
+            return null;
+          })
+        : Promise.resolve(null);
+      const [res] = await Promise.all([filingPatchP, tagPatchP]);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         console.error('Edit filing failed:', err);

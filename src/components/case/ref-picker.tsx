@@ -32,15 +32,30 @@ export type RefTarget =
 export type PersonMarker =
   | 'judge'
   | 'lawyer'
+  | 'proSe'
   | 'courtClerk'
   | 'courtReporter'
   | 'self';
+
+/** Chip set rendered above the search input for Person pickers. */
+const PERSON_ROLE_CHIPS: { marker: PersonMarker; label: string }[] = [
+  { marker: 'lawyer', label: 'Lawyer' },
+  { marker: 'proSe', label: 'Pro Se' },
+  { marker: 'judge', label: 'Judge' },
+  { marker: 'courtClerk', label: 'Court Clerk' },
+  { marker: 'courtReporter', label: 'Court Reporter' },
+];
 
 export interface RefPickerProps {
   refTarget: RefTarget;
   /** Multi-select for list-valued refs (judgeRefs, plaintiffRefs, etc.). */
   multi?: boolean;
-  /** Constrain person results to a sub-marker (e.g., 'judge' or 'lawyer'). */
+  /**
+   * Initial Person sub-marker pre-toggled in the chip row. The user can
+   * untoggle it to broaden the search, or add more chips for AND-narrowing.
+   * Still supported as a single value for back-compat with callers that
+   * haven't migrated to multi-role yet.
+   */
   personMarker?: PersonMarker;
   /** Additional Haystack filter to AND into the entity query. */
   scopeFilter?: string;
@@ -75,16 +90,78 @@ interface RefResult {
   primary: string;
   secondary?: string;
   tertiary?: string;
+  /** Small role-tag labels rendered inline next to `primary` (Person only). */
+  badges?: string[];
   raw: Record<string, unknown>;
 }
+
+/**
+ * Detect whether a Person row carries a given intrinsic marker. Markers may
+ * surface in several shapes depending on whether the row came from a plain
+ * Prisma row, a Hayson-serialized grid, or a merged tags-blob:
+ *   - boolean true        (Prisma column / merged tag)
+ *   - 'm:'                (Hayson marker literal)
+ *   - { _kind: 'marker' } (decoded Hayson marker object)
+ *   - { val: 'm:' }       (lightly-decoded Hayson marker)
+ * We accept any of these as "present"; explicit `false`/null/undefined are absent.
+ */
+function hasPersonMarker(row: Record<string, unknown>, key: string): boolean {
+  const direct = row[key];
+  if (direct !== undefined && direct !== null && direct !== false) {
+    if (direct === true) return true;
+    if (typeof direct === 'string') return direct === 'm:' || direct === 'true';
+    if (typeof direct === 'object') {
+      const o = direct as { _kind?: unknown; val?: unknown };
+      if (o._kind === 'marker') return true;
+      if (typeof o.val === 'string' && o.val === 'm:') return true;
+      // Any non-empty object that isn't an explicit false-ish shape counts.
+      return true;
+    }
+  }
+  // Fallback: inspect `tags` blob (object or JSON string) for the marker.
+  const tags = row.tags;
+  let parsed: Record<string, unknown> | null = null;
+  if (tags && typeof tags === 'object') {
+    parsed = tags as Record<string, unknown>;
+  } else if (typeof tags === 'string') {
+    try {
+      const j = JSON.parse(tags);
+      if (j && typeof j === 'object') parsed = j as Record<string, unknown>;
+    } catch {
+      // ignore
+    }
+  }
+  if (!parsed) return false;
+  const v = parsed[key];
+  if (v === undefined || v === null || v === false) return false;
+  if (v === true) return true;
+  if (typeof v === 'string') return v === 'm:' || v === 'true';
+  if (typeof v === 'object') {
+    const o = v as { _kind?: unknown; val?: unknown };
+    if (o._kind === 'marker') return true;
+    if (typeof o.val === 'string' && o.val === 'm:') return true;
+    return true;
+  }
+  return false;
+}
+
+const PERSON_BADGE_DEFS: { key: string; label: string }[] = [
+  { key: 'lawyer', label: 'Lawyer' },
+  { key: 'proSe', label: 'Pro Se' },
+  { key: 'judge', label: 'Judge' },
+  { key: 'courtClerk', label: 'Court Clerk' },
+  { key: 'courtReporter', label: 'Court Reporter' },
+];
 
 // ---------------------------------------------------------------------------
 // Filter construction
 
-function baseFilterFor(refTarget: RefTarget, personMarker?: PersonMarker): string {
+function baseFilterFor(refTarget: RefTarget, personMarkers: PersonMarker[]): string {
   switch (refTarget) {
-    case 'person':
-      return personMarker ? `person and ${personMarker}` : 'person';
+    case 'person': {
+      if (personMarkers.length === 0) return 'person';
+      return `person and ${personMarkers.join(' and ')}`;
+    }
     case 'motion':
       return 'motion';
     case 'case':
@@ -101,10 +178,10 @@ function baseFilterFor(refTarget: RefTarget, personMarker?: PersonMarker): strin
 
 function composeFilter(
   refTarget: RefTarget,
-  personMarker?: PersonMarker,
+  personMarkers: PersonMarker[],
   scopeFilter?: string,
 ): string {
-  const base = baseFilterFor(refTarget, personMarker);
+  const base = baseFilterFor(refTarget, personMarkers);
   if (scopeFilter && scopeFilter.trim()) {
     return `${base} and ${scopeFilter.trim()}`;
   }
@@ -126,12 +203,14 @@ const RESULT_CACHE: Map<string, CacheEntry> = new Map();
 
 function cacheKey(
   refTarget: RefTarget,
-  personMarker: PersonMarker | undefined,
+  personMarkers: PersonMarker[],
   scopeFilter: string | undefined,
   scopeCaseId: string | undefined,
+  courtId: string | undefined,
   q: string,
 ): string {
-  return `${refTarget}|${personMarker ?? ''}|${scopeFilter ?? ''}|${scopeCaseId ?? ''}|${q}`;
+  const markers = [...personMarkers].sort().join('+');
+  return `${refTarget}|${markers}|${scopeFilter ?? ''}|${scopeCaseId ?? ''}|${courtId ?? ''}|${q}`;
 }
 
 function cacheGet(key: string): RefResult[] | null {
@@ -216,7 +295,16 @@ function labelRow(refTarget: RefTarget, row: Record<string, unknown>): RefResult
         asString(row.barNumber) ??
         asString(row.email) ??
         asString(row.jurisdictionId);
-      return { id, primary, secondary, raw: row };
+      const badges = PERSON_BADGE_DEFS
+        .filter((d) => hasPersonMarker(row, d.key))
+        .map((d) => d.label);
+      return {
+        id,
+        primary,
+        secondary,
+        badges: badges.length > 0 ? badges : undefined,
+        raw: row,
+      };
     }
     case 'motion': {
       // Fall back through every plausible human-readable field before giving
@@ -306,12 +394,13 @@ export interface FetchOutcome {
 
 async function fetchResults(
   refTarget: RefTarget,
-  personMarker: PersonMarker | undefined,
+  personMarkers: PersonMarker[],
   scopeFilter: string | undefined,
+  scopeCaseId: string | undefined,
   q: string,
   signal?: AbortSignal,
 ): Promise<FetchOutcome> {
-  const filter = composeFilter(refTarget, personMarker, scopeFilter);
+  const filter = composeFilter(refTarget, personMarkers, scopeFilter);
   try {
     // Route through the same-origin proxy via the typed client. The proxy
     // attaches the bearer auth server-side; the browser never sees the key.
@@ -343,7 +432,25 @@ async function fetchResults(
     const rows: Record<string, unknown>[] = Array.isArray(grid.rows)
       ? (grid.rows as Record<string, unknown>[])
       : [];
-    const mapped = rows.map((r) => labelRow(refTarget, r));
+    // Client-side case scoping. The route synthesizes `caseRef` post-read from
+    // the row's `caseId` FK column, so we filter on that here. This replaces a
+    // broken server-side `caseRef==@<id>` Haystack filter — Motion/MotionAttachment
+    // /Hearing tables don't store caseRef in `tags`, only on the `caseId` column,
+    // and the SQL compiler only looks in tags. See haystack-filter-sql.ts.
+    const scopedRows = scopeCaseId
+      ? rows.filter((r) => {
+          const cr = (r as { caseRef?: unknown }).caseRef;
+          const id =
+            typeof cr === 'string' ? cr :
+            cr && typeof cr === 'object'
+              ? ((cr as { val?: unknown }).val as string | undefined)
+              : undefined;
+          if (!id) return false;
+          const canon = id.startsWith('@') ? id : `@${id}`;
+          return canon === scopeCaseId;
+        })
+      : rows;
+    const mapped = scopedRows.map((r) => labelRow(refTarget, r));
     // Client-side narrow by q so the user can type to filter the cached set.
     const narrowed = q ? mapped.filter((m) => clientSideQueryMatch(m, q)) : mapped;
     return { results: narrowed.slice(0, 8), unauthorized: false };
@@ -460,6 +567,7 @@ export function RefPicker({
   multi,
   personMarker,
   scopeFilter,
+  scopeCaseId,
   value,
   onChange,
   onClose,
@@ -473,6 +581,33 @@ export function RefPicker({
   const [loading, setLoading] = useState(false);
   const [unauthorized, setUnauthorized] = useState(false);
   const [highlight, setHighlight] = useState(0);
+
+  // ---- Person filter chips ------------------------------------------------
+  // Active intrinsic-marker roles for Person results. AND-narrows the
+  // Haystack filter. Initialized from `personMarker` for back-compat with
+  // callers that haven't migrated. Only meaningful when refTarget==='person'.
+  const [activeRoles, setActiveRoles] = useState<PersonMarker[]>(
+    refTarget === 'person' && personMarker ? [personMarker] : [],
+  );
+  // Courts that have at least one Person attached (via PersonRole→Case→Court).
+  // Populated on first open of a Person picker. Empty until then.
+  const [courtChoices, setCourtChoices] = useState<{ id: string; name: string }[]>([]);
+  // Currently selected court chip (canonical '@<id>') — narrows results to
+  // persons attached to that court. null = no court filter.
+  const [activeCourtId, setActiveCourtId] = useState<string | null>(null);
+  // PersonIds attached to `activeCourtId`. Used to intersect with Haystack
+  // person results client-side, since the Haystack filter only sees
+  // `json_extract(tags,'$.X')` on the Person row — not joined PersonRole.
+  const [courtPersonIds, setCourtPersonIds] = useState<Set<string> | null>(null);
+
+  const toggleRole = useCallback((m: PersonMarker) => {
+    setActiveRoles((cur) =>
+      cur.includes(m) ? cur.filter((x) => x !== m) : [...cur, m],
+    );
+  }, []);
+  const toggleCourt = useCallback((id: string) => {
+    setActiveCourtId((cur) => (cur === id ? null : id));
+  }, []);
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
@@ -504,9 +639,18 @@ export function RefPicker({
     inputRef.current?.focus();
   }, []);
 
-  // Fetch on debounced query change
+  const rolesKey = [...activeRoles].sort().join('+');
+
+  // Fetch on debounced query / role / court change.
   useEffect(() => {
-    const key = cacheKey(refTarget, personMarker, scopeFilter, debounced);
+    const key = cacheKey(
+      refTarget,
+      activeRoles,
+      scopeFilter,
+      scopeCaseId,
+      activeCourtId ?? undefined,
+      debounced,
+    );
     const cached = cacheGet(key);
     if (cached) {
       setResults(cached);
@@ -515,14 +659,18 @@ export function RefPicker({
     }
     const ctl = new AbortController();
     setLoading(true);
-    fetchResults(refTarget, personMarker, scopeFilter, debounced, ctl.signal)
+    fetchResults(refTarget, activeRoles, scopeFilter, scopeCaseId, debounced, ctl.signal)
       .then((out) => {
         if (ctl.signal.aborted) return;
         setUnauthorized(out.unauthorized);
         const excludeSet = new Set(excludeIds ?? []);
-        const filtered = excludeSet.size > 0
+        let filtered = excludeSet.size > 0
           ? out.results.filter((r) => !excludeSet.has(r.id))
           : out.results;
+        // Court intersect — only for person picker with an active court chip.
+        if (refTarget === 'person' && activeCourtId && courtPersonIds) {
+          filtered = filtered.filter((r) => courtPersonIds.has(r.id));
+        }
         setResults(filtered);
         setHighlight(0);
         // Cache the unfiltered set so a sibling picker without the same
@@ -533,8 +681,48 @@ export function RefPicker({
         if (!ctl.signal.aborted) setLoading(false);
       });
     return () => ctl.abort();
-    // excludeKey changes whenever excludeIds set membership changes.
-  }, [refTarget, personMarker, scopeFilter, debounced, excludeKey, excludeIds]);
+    // rolesKey + activeCourtId + courtPersonIds are intentional triggers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refTarget, rolesKey, scopeFilter, scopeCaseId, debounced, excludeKey, excludeIds, activeCourtId, courtPersonIds]);
+
+  // Load court choices once for person pickers.
+  useEffect(() => {
+    if (refTarget !== 'person') return;
+    let aborted = false;
+    fetch('/api/people/courts')
+      .then((r) => (r.ok ? r.json() : { courts: [] }))
+      .then((j: { courts?: { id: string; name: string }[] }) => {
+        if (aborted) return;
+        setCourtChoices(Array.isArray(j.courts) ? j.courts : []);
+      })
+      .catch(() => {
+        if (!aborted) setCourtChoices([]);
+      });
+    return () => {
+      aborted = true;
+    };
+  }, [refTarget]);
+
+  // Load person ids for selected court (or clear when none).
+  useEffect(() => {
+    if (refTarget !== 'person' || !activeCourtId) {
+      setCourtPersonIds(null);
+      return;
+    }
+    let aborted = false;
+    fetch(`/api/people/courts?courtId=${encodeURIComponent(activeCourtId)}`)
+      .then((r) => (r.ok ? r.json() : { personIds: [] }))
+      .then((j: { personIds?: string[] }) => {
+        if (aborted) return;
+        setCourtPersonIds(new Set(Array.isArray(j.personIds) ? j.personIds : []));
+      })
+      .catch(() => {
+        if (!aborted) setCourtPersonIds(new Set());
+      });
+    return () => {
+      aborted = true;
+    };
+  }, [refTarget, activeCourtId]);
 
   // Click-outside
   useEffect(() => {
@@ -684,6 +872,58 @@ export function RefPicker({
         </div>
       )}
 
+      {/* Person role + court filter chips */}
+      {refTarget === 'person' && (
+        <div className="px-2 py-1.5 border-b border-gray-100 bg-white space-y-1">
+          <div className="flex flex-wrap gap-1">
+            {PERSON_ROLE_CHIPS.map((c) => {
+              const on = activeRoles.includes(c.marker);
+              return (
+                <button
+                  key={c.marker}
+                  type="button"
+                  onClick={() => toggleRole(c.marker)}
+                  className={
+                    'px-1.5 py-0.5 rounded text-[11px] border transition-colors ' +
+                    (on
+                      ? 'bg-blue-100 text-blue-800 border-blue-300'
+                      : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100')
+                  }
+                  aria-pressed={on}
+                  title={`Filter by ${c.label}`}
+                >
+                  {c.label}
+                </button>
+              );
+            })}
+          </div>
+          {courtChoices.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {courtChoices.map((co) => {
+                const on = activeCourtId === co.id;
+                return (
+                  <button
+                    key={co.id}
+                    type="button"
+                    onClick={() => toggleCourt(co.id)}
+                    className={
+                      'px-1.5 py-0.5 rounded text-[10px] border transition-colors max-w-[200px] truncate ' +
+                      (on
+                        ? 'bg-blue-100 text-blue-800 border-blue-300'
+                        : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100')
+                    }
+                    aria-pressed={on}
+                    title={`Filter to people at ${co.name}`}
+                  >
+                    {co.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Input */}
       <div className="px-2 py-1.5 border-b border-gray-100">
         <input
@@ -723,7 +963,21 @@ export function RefPicker({
                     i === highlight ? 'bg-blue-50' : 'hover:bg-gray-50'
                   }`}
                 >
-                  <span className="text-[12px] text-gray-900 truncate">{r.primary}</span>
+                  <span className="flex items-center gap-1 min-w-0">
+                    <span className="text-[12px] text-gray-900 truncate">{r.primary}</span>
+                    {r.badges && r.badges.length > 0 && (
+                      <span className="flex flex-wrap gap-1 shrink-0">
+                        {r.badges.map((b) => (
+                          <span
+                            key={b}
+                            className="text-[9px] px-1 py-0 rounded bg-blue-50 text-blue-700 border border-blue-200"
+                          >
+                            {b}
+                          </span>
+                        ))}
+                      </span>
+                    )}
+                  </span>
                   {r.secondary && (
                     <span className="text-[10px] text-gray-500 truncate">{r.secondary}</span>
                   )}

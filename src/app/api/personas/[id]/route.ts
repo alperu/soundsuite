@@ -107,11 +107,28 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
     if (body.jurisdictionId !== undefined) patch.jurisdictionId = body.jurisdictionId ?? null
 
     // Merge intrinsic tags. `person` marker is sticky.
+    //
+    // Two body shapes are accepted:
+    //   1. `markers: string[]`  — the authoritative array of intrinsic
+    //      markers the persona should carry. Any ALLOWED_INTRINSIC key not
+    //      in the array is removed; keys in the array are set to `true`.
+    //      This is what the persona edit UI (`updatePersona` in
+    //      lib/personas/client.ts) sends.
+    //   2. `intrinsicTags: { [marker]: boolean }` — legacy per-key patch
+    //      shape: only the keys present are modified, others left alone.
     const currentTags = (typeof existing.tags === 'string'
       ? JSON.parse(existing.tags as unknown as string)
       : (existing.tags as Record<string, unknown>)) ?? {}
     const nextTags: Record<string, unknown> = { ...currentTags, person: true }
-    if (body.intrinsicTags && typeof body.intrinsicTags === 'object') {
+    if (Array.isArray(body.markers)) {
+      const wanted = new Set(
+        body.markers.filter((m: unknown): m is string => typeof m === 'string'),
+      )
+      for (const k of ALLOWED_INTRINSIC) {
+        if (wanted.has(k)) nextTags[k] = true
+        else delete nextTags[k]
+      }
+    } else if (body.intrinsicTags && typeof body.intrinsicTags === 'object') {
       for (const k of ALLOWED_INTRINSIC) {
         if (k in body.intrinsicTags) {
           if (body.intrinsicTags[k]) nextTags[k] = true

@@ -12,7 +12,7 @@ import { QueryPreprocessor } from '../../search/query-preprocessor';
 import { rerank } from '../../search/reranker';
 import { getChatVectorStore } from '../../chat/chat-vector-store';
 import { parseBooleanQuery } from '../../search/boolean-query';
-import { astToLanceQuery, BooleanFtsConversionError } from '../../search/boolean-to-fts';
+import { astToLanceQuery, BooleanFtsConversionError, extractFieldFilters } from '../../search/boolean-to-fts';
 
 export interface QueryCaseKnowledgeParams {
   query: string;
@@ -145,19 +145,38 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
 
     // Build FTS query from extracted keywords using BooleanQuery
     let ftsQuery: FullTextQuery | undefined;
+    // Field-filter SQL clauses lifted out of the AST (see boolean-to-fts.ts).
+    // Merged into searchQuery.filter._rawWhere below.
+    const fieldWhereClauses: string[] = [];
     if (searchMode === 'hybrid' || searchMode === 'keyword') {
       let booleanHandled = false;
       if (mode === 'boolean') {
         const parsed = parseBooleanQuery(query);
-        if (parsed.ok && parsed.hasOperators) {
-          try {
-            ftsQuery = astToLanceQuery(parsed.ast);
+        if (parsed.ok) {
+          // Extract field filters first — strips field-qualified TERMs whose
+          // ancestors are all AND, returns SQL where-clauses + rewritten AST.
+          const { whereClauses, ast: strippedAst } = extractFieldFilters(parsed.ast);
+          fieldWhereClauses.push(...whereClauses);
+
+          // If the AST still has boolean operators OR field filters were
+          // extracted (a single field term should also engage the boolean path
+          // so the .where() lands on LanceDB), build an FTS query.
+          const shouldUseBoolean = parsed.hasOperators || whereClauses.length > 0;
+          if (shouldUseBoolean && strippedAst) {
+            try {
+              ftsQuery = astToLanceQuery(strippedAst);
+              booleanHandled = true;
+            } catch (err) {
+              const msg = err instanceof BooleanFtsConversionError ? err.message : String(err);
+              context.logger.warn?.('Boolean FTS conversion failed — falling back to legacy', { error: msg });
+            }
+          } else if (shouldUseBoolean && !strippedAst) {
+            // Pure field-filter query like `case:X` with no text component.
+            // We have where-clauses; no FTS body needed. Mark as handled so
+            // we skip the keyword fallback.
             booleanHandled = true;
-          } catch (err) {
-            const msg = err instanceof BooleanFtsConversionError ? err.message : String(err);
-            context.logger.warn?.('Boolean FTS conversion failed — falling back to legacy', { error: msg });
           }
-        } else if (!parsed.ok) {
+        } else {
           context.logger.warn?.('Boolean parse failed — falling back to legacy', {
             error: parsed.error,
             position: parsed.position,
@@ -192,6 +211,12 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     // Apply case filter if provided
     if (caseId) {
       searchQuery.filter = { caseId };
+    }
+
+    // Merge field-qualified filter clauses lifted from the boolean AST.
+    if (fieldWhereClauses.length > 0) {
+      if (!searchQuery.filter) searchQuery.filter = {};
+      searchQuery.filter._rawWhere = fieldWhereClauses;
     }
 
     // Perform primary search
