@@ -12,6 +12,7 @@ import { streamAI } from '../ai/ai-provider';
 import type { AIProviderKey } from '../ai/models';
 import { rerank, RerankableResult } from './reranker';
 import type { ToolRegistry } from '../mcp/tool-registry';
+import { parseBooleanQuery, astSerialize } from './boolean-query';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -132,6 +133,18 @@ export async function decomposeQuery(
   query: string,
   options?: { provider?: string; model?: string; history?: ConversationTurn[]; thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal },
 ): Promise<DecompositionResult> {
+  // Boolean-syntax bypass — when the user wrote explicit operators, top-level
+  // OR branches become parallel sub-queries; everything else is left intact.
+  // Each branch is re-serialized so the downstream pipeline can re-parse it.
+  const parsedBool = parseBooleanQuery(query);
+  if (parsedBool.ok && parsedBool.hasOperators) {
+    const branches = parsedBool.ast.op === 'OR' ? parsedBool.ast.children : [parsedBool.ast];
+    const subQueries = branches.map(astSerialize).filter(s => s.trim().length > 0);
+    if (subQueries.length > 0) {
+      return { subQueries, intent: query };
+    }
+  }
+
   try {
     // For follow-ups, include conversation context so decomposition is aware of prior discussion
     let userContent = query;

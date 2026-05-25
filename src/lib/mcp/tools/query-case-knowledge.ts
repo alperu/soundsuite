@@ -11,6 +11,8 @@ import { detectLineNumbers } from '../../citations/line-number-detector';
 import { QueryPreprocessor } from '../../search/query-preprocessor';
 import { rerank } from '../../search/reranker';
 import { getChatVectorStore } from '../../chat/chat-vector-store';
+import { parseBooleanQuery } from '../../search/boolean-query';
+import { astToLanceQuery, BooleanFtsConversionError } from '../../search/boolean-to-fts';
 
 export interface QueryCaseKnowledgeParams {
   query: string;
@@ -18,6 +20,8 @@ export interface QueryCaseKnowledgeParams {
   chatId?: string;
   limit?: number;
   searchMode?: 'vector' | 'hybrid' | 'keyword';
+  /** 'boolean' parses the query as a full boolean expression with AND/OR/NOT, phrases, and `-`. */
+  mode?: 'legacy' | 'boolean';
 }
 
 export interface QueryCaseKnowledgeResult {
@@ -92,7 +96,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     context: ToolExecutionContext,
     _config: ToolConfigEntry,
   ): Promise<QueryCaseKnowledgeResult> {
-    const { query, caseId, chatId, limit = 10, searchMode = 'hybrid' } = params;
+    const { query, caseId, chatId, limit = 10, searchMode = 'hybrid', mode = 'legacy' } = params;
     const chatHitChunkIds = new Set<string>();
 
     // Over-fetch candidates so the cross-encoder reranker has a larger pool to judge.
@@ -142,7 +146,25 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     // Build FTS query from extracted keywords using BooleanQuery
     let ftsQuery: FullTextQuery | undefined;
     if (searchMode === 'hybrid' || searchMode === 'keyword') {
-      if (processed.keywords.length > 0) {
+      let booleanHandled = false;
+      if (mode === 'boolean') {
+        const parsed = parseBooleanQuery(query);
+        if (parsed.ok && parsed.hasOperators) {
+          try {
+            ftsQuery = astToLanceQuery(parsed.ast);
+            booleanHandled = true;
+          } catch (err) {
+            const msg = err instanceof BooleanFtsConversionError ? err.message : String(err);
+            context.logger.warn?.('Boolean FTS conversion failed — falling back to legacy', { error: msg });
+          }
+        } else if (!parsed.ok) {
+          context.logger.warn?.('Boolean parse failed — falling back to legacy', {
+            error: parsed.error,
+            position: parsed.position,
+          });
+        }
+      }
+      if (!booleanHandled && processed.keywords.length > 0) {
         const clauses: [Occur, FullTextQuery][] = processed.keywords.map((kw) => [
           Occur.Should,
           new MatchQuery(kw, 'text') as FullTextQuery,

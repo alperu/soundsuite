@@ -27,6 +27,7 @@ export async function POST(request: NextRequest) {
       chatId,
       limit = 20,
       searchMode = 'hybrid',
+      mode,
       workflowId,
       workflowIds,
       history,
@@ -42,6 +43,7 @@ export async function POST(request: NextRequest) {
       chatId?: string;
       limit?: number;
       searchMode?: 'vector' | 'hybrid' | 'keyword';
+      mode?: 'legacy' | 'boolean';
       workflowId?: string;
       workflowIds?: string[];
       history?: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -97,6 +99,7 @@ export async function POST(request: NextRequest) {
             ...(chatId ? { chatId } : {}),
             limit,
             searchMode,
+            ...(mode ? { mode } : {}),
           });
 
           if (!searchResult.success) {

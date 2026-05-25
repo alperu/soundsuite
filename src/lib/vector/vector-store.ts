@@ -24,7 +24,7 @@ import { EmbeddedChunk } from '../ingestion/embedding-provider';
 import { logger } from '@/lib/logger';
 
 // Re-export query types for consumers
-export { MatchQuery, BooleanQuery, Occur, Operator } from '@lancedb/lancedb';
+export { MatchQuery, PhraseQuery, BooleanQuery, Occur, Operator } from '@lancedb/lancedb';
 export type { FullTextQuery } from '@lancedb/lancedb';
 
 /**

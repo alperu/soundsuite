@@ -28,6 +28,7 @@ import {
   type HaystackFilterInputHandle,
 } from './search/haystack-filter-input';
 import { SampleQueryPanel } from './search/sample-query-panel';
+import { parseBooleanQuery, type ParseResult } from '@/lib/search/boolean-query';
 import { TokenNameSuggestions } from './search/token-name-suggestions';
 import {
   ActiveTokenSuggestions,
@@ -308,6 +309,11 @@ export default function SearchInterface({
 
   // AI search state
   const [aiQuery, setAiQuery] = useState('');
+  // Boolean ("Advanced") query mode — enables AND/OR/NOT/-foo/"phrase"/(group) parsing server-side
+  const [booleanMode, setBooleanMode] = usePersistedState<boolean>('search.booleanMode', false);
+  const [boolParseResult, setBoolParseResult] = useState<ParseResult | null>(null);
+  const [boolHintDismissed, setBoolHintDismissed] = usePersistedState<boolean>('search.boolHintDismissed', false);
+  const [boolHintVisible, setBoolHintVisible] = useState(false);
   const [aiCaseId, setAiCaseId] = usePersistedState<string>('search.aiCaseId', '');
   const [aiProvider, setAiProvider] = usePersistedState<string>('search.aiProvider', '');
   const [aiModel, setAiModel] = usePersistedState<string>('search.aiModel', '');
@@ -633,6 +639,42 @@ export default function SearchInterface({
     setPreference('search.collapsedCategories', Array.from(collapsedCats)).catch(() => {});
   }, [collapsedCats]);
 
+  // Debounced boolean-syntax check on the AI query — drives the inline
+  // syntax indicator and (when Advanced is off) the one-time hint toast.
+  useEffect(() => {
+    const trimmed = aiQuery.trim();
+    if (!trimmed) {
+      setBoolParseResult(null);
+      setBoolHintVisible(false);
+      return;
+    }
+    const t = setTimeout(() => {
+      const r = parseBooleanQuery(trimmed);
+      setBoolParseResult(r);
+      if (!booleanMode && !boolHintDismissed && r.ok && r.hasOperators) {
+        setBoolHintVisible(true);
+      } else {
+        setBoolHintVisible(false);
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [aiQuery, booleanMode, boolHintDismissed]);
+
+  // Summary counts for the "boolean parsed" pill
+  const boolSummary = React.useMemo(() => {
+    if (!boolParseResult || !boolParseResult.ok || !boolParseResult.hasOperators) return null;
+    let terms = 0, ops = 0;
+    const walk = (n: any) => {
+      if (!n) return;
+      if (n.op === 'TERM') { terms++; return; }
+      if (n.op === 'NOT') { ops++; walk(n.child); return; }
+      ops++;
+      for (const c of n.children ?? []) walk(c);
+    };
+    walk(boolParseResult.ast);
+    return { terms, ops };
+  }, [boolParseResult]);
+
   // Dynamic Ollama models — fetched from the running Ollama instance
   const [ollamaModels, setOllamaModels] = useState<AIModelDef[] | null>(null);
   const [ollamaModelsLoading, setOllamaModelsLoading] = useState(false);
@@ -827,6 +869,7 @@ export default function SearchInterface({
         maxTokens,
         effort,
         useRlm,
+        ...(booleanMode ? { mode: 'boolean' } : {}),
         ...(history && history.length > 0 ? { history } : {}),
         ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
       }),
@@ -2018,7 +2061,74 @@ export default function SearchInterface({
                       </button>
                     )}
                   </form>
+                  {/* Boolean (advanced) query syntax — toggle, live syntax check, examples */}
+                  <div className="mt-1.5">
+                    {boolParseResult && !boolParseResult.ok && booleanMode && aiQuery.trim() && (
+                      <div className="text-[10px] font-mono text-red-700 bg-red-50 border border-red-200 px-2 py-1 rounded mb-1">
+                        <span className="font-sans font-medium">Syntax:</span> {boolParseResult.error} <span className="text-red-500">(col {boolParseResult.position + 1})</span>
+                      </div>
+                    )}
+                    {boolHintVisible && (
+                      <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 px-2 py-1 rounded mb-1 flex items-center gap-2">
+                        <span className="flex-1">Looks like a boolean query — turn on Advanced to enable AND / OR / NOT / phrases.</span>
+                        <button
+                          type="button"
+                          onClick={() => { setBooleanMode(true); setBoolHintVisible(false); }}
+                          className="px-2 py-0.5 text-[10px] bg-amber-600 text-white rounded hover:bg-amber-700"
+                        >Enable</button>
+                        <button
+                          type="button"
+                          onClick={() => { setBoolHintDismissed(true); setBoolHintVisible(false); }}
+                          className="px-1 text-[10px] text-amber-700 hover:text-amber-900"
+                          aria-label="Dismiss"
+                        >×</button>
+                      </div>
+                    )}
+                    {booleanMode && (
+                      <div className="flex items-center gap-2 flex-wrap text-[10px] text-gray-500 mb-1">
+                        <span className="font-medium text-gray-600">Examples:</span>
+                        {[
+                          'motion AND compel',
+                          '"23-CV-1234"',
+                          'appeal OR petition',
+                          '-dismissed',
+                        ].map(ex => (
+                          <button
+                            key={ex}
+                            type="button"
+                            onClick={() => {
+                              const el = aiQueryRef.current;
+                              if (el && typeof (el as any).setRangeText === 'function') {
+                                const insert = (el.value && !el.value.endsWith(' ') ? ' ' : '') + ex;
+                                (el as any).setRangeText(insert, el.selectionStart ?? el.value.length, el.selectionEnd ?? el.value.length, 'end');
+                                setAiQuery(el.value);
+                                el.focus();
+                              } else {
+                                setAiQuery(prev => (prev && !prev.endsWith(' ') ? prev + ' ' : prev) + ex);
+                              }
+                            }}
+                            className="px-1.5 py-0.5 font-mono bg-purple-50 border border-purple-200 text-purple-700 rounded hover:bg-purple-100"
+                          >{ex}</button>
+                        ))}
+                        {boolSummary && boolParseResult?.ok && (
+                          <span className="ml-auto inline-flex items-center gap-1 px-1.5 py-0.5 bg-green-50 border border-green-200 text-green-700 rounded">
+                            <span className="w-1 h-1 rounded-full bg-green-500" />
+                            boolean parsed: {boolSummary.terms} term{boolSummary.terms === 1 ? '' : 's'} / {boolSummary.ops} operator{boolSummary.ops === 1 ? '' : 's'}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
                   <div className="flex items-center justify-center gap-3 mt-1.5 flex-wrap">
+                    <label className="inline-flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={booleanMode}
+                        onChange={e => setBooleanMode(e.target.checked)}
+                        className="w-3 h-3"
+                      />
+                      Advanced (boolean)
+                    </label>
                     <label className="inline-flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
                       <input
                         type="checkbox"
@@ -2395,6 +2505,21 @@ function SearchDocsPanel({ mode, embeddingInfo, directMode }: { mode: SearchMode
             in your documents using vector similarity, then sends them as context to the selected AI
             model to generate an answer grounded in your actual case materials.
           </p>
+        </div>
+
+        <div>
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Boolean query syntax</h4>
+          <p className="text-[11px] text-gray-600 leading-relaxed mb-2">
+            Toggle <em>Advanced (boolean)</em> under the input to enable explicit operators on the
+            keyword arm of the search. The vector arm continues to run on the original query.
+          </p>
+          <ul className="text-[11px] text-gray-600 space-y-1">
+            <li><code className="bg-gray-100 px-1 rounded">A AND B</code> — both terms must match (implicit between adjacent words)</li>
+            <li><code className="bg-gray-100 px-1 rounded">A OR B</code> — either term matches</li>
+            <li><code className="bg-gray-100 px-1 rounded">NOT B</code> or <code className="bg-gray-100 px-1 rounded">-B</code> — exclude documents matching B</li>
+            <li><code className="bg-gray-100 px-1 rounded">&quot;motion to compel&quot;</code> — exact phrase</li>
+            <li><code className="bg-gray-100 px-1 rounded">(A AND B) OR C</code> — group with parentheses; AND binds tighter than OR</li>
+          </ul>
         </div>
 
         <div>
