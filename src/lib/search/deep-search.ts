@@ -1058,12 +1058,20 @@ Now write the report. If you need more evidence on a specific aspect, call query
     { role: 'user' as const, content: userContent },
   ];
 
+  // RLM context window is 32K (Qwen3-8B with --max-model-len 32768).
+  // vLLM enforces prompt_tokens + max_tokens <= max_model_len; if we pass
+  // through a large user-facing maxTokens (e.g. 32768 from the UI for cloud
+  // models) the prompt has zero room and vLLM 400s. Cap output at 4096 —
+  // synthesis reports are well under that, and tool-call rounds are tiny.
+  const RLM_MAX_OUTPUT_TOKENS = 4096;
+  const rlmMaxTokens = Math.min(options.maxTokens ?? RLM_MAX_OUTPUT_TOKENS, RLM_MAX_OUTPUT_TOKENS);
+
   for await (const ev of runRlmWithTools({
     messages,
     tools: RLM_TOOLS,
     executeTool,
     maxRounds: options.maxRounds ?? 4,
-    maxTokens: options.maxTokens ?? 4096,
+    maxTokens: rlmMaxTokens,
     temperature: 0.3,
     signal: options.signal,
   })) {
