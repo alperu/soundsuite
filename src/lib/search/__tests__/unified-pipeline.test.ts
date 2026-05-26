@@ -205,6 +205,93 @@ describe('unified-pipeline — not semantics', () => {
   });
 });
 
+describe('unified-pipeline — XETO marker tags (#66)', () => {
+  test('case->jurisdictionTx==true → tags JSON path predicate', async () => {
+    const ast = parse('case->jurisdictionTx==true');
+    const { whereClauses, prismaRequests } = extractFieldFilters(ast);
+    expect(whereClauses).toEqual([]);
+    expect(prismaRequests).toHaveLength(1);
+    expect(prismaRequests[0].path).toEqual(['case', 'jurisdictionTx']);
+    expect(prismaRequests[0].value).toBe('true');
+
+    const client = makeClient({ cases: [{ id: 'c-1' }, { id: 'c-2' }] });
+    const { whereClauses: more } = await resolvePrismaFilters(prismaRequests, client);
+    // Prisma JSON-path filter shape (Prisma 5+ / SQLite supported).
+    expect(client.case.findMany).toHaveBeenCalledWith({
+      where: { tags: { path: ['jurisdictionTx'], equals: true } },
+      select: { id: true },
+    });
+    expect(more).toEqual([`case_id IN ('c-1', 'c-2')`]);
+  });
+
+  test('case->site==true uses the same path predicate', async () => {
+    const ast = parse('case->site==true');
+    const { prismaRequests } = extractFieldFilters(ast);
+    const client = makeClient({ cases: [{ id: 'c-7' }] });
+    await resolvePrismaFilters(prismaRequests, client);
+    expect(client.case.findMany).toHaveBeenCalledWith({
+      where: { tags: { path: ['site'], equals: true } },
+      select: { id: true },
+    });
+  });
+
+  test('case->jurisdictionTx==false flips the predicate value', async () => {
+    const ast = parse('case->jurisdictionTx==false');
+    const { prismaRequests } = extractFieldFilters(ast);
+    const client = makeClient({ cases: [] });
+    await resolvePrismaFilters(prismaRequests, client);
+    expect(client.case.findMany).toHaveBeenCalledWith({
+      where: { tags: { path: ['jurisdictionTx'], equals: false } },
+      select: { id: true },
+    });
+  });
+
+  test('case->jurisdictionTx!=true inverts equality to expect false', async () => {
+    const ast = parse('case->jurisdictionTx!=true');
+    const { prismaRequests } = extractFieldFilters(ast);
+    const client = makeClient({ cases: [] });
+    await resolvePrismaFilters(prismaRequests, client);
+    expect(client.case.findMany).toHaveBeenCalledWith({
+      where: { tags: { path: ['jurisdictionTx'], equals: false } },
+      select: { id: true },
+    });
+  });
+
+  test('case->jurisdiction=="California" still works (column path, not marker)', async () => {
+    const ast = parse('case->jurisdiction=="California"');
+    const { prismaRequests } = extractFieldFilters(ast);
+    const client = makeClient({ cases: [{ id: 'c-x' }] });
+    await resolvePrismaFilters(prismaRequests, client);
+    // Column-backed equality — NOT a JSON predicate.
+    expect(client.case.findMany).toHaveBeenCalledWith({
+      where: { jurisdiction: 'California' },
+      select: { id: true },
+    });
+  });
+
+  test('unknown marker `case->bogusMarker==true` degrades to bare text', async () => {
+    const ast = parse('case->bogusMarker==true');
+    const { whereClauses, prismaRequests, ast: stripped } = extractFieldFilters(ast);
+    expect(whereClauses).toEqual([]);
+    expect(prismaRequests).toEqual([]);
+    expect(stripped).toEqual({
+      op: 'TERM', value: 'case->bogusMarker==true', phrase: false,
+    });
+  });
+
+  test('marker with non-boolean RHS returns null (degrade)', async () => {
+    // `case->jurisdictionTx=="banana"` — boolean predicate path requires
+    // true/false RHS; arbitrary string falls back via the resolver returning
+    // null, which lands in `degraded[]`.
+    const ast = parse('case->jurisdictionTx=="banana"');
+    const { prismaRequests } = extractFieldFilters(ast);
+    const client = makeClient();
+    const { whereClauses, degraded } = await resolvePrismaFilters(prismaRequests, client);
+    expect(whereClauses).toEqual([]);
+    expect(degraded).toHaveLength(1);
+  });
+});
+
 describe('unified-pipeline — combined paths', () => {
   test('caseRef==@u1 and case->jurisdiction=="TX" → both lifts, one Prisma call', async () => {
     const ast = parse('caseRef==@u1 and case->jurisdiction=="TX"');

@@ -97,6 +97,12 @@ export const CATALOGUE: CatalogueSection[] = [
       { name: 'case->country',      type: 'string', example: 'case->country=="USA"' },
       { name: 'case->name',         type: 'string', example: 'case->name=="Smith v. Jones"' },
       { name: 'case->caseNumber',   type: 'string', example: 'case->caseNumber=="23-CV-1234"' },
+      // Task #66: XETO marker tags (presence flags in `Case.tags` JSON).
+      { name: 'case->case',            type: 'marker', example: 'case->case==true' },
+      { name: 'case->site',            type: 'marker', example: 'case->site==true' },
+      { name: 'case->jurisdictionTx',  type: 'marker', example: 'case->jurisdictionTx==true' },
+      { name: 'case->jurisdictionCa',  type: 'marker', example: 'case->jurisdictionCa==true' },
+      { name: 'case->jurisdictionNy',  type: 'marker', example: 'case->jurisdictionNy==true' },
     ],
   },
   {
@@ -161,6 +167,7 @@ export const FEATURED_EXAMPLES: string[] = [
   'motion and motionType=="disqualification"',         // marker + scalar
   'caseRef==@<case-uuid>',                             // ref
   'case->judge->displayName=="Roberts"',               // path traversal
+  'case->jurisdictionTx==true',                        // XETO marker tag (#66)
 ];
 
 /** Comparison operators rendered as the top toolbar. */
