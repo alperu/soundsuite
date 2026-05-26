@@ -45,6 +45,7 @@ import {
 import type { SampleQuery } from '@/lib/search/sample-queries';
 import {
   buildHaystackFilter,
+  TOKEN_MAP,
   type FilterChip,
 } from '@/lib/search/haystack-query-builder';
 
@@ -85,21 +86,10 @@ interface AISearchResult {
   usage: { inputTokens: number; outputTokens: number };
 }
 
-interface DeepSearchProgress {
-  step: 'decomposing' | 'searching' | 'pattern_searching' | 'merging' | 'reranking' | 'generating' | 'done' | 'warning';
-  message: string;
-  subQueryIndex?: number;
-  subQueryTotal?: number;
-  subQueries?: string[];
-  intent?: string;
-  searchStats?: Partial<{
-    totalRetrieved: number;
-    uniqueAfterDedup: number;
-    finalAfterRerank: number;
-    subQueryCount: number;
-  }>;
-  warnings?: Array<{ source: string; host?: string; message: string; count?: number }>;
-}
+// DeepSearchProgress now imported from '@/lib/search/deep-search' (added below
+// alongside DeepSearchResult import) so the rlm-synthesis/rlm-subcall steps
+// and rlm-* fields stay in sync with the orchestrator.
+import type { DeepSearchProgress } from '@/lib/search/deep-search';
 
 interface AIConversationTurn {
   query: string;
@@ -448,7 +438,9 @@ export default function SearchInterface({
       if (!activeToken) return;
       setHaystackChips((prev) => [
         ...prev,
-        { key: activeToken.prefix, value: picked.value, label: picked.label },
+        // Preserve the user-typed operator (>=, <=, etc.) — without this the
+        // chip falls back to `==` and the chip render shows the wrong op.
+        { key: activeToken.prefix, value: picked.value, label: picked.label, op: activeToken.op },
       ]);
       setAiQuery((prev) => {
         const before = prev.slice(0, activeToken.startIndex);
@@ -521,16 +513,19 @@ export default function SearchInterface({
   // (with a leading space if non-empty) triggers HaystackFilterInput's
   // prefix-detector, which opens the matching picker on the next render.
   const handleSampleToken = useCallback((token: string) => {
+    // Use the token's canonical operator from TOKEN_MAP (e.g. filedAfter → >=);
+    // fall back to `==` for equality fields.
+    const op = TOKEN_MAP[token]?.op ?? '==';
     setAiQuery((prev) => {
       const trimmed = prev.replace(/\s+$/, '');
-      if (!trimmed) return `${token}:`;
+      if (!trimmed) return `${token}${op}`;
       // Replace a dangling partial token (e.g. user typed "jud") with the
       // selected one. Otherwise append after a single space.
       const partial = trimmed.match(/(?:^|\s)(\w+)$/);
       if (partial) {
-        return trimmed.replace(/(?:^|\s)(\w+)$/, (m) => (m.startsWith(' ') ? ` ${token}:` : `${token}:`));
+        return trimmed.replace(/(?:^|\s)(\w+)$/, (m) => (m.startsWith(' ') ? ` ${token}${op}` : `${token}${op}`));
       }
-      return `${trimmed} ${token}:`;
+      return `${trimmed} ${token}${op}`;
     });
     aiQueryRef.current?.focus();
   }, []);
@@ -1012,6 +1007,7 @@ export default function SearchInterface({
       maxTokens,
       effort,
       multiPass,
+      useRlm,
       ...(history && history.length > 0 ? { history } : {}),
       ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
     });
@@ -2948,13 +2944,21 @@ const STEP_LABELS: Record<string, string> = {
   merging: 'Deduplicating & Reranking',
   reranking: 'Reranking Results',
   generating: 'Generating Report',
+  'rlm-synthesis': 'RLM Synthesis',
+  'rlm-subcall': 'RLM Recursive Sub-Call',
   done: 'Complete',
 };
 
 const STEP_ORDER = ['decomposing', 'searching', 'pattern_searching', 'merging', 'generating', 'done'] as const;
 
 function DeepSearchProgressCard({ progress, startTime, tokenCount }: { progress: DeepSearchProgress; startTime: number; tokenCount: number }) {
-  const currentIdx = STEP_ORDER.indexOf(progress.step as typeof STEP_ORDER[number]);
+  // RLM synthesis/sub-call rounds are part of the synthesis phase from the
+  // user's perspective — collapse onto 'generating' so the top progress bar
+  // doesn't visually regress to "nothing happening" mid-recursion.
+  const stepForOrder = (progress.step === 'rlm-synthesis' || progress.step === 'rlm-subcall')
+    ? 'generating'
+    : progress.step;
+  const currentIdx = STEP_ORDER.indexOf(stepForOrder as typeof STEP_ORDER[number]);
   const [elapsed, setElapsed] = useState(0);
   const [expanded, setExpanded] = useState(false);
   useEffect(() => {
@@ -3013,6 +3017,23 @@ function DeepSearchProgressCard({ progress, startTime, tokenCount }: { progress:
         <div>
           <p className="text-sm font-medium text-gray-900">{STEP_LABELS[progress.step] || progress.step}</p>
           <p className="text-xs text-gray-500 mt-0.5">{progress.message}</p>
+          {(progress.step === 'rlm-synthesis' || progress.step === 'rlm-subcall') && (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-medium">ss-rlm</span>
+              {progress.rlmHost && (
+                <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 font-mono">{progress.rlmHost}</span>
+              )}
+              {progress.rlmRound !== undefined && (
+                <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700">round {progress.rlmRound}</span>
+              )}
+              {progress.rlmChunkCount !== undefined && (
+                <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700">{progress.rlmChunkCount} excerpts</span>
+              )}
+              {progress.rlmSubQuery && (
+                <span className="text-gray-600 italic truncate max-w-full">"{progress.rlmSubQuery}"</span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Sub-queries (shown once decomposition is done) */}
@@ -3099,7 +3120,16 @@ const DeepSearchResultCard = React.memo(function DeepSearchResultCard({ result, 
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium text-gray-900">Research Report</span>
-            <span className="text-xs bg-white/60 px-1.5 py-0.5 rounded text-gray-600 font-mono">{getProviderName(result.provider)}: {result.model}</span>
+            {result.provider === 'rlm' ? (
+              <span
+                className="text-xs px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-medium border border-emerald-200"
+                title={`Answered by ss-rlm (${result.model}) with recursive query_case_knowledge tool calls`}
+              >
+                ss-rlm · {result.model.replace('mit-oasys/', '')}
+              </span>
+            ) : (
+              <span className="text-xs bg-white/60 px-1.5 py-0.5 rounded text-gray-600 font-mono">{getProviderName(result.provider)}: {result.model}</span>
+            )}
           </div>
           <div className="flex items-center gap-1.5">
             <button

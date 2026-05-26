@@ -213,6 +213,22 @@ export const HaystackFilterInput = forwardRef<
   const [cursor, setCursor] = useState<number>(0);
   // Task #55: hover-pair highlight for paren chips.
   const [hoveredParen, setHoveredParen] = useState<number | null>(null);
+  // Task #61: caret position between chips. Range is 0..chips.length where
+  // chips.length means "input is at the end" (the default and most common
+  // state). Decrementing moves the input visually before the previous chip;
+  // typing or committing a chip inserts at the caret position.
+  const [caretIdx, setCaretIdx] = useState<number>(chips.length);
+  // Clamp when chips change from outside (e.g. another chip is added/removed).
+  useEffect(() => {
+    setCaretIdx((c) => Math.min(Math.max(c, 0), chips.length));
+  }, [chips.length]);
+
+  // Insert a new chip at the current caret position, then advance the caret
+  // past the inserted chip. Used by all chip-commit code paths.
+  const insertChip = useCallback((next: FilterChip) => {
+    onChipsChange([...chips.slice(0, caretIdx), next, ...chips.slice(caretIdx)]);
+    setCaretIdx((c) => c + 1);
+  }, [chips, caretIdx, onChipsChange]);
 
   // ---------------------------------------------------------------------------
   // Active-token detection — runs on every freetext / cursor change.
@@ -260,7 +276,7 @@ export const HaystackFilterInput = forwardRef<
       // Falls back to the token's default op from TOKEN_MAP (e.g. `filedAfter`
       // implies `>=`) and finally `==` for equality fields.
       const op = (srcActive?.op ?? TOKEN_MAP[token]?.op ?? '==') as FieldChipOp;
-      onChipsChange([...chips, { key: token, value, label, op }]);
+      insertChip({ key: token, value, label, op });
       // Strip the matching `token<op>partial` substring out of the freetext.
       const a =
         srcActive ?? activeTokenAtCursor(freetext, cursor) ?? null;
@@ -480,10 +496,30 @@ export const HaystackFilterInput = forwardRef<
         }
       }
 
-      // Backspace at empty input → remove last chip.
-      if (e.key === 'Backspace' && freetext === '' && chips.length > 0) {
+      // Task #61: ArrowLeft / ArrowRight to navigate caret BETWEEN chips.
+      // Triggers only when freetext is empty AND we're not inside a picker —
+      // otherwise the input's native arrow-cursor behavior wins.
+      if (!activeToken && tokenSuggestions.length === 0 && freetext === '') {
+        if (e.key === 'ArrowLeft' && caretIdx > 0) {
+          e.preventDefault();
+          setCaretIdx((c) => Math.max(0, c - 1));
+          return;
+        }
+        if (e.key === 'ArrowRight' && caretIdx < chips.length) {
+          e.preventDefault();
+          setCaretIdx((c) => Math.min(chips.length, c + 1));
+          return;
+        }
+        // Home / End jump caret to far ends.
+        if (e.key === 'Home') { e.preventDefault(); setCaretIdx(0); return; }
+        if (e.key === 'End') { e.preventDefault(); setCaretIdx(chips.length); return; }
+      }
+
+      // Backspace at empty input → remove the chip immediately before the caret.
+      if (e.key === 'Backspace' && freetext === '' && chips.length > 0 && caretIdx > 0) {
         e.preventDefault();
-        onChipsChange(chips.slice(0, -1));
+        onChipsChange([...chips.slice(0, caretIdx - 1), ...chips.slice(caretIdx)]);
+        setCaretIdx((c) => Math.max(0, c - 1));
         return;
       }
 
@@ -506,6 +542,7 @@ export const HaystackFilterInput = forwardRef<
       tokenSuggestions,
       tokenHighlight,
       chips,
+      caretIdx,
       completeToken,
       onChipsChange,
       onSubmit,
@@ -533,6 +570,7 @@ export const HaystackFilterInput = forwardRef<
         onClick={() => inputRef.current?.focus()}
       >
         {chips.map((c, i) => {
+          const renderInner = () => {
           const kind = (c as { kind?: string }).kind;
           // Task #55: operator/paren/term variants. The pill text is uppercase
           // even though canonical syntax is lowercase (matches the
@@ -615,6 +653,25 @@ export const HaystackFilterInput = forwardRef<
               </button>
             </span>
           );
+          };
+          const inner = renderInner();
+          // Task #61: when caret is positioned just before this chip, render
+          // a marker (visible 1px purple bar) so the user sees where the
+          // input will insert the next chip. The actual <input> element
+          // stays at the end of the row; the marker is the visual cue.
+          if (caretIdx === i && freetext === '') {
+            return (
+              <React.Fragment key={`pair-${i}`}>
+                <span
+                  className="inline-block w-px h-5 self-center bg-purple-600 animate-pulse"
+                  aria-hidden="true"
+                  aria-label={`Caret at position ${i}`}
+                />
+                {inner}
+              </React.Fragment>
+            );
+          }
+          return inner;
         })}
         <input
           ref={inputRef}
@@ -634,16 +691,16 @@ export const HaystackFilterInput = forwardRef<
             const insidePicker = activeTokenAtCursor(next, next.length) !== null;
 
             if (!insidePicker && lastChar === '(') {
-              // Drop the typed `(`; insert lparen chip.
+              // Drop the typed `(`; insert lparen chip at caret position.
               const trimmed = next.slice(0, -1);
-              onChipsChange([...chips, { kind: 'lparen' } as FilterChip]);
+              insertChip({ kind: 'lparen' } as FilterChip);
               onFreetextChange(trimmed);
               requestAnimationFrame(syncCursor);
               return;
             }
             if (!insidePicker && lastChar === ')') {
               const trimmed = next.slice(0, -1);
-              onChipsChange([...chips, { kind: 'rparen' } as FilterChip]);
+              insertChip({ kind: 'rparen' } as FilterChip);
               onFreetextChange(trimmed);
               requestAnimationFrame(syncCursor);
               return;
@@ -651,7 +708,9 @@ export const HaystackFilterInput = forwardRef<
             if (!insidePicker && lastChar === ' ') {
               const { remaining, newChips } = extractInlineChips(next, 'space');
               if (newChips.length > 0) {
-                onChipsChange([...chips, ...newChips]);
+                // Splice at caret position; advance caret past all inserted chips.
+                onChipsChange([...chips.slice(0, caretIdx), ...newChips, ...chips.slice(caretIdx)]);
+                setCaretIdx((c) => c + newChips.length);
                 onFreetextChange(remaining);
                 requestAnimationFrame(syncCursor);
                 return;

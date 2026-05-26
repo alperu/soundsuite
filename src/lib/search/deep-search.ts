@@ -13,6 +13,7 @@ import type { AIProviderKey } from '../ai/models';
 import { rerank, RerankableResult } from './reranker';
 import type { ToolRegistry } from '../mcp/tool-registry';
 import { parseBooleanQuery, astSerialize } from './boolean-query';
+import { runRlmWithTools, type RlmToolSpec, RLM_MODEL_ID } from '../ai/stream-rlm';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,7 +40,17 @@ interface DecompositionResult {
 }
 
 export interface DeepSearchProgress {
-  step: 'decomposing' | 'searching' | 'pattern_searching' | 'merging' | 'reranking' | 'generating' | 'done' | 'warning';
+  step:
+    | 'decomposing'
+    | 'searching'
+    | 'pattern_searching'
+    | 'merging'
+    | 'reranking'
+    | 'generating'
+    | 'rlm-synthesis'
+    | 'rlm-subcall'
+    | 'done'
+    | 'warning';
   message: string;
   /** For 'searching' step: which sub-query index (0-based) */
   subQueryIndex?: number;
@@ -50,6 +61,16 @@ export interface DeepSearchProgress {
   searchStats?: Partial<DeepSearchResult['searchStats']>;
   /** Non-fatal warnings collected during the run (e.g. reranker fallback). */
   warnings?: Array<{ source: string; host?: string; message: string; count?: number }>;
+  /** rlm-synthesis / rlm-subcall: sidecar host serving the RLM */
+  rlmHost?: string;
+  /** rlm-synthesis / rlm-subcall: RLM model id */
+  rlmModel?: string;
+  /** rlm-subcall: 1-based round index within the tool-use loop */
+  rlmRound?: number;
+  /** rlm-subcall: the sub-query the model asked for */
+  rlmSubQuery?: string;
+  /** rlm-subcall: number of chunks returned to the model */
+  rlmChunkCount?: number;
 }
 
 export interface ConversationTurn {
@@ -88,6 +109,17 @@ export interface DeepSearchOptions {
    * each section under the attention sweet-spot (~4-8K tokens) for quality.
    */
   multiPass?: boolean;
+  /**
+   * Route the final synthesis through ss-rlm (Qwen3-8B post-trained) via
+   * vLLM's OpenAI tool-calling, exposing query_case_knowledge as a tool so
+   * the model can fetch additional evidence recursively instead of being
+   * fed every reranked chunk up-front. When set, generated `provider` on the
+   * result becomes 'rlm' and the run emits 'rlm-synthesis' / 'rlm-subcall'
+   * progress events for the UI.
+   */
+  useRlm?: boolean;
+  /** Max RLM tool-use rounds before forcing a final answer. Default 4. */
+  rlmMaxRounds?: number;
 }
 
 export interface DeepSearchResult {
@@ -857,6 +889,227 @@ Write the body of this subsection now. Do not include the heading.`;
 }
 
 // ---------------------------------------------------------------------------
+// 4b. RLM Report Generation — recursive tool-use synthesis
+// ---------------------------------------------------------------------------
+
+const RLM_SYSTEM_PROMPT = `You are a legal research assistant analyzing court documents.
+
+You have one tool available:
+- query_case_knowledge: search the case's indexed transcripts/filings for additional excerpts. Use it when the provided excerpts don't cover an aspect of the question. Each call returns ranked chunks with citations.
+
+Strategy:
+1. Read the user's research question and the initial excerpts.
+2. If you need more evidence on a specific aspect, call query_case_knowledge with a focused sub-query (under 20 words). You may call it up to 3 times across this conversation.
+3. Once you have enough evidence, write the final report.
+
+Final report format (markdown):
+- ## Summary — 1-2 paragraphs answering the question
+- ## Findings — 3-7 sections, organized by distinct topic, with inline citations like [Document, p.X]
+- ## Gaps — anything the evidence does not cover
+- ## Legal Significance — short interpretation
+- ## Next Steps — what to investigate next
+
+Use ONLY the citations present in the provided excerpts and any returned by query_case_knowledge. Never invent citations.`;
+
+const RLM_TOOLS: RlmToolSpec[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'query_case_knowledge',
+      description:
+        'Semantic + keyword search over the case\'s indexed court documents. Returns ranked excerpts with citations. Use a short, focused sub-query (under 20 words).',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Sub-query to search for. Be specific. Under 20 words.' },
+          limit: { type: 'integer', description: 'Max excerpts to return. Default 20.', default: 20 },
+        },
+        required: ['query'],
+      },
+    },
+  },
+];
+
+export async function generateReportWithRlm(
+  query: string,
+  decomposition: DecompositionResult,
+  initialSources: DeepSearchSource[],
+  registry: ToolRegistry,
+  options: {
+    caseId?: string;
+    chatId?: string;
+    history?: ConversationTurn[];
+    workflowContext?: string;
+    maxTokens?: number;
+    signal?: AbortSignal;
+    onToken?: (text: string) => void;
+    onProgress?: (p: DeepSearchProgress) => void;
+    pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void;
+    maxRounds?: number;
+  } = {},
+): Promise<{ report: string; extraSources: DeepSearchSource[]; host: string | null; model: string }> {
+  const emit = options.onProgress || (() => {});
+  const extraSources: DeepSearchSource[] = [];
+  const seenKeys = new Set(initialSources.map(s => `${s.document}::${s.page}::${s.text.slice(0, 60)}`));
+
+  // Initial context (same shape as generateReport but smaller — leave room
+  // for recursive fetches).
+  const contextParts: string[] = [];
+  let totalChars = 0;
+  const maxChars = 60000;
+  for (const s of initialSources) {
+    const cite = s.citation || s.citationShort || `${s.document}, p.${s.page}`;
+    const block = `[${cite}]\n${s.text}\n`;
+    if (totalChars + block.length > maxChars) break;
+    contextParts.push(block);
+    totalChars += block.length;
+  }
+  const contextBlock = contextParts.join('\n---\n');
+
+  const historySection = options.history && options.history.length > 0
+    ? `## Previous Conversation\n${options.history.map(t => `**${t.role === 'user' ? 'User' : 'Assistant'}:** ${t.content}`).join('\n\n')}\n\n---\n\n`
+    : '';
+  const workflowSection = options.workflowContext ? `## Active Workflow Context\n\n${options.workflowContext}\n\n` : '';
+
+  const userContent = `${historySection}${workflowSection}## Research Question
+${query}
+
+## Sub-Questions Investigated
+${decomposition.subQueries.map((sq, i) => `${i + 1}. ${sq}`).join('\n')}
+
+## Research Intent
+${decomposition.intent}
+
+## Initial Document Excerpts (${initialSources.length} sources)
+
+${contextBlock}
+
+Now write the report. If you need more evidence on a specific aspect, call query_case_knowledge first.`;
+
+  const executeTool = async (
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<{ ok: boolean; content: string; preview?: string; chunkCount?: number }> => {
+    if (toolName !== 'query_case_knowledge') {
+      return { ok: false, content: `Unknown tool: ${toolName}` };
+    }
+    const subQuery = typeof args.query === 'string' ? args.query : '';
+    if (!subQuery) return { ok: false, content: 'Missing query argument' };
+    const limit = typeof args.limit === 'number' ? args.limit : 20;
+    try {
+      const res = await registry.execute(
+        'query_case_knowledge',
+        {
+          query: subQuery,
+          ...(options.caseId ? { caseId: options.caseId } : {}),
+          ...(options.chatId ? { chatId: options.chatId } : {}),
+          limit,
+          searchMode: 'hybrid',
+        },
+        options.pushWarning ? { pushWarning: options.pushWarning } : undefined,
+      );
+      if (!res.success || !res.data?.results) {
+        return { ok: false, content: `No results: ${res.error || 'empty'}`, chunkCount: 0 };
+      }
+      const results = res.data.results as Array<any>;
+      // Accumulate any new sources into the returned report's source list.
+      const newSources: DeepSearchSource[] = [];
+      for (const r of results) {
+        const key = `${r.document}::${r.page}::${(r.text || '').slice(0, 60)}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        const src: DeepSearchSource = {
+          text: r.text,
+          document: r.document,
+          page: r.page,
+          score: r.score,
+          citation: r.citation,
+          citationShort: r.citationShort,
+          filingType: r.filingType,
+          volumeNumber: r.volumeNumber,
+          caseNumber: r.caseNumber,
+          filingSlug: r.filingSlug,
+          matchedSubQueries: [`[rlm] ${subQuery}`],
+        };
+        newSources.push(src);
+        extraSources.push(src);
+      }
+      // Build the tool-result content for the model: top excerpts with cites.
+      const content = results.slice(0, limit).map((r: any) => {
+        const cite = r.citation || r.citationShort || `${r.document}, p.${r.page}`;
+        return `[${cite}]\n${r.text}`;
+      }).join('\n\n---\n\n') || 'No matches.';
+      return {
+        ok: true,
+        content,
+        preview: `${results.length} excerpts for "${subQuery.slice(0, 60)}"`,
+        chunkCount: results.length,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, content: `Tool error: ${msg}` };
+    }
+  };
+
+  let host: string | null = null;
+  let finalReport = '';
+  const messages = [
+    { role: 'system' as const, content: RLM_SYSTEM_PROMPT },
+    { role: 'user' as const, content: userContent },
+  ];
+
+  for await (const ev of runRlmWithTools({
+    messages,
+    tools: RLM_TOOLS,
+    executeTool,
+    maxRounds: options.maxRounds ?? 4,
+    maxTokens: options.maxTokens ?? 4096,
+    temperature: 0.3,
+    signal: options.signal,
+  })) {
+    if (ev.type === 'start') {
+      host = ev.host;
+      emit({
+        step: 'rlm-synthesis',
+        message: `Routing synthesis through ss-rlm on ${ev.host}…`,
+        rlmHost: ev.host,
+        rlmModel: ev.model,
+      });
+    } else if (ev.type === 'tool-call') {
+      const sq = typeof ev.args.query === 'string' ? ev.args.query : '';
+      emit({
+        step: 'rlm-subcall',
+        message: `RLM round ${ev.round}: query_case_knowledge("${sq.slice(0, 80)}")`,
+        rlmHost: host || undefined,
+        rlmModel: RLM_MODEL_ID,
+        rlmRound: ev.round,
+        rlmSubQuery: sq,
+      });
+    } else if (ev.type === 'tool-result') {
+      emit({
+        step: 'rlm-subcall',
+        message: ev.ok
+          ? `RLM round ${ev.round}: ${ev.chunkCount ?? 0} excerpts returned${ev.preview ? ` — ${ev.preview}` : ''}`
+          : `RLM round ${ev.round}: tool failed`,
+        rlmHost: host || undefined,
+        rlmModel: RLM_MODEL_ID,
+        rlmRound: ev.round,
+        rlmChunkCount: ev.chunkCount,
+      });
+    } else if (ev.type === 'token') {
+      finalReport += ev.text;
+      options.onToken?.(ev.text);
+    } else if (ev.type === 'done') {
+      if (!finalReport && ev.content) finalReport = ev.content;
+    } else if (ev.type === 'error') {
+      throw new Error(`RLM synthesis failed: ${ev.message}`);
+    }
+  }
+
+  return { report: finalReport, extraSources, host, model: RLM_MODEL_ID };
+}
+
+// ---------------------------------------------------------------------------
 // 5. Orchestrator
 // ---------------------------------------------------------------------------
 
@@ -865,7 +1118,7 @@ export async function deepSearch(
   registry: ToolRegistry,
   options: DeepSearchOptions = {},
 ): Promise<DeepSearchResult> {
-  const { provider, model, caseId, chatId, onProgress, history, workflowContext, thinking, maxTokens, effort, signal, onToken, onThinking, multiPass } = options;
+  const { provider, model, caseId, chatId, onProgress, history, workflowContext, thinking, maxTokens, effort, signal, onToken, onThinking, multiPass, useRlm, rlmMaxRounds } = options;
   const emit = onProgress || (() => {});
   const checkAbort = () => {
     if (signal?.aborted) {
@@ -957,25 +1210,54 @@ export async function deepSearch(
   checkAbort();
   emit({
     step: 'generating',
-    message: `Generating research report from ${sources.length} sources...`,
+    message: useRlm
+      ? `Routing synthesis through ss-rlm with ${sources.length} reranked sources...`
+      : `Generating research report from ${sources.length} sources...`,
     subQueries: decomposition.subQueries,
     intent: decomposition.intent,
     searchStats: { ...stats, subQueryCount: decomposition.subQueries.length },
   });
-  const reportFn = multiPass ? generateReportMultiPass : generateReport;
-  const report = await reportFn(query, decomposition, sources, {
-    provider,
-    model,
-    history,
-    workflowContext,
-    thinking,
-    maxTokens,
-    effort,
-    signal,
-    onToken,
-    onThinking,
-    onProgress: emit,
-  });
+
+  let report: string;
+  let finalSources: DeepSearchSource[] = sources;
+  let resultProvider: string = provider || 'auto';
+  let resultModel: string = model || 'auto';
+
+  if (useRlm) {
+    const rlmOut = await generateReportWithRlm(query, decomposition, sources, registry, {
+      caseId,
+      chatId,
+      history,
+      workflowContext,
+      maxTokens,
+      signal,
+      onToken,
+      onProgress: emit,
+      pushWarning,
+      maxRounds: rlmMaxRounds,
+    });
+    report = rlmOut.report;
+    if (rlmOut.extraSources.length > 0) {
+      finalSources = [...sources, ...rlmOut.extraSources];
+    }
+    resultProvider = 'rlm';
+    resultModel = rlmOut.model;
+  } else {
+    const reportFn = multiPass ? generateReportMultiPass : generateReport;
+    report = await reportFn(query, decomposition, sources, {
+      provider,
+      model,
+      history,
+      workflowContext,
+      thinking,
+      maxTokens,
+      effort,
+      signal,
+      onToken,
+      onThinking,
+      onProgress: emit,
+    });
+  }
 
   console.log(`[Deep Search] Completed in ${Date.now() - t0}ms`);
 
@@ -983,14 +1265,14 @@ export async function deepSearch(
 
   return {
     report,
-    sources,
+    sources: finalSources,
     subQueries: decomposition.subQueries,
     intent: decomposition.intent,
     searchStats: {
       ...stats,
       subQueryCount: decomposition.subQueries.length,
     },
-    model: model || 'auto',
-    provider: provider || 'auto',
+    model: resultModel,
+    provider: resultProvider,
   };
 }

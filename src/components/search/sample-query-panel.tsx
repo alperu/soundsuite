@@ -22,6 +22,7 @@ import {
   type SampleQuery,
   type SampleCategory,
 } from '@/lib/search/sample-queries';
+import { TOKEN_MAP } from '@/lib/search/haystack-query-builder';
 
 export interface SampleQueryPanelProps {
   /**
@@ -131,7 +132,10 @@ export function SampleQueryPanel({ onSelectQuery, onSelectToken }: SampleQueryPa
           Click to insert into the search bar.
         </p>
         <div className="flex flex-wrap gap-1">
-          {TOKEN_GLOSSARY.map((t) => (
+          {TOKEN_GLOSSARY.map((t) => {
+            // Canonical Axon op: TOKEN_MAP default (e.g. filedAfter → >=) or ==.
+            const op = TOKEN_MAP[t.token]?.op ?? '==';
+            return (
             <button
               key={t.token}
               type="button"
@@ -139,9 +143,10 @@ export function SampleQueryPanel({ onSelectQuery, onSelectToken }: SampleQueryPa
               title={t.hint}
               className="font-mono text-[10px] px-1.5 py-0.5 rounded border border-gray-200 bg-white text-gray-700 hover:bg-purple-50 hover:border-purple-300 hover:text-purple-700 transition-colors"
             >
-              {t.token}:
+              {t.token}{op}
             </button>
-          ))}
+            );
+          })}
         </div>
       </div>
     </aside>

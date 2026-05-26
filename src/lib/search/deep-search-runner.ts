@@ -64,6 +64,8 @@ export interface DeepSearchStartParams {
   multiPass?: boolean;
   workflowIds?: string[];
   history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Route the final synthesis through ss-rlm with recursive tool calls. */
+  useRlm?: boolean;
 }
 
 const initialState: DeepSearchRunnerState = {
@@ -156,6 +158,7 @@ class DeepSearchRunner {
           maxTokens: params.maxTokens,
           effort: params.effort,
           multiPass: params.multiPass,
+          ...(params.useRlm ? { useRlm: true } : {}),
           ...(params.history && params.history.length > 0 ? { history: params.history } : {}),
           ...(params.workflowIds && params.workflowIds.length > 0 ? { workflowIds: params.workflowIds } : {}),
         }),
@@ -256,6 +259,16 @@ class DeepSearchRunner {
         this.set({ warnings: next });
       }
       if (p.step !== 'warning') this.set({ progress: p });
+      // RLM tool-call rounds are valuable history — keep them in the log so
+      // the user can see what sub-queries the model asked for.
+      if (p.step === 'rlm-subcall' || p.step === 'rlm-synthesis') {
+        this.set({
+          progressLog: [
+            ...this.state.progressLog,
+            { step: p.step, message: p.message, timestamp: Date.now() },
+          ],
+        });
+      }
     } else if (event.type === 'token') {
       this.set({
         streamingAnswer: (this.state.streamingAnswer ?? '') + event.text,

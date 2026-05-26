@@ -54,6 +54,7 @@ export function TokenNameSuggestions({
         <ul className="py-1">
           {suggestions.map((tok, i) => {
             const def = TOKEN_MAP[tok];
+            const op = def?.op ?? '==';
             return (
               <li key={tok}>
                 <button
@@ -68,7 +69,7 @@ export function TokenNameSuggestions({
                     i === highlight ? 'bg-purple-100' : ''
                   }`}
                 >
-                  <span className="font-mono text-gray-800">{tok}:</span>
+                  <span className="font-mono text-gray-800">{tok}{op}</span>
                   {def?.category && (
                     <span className="ml-2 text-[10px] text-gray-500">
                       {def.category}

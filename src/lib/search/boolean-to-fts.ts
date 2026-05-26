@@ -366,6 +366,14 @@ export interface LegalSchemaClient {
   person: {
     findMany(args: { where: any; select?: any }): Promise<any[]>;
   };
+  // Added in #58 for clerk/reporter (FK on MotionEvent).
+  motionEvent: {
+    findMany(args: { where: any; select?: any }): Promise<any[]>;
+  };
+  // Added in #58 for lawyer (via PersonRole.tags.lawyer).
+  personRole: {
+    findMany(args: { where: any; select?: any }): Promise<any[]>;
+  };
 }
 
 const FANOUT_CAP = 2000;
@@ -450,11 +458,9 @@ async function resolveOne(
       return capFanout(caseIds, req);
     }
     if (resolver.personTag) {
-      // lawyerRef/clerkRef/reporterRef — Phase 1 scope cut: not wired.
-      logger?.warn?.('Person-tag traversal not wired (Phase 1 scope cut)', {
-        field: path[0], tag: resolver.personTag,
-      });
-      return null;
+      // lawyerRef / clerkRef / reporterRef — #58.
+      const caseIds = await resolvePersonTagFilter([value], resolver.personTag, client);
+      return capFanout(caseIds, req);
     }
     return null;
   }
@@ -481,8 +487,10 @@ async function resolveOne(
     const personIds = persons.map(p => p.id as string);
     if (personIds.length === 0) return [];
     if (!resolver.motionColumn) {
-      logger?.warn?.('Person-tag 2-hop traversal not wired (Phase 1 scope cut)', { field: path[0] });
-      return null;
+      // lawyerRef/clerkRef/reporterRef 2-hop — #58.
+      if (!resolver.personTag) return null;
+      const caseIds = await resolvePersonTagFilter(personIds, resolver.personTag, client);
+      return capFanout(caseIds, req);
     }
     const motions = await client.motion.findMany({
       where: { [resolver.motionColumn]: { in: personIds } },
@@ -510,6 +518,72 @@ async function resolveOne(
   }
 
   return null;
+}
+
+/**
+ * Resolve a Person-tagged ref filter (lawyer/clerk/reporter) to a caseId set.
+ * Schema (#58):
+ *   - courtClerk / courtReporter: dedicated FK columns on MotionEvent. Each
+ *     event row carries a caseId, so one findMany is enough.
+ *   - lawyer: tracked via PersonRole.tags.lawyer with a polymorphic
+ *     (scopeKind, scopeId). scopeKind='motion' rows resolve to a Motion which
+ *     then carries caseId; scopeKind='case' rows give the caseId directly.
+ *
+ * Returns the union of caseIds. Empty array means no match.
+ */
+async function resolvePersonTagFilter(
+  personIds: string[],
+  tag: string,
+  client: LegalSchemaClient,
+): Promise<string[]> {
+  if (personIds.length === 0) return [];
+
+  if (tag === 'courtClerk' || tag === 'courtReporter') {
+    const fkCol = tag === 'courtClerk' ? 'courtClerkId' : 'courtReporterId';
+    const events = await client.motionEvent.findMany({
+      where: { [fkCol]: { in: personIds } },
+      select: { caseId: true },
+    });
+    return uniqueNonNull(events.map((e) => (e.caseId as string | null) ?? null));
+  }
+
+  if (tag === 'lawyer') {
+    // PersonRole rows are typically a small set per person, so we don't try
+    // to push the tag predicate into Prisma's JSON path filter (Prisma's
+    // JSON support varies by datasource; SQLite is the conservative ceiling).
+    // Fetch all roles for the candidate personIds, then post-filter in JS.
+    const roles = await client.personRole.findMany({
+      where: { personId: { in: personIds } },
+      select: { scopeKind: true, scopeId: true, tags: true },
+    });
+    const motionIds: string[] = [];
+    const caseIds: string[] = [];
+    for (const r of roles) {
+      const tags = (r.tags as Record<string, unknown> | null) ?? null;
+      if (!tags || tags[tag] !== true) continue;
+      const kind = r.scopeKind as string | null;
+      const scopeId = r.scopeId as string | null;
+      if (!kind || !scopeId) continue;
+      if (kind === 'motion') motionIds.push(scopeId);
+      else if (kind === 'case') caseIds.push(scopeId);
+    }
+    if (motionIds.length > 0) {
+      const motions = await client.motion.findMany({
+        where: { id: { in: motionIds } },
+        select: { caseId: true },
+      });
+      for (const m of motions) {
+        const cid = m.caseId as string | null;
+        if (cid) caseIds.push(cid);
+      }
+    }
+    return [...new Set(caseIds)];
+  }
+
+  // Unknown tag — caller's resolver claimed personTag but we don't know how
+  // to walk it. Treat as no-match rather than fabricating results.
+  logger?.warn?.('Unknown personTag in resolvePersonTagFilter', { tag });
+  return [];
 }
 
 function buildScalarWhere(field: string, cmp: CompareOp, value: string): any {

@@ -40,7 +40,8 @@ type Props = {
 const EXAMPLES: string[] = [
   '(motion and compel) or appeal',
   'case=="23-CV-1234" and motionType=="disqualification"',
-  'pageCount >= 10 and filingType=="RR"',
+  'case->jurisdiction=="Texas" and motion',
+  'judgeRef->displayName=="Roberts"',
   '"order denying" -dismissed',
 ];
 
@@ -167,6 +168,65 @@ export function FilterLogicPanel({ onInsertExample, collapsed = false, onToggleC
           </ul>
           <p className="text-[10px] text-gray-500 mt-1 leading-snug">
             <code className="bg-gray-100 px-0.5 rounded">@id</code> is a typed reference — strictly identity, no fuzzy match.
+          </p>
+        </section>
+
+        {/* Path traversal */}
+        <section>
+          <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+            Path traversal <code className="bg-gray-100 px-0.5 rounded">-&gt;</code>
+          </h4>
+          <p className="text-[10px] text-gray-500 mb-1.5 leading-snug">
+            Walk from a record into a related entity and filter there. Each{' '}
+            <code className="bg-gray-100 px-0.5 rounded">-&gt;</code> is one hop.
+          </p>
+          <ul className="space-y-1 text-[11px] leading-relaxed">
+            <li><code className="bg-gray-100 px-1 rounded">case-&gt;jurisdiction==&quot;Texas&quot;</code></li>
+            <li><code className="bg-gray-100 px-1 rounded">case-&gt;county==&quot;Travis&quot;</code></li>
+            <li><code className="bg-gray-100 px-1 rounded">case-&gt;judge-&gt;displayName==&quot;Roberts&quot;</code></li>
+            <li><code className="bg-gray-100 px-1 rounded">judgeRef-&gt;email==&quot;smith@court.gov&quot;</code></li>
+            <li><code className="bg-gray-100 px-1 rounded">clerkRef-&gt;displayName==&quot;Smith&quot;</code></li>
+          </ul>
+          <p className="text-[10px] text-amber-700 mt-1 leading-snug bg-amber-50 border border-amber-200 rounded px-2 py-1">
+            <span className="font-semibold">Note:</span> Path-traversal queries hit the denormalized Prisma columns
+            (full names like <code className="bg-white px-0.5 rounded">&quot;Texas&quot;</code>, not codes like
+            <code className="bg-white px-0.5 rounded">&quot;TX&quot;</code>). The XETO marker-tag form
+            (<code className="bg-white px-0.5 rounded">jurisdictionTx</code>,{' '}
+            <code className="bg-white px-0.5 rounded">jurisdictionCa</code>) lives in the <code className="bg-white px-0.5 rounded">tags</code> JSON
+            and isn&apos;t directly filterable yet.
+          </p>
+          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+            <span className="font-semibold">From <code className="bg-gray-100 px-0.5 rounded">case</code> (2-hop):</span>{' '}
+            <code className="bg-gray-100 px-0.5 rounded">jurisdiction</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">state</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">county</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">country</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">name</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">caseNumber</code>.
+          </p>
+          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+            <span className="font-semibold">From <code className="bg-gray-100 px-0.5 rounded">case</code> (3-hop):</span>{' '}
+            <code className="bg-gray-100 px-0.5 rounded">judge</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">movant</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">respondent</code>{' '}
+            → <code className="bg-gray-100 px-0.5 rounded">displayName</code> /{' '}
+            <code className="bg-gray-100 px-0.5 rounded">email</code> /{' '}
+            <code className="bg-gray-100 px-0.5 rounded">barNumber</code>.
+          </p>
+          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+            <span className="font-semibold">From any ref</span>{' '}
+            (<code className="bg-gray-100 px-0.5 rounded">judgeRef</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">movantRef</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">respondentRef</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">lawyerRef</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">clerkRef</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">reporterRef</code>):{' '}
+            <code className="bg-gray-100 px-0.5 rounded">displayName</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">email</code>,{' '}
+            <code className="bg-gray-100 px-0.5 rounded">barNumber</code>.
+          </p>
+          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+            Unknown paths fall back to bare-text search.
           </p>
         </section>
 

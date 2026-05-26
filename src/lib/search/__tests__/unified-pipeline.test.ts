@@ -49,13 +49,17 @@ function parse(input: string) {
 
 function makeClient(opts: {
   cases?: Array<{ id: string }>;
-  motions?: Array<{ caseId: string | null }>;
+  motions?: Array<{ caseId: string | null; id?: string }>;
   persons?: Array<{ id: string }>;
+  motionEvents?: Array<{ caseId: string | null }>;
+  personRoles?: Array<{ scopeKind: string; scopeId: string; tags: Record<string, unknown> }>;
 } = {}): LegalSchemaClient {
   return {
-    case:   { findMany: jest.fn().mockResolvedValue(opts.cases ?? []) },
-    motion: { findMany: jest.fn().mockResolvedValue(opts.motions ?? []) },
-    person: { findMany: jest.fn().mockResolvedValue(opts.persons ?? []) },
+    case:        { findMany: jest.fn().mockResolvedValue(opts.cases ?? []) },
+    motion:      { findMany: jest.fn().mockResolvedValue(opts.motions ?? []) },
+    person:      { findMany: jest.fn().mockResolvedValue(opts.persons ?? []) },
+    motionEvent: { findMany: jest.fn().mockResolvedValue(opts.motionEvents ?? []) },
+    personRole:  { findMany: jest.fn().mockResolvedValue(opts.personRoles ?? []) },
   };
 }
 
@@ -211,5 +215,84 @@ describe('unified-pipeline — combined paths', () => {
     const client = makeClient({ cases: [{ id: 'c-1' }] });
     const { whereClauses: more } = await resolvePrismaFilters(prismaRequests, client);
     expect(more).toEqual([`case_id IN ('c-1')`]);
+  });
+});
+
+describe('unified-pipeline — PersonTag refs (#58: lawyer/clerk/reporter)', () => {
+  test('clerkRef==@p1 → MotionEvent.courtClerkId lookup → case_id IN (...)', async () => {
+    const ast = parse('clerkRef==@p1');
+    const { whereClauses, prismaRequests } = extractFieldFilters(ast);
+    expect(whereClauses).toEqual([]);
+    expect(prismaRequests).toHaveLength(1);
+
+    const client = makeClient({
+      motionEvents: [{ caseId: 'c-1' }, { caseId: 'c-2' }, { caseId: null }],
+    });
+    const { whereClauses: more } = await resolvePrismaFilters(prismaRequests, client);
+    expect(client.motionEvent.findMany).toHaveBeenCalledWith({
+      where: { courtClerkId: { in: ['p1'] } },
+      select: { caseId: true },
+    });
+    expect(more).toEqual([`case_id IN ('c-1', 'c-2')`]);
+  });
+
+  test('reporterRef==@p2 → MotionEvent.courtReporterId lookup', async () => {
+    const ast = parse('reporterRef==@p2');
+    const { prismaRequests } = extractFieldFilters(ast);
+    const client = makeClient({ motionEvents: [{ caseId: 'c-9' }] });
+    const { whereClauses } = await resolvePrismaFilters(prismaRequests, client);
+    expect(client.motionEvent.findMany).toHaveBeenCalledWith({
+      where: { courtReporterId: { in: ['p2'] } },
+      select: { caseId: true },
+    });
+    expect(whereClauses).toEqual([`case_id IN ('c-9')`]);
+  });
+
+  test('lawyerRef==@p3 → PersonRole.tags.lawyer (motion + case scope)', async () => {
+    const ast = parse('lawyerRef==@p3');
+    const { prismaRequests } = extractFieldFilters(ast);
+    const client = makeClient({
+      personRoles: [
+        { scopeKind: 'motion', scopeId: 'm-1', tags: { lawyer: true } },
+        { scopeKind: 'case',   scopeId: 'c-2', tags: { lawyer: true } },
+        { scopeKind: 'motion', scopeId: 'm-X', tags: { other: true } }, // ignored — not lawyer
+      ],
+      motions: [{ id: 'm-1', caseId: 'c-1' }],
+    });
+    const { whereClauses } = await resolvePrismaFilters(prismaRequests, client);
+    expect(client.personRole.findMany).toHaveBeenCalledWith({
+      where: { personId: { in: ['p3'] } },
+      select: { scopeKind: true, scopeId: true, tags: true },
+    });
+    expect(client.motion.findMany).toHaveBeenCalledWith({
+      where: { id: { in: ['m-1'] } },
+      select: { caseId: true },
+    });
+    // Order: case-scoped first (from PersonRole walk), then motion-resolved.
+    expect(whereClauses[0]).toMatch(/case_id IN \('c-[12]', 'c-[12]'\)/);
+  });
+
+  test('lawyerRef==@p4 with no matching roles → __no_match__ sentinel', async () => {
+    const ast = parse('lawyerRef==@p4');
+    const { prismaRequests } = extractFieldFilters(ast);
+    const client = makeClient({ personRoles: [] });
+    const { whereClauses } = await resolvePrismaFilters(prismaRequests, client);
+    expect(whereClauses).toEqual([`case_id = '__no_match__'`]);
+  });
+
+  test('clerkRef->displayName=="Smith" → 2-hop via Person + MotionEvent', async () => {
+    const ast = parse('clerkRef->displayName=="Smith"');
+    const { prismaRequests } = extractFieldFilters(ast);
+    const client = makeClient({
+      persons: [{ id: 'p-99' }],
+      motionEvents: [{ caseId: 'c-77' }],
+    });
+    const { whereClauses } = await resolvePrismaFilters(prismaRequests, client);
+    expect(client.person.findMany).toHaveBeenCalled();
+    expect(client.motionEvent.findMany).toHaveBeenCalledWith({
+      where: { courtClerkId: { in: ['p-99'] } },
+      select: { caseId: true },
+    });
+    expect(whereClauses).toEqual([`case_id IN ('c-77')`]);
   });
 });
