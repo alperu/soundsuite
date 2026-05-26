@@ -272,10 +272,14 @@ export const HaystackFilterInput = forwardRef<
 
   const commitChip = useCallback(
     (token: string, value: string, label?: string, srcActive?: ActiveToken) => {
+      // Task #65: `token` may be a multi-segment path (`reporterRef->displayName`).
+      // TOKEN_MAP defaults still come from the first segment, but the chip
+      // stores the full joined path so the compiler can emit `path<op>value`.
+      const rootSeg = token.split('->')[0];
       // Preserve the user-typed operator (==, >=, <=, etc.) on the chip.
       // Falls back to the token's default op from TOKEN_MAP (e.g. `filedAfter`
       // implies `>=`) and finally `==` for equality fields.
-      const op = (srcActive?.op ?? TOKEN_MAP[token]?.op ?? '==') as FieldChipOp;
+      const op = (srcActive?.op ?? TOKEN_MAP[rootSeg]?.op ?? '==') as FieldChipOp;
       insertChip({ key: token, value, label, op });
       // Strip the matching `token<op>partial` substring out of the freetext.
       const a =

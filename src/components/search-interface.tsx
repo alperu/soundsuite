@@ -28,6 +28,7 @@ import {
   type HaystackFilterInputHandle,
 } from './search/haystack-filter-input';
 import { SampleQueryPanel } from './search/sample-query-panel';
+import { HaystackPreviewGrid } from './search/haystack-preview-grid';
 import { FilterLogicPanel, isLikelyMidTyping } from './search/filter-logic-panel';
 import BooleanChipComposer from './search/boolean-chip-composer';
 
@@ -673,7 +674,7 @@ export default function SearchInterface({
   const [toolResult, setToolResult] = useState<{ toolName: string; data: any; executionTimeMs: number; resultCount: number; error?: string } | null>(null);
   const [toolLoading, setToolLoading] = useState(false);
   const [collapsedCats, setCollapsedCatsState] = useState<Set<string>>(new Set());
-  const [infoTab, setInfoTab] = usePersistedState<'workflows' | 'history' | 'bookmarks' | 'docs'>('search.infoTab', 'workflows');
+  const [infoTab, setInfoTab] = usePersistedState<'workflows' | 'history' | 'bookmarks' | 'docs' | 'haystack'>('search.infoTab', 'workflows');
   const [selectedWorkflowIds, setSelectedWorkflowIds] = usePersistedState<string[]>('search.selectedWorkflowIds', []);
 
   // Persist collapsed categories as array
@@ -2405,7 +2406,7 @@ export default function SearchInterface({
       <aside className="flex-shrink-0 border-l border-gray-200 bg-white flex flex-col overflow-hidden" style={{ width: columnWidths.right }}>
         {/* Tabs */}
         <div className="flex border-b border-gray-200">
-          {(['workflows', 'history', 'bookmarks', 'docs'] as const).map(tab => (
+          {(['workflows', 'history', 'bookmarks', 'docs', 'haystack'] as const).map(tab => (
             <button
               key={tab}
               onClick={() => setInfoTab(tab)}
@@ -2415,7 +2416,7 @@ export default function SearchInterface({
                   : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
               }`}
             >
-              {tab === 'workflows' ? 'Workflows' : tab === 'history' ? 'History' : tab === 'bookmarks' ? 'Bookmarks' : 'Docs'}
+              {tab === 'workflows' ? 'Workflows' : tab === 'history' ? 'History' : tab === 'bookmarks' ? 'Bookmarks' : tab === 'docs' ? 'Docs' : 'Haystack'}
             </button>
           ))}
         </div>
@@ -2449,6 +2450,15 @@ export default function SearchInterface({
               ? <ToolDocsPanel tool={selectedTool} />
               : <SearchDocsPanel mode={mode} embeddingInfo={embeddingInfo} directMode={directMode} />
           )}
+          {infoTab === 'haystack' && (() => {
+            const compiled = buildHaystackFilter(haystackChips, aiQuery);
+            return (
+              <HaystackPreviewGrid
+                filter={compiled.filter}
+                kind={compiled.impliedKind}
+              />
+            );
+          })()}
         </div>
       </aside>
     </div>

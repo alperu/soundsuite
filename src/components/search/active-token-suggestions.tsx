@@ -39,8 +39,18 @@ import { MOTION_TYPES } from '@/lib/filings/motion-types';
 export type ActiveTokenOp = '==' | '!=' | '>=' | '<=' | '>' | '<';
 
 export interface ActiveToken {
-  /** Surface token (e.g. `motionType`, `judge`). Always a key in TOKEN_MAP. */
+  /**
+   * Surface token path joined with `->` (e.g. `motionType`, `judge`,
+   * `reporterRef->displayName`). For backward compatibility this stays the
+   * same field name; the first segment is always a key in TOKEN_MAP.
+   */
   prefix: string;
+  /**
+   * Path split on `->`. `prefix === path.join('->')`. Length 1 = single-segment
+   * (the legacy / common case); length > 1 = path traversal like
+   * `reporterRef->displayName`.
+   */
+  path: string[];
   /** What the user has typed after the operator. */
   partial: string;
   /** The operator the user typed (`==`, `>=`, etc.). Defaults to `==` for
@@ -233,6 +243,91 @@ function mapRow(token: string, row: Record<string, unknown>): RemoteOption | nul
   return { value: canonId, label: primary, secondary };
 }
 
+/**
+ * Task #65 — path-traversal value picker. Hits /api/search/path-values which
+ * resolves the last segment against Prisma (Case for `case->X`, Person for
+ * `<personRef>->X`). Same debounced/cancellable pattern as
+ * `useRemoteSuggestions` above.
+ */
+function usePathTraversalSuggestions(
+  path: string[],
+  partial: string,
+  enabled: boolean,
+): { options: RemoteOption[]; loading: boolean; error: string | null } {
+  const [state, setState] = useState<{
+    options: RemoteOption[];
+    loading: boolean;
+    error: string | null;
+  }>({ options: [], loading: false, error: null });
+
+  const lastKeyRef = useRef('');
+  const joined = path.join('->');
+
+  useEffect(() => {
+    if (!enabled || path.length < 2) {
+      setState({ options: [], loading: false, error: null });
+      return;
+    }
+    const key = `${joined}|${partial}`;
+    lastKeyRef.current = key;
+    let cancelled = false;
+
+    setState((s) => ({ ...s, loading: true }));
+    const handle = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({
+          path: joined,
+          prefix: partial,
+          limit: '20',
+        });
+        const res = await fetch(`/api/search/path-values?${params.toString()}`);
+        if (cancelled || lastKeyRef.current !== key) return;
+        if (!res.ok) {
+          setState({
+            options: [],
+            loading: false,
+            error: `HTTP ${res.status}`,
+          });
+          return;
+        }
+        const json = (await res.json()) as {
+          options?: Array<{
+            value: string;
+            label: string;
+            secondary?: string;
+            id?: string;
+          }>;
+          error?: string;
+        };
+        if (json.error) {
+          setState({ options: [], loading: false, error: json.error });
+          return;
+        }
+        const mapped: RemoteOption[] = (json.options ?? []).map((o) => ({
+          value: o.value,
+          label: o.label,
+          secondary: o.secondary,
+        }));
+        setState({ options: mapped, loading: false, error: null });
+      } catch (e) {
+        if (cancelled) return;
+        setState({
+          options: [],
+          loading: false,
+          error: (e as Error).message ?? 'fetch failed',
+        });
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [joined, partial, enabled, path.length]);
+
+  return state;
+}
+
 function strField(v: unknown): string | undefined {
   if (v == null) return undefined;
   if (typeof v === 'string') return v;
@@ -275,37 +370,44 @@ export function ActiveTokenSuggestions({
   onOptionsChange,
   onHighlightReset,
 }: ActiveTokenSuggestionsProps) {
-  const token = active?.prefix ?? null;
+  const path = active?.path ?? [];
+  const token = active ? path[0] ?? null : null;
   const partial = active?.partial ?? '';
+  // Task #65: multi-segment paths (`reporterRef->displayName`) route through
+  // /api/search/path-values instead of the haystack-proxy person/case picker.
+  const isPathTraversal = active != null && path.length > 1;
 
   // -------------------------------------------------------------------------
   // Sourcing dispatch
 
   const motionType = useMotionTypeSuggestions(partial);
-  const isMotionType = token === 'motionType';
+  const isMotionType = !isPathTraversal && token === 'motionType';
 
   const enumToken =
-    token && TOKEN_MAP[token]?.category === 'enum' && token !== 'motionType'
+    !isPathTraversal && token && TOKEN_MAP[token]?.category === 'enum' && token !== 'motionType'
       ? token
       : null;
   const enumOpts = useEnumSuggestions(enumToken ?? '', partial);
 
-  const isRefToken = token != null && REF_TOKENS.has(token);
+  const isRefToken = !isPathTraversal && token != null && REF_TOKENS.has(token);
   const remote = useRemoteSuggestions(isRefToken ? token : null, partial, isRefToken);
 
-  const isDateToken = token != null && DATE_TOKENS.has(token);
-  const isNumberToken = token != null && TOKEN_MAP[token]?.category === 'number';
+  const pathRemote = usePathTraversalSuggestions(path, partial, isPathTraversal);
+
+  const isDateToken = !isPathTraversal && token != null && DATE_TOKENS.has(token);
+  const isNumberToken = !isPathTraversal && token != null && TOKEN_MAP[token]?.category === 'number';
 
   // -------------------------------------------------------------------------
   // Bubble the visible option list up to the parent so it can handle Enter.
 
   const options: PickedSuggestion[] = useMemo(() => {
     if (!token) return [];
+    if (isPathTraversal) return pathRemote.options;
     if (isMotionType) return motionType.options;
     if (enumToken) return enumOpts.options;
     if (isRefToken) return remote.options;
     return [];
-  }, [token, isMotionType, motionType.options, enumToken, enumOpts.options, isRefToken, remote.options]);
+  }, [token, isPathTraversal, pathRemote.options, isMotionType, motionType.options, enumToken, enumOpts.options, isRefToken, remote.options]);
 
   // Reset highlight when the option set actually changes (length OR contents).
   const lastSig = useRef('');
@@ -325,8 +427,9 @@ export function ActiveTokenSuggestions({
   // Render
 
   const def = TOKEN_MAP[token];
-  const headerLabel =
-    isMotionType
+  const headerLabel = isPathTraversal
+    ? `Path · ${path.join(' → ')}`
+    : isMotionType
       ? 'Motion type'
       : enumToken
         ? `${token} (enum)`
@@ -349,7 +452,10 @@ export function ActiveTokenSuggestions({
     >
       <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
         <h3 className="text-sm font-semibold text-gray-800">
-          <span className="font-mono text-purple-700">{token}:</span>
+          <span className="font-mono text-purple-700">
+            {isPathTraversal ? path.join('->') : token}
+            {active?.op ? active.op : '=='}
+          </span>
           <span className="ml-1.5 text-gray-700">{partial || '…'}</span>
         </h3>
         <p className="text-[11px] text-gray-500 mt-0.5">
@@ -459,6 +565,50 @@ export function ActiveTokenSuggestions({
         </div>
       )}
 
+      {/* Task #65: path-traversal — Person/Case attribute lookup via Prisma */}
+      {isPathTraversal && (
+        <div className="flex-1 overflow-y-auto">
+          {pathRemote.loading && (
+            <div className="px-4 py-2 text-[11px] text-gray-400">Loading…</div>
+          )}
+          {!pathRemote.loading && pathRemote.error && (
+            <div className="px-4 py-2 text-[11px] text-red-600">
+              Lookup failed: {pathRemote.error}
+            </div>
+          )}
+          {!pathRemote.loading && !pathRemote.error && pathRemote.options.length === 0 && (
+            <div className="px-4 py-2 text-xs text-gray-500">
+              {partial ? 'No matches.' : 'Type to search…'}
+            </div>
+          )}
+          <ul className="py-1">
+            {pathRemote.options.map((opt, i) => (
+              <li key={`pt-${opt.value}-${i}`}>
+                <button
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    onPick(opt);
+                  }}
+                  className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-purple-50 ${
+                    i === highlight ? 'bg-purple-100' : ''
+                  }`}
+                >
+                  <div className="font-medium text-gray-800 leading-snug">
+                    {opt.label}
+                  </div>
+                  {opt.secondary && (
+                    <div className="text-[10px] text-gray-500 leading-snug mt-0.5">
+                      {opt.secondary}
+                    </div>
+                  )}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* Refs (person / case / court) — live haystack-proxy */}
       {isRefToken && (
         <div className="flex-1 overflow-y-auto">
@@ -520,29 +670,37 @@ export function ActiveTokenSuggestions({
  * judge:rob<cursor>" case works exactly as before. Plain end-of-string
  * behavior emerges when `cursor === text.length`.
  */
-// Match `<prefix><op><partial>` where <op> is any Axon comparison operator.
+// Match `<prefix><op><partial>` where:
+//   <prefix> is one or more `\w+` segments joined by `->` (Task #65 — path
+//     traversal: `reporterRef->displayName`, `case->jurisdiction`, etc.)
+//   <op> is any Axon comparison operator.
 // `==` is the canonical equality; `>=`/`<=`/`>`/`<`/`!=` are valid for
 // date/number-typed fields (`hearingDate >= 2026-04-01`). Legacy `:` no
 // longer triggers the picker (per #59 it's a parse error).
-const ACTIVE_TOKEN_RE = /(?:^|\s)(\w+)\s*(==|!=|>=|<=|>|<)\s*([^\s]*)$/;
+const ACTIVE_TOKEN_RE = /(?:^|\s)(\w+(?:->\w+)*)\s*(==|!=|>=|<=|>|<)\s*([^\s]*)$/;
 
 // Match a bare prefix (no operator yet) — used by the Ctrl+Space hook so
-// `case<cursor>` can pop the picker without first typing `==`.
-const BARE_PREFIX_RE = /(?:^|\s)(\w+)$/;
+// `case<cursor>` can pop the picker without first typing `==`. Also supports
+// path traversal: `reporterRef->display<cursor>`.
+const BARE_PREFIX_RE = /(?:^|\s)(\w+(?:->\w+)*)$/;
 
 export function activeTokenAtCursor(text: string, cursor: number): ActiveToken | null {
   const slice = text.slice(0, cursor);
   const m = slice.match(ACTIVE_TOKEN_RE);
   if (!m) return null;
   const prefix = m[1];
-  if (!TOKEN_MAP[prefix]) return null;
+  const path = prefix.split('->');
+  // First segment must be a known TOKEN_MAP key — that's how we know the
+  // picker has anything to offer. (For multi-segment paths the value-source
+  // is selected by the *last* segment; see the dispatcher below.)
+  if (!TOKEN_MAP[path[0]]) return null;
   const op = m[2] as ActiveTokenOp;
   const partial = m[3];
   const matchedAt = m.index ?? 0;
   const offset = m[0].startsWith(' ') ? 1 : 0;
   const startIndex = matchedAt + offset;
   const endIndex = cursor;
-  return { prefix, partial, op, startIndex, endIndex };
+  return { prefix, path, partial, op, startIndex, endIndex };
 }
 
 /**
@@ -559,12 +717,13 @@ export function forceActiveTokenAtCursor(text: string, cursor: number): ActiveTo
   const m = slice.match(BARE_PREFIX_RE);
   if (!m) return null;
   const prefix = m[1];
-  if (!TOKEN_MAP[prefix]) return null;
+  const path = prefix.split('->');
+  if (!TOKEN_MAP[path[0]]) return null;
   const matchedAt = m.index ?? 0;
   const offset = m[0].startsWith(' ') ? 1 : 0;
   const startIndex = matchedAt + offset;
   // Default to the field's preferred op (e.g. date fields use `>=` for `filedAfter`)
   // and fall back to `==` for equality fields.
-  const defOp = (TOKEN_MAP[prefix]?.op ?? '==') as ActiveTokenOp;
-  return { prefix, partial: '', op: defOp, startIndex, endIndex: cursor };
+  const defOp = (TOKEN_MAP[path[0]]?.op ?? '==') as ActiveTokenOp;
+  return { prefix, path, partial: '', op: defOp, startIndex, endIndex: cursor };
 }
