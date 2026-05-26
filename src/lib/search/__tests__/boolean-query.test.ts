@@ -8,7 +8,7 @@ function ok(input: string) {
 function term(value: string, phrase = false): Node { return { op: 'TERM', value, phrase }; }
 
 describe('parseBooleanQuery — basic terms', () => {
-  test('1. empty string → empty AND, no operators', () => {
+  test('1. empty string → empty and, no operators', () => {
     const r = parseBooleanQuery('');
     expect(r.ok).toBe(true);
     if (r.ok) {
@@ -17,7 +17,7 @@ describe('parseBooleanQuery — basic terms', () => {
     }
   });
 
-  test('2. whitespace only → empty AND', () => {
+  test('2. whitespace only → empty and', () => {
     const r = parseBooleanQuery('   \t\n  ');
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.ast).toEqual({ op: 'AND', children: [] });
@@ -34,21 +34,21 @@ describe('parseBooleanQuery — basic terms', () => {
     expect(r.ast).toEqual(term('motion'));
   });
 
-  test('5. two adjacent bare terms → implicit AND', () => {
+  test('5. two adjacent bare terms → implicit and', () => {
     const r = ok('motion compel');
     expect(r.hasOperators).toBe(false);
     expect(r.ast).toEqual({ op: 'AND', children: [term('motion'), term('compel')] });
   });
 
-  test('6. three adjacent terms → implicit AND chain', () => {
+  test('6. three adjacent terms → implicit and chain', () => {
     const r = ok('a b c');
     expect(r.ast).toEqual({ op: 'AND', children: [term('a'), term('b'), term('c')] });
   });
 });
 
 describe('parseBooleanQuery — operators', () => {
-  test('7. explicit AND', () => {
-    const r = ok('motion AND compel');
+  test('7. explicit and', () => {
+    const r = ok('motion and compel');
     expect(r.hasOperators).toBe(true);
     expect(r.ast).toEqual({ op: 'AND', children: [term('motion'), term('compel')] });
   });
@@ -59,8 +59,8 @@ describe('parseBooleanQuery — operators', () => {
     expect(r.ast).toEqual({ op: 'AND', children: [term('motion'), term('compel')] });
   });
 
-  test('9. explicit OR', () => {
-    const r = ok('appeal OR petition');
+  test('9. explicit or', () => {
+    const r = ok('appeal or petition');
     expect(r.hasOperators).toBe(true);
     expect(r.ast).toEqual({ op: 'OR', children: [term('appeal'), term('petition')] });
   });
@@ -70,18 +70,18 @@ describe('parseBooleanQuery — operators', () => {
     expect(r.ast).toEqual({ op: 'OR', children: [term('appeal'), term('petition')] });
   });
 
-  test('11. AND tighter than OR', () => {
-    // A AND B OR C → (A AND B) OR C
-    const r = ok('A AND B OR C');
+  test('11. and tighter than or', () => {
+    // A and B or C → (A and B) or C
+    const r = ok('A and B or C');
     expect(r.ast).toEqual({
       op: 'OR',
       children: [{ op: 'AND', children: [term('A'), term('B')] }, term('C')],
     });
   });
 
-  test('12. OR-AND-OR precedence', () => {
-    // A OR B AND C OR D → A OR (B AND C) OR D
-    const r = ok('A OR B AND C OR D');
+  test('12. or-and-or precedence', () => {
+    // A or B and C or D → A or (B and C) or D
+    const r = ok('A or B and C or D');
     expect(r.ast).toEqual({
       op: 'OR',
       children: [term('A'), { op: 'AND', children: [term('B'), term('C')] }, term('D')],
@@ -89,7 +89,7 @@ describe('parseBooleanQuery — operators', () => {
   });
 
   test('13. parens override precedence', () => {
-    const r = ok('A AND (B OR C)');
+    const r = ok('A and (B or C)');
     expect(r.ast).toEqual({
       op: 'AND',
       children: [term('A'), { op: 'OR', children: [term('B'), term('C')] }],
@@ -101,16 +101,16 @@ describe('parseBooleanQuery — operators', () => {
     expect(r.ast).toEqual(term('A'));
   });
 
-  test('15. parens with implicit AND outside', () => {
-    const r = ok('(A OR B) C');
+  test('15. parens with implicit and outside', () => {
+    const r = ok('(A or B) C');
     expect(r.ast).toEqual({
       op: 'AND',
       children: [{ op: 'OR', children: [term('A'), term('B')] }, term('C')],
     });
   });
 
-  test('16. (A AND B) OR C exemplar', () => {
-    const r = ok('(A AND B) OR C');
+  test('16. (A and B) or C exemplar', () => {
+    const r = ok('(A and B) or C');
     expect(r.ast).toEqual({
       op: 'OR',
       children: [{ op: 'AND', children: [term('A'), term('B')] }, term('C')],
@@ -118,9 +118,9 @@ describe('parseBooleanQuery — operators', () => {
   });
 });
 
-describe('parseBooleanQuery — NOT and dash', () => {
-  test('17. NOT word', () => {
-    const r = ok('NOT dismissed');
+describe('parseBooleanQuery — not and dash', () => {
+  test('17. not word', () => {
+    const r = ok('not dismissed');
     expect(r.hasOperators).toBe(true);
     expect(r.ast).toEqual({ op: 'NOT', child: term('dismissed') });
   });
@@ -136,21 +136,21 @@ describe('parseBooleanQuery — NOT and dash', () => {
     expect(r.ast).toEqual({ op: 'NOT', child: term('dismissed') });
   });
 
-  test('20. dash inside a word is NOT negation', () => {
+  test('20. dash inside a word is not negation', () => {
     const r = ok('case-23');
     expect(r.hasOperators).toBe(false);
     expect(r.ast).toEqual(term('case-23'));
   });
 
-  test('21. AND NOT combination', () => {
-    const r = ok('motion AND NOT dismissed');
+  test('21. and not combination', () => {
+    const r = ok('motion and not dismissed');
     expect(r.ast).toEqual({
       op: 'AND',
       children: [term('motion'), { op: 'NOT', child: term('dismissed') }],
     });
   });
 
-  test('22. AND with -dash shorthand', () => {
+  test('22. and with -dash shorthand', () => {
     const r = ok('motion -dismissed');
     expect(r.ast).toEqual({
       op: 'AND',
@@ -158,13 +158,13 @@ describe('parseBooleanQuery — NOT and dash', () => {
     });
   });
 
-  test('23. double NOT', () => {
-    const r = ok('NOT NOT foo');
+  test('23. double not', () => {
+    const r = ok('not not foo');
     expect(r.ast).toEqual({ op: 'NOT', child: { op: 'NOT', child: term('foo') } });
   });
 
-  test('24. NOT in parens', () => {
-    const r = ok('A AND (NOT B)');
+  test('24. not in parens', () => {
+    const r = ok('A and (not B)');
     expect(r.ast).toEqual({
       op: 'AND',
       children: [term('A'), { op: 'NOT', child: term('B') }],
@@ -194,8 +194,8 @@ describe('parseBooleanQuery — phrases', () => {
     expect(r.ast).toEqual(term('a\\b', true));
   });
 
-  test('29. phrase combined with AND', () => {
-    const r = ok('"motion to compel" AND granted');
+  test('29. phrase combined with and', () => {
+    const r = ok('"motion to compel" and granted');
     expect(r.ast).toEqual({
       op: 'AND',
       children: [term('motion to compel', true), term('granted')],
@@ -229,7 +229,7 @@ describe('parseBooleanQuery — operator-like substrings', () => {
     expect(r.ast).toEqual(term('Organizer'));
   });
 
-  test('34. "north" containing "or" is not OR', () => {
+  test('34. "north" containing "or" is not or', () => {
     const r = ok('north south');
     expect(r.hasOperators).toBe(false);
     expect(r.ast).toEqual({ op: 'AND', children: [term('north'), term('south')] });
@@ -238,30 +238,30 @@ describe('parseBooleanQuery — operator-like substrings', () => {
 
 describe('parseBooleanQuery — errors', () => {
   test('35. unbalanced open paren', () => {
-    const r = parseBooleanQuery('(A AND B');
+    const r = parseBooleanQuery('(A and B');
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.position).toBe(0);
   });
 
   test('36. unbalanced close paren', () => {
-    const r = parseBooleanQuery('A AND B)');
+    const r = parseBooleanQuery('A and B)');
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toMatch(/Unbalanced|trailing/);
   });
 
-  test('37. AND at start invalid', () => {
-    const r = parseBooleanQuery('AND foo');
+  test('37. and at start invalid', () => {
+    const r = parseBooleanQuery('and foo');
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.position).toBe(0);
   });
 
-  test('38. trailing AND invalid', () => {
-    const r = parseBooleanQuery('foo AND');
+  test('38. trailing and invalid', () => {
+    const r = parseBooleanQuery('foo and');
     expect(r.ok).toBe(false);
   });
 
-  test('39. trailing OR invalid', () => {
-    const r = parseBooleanQuery('foo OR');
+  test('39. trailing or invalid', () => {
+    const r = parseBooleanQuery('foo or');
     expect(r.ok).toBe(false);
   });
 
@@ -270,8 +270,8 @@ describe('parseBooleanQuery — errors', () => {
     expect(r.ok).toBe(false);
   });
 
-  test('41. NOT with nothing after', () => {
-    const r = parseBooleanQuery('NOT');
+  test('41. not with nothing after', () => {
+    const r = parseBooleanQuery('not');
     expect(r.ok).toBe(false);
   });
 
@@ -298,15 +298,15 @@ describe('astSerialize — round-trip', () => {
   const cases = [
     'foo',
     'foo bar',
-    'A AND B',
-    'A OR B',
-    '(A AND B) OR C',
-    'A AND (B OR C)',
-    'NOT dismissed',
-    'motion AND NOT dismissed',
+    'A and B',
+    'A or B',
+    '(A and B) or C',
+    'A and (B or C)',
+    'not dismissed',
+    'motion and not dismissed',
     '"motion to compel"',
-    '"motion to compel" AND granted',
-    '(A OR B) AND (C OR D)',
+    '"motion to compel" and granted',
+    '(A or B) and (C or D)',
   ];
   for (const c of cases) {
     test(`round-trip: ${c}`, () => {
@@ -344,7 +344,7 @@ describe('parseBooleanQuery — field-qualified terms', () => {
     expect(r.ast).toEqual({ op: 'TERM', value: '23-CV-1234', phrase: true, path: ['case'], compareOp: '==' });
   });
 
-  test('F3. two field terms OR-combined', () => {
+  test('F3. two field terms or-combined', () => {
     const r = ok('motionType=="disqualification" or case=="23-CV-1234"');
     expect(r.hasOperators).toBe(true);
     expect(r.ast).toEqual({
@@ -380,7 +380,7 @@ describe('parseBooleanQuery — field-qualified terms', () => {
     expect(r.ast).toEqual({ op: 'TERM', value: ':bare', phrase: false });
   });
 
-  test('F6. field term AND -bareNegated', () => {
+  test('F6. field term and -bareNegated', () => {
     const r = ok('motionType=="disqualification" and -dismissed');
     expect(r.ast).toEqual({
       op: 'AND',
@@ -448,8 +448,8 @@ describe('parseBooleanQuery — Axon-style comparison operators', () => {
     }
   });
 
-  test('A4. == combines with AND/OR', () => {
-    const r = parseBooleanQuery('case=="X" AND motionType=="disqualify"');
+  test('A4. == combines with and/or', () => {
+    const r = parseBooleanQuery('case=="X" and motionType=="disqualify"');
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.ast).toEqual({
@@ -469,7 +469,7 @@ describe('parseBooleanQuery — Axon-style comparison operators', () => {
   });
 
   test('A6. == round-trips through astSerialize', () => {
-    const src = 'case=="23-CV-1234" AND pageCount>=10';
+    const src = 'case=="23-CV-1234" and pageCount>=10';
     const r1 = parseBooleanQuery(src);
     expect(r1.ok).toBe(true);
     if (!r1.ok) return;
@@ -525,7 +525,7 @@ describe('parseBooleanQuery — refs and aliases (task #53)', () => {
     });
   });
 
-  test('U4. filedAfter==2026-01-01 alias rewrites field AND coerces op to >=', () => {
+  test('U4. filedAfter==2026-01-01 alias rewrites field and coerces op to >=', () => {
     const r = ok('filedAfter==2026-01-01');
     expect(r.ast).toEqual({
       op: 'TERM',
@@ -587,9 +587,9 @@ describe('parseBooleanQuery — refs and aliases (task #53)', () => {
       'judge==@person-roberts',
       'filedAfter==2026-01-01',
       'case->jurisdiction=="TX"',
-      'case=="X" AND judge==@y',
-      'caseRef==@x OR motionType=="disqualify"',
-      'NOT judge==@x',
+      'case=="X" and judge==@y',
+      'caseRef==@x or motionType=="disqualify"',
+      'not judge==@x',
     ];
     for (const src of inputs) {
       const r1 = parseBooleanQuery(src);

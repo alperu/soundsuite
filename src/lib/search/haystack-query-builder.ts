@@ -20,6 +20,7 @@ export type ChipCategory = 'ref' | 'date' | 'enum' | 'number' | 'text';
 /**
  * A single token chip emitted by the structured input.
  *
+ * Most chips are field-op chips (`kind: 'field'` or omitted, the default).
  * `key` is the surface token typed by the user (e.g. `judge`, `hearingDate`,
  * `motionType`). It maps to one or more Haystack filter terms via the
  * TOKEN_MAP below.
@@ -28,12 +29,22 @@ export type ChipCategory = 'ref' | 'date' | 'enum' | 'number' | 'text';
  * a bare symbol, for dates an ISO `YYYY-MM-DD` string. For ranges, callers
  * use two chips (`filedAfter` + `filedBefore`) or a single chip whose value
  * is `YYYY-MM-DD..YYYY-MM-DD`.
+ *
+ * Task #55 (2026-05-26): the union also covers boolean operator pills
+ * (`and`/`or`/`not`), paren pills (`lparen`/`rparen`), and bare-term pills
+ * (`kind: 'term'`) so the input can render `motion and compel` as three
+ * chips in order instead of splitting the user input between freetext and
+ * chip arrays.
  */
-export interface FilterChip {
-  key: string;
-  value: string;
-  /** Optional display label for the picked value (e.g. "Judge Roberts"). */
-  label?: string;
+export type FilterChip =
+  | { kind?: 'field'; key: string; value: string; label?: string }
+  | { kind: 'term'; value: string; phrase?: boolean }
+  | { kind: 'and' | 'or' | 'not' }
+  | { kind: 'lparen' | 'rparen' };
+
+/** Type guard: is this a field-op chip (the legacy shape)? */
+export function isFieldChip(c: FilterChip): c is { kind?: 'field'; key: string; value: string; label?: string } {
+  return (c as { kind?: string }).kind === undefined || (c as { kind?: string }).kind === 'field';
 }
 
 /**
@@ -151,8 +162,8 @@ function quote(s: string): string {
   return `"${s.replace(/"/g, '\\"')}"`;
 }
 
-/** Format a chip into a single Haystack filter term (without leading `and`). */
-function termFor(chip: FilterChip): string | null {
+/** Format a field chip into a single Haystack filter term (without leading `and`). */
+function termFor(chip: { key: string; value: string; label?: string }): string | null {
   const def = TOKEN_MAP[chip.key];
   if (!def) return null;
   const op = def.op ?? '==';
@@ -190,14 +201,59 @@ function termFor(chip: FilterChip): string | null {
  * "all of these are movants on the same record"; the UI can add a future OR
  * affordance later).
  */
-function groupByKey(chips: FilterChip[]): Map<string, FilterChip[]> {
-  const m = new Map<string, FilterChip[]>();
+function groupByKey(chips: Array<{ key: string; value: string; label?: string }>): Map<string, Array<{ key: string; value: string; label?: string }>> {
+  const m = new Map<string, Array<{ key: string; value: string; label?: string }>>();
   for (const c of chips) {
     const arr = m.get(c.key) ?? [];
     arr.push(c);
     m.set(c.key, arr);
   }
   return m;
+}
+
+/**
+ * Linear serialization branch — used when the chip array contains operator /
+ * paren / bare-term chips. We can't use the `groupByKey` + implied-kind path
+ * because chip order is load-bearing here. Each chip emits its surface form
+ * and we join with single spaces.
+ */
+function buildLinear(chips: FilterChip[]): string {
+  const parts: string[] = [];
+  for (const c of chips) {
+    const kind = (c as { kind?: string }).kind;
+    if (kind === 'and') parts.push('and');
+    else if (kind === 'or') parts.push('or');
+    else if (kind === 'not') parts.push('not');
+    else if (kind === 'lparen') parts.push('(');
+    else if (kind === 'rparen') parts.push(')');
+    else if (kind === 'term') {
+      const tc = c as { kind: 'term'; value: string; phrase?: boolean };
+      const v = tc.value.trim();
+      if (!v) continue;
+      if (tc.phrase) parts.push(quote(v));
+      else parts.push(v);
+    } else {
+      // field-op chip
+      const fc = c as { key: string; value: string; label?: string };
+      const term = termFor(fc);
+      if (term) parts.push(term);
+    }
+  }
+  // Compact `( foo` → `(foo` and `foo )` → `foo)` for cleaner output.
+  return parts
+    .join(' ')
+    .replace(/\(\s+/g, '(')
+    .replace(/\s+\)/g, ')')
+    .trim();
+}
+
+/** True when the chip array contains any operator/paren/term chip. */
+function hasInlineOperators(chips: FilterChip[]): boolean {
+  for (const c of chips) {
+    const k = (c as { kind?: string }).kind;
+    if (k && k !== 'field') return true;
+  }
+  return false;
 }
 
 export interface BuildResult {
@@ -228,11 +284,22 @@ export function buildHaystackFilter(
     return { filter: '', freetext: trimmedFree };
   }
 
+  // Task #55: if the chip array contains inline operator/paren/term chips,
+  // serialize linearly and skip implied-kind. Chip order is load-bearing
+  // (e.g. `motion and compel` must serialize in that exact order, not get
+  // re-grouped or have `motionEvent and` prepended).
+  if (hasInlineOperators(chips)) {
+    return { filter: buildLinear(chips), freetext: trimmedFree };
+  }
+
+  // From here on, every chip is a field-op chip (kind undefined or 'field').
+  const fieldChips = chips.filter(isFieldChip);
+
   // Step 1: implied kind. Take the most-specific (last set) kind, but if any
   // chip has a different impliedKind, drop the implication entirely.
   let impliedKind: string | undefined;
   let kindConflict = false;
-  for (const c of chips) {
+  for (const c of fieldChips) {
     const def = TOKEN_MAP[c.key];
     if (!def?.impliedKind) continue;
     if (impliedKind && impliedKind !== def.impliedKind) {
@@ -244,7 +311,7 @@ export function buildHaystackFilter(
   if (kindConflict) impliedKind = undefined;
 
   // Step 2: build per-key term groups, preserving first-seen key order.
-  const grouped = groupByKey(chips);
+  const grouped = groupByKey(fieldChips);
   const groupTerms: string[] = [];
   for (const [, group] of grouped) {
     const terms = group.map(termFor).filter((t): t is string => !!t);

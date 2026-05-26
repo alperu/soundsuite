@@ -60,8 +60,8 @@ function makeClient(opts: {
 }
 
 describe('unified-pipeline — lance-scalar paths (no Prisma)', () => {
-  test('case=="X" AND motion → lance-scalar where + FTS, no Prisma', async () => {
-    const ast = parse('case=="X" AND motion');
+  test('case=="X" and motion → lance-scalar where + FTS, no Prisma', async () => {
+    const ast = parse('case=="X" and motion');
     const { whereClauses, prismaRequests, ast: stripped } = extractFieldFilters(ast);
     expect(whereClauses).toEqual([`case_number = 'X'`]);
     expect(prismaRequests).toEqual([]);
@@ -177,33 +177,33 @@ describe('unified-pipeline — prisma-traverse', () => {
   });
 });
 
-describe('unified-pipeline — NOT semantics', () => {
-  test('NOT case=="X" lifts as case_number != X (single-TERM negation)', async () => {
-    const ast = parse('foo AND NOT case=="X"');
+describe('unified-pipeline — not semantics', () => {
+  test('not case=="X" lifts as case_number != X (single-TERM negation)', async () => {
+    const ast = parse('foo and not case=="X"');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     expect(whereClauses).toEqual([`case_number != 'X'`]);
     // The bare `foo` remains.
     expect(stripped).toEqual({ op: 'TERM', value: 'foo', phrase: false });
   });
 
-  test('NOT (case=="X" AND foo) leaves subtree intact — no SQL lift', async () => {
+  test('not (case=="X" and foo) leaves subtree intact — no SQL lift', async () => {
     // De Morgan's would require ORing SQL with FTS — LanceDB can't.
-    // Safer: don't lift anything from inside a NOT-of-compound.
-    const ast = parse('bar AND NOT (case=="X" AND foo)');
+    // Safer: don't lift anything from inside a not-of-compound.
+    const ast = parse('bar and not (case=="X" and foo)');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     expect(whereClauses).toEqual([]);
-    // Stripped AST keeps the NOT-AND intact (the case=="X" leaf becomes a
+    // Stripped AST keeps the not-and intact (the case=="X" leaf becomes a
     // bare text TERM since it wasn't lifted, but the subtree shape stands).
     expect(stripped).not.toBeNull();
-    // Crude shape assertion: there's a NOT somewhere in the tree.
+    // Crude shape assertion: there's a not somewhere in the tree.
     const hasNot = JSON.stringify(stripped).includes('"NOT"');
     expect(hasNot).toBe(true);
   });
 });
 
 describe('unified-pipeline — combined paths', () => {
-  test('caseRef==@u1 AND case->jurisdiction=="TX" → both lifts, one Prisma call', async () => {
-    const ast = parse('caseRef==@u1 AND case->jurisdiction=="TX"');
+  test('caseRef==@u1 and case->jurisdiction=="TX" → both lifts, one Prisma call', async () => {
+    const ast = parse('caseRef==@u1 and case->jurisdiction=="TX"');
     const { whereClauses, prismaRequests } = extractFieldFilters(ast);
     expect(whereClauses).toEqual([`case_id = 'u1'`]);
     expect(prismaRequests).toHaveLength(1);

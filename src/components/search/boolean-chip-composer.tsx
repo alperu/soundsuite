@@ -158,9 +158,9 @@ export function tokensToString(tokens: FlatToken[]): string {
       } else {
         parts.push(`${prefix}${t.value}`);
       }
-    } else if (t.kind === 'and') parts.push('AND');
-    else if (t.kind === 'or') parts.push('OR');
-    else if (t.kind === 'not') parts.push('NOT');
+    } else if (t.kind === 'and') parts.push('and');
+    else if (t.kind === 'or') parts.push('or');
+    else if (t.kind === 'not') parts.push('not');
     else if (t.kind === 'lparen') parts.push('(');
     else if (t.kind === 'rparen') parts.push(')');
   }

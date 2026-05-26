@@ -19,8 +19,8 @@ function kinds(tokens: FlatToken[]): string[] {
 }
 
 describe('stringToTokens', () => {
-  it('parses (motion AND compel) OR appeal into 7 tokens', () => {
-    const toks = stringToTokens('(motion AND compel) OR appeal');
+  it('parses (motion and compel) or appeal into 7 tokens', () => {
+    const toks = stringToTokens('(motion and compel) or appeal');
     expect(kinds(toks)).toEqual([
       'lparen', 'term:motion', 'and', 'term:compel', 'rparen', 'or', 'term:appeal',
     ]);
@@ -28,10 +28,10 @@ describe('stringToTokens', () => {
 
   it('round-trips through tokensToString → parseBooleanQuery', () => {
     const inputs = [
-      '(motion AND compel) OR appeal',
-      'case==23-CV-1234 AND motionType==disqualification',
+      '(motion and compel) or appeal',
+      'case==23-CV-1234 and motionType==disqualification',
       '"order denying" -dismissed',
-      'appeal OR petition',
+      'appeal or petition',
     ];
     for (const inp of inputs) {
       const toks = stringToTokens(inp);
@@ -144,26 +144,26 @@ describe('BooleanChipComposer (DOM)', () => {
 
   afterEach(() => { try { unmount(); } catch { /* */ } });
 
-  it('clicking AND toolbar inserts an AND chip', () => {
+  it('clicking AND toolbar inserts an and chip', () => {
     mount('motion compel');
     click(findButtonByLabel('Insert AND'));
     expect(onChange).toHaveBeenCalled();
     const last = onChange.mock.calls.at(-1)![0];
-    expect(last).toMatch(/AND/);
+    expect(last).toMatch(/\band\b/);
   });
 
   it('clicking OR / NOT / parens insert their chips', () => {
     mount('a b');
     click(findButtonByLabel('Insert OR'));
-    expect(onChange.mock.calls.at(-1)![0]).toMatch(/OR/);
+    expect(onChange.mock.calls.at(-1)![0]).toMatch(/\bor\b/);
     click(findButtonByLabel('Insert NOT'));
-    expect(onChange.mock.calls.at(-1)![0]).toMatch(/NOT/);
+    expect(onChange.mock.calls.at(-1)![0]).toMatch(/\bnot\b/);
     click(findButtonByLabel('Insert parentheses'));
     expect(onChange.mock.calls.at(-1)![0]).toMatch(/\(.*\)/);
   });
 
   it('Backspace at end of composer removes the last chip', () => {
-    mount('motion AND compel');
+    mount('motion and compel');
     const box = findBox();
     act(() => { box.focus(); });
     keydown(box, 'Backspace');

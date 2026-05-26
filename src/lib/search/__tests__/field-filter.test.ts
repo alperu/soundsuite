@@ -70,9 +70,9 @@ describe('FIELD_RESOLVERS map (schema audit)', () => {
   });
 });
 
-describe('extractFieldFilters — AND-only ancestors', () => {
-  test('case==23-CV-1234 AND motion → where + MatchQuery', () => {
-    const ast = parse('case==23-CV-1234 AND motion');
+describe('extractFieldFilters — and-only ancestors', () => {
+  test('case==23-CV-1234 and motion → where + MatchQuery', () => {
+    const ast = parse('case==23-CV-1234 and motion');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     void 0; // shape extended with prismaRequests in #54 — see unified-pipeline test
     expect(whereClauses).toEqual([`case_number = '23-CV-1234'`]);
@@ -94,15 +94,15 @@ describe('extractFieldFilters — AND-only ancestors', () => {
   });
 
   test("phrase field value: case==\"motion to compel\" AND granted", () => {
-    const ast = parse('case=="motion to compel" AND granted');
+    const ast = parse('case=="motion to compel" and granted');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     void 0; // shape extended with prismaRequests in #54 — see unified-pipeline test
     expect(whereClauses).toEqual([`case_number = 'motion to compel'`]);
     expect(stripped).toEqual({ op: 'TERM', value: 'granted', phrase: false });
   });
 
-  test('two AND-ed field terms → two where clauses', () => {
-    const ast = parse('case==X AND filingType==RR');
+  test('two and-ed field terms → two where clauses', () => {
+    const ast = parse('case==X and filingType==RR');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     void 0; // shape extended with prismaRequests in #54 — see unified-pipeline test
     expect(whereClauses).toEqual([
@@ -142,17 +142,17 @@ describe('extractFieldFilters — unknown fields fall back', () => {
   });
 });
 
-describe('extractFieldFilters — OR-ancestor degradation', () => {
+describe('extractFieldFilters — or-ancestor degradation', () => {
   beforeEach(() => {
     (logger.warn as jest.Mock).mockClear?.();
   });
 
-  test('case==X OR keyword → field term degraded to bare text (logged)', () => {
-    const ast = parse('case==X OR keyword');
+  test('case==X or keyword → field term degraded to bare text (logged)', () => {
+    const ast = parse('case==X or keyword');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     void 0; // shape extended with prismaRequests in #54 — see unified-pipeline test
     expect(whereClauses).toEqual([]);
-    // The OR is preserved; the field term became a bare "case==X" text match
+    // The or is preserved; the field term became a bare "case==X" text match
     // (canonical Axon — `:` was normalized away at tokenize time).
     expect(stripped).toEqual({
       op: 'OR',

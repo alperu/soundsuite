@@ -843,11 +843,14 @@ export function compileToEnglish(chips: HaystackChip[], freetext?: string): stri
 
   const parts: string[] = [];
 
-  // Map chips to phrases.
+  // Map chips to phrases. Skip operator / paren / bare-term chips — only
+  // field-op chips have a readable English phrasing here.
   const phrases: string[] = [];
   for (const c of chips) {
-    const label = c.label ?? c.value;
-    switch (c.key) {
+    if ((c as { kind?: string }).kind !== undefined && (c as { kind?: string }).kind !== 'field') continue;
+    const fc = c as { key: string; value: string; label?: string };
+    const label = fc.label ?? fc.value;
+    switch (fc.key) {
       case 'judge':
         phrases.push(`signed by Judge ${stripAt(label)}`);
         break;

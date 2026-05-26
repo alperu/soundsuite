@@ -73,7 +73,11 @@ const FIELD_OP_RE = /^([A-Za-z][A-Za-z0-9_]*(?:->[A-Za-z][A-Za-z0-9_]*)*)(==|!=|
 // of falling through to the bare-term branch.
 const LEGACY_COLON_RE = /^([A-Za-z][A-Za-z0-9_]*(?:->[A-Za-z][A-Za-z0-9_]*)*):/;
 
-const OP_WORDS = new Set(['AND', 'OR', 'NOT', 'and', 'or', 'not']);
+// Task #55 (locked 2026-05-26): only lowercase Axon operators are accepted.
+// Uppercase `AND`/`OR`/`NOT` are rejected at tokenize time with a specific
+// suggestion, same shape as the `:` rejection.
+const OP_WORDS = new Set(['and', 'or', 'not']);
+const UPPERCASE_OP_RE = /^(AND|OR|NOT|And|Or|Not)$/;
 
 function isWs(c: string): boolean {
   return c === ' ' || c === '\t' || c === '\n' || c === '\r';
@@ -254,6 +258,9 @@ function tokenize(input: string): { ok: true; tokens: Tok[]; hasOperators: boole
       tokens.push({ kind: upper, pos: start, text: buf });
       hasOperators = true;
       atWordBoundary = false;
+    } else if (UPPERCASE_OP_RE.test(buf)) {
+      // Task #55: uppercase operators are rejected — pure lowercase Axon only.
+      return { ok: false, error: 'Use lowercase `and` / `or` / `not` (Axon syntax).', position: start };
     } else {
       tokens.push({ kind: 'TERM', pos: start, text: buf, value: buf, phrase: false });
       atWordBoundary = false;

@@ -37,16 +37,16 @@ describe('astToLanceQuery', () => {
     expect(fq).toBeInstanceOf(PhraseQuery);
   });
 
-  test('A AND B → BooleanQuery with two Must', () => {
-    const fq = build('A AND B') as any;
+  test('A and B → BooleanQuery with two Must', () => {
+    const fq = build('A and B') as any;
     expect(fq).toBeInstanceOf(BooleanQuery);
     // Inspect the constructor-captured queries via a structural check.
     // LanceDB stores the spec in `inner`, but we can also assert by re-building parts.
     // Just confirm it is a BooleanQuery — deep inspection is brittle across versions.
   });
 
-  test('(A AND B) OR C → OR at root, AND nested first branch', () => {
-    const parsed = parseBooleanQuery('(A AND B) OR C');
+  test('(A and B) or C → or at root, and nested first branch', () => {
+    const parsed = parseBooleanQuery('(A and B) or C');
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.ast).toEqual({
@@ -69,21 +69,21 @@ describe('astToLanceQuery', () => {
     expect(fq.clauses[1][1].q).toBe('C');
   });
 
-  test('A AND -B → MustNot folded into parent', () => {
-    const fq = build('A AND -B') as any;
+  test('A and -B → MustNot folded into parent', () => {
+    const fq = build('A and -B') as any;
     expect(fq).toBeInstanceOf(BooleanQuery);
     const occurs = fq.clauses.map((c: any) => c[0]);
     expect(occurs).toContain('MUST');
     expect(occurs).toContain('MUST_NOT');
   });
 
-  test('A AND NOT B → BooleanQuery with Must + MustNot', () => {
-    const fq = build('A AND NOT B') as any;
+  test('A and not B → BooleanQuery with Must + MustNot', () => {
+    const fq = build('A and not B') as any;
     expect(fq).toBeInstanceOf(BooleanQuery);
   });
 
-  test('lone top-level NOT → throws conversion error', () => {
-    const parsed = parseBooleanQuery('NOT foo');
+  test('lone top-level not → throws conversion error', () => {
+    const parsed = parseBooleanQuery('not foo');
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(() => astToLanceQuery(parsed.ast)).toThrow(BooleanFtsConversionError);

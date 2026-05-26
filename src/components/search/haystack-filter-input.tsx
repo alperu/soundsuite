@@ -68,6 +68,73 @@ export function stripActiveTokenFromText(text: string, active: ActiveToken): str
   return joined;
 }
 
+/**
+ * Task #55: walk the chip array from a paren index and find its match. Used
+ * to highlight the paired paren on hover. Returns null if unbalanced.
+ */
+export function matchingParenIdx(chips: FilterChip[], idx: number): number | null {
+  const t = chips[idx];
+  if (!t) return null;
+  const kind = (t as { kind?: string }).kind;
+  if (kind !== 'lparen' && kind !== 'rparen') return null;
+  if (kind === 'lparen') {
+    let depth = 0;
+    for (let i = idx; i < chips.length; i++) {
+      const k = (chips[i] as { kind?: string }).kind;
+      if (k === 'lparen') depth++;
+      else if (k === 'rparen') { depth--; if (depth === 0) return i; }
+    }
+  } else {
+    let depth = 0;
+    for (let i = idx; i >= 0; i--) {
+      const k = (chips[i] as { kind?: string }).kind;
+      if (k === 'rparen') depth++;
+      else if (k === 'lparen') { depth--; if (depth === 0) return i; }
+    }
+  }
+  return null;
+}
+
+/**
+ * Task #55: scan a freshly-typed freetext string and pull out any operator
+ * chips that can be auto-committed. Returns the remaining freetext plus the
+ * chips to splice in. The rules (gated by trailing space or paren typed):
+ *   - `(` and `)` anywhere → committed as lparen/rparen, removed from text
+ *   - trailing whole-word lowercase `and`/`or`/`not` followed by space →
+ *     committed as the operator chip, the word + space removed
+ *   - whole-word bare term followed by space, when an operator chip exists
+ *     elsewhere in the array (else leave as freetext) — kept simple: we ONLY
+ *     auto-commit operators here. Bare terms remain in freetext until the
+ *     parent's submit pipeline handles them.
+ *
+ * Note we only commit lowercase operators. Uppercase typed → falls through
+ * as bare freetext, the parser pill catches it with the explicit error.
+ */
+export function extractInlineChips(
+  freetext: string,
+  trigger: 'space' | 'lparen' | 'rparen',
+): { remaining: string; newChips: FilterChip[] } {
+  const newChips: FilterChip[] = [];
+  // Paren triggers commit immediately.
+  if (trigger === 'lparen') {
+    return { remaining: freetext, newChips: [{ kind: 'lparen' }] };
+  }
+  if (trigger === 'rparen') {
+    return { remaining: freetext, newChips: [{ kind: 'rparen' }] };
+  }
+  // Space trigger: check if the trailing word (now followed by the just-typed
+  // space) is a lowercase operator.
+  const m = freetext.match(/(^|\s)(and|or|not)\s$/);
+  if (m) {
+    const op = m[2] as 'and' | 'or' | 'not';
+    const cutAt = freetext.length - m[0].length + m[1].length;
+    const remaining = freetext.slice(0, cutAt).replace(/\s+$/, '');
+    newChips.push({ kind: op });
+    return { remaining, newChips };
+  }
+  return { remaining: freetext, newChips: [] };
+}
+
 // ---------------------------------------------------------------------------
 // Component
 
@@ -142,6 +209,8 @@ export const HaystackFilterInput = forwardRef<
 }: HaystackFilterInputProps, ref) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [cursor, setCursor] = useState<number>(0);
+  // Task #55: hover-pair highlight for paren chips.
+  const [hoveredParen, setHoveredParen] = useState<number | null>(null);
 
   // ---------------------------------------------------------------------------
   // Active-token detection — runs on every freetext / cursor change.
@@ -425,21 +494,80 @@ export const HaystackFilterInput = forwardRef<
         onClick={() => inputRef.current?.focus()}
       >
         {chips.map((c, i) => {
-          const def = TOKEN_MAP[c.key];
+          const kind = (c as { kind?: string }).kind;
+          // Task #55: operator/paren/term variants. The pill text is uppercase
+          // even though canonical syntax is lowercase (matches the
+          // boolean-chip-composer convention).
+          if (kind === 'and' || kind === 'or' || kind === 'not') {
+            const opClasses =
+              kind === 'and' ? 'border-blue-300 bg-blue-100 text-blue-700' :
+              kind === 'or'  ? 'border-purple-300 bg-purple-100 text-purple-700' :
+                               'border-red-300 bg-red-100 text-red-700';
+            return (
+              <button
+                key={`op-${i}-${kind}`}
+                type="button"
+                onClick={() => removeChipAt(i)}
+                title={`${kind.toUpperCase()} (click to remove)`}
+                aria-label={`${kind.toUpperCase()} operator. Click to remove.`}
+                className={`inline-flex items-center text-[10px] font-semibold uppercase px-2 py-0.5 border rounded ${opClasses}`}
+              >
+                {kind}
+              </button>
+            );
+          }
+          if (kind === 'lparen' || kind === 'rparen') {
+            const isMatch = hoveredParen !== null &&
+              (i === hoveredParen || i === matchingParenIdx(chips, hoveredParen));
+            const matchBg = isMatch ? 'bg-amber-100 border-amber-400' : 'bg-gray-50 border-gray-300';
+            return (
+              <button
+                key={`paren-${i}-${kind}`}
+                type="button"
+                onClick={() => removeChipAt(i)}
+                onMouseEnter={() => setHoveredParen(i)}
+                onMouseLeave={() => setHoveredParen(null)}
+                title={`${kind === 'lparen' ? 'Open' : 'Close'} paren (click to remove)`}
+                aria-label={`${kind === 'lparen' ? 'Open' : 'Close'} paren. Click to remove.`}
+                className={`inline-flex items-center text-xs font-mono px-1.5 py-0.5 border rounded text-gray-700 ${matchBg}`}
+              >
+                {kind === 'lparen' ? '(' : ')'}
+              </button>
+            );
+          }
+          if (kind === 'term') {
+            const tc = c as { kind: 'term'; value: string; phrase?: boolean };
+            return (
+              <button
+                key={`term-${i}-${tc.value}`}
+                type="button"
+                onClick={() => removeChipAt(i)}
+                title={`Term: ${tc.value} (click to remove)`}
+                aria-label={`Term ${tc.value}. Click to remove.`}
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-xs border border-gray-300 bg-white text-gray-800 rounded-md font-mono"
+              >
+                {tc.phrase ? `"${tc.value}"` : tc.value}
+                <span className="opacity-60">×</span>
+              </button>
+            );
+          }
+          // Default: field-op chip (legacy shape).
+          const fc = c as { key: string; value: string; label?: string };
+          const def = TOKEN_MAP[fc.key];
           const cat = def?.category ?? 'text';
           return (
             <span
-              key={`${c.key}-${i}-${c.value}`}
+              key={`${fc.key}-${i}-${fc.value}`}
               className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium border rounded-full ${categoryClasses[cat] ?? categoryClasses.text}`}
-              title={`${c.key}: ${c.label ?? c.value}`}
+              title={`${fc.key}: ${fc.label ?? fc.value}`}
             >
-              <span className="opacity-70">{c.key}:</span>
-              <span>{c.label ?? c.value}</span>
+              <span className="opacity-70">{fc.key}:</span>
+              <span>{fc.label ?? fc.value}</span>
               <button
                 type="button"
                 onClick={() => removeChipAt(i)}
                 className="ml-0.5 text-current opacity-60 hover:opacity-100"
-                aria-label={`Remove ${c.key} filter`}
+                aria-label={`Remove ${fc.key} filter`}
               >
                 ×
               </button>
@@ -451,7 +579,43 @@ export const HaystackFilterInput = forwardRef<
           type="text"
           value={freetext}
           onChange={(e) => {
-            onFreetextChange(e.target.value);
+            const next = e.target.value;
+            // Task #55: inline-operator / paren tokenization. Detect the just-
+            // typed char by comparing lengths; only single-char inserts at the
+            // end trigger the auto-commit. Paste/multi-char edits fall through
+            // to plain freetext.
+            const prev = freetext;
+            const grew = next.length === prev.length + 1 && next.startsWith(prev);
+            const lastChar = grew ? next[next.length - 1] : null;
+            // Don't auto-commit while a `token:partial` picker is active —
+            // typing space inside a date or enum picker should not eat the word.
+            const insidePicker = activeTokenAtCursor(next, next.length) !== null;
+
+            if (!insidePicker && lastChar === '(') {
+              // Drop the typed `(`; insert lparen chip.
+              const trimmed = next.slice(0, -1);
+              onChipsChange([...chips, { kind: 'lparen' } as FilterChip]);
+              onFreetextChange(trimmed);
+              requestAnimationFrame(syncCursor);
+              return;
+            }
+            if (!insidePicker && lastChar === ')') {
+              const trimmed = next.slice(0, -1);
+              onChipsChange([...chips, { kind: 'rparen' } as FilterChip]);
+              onFreetextChange(trimmed);
+              requestAnimationFrame(syncCursor);
+              return;
+            }
+            if (!insidePicker && lastChar === ' ') {
+              const { remaining, newChips } = extractInlineChips(next, 'space');
+              if (newChips.length > 0) {
+                onChipsChange([...chips, ...newChips]);
+                onFreetextChange(remaining);
+                requestAnimationFrame(syncCursor);
+                return;
+              }
+            }
+            onFreetextChange(next);
             // Defer to next frame so selectionEnd reflects the new value.
             requestAnimationFrame(syncCursor);
           }}

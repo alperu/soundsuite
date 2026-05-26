@@ -12,12 +12,12 @@ import React from 'react';
 // ---------------------------------------------------------------------------
 export function isLikelyMidTyping(input: string, _errorPos: number): boolean {
   if (!input.trim()) return true;
-  // trailing operator
-  if (/(?:^|\s)(and|or|not|AND|OR|NOT|-|\()\s*$/.test(input)) return true;
+  // trailing operator (lowercase only — uppercase is a real parse error post-#55)
+  if (/(?:^|\s)(and|or|not|-|\()\s*$/.test(input)) return true;
   // leading or/and
-  if (/^\s*(and|or|AND|OR)\b/.test(input)) return true;
+  if (/^\s*(and|or)\b/.test(input)) return true;
   // operator/paren-only
-  if (/^[\s()\-]*(and|or|not|AND|OR|NOT)?[\s()\-]*$/.test(input)) return true;
+  if (/^[\s()\-]*(and|or|not)?[\s()\-]*$/.test(input)) return true;
   // Trailing Axon-op without a value (mid-typing `case==`, `motionType>=`).
   if (/[A-Za-z0-9_)](==|!=|>=|<=|>|<)\s*$/.test(input)) return true;
   return false;
