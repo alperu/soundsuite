@@ -1,6 +1,13 @@
 'use client';
 
 import React from 'react';
+import {
+  CATALOGUE,
+  FEATURED_EXAMPLES,
+  OPERATORS,
+  BOOLEANS,
+  type FieldType,
+} from './filter-logic-catalogue';
 
 // ---------------------------------------------------------------------------
 // isLikelyMidTyping — exported for testing.
@@ -26,9 +33,9 @@ export function isLikelyMidTyping(input: string, _errorPos: number): boolean {
 // ---------------------------------------------------------------------------
 // FilterLogicPanel
 //
-// Left-rail reference for boolean-query syntax. Pure presentational —
-// collapsed state is owned by the parent (persisted to localStorage under
-// "filter-logic-panel-collapsed").
+// Catalogue-driven reference for the Axon query syntax. All field metadata
+// comes from `filter-logic-catalogue.ts`, which mirrors the XETO interfaces
+// in `src/lib/legal/types.ts`. No hand-written prose lives in this file.
 // ---------------------------------------------------------------------------
 
 type Props = {
@@ -36,14 +43,6 @@ type Props = {
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
 };
-
-const EXAMPLES: string[] = [
-  '(motion and compel) or appeal',
-  'case=="23-CV-1234" and motionType=="disqualification"',
-  'case->jurisdiction=="Texas" and motion',
-  'judgeRef->displayName=="Roberts"',
-  '"order denying" -dismissed',
-];
 
 function ChevronLeft({ className }: { className?: string }) {
   return (
@@ -58,6 +57,37 @@ function ChevronRight({ className }: { className?: string }) {
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
     </svg>
+  );
+}
+
+const TYPE_CHIP_CLASS: Record<FieldType, string> = {
+  string: 'bg-gray-100 text-gray-600',
+  date:   'bg-blue-50 text-blue-700',
+  number: 'bg-emerald-50 text-emerald-700',
+  ref:    'bg-violet-50 text-violet-700',
+  marker: 'bg-amber-50 text-amber-700',
+};
+
+function TypeChip({ type }: { type: FieldType }) {
+  return (
+    <span
+      className={`ml-1 px-1 py-px text-[9px] uppercase tracking-wider rounded ${TYPE_CHIP_CLASS[type]}`}
+    >
+      {type}
+    </span>
+  );
+}
+
+function TokenPill({ label, onClick, title }: { label: string; onClick: () => void; title?: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title ?? label}
+      className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-white border border-gray-200 text-gray-700 hover:bg-gray-100 hover:border-gray-300"
+    >
+      {label}
+    </button>
   );
 }
 
@@ -104,137 +134,58 @@ export function FilterLogicPanel({ onInsertExample, collapsed = false, onToggleC
       </div>
 
       <div className="p-3 space-y-4 text-xs text-gray-700">
-        <p className="text-[11px] text-gray-600 leading-snug">
-          Syntax is Axon — lowercase keywords, <code className="bg-gray-100 px-0.5 rounded">==</code> for equality.
-        </p>
-
-        {/* Boolean operators */}
-        <section>
-          <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Boolean operators</h4>
-          <ul className="space-y-1 text-[11px] leading-relaxed">
-            <li><code className="bg-gray-100 px-1 rounded">a and b</code> — both terms match</li>
-            <li><code className="bg-gray-100 px-1 rounded">a or b</code> — either term matches</li>
-            <li><code className="bg-gray-100 px-1 rounded">not b</code> or <code className="bg-gray-100 px-1 rounded">-foo</code> — exclude</li>
-            <li><code className="bg-gray-100 px-1 rounded">(a and b) or c</code> — group with parens</li>
-          </ul>
-        </section>
-
-        {/* Phrases */}
-        <section>
-          <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Phrases</h4>
-          <ul className="space-y-1 text-[11px] leading-relaxed">
-            <li><code className="bg-gray-100 px-1 rounded">&quot;motion to compel&quot;</code> — exact phrase</li>
-            <li>Escape an internal quote with <code className="bg-gray-100 px-1 rounded">\&quot;</code></li>
-          </ul>
-        </section>
-
-        {/* Field comparisons (Axon-style) */}
+        {/* Operators toolbar */}
         <section>
           <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-            Field comparisons
+            Operators
           </h4>
-          <ul className="space-y-1 text-[11px] leading-relaxed">
-            <li><code className="bg-gray-100 px-1 rounded">case==&quot;23-CV-1234&quot;</code></li>
-            <li><code className="bg-gray-100 px-1 rounded">filingType==&quot;RR&quot;</code></li>
-            <li><code className="bg-gray-100 px-1 rounded">documentType==&quot;order denying&quot;</code></li>
-            <li><code className="bg-gray-100 px-1 rounded">pageCount &gt;= 10</code></li>
-            <li><code className="bg-gray-100 px-1 rounded">filingDate &gt; 2026-01-01</code></li>
-          </ul>
-          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
-            Operators: <code className="bg-gray-100 px-0.5 rounded">==</code>{' '}
-            <code className="bg-gray-100 px-0.5 rounded">!=</code>{' '}
-            <code className="bg-gray-100 px-0.5 rounded">&gt;=</code>{' '}
-            <code className="bg-gray-100 px-0.5 rounded">&lt;=</code>{' '}
-            <code className="bg-gray-100 px-0.5 rounded">&gt;</code>{' '}
-            <code className="bg-gray-100 px-0.5 rounded">&lt;</code>
-          </p>
-          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
-            Fields: <code className="bg-gray-100 px-0.5 rounded">case</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">caseId</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">filingType</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">documentType</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">motionType</code>.
-            Unknown fields fall back to bare text. Field filters under an{' '}
-            <code className="bg-gray-100 px-0.5 rounded">or</code> branch currently degrade to text match.
-          </p>
+          <div className="flex flex-wrap gap-1">
+            {OPERATORS.map((op) => (
+              <TokenPill key={op.token} label={op.token} onClick={() => onInsertExample(op.insert)} />
+            ))}
+            <span className="mx-1 text-gray-300">|</span>
+            {BOOLEANS.map((op) => (
+              <TokenPill key={op.token} label={op.token} onClick={() => onInsertExample(op.insert)} />
+            ))}
+          </div>
         </section>
 
-        {/* Refs */}
-        <section>
-          <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Refs</h4>
-          <ul className="space-y-1 text-[11px] leading-relaxed">
-            <li><code className="bg-gray-100 px-1 rounded">caseRef==@04a8cd94-359c-4feb-…</code></li>
-            <li><code className="bg-gray-100 px-1 rounded">filingRef==@&lt;filing-uuid&gt;</code></li>
-          </ul>
-          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
-            <code className="bg-gray-100 px-0.5 rounded">@id</code> is a typed reference — strictly identity, no fuzzy match.
-          </p>
-        </section>
+        {/* Catalogue sections */}
+        {CATALOGUE.map((section) => (
+          <section key={section.marker}>
+            <div className="flex items-baseline gap-1.5 mb-1.5">
+              <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+                {section.name}
+              </h4>
+              <code className="text-[9px] px-1 py-px rounded bg-gray-100 text-gray-500 font-mono">
+                {section.marker}
+              </code>
+            </div>
+            <ul className="space-y-0.5">
+              {section.fields.map((f) => (
+                <li key={f.name}>
+                  <button
+                    type="button"
+                    onClick={() => onInsertExample(f.example)}
+                    title={f.example}
+                    className="w-full text-left flex items-center px-1 py-0.5 rounded hover:bg-gray-100 group"
+                  >
+                    <code className="font-mono text-[10px] text-gray-700 truncate">{f.name}</code>
+                    <TypeChip type={f.type} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
 
-        {/* Path traversal */}
+        {/* Featured examples */}
         <section>
           <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-            Path traversal <code className="bg-gray-100 px-0.5 rounded">-&gt;</code>
+            Examples
           </h4>
-          <p className="text-[10px] text-gray-500 mb-1.5 leading-snug">
-            Walk from a record into a related entity and filter there. Each{' '}
-            <code className="bg-gray-100 px-0.5 rounded">-&gt;</code> is one hop.
-          </p>
-          <ul className="space-y-1 text-[11px] leading-relaxed">
-            <li><code className="bg-gray-100 px-1 rounded">case-&gt;jurisdiction==&quot;Texas&quot;</code></li>
-            <li><code className="bg-gray-100 px-1 rounded">case-&gt;county==&quot;Travis&quot;</code></li>
-            <li><code className="bg-gray-100 px-1 rounded">case-&gt;judge-&gt;displayName==&quot;Roberts&quot;</code></li>
-            <li><code className="bg-gray-100 px-1 rounded">judgeRef-&gt;email==&quot;smith@court.gov&quot;</code></li>
-            <li><code className="bg-gray-100 px-1 rounded">clerkRef-&gt;displayName==&quot;Smith&quot;</code></li>
-          </ul>
-          <p className="text-[10px] text-amber-700 mt-1 leading-snug bg-amber-50 border border-amber-200 rounded px-2 py-1">
-            <span className="font-semibold">Note:</span> Path-traversal queries hit the denormalized Prisma columns
-            (full names like <code className="bg-white px-0.5 rounded">&quot;Texas&quot;</code>, not codes like
-            <code className="bg-white px-0.5 rounded">&quot;TX&quot;</code>). The XETO marker-tag form
-            (<code className="bg-white px-0.5 rounded">jurisdictionTx</code>,{' '}
-            <code className="bg-white px-0.5 rounded">jurisdictionCa</code>) lives in the <code className="bg-white px-0.5 rounded">tags</code> JSON
-            and isn&apos;t directly filterable yet.
-          </p>
-          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
-            <span className="font-semibold">From <code className="bg-gray-100 px-0.5 rounded">case</code> (2-hop):</span>{' '}
-            <code className="bg-gray-100 px-0.5 rounded">jurisdiction</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">state</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">county</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">country</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">name</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">caseNumber</code>.
-          </p>
-          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
-            <span className="font-semibold">From <code className="bg-gray-100 px-0.5 rounded">case</code> (3-hop):</span>{' '}
-            <code className="bg-gray-100 px-0.5 rounded">judge</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">movant</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">respondent</code>{' '}
-            → <code className="bg-gray-100 px-0.5 rounded">displayName</code> /{' '}
-            <code className="bg-gray-100 px-0.5 rounded">email</code> /{' '}
-            <code className="bg-gray-100 px-0.5 rounded">barNumber</code>.
-          </p>
-          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
-            <span className="font-semibold">From any ref</span>{' '}
-            (<code className="bg-gray-100 px-0.5 rounded">judgeRef</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">movantRef</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">respondentRef</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">lawyerRef</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">clerkRef</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">reporterRef</code>):{' '}
-            <code className="bg-gray-100 px-0.5 rounded">displayName</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">email</code>,{' '}
-            <code className="bg-gray-100 px-0.5 rounded">barNumber</code>.
-          </p>
-          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
-            Unknown paths fall back to bare-text search.
-          </p>
-        </section>
-
-        {/* Examples */}
-        <section>
-          <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Examples</h4>
           <div className="flex flex-col gap-1">
-            {EXAMPLES.map(ex => (
+            {FEATURED_EXAMPLES.map((ex) => (
               <button
                 key={ex}
                 type="button"
@@ -246,47 +197,6 @@ export function FilterLogicPanel({ onInsertExample, collapsed = false, onToggleC
               </button>
             ))}
           </div>
-        </section>
-
-        {/* Precedence cheat sheet */}
-        <section>
-          <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Precedence</h4>
-          <table className="w-full text-[10px] border-collapse">
-            <thead>
-              <tr className="text-left text-gray-500">
-                <th className="py-0.5 pr-2 font-medium">Op</th>
-                <th className="py-0.5 pr-2 font-medium">Binds</th>
-                <th className="py-0.5 font-medium">Example</th>
-              </tr>
-            </thead>
-            <tbody className="font-mono text-gray-700">
-              <tr className="border-t border-gray-200">
-                <td className="py-0.5 pr-2">not</td>
-                <td className="py-0.5 pr-2">tightest</td>
-                <td className="py-0.5">not a</td>
-              </tr>
-              <tr className="border-t border-gray-200">
-                <td className="py-0.5 pr-2">and</td>
-                <td className="py-0.5 pr-2">middle</td>
-                <td className="py-0.5">a and b</td>
-              </tr>
-              <tr className="border-t border-gray-200">
-                <td className="py-0.5 pr-2">or</td>
-                <td className="py-0.5 pr-2">loosest</td>
-                <td className="py-0.5">a or b</td>
-              </tr>
-            </tbody>
-          </table>
-        </section>
-
-        {/* Mid-typing note */}
-        <section className="border-t border-gray-200 pt-3">
-          <p className="text-[10px] text-gray-500 leading-snug">
-            Trailing <code className="bg-gray-100 px-0.5 rounded">and</code> /{' '}
-            <code className="bg-gray-100 px-0.5 rounded">or</code> is treated as incomplete, not an error.
-            Red bar appears only for real syntax problems like mismatched parens
-            or legacy <code className="bg-gray-100 px-0.5 rounded">field:value</code> (use <code className="bg-gray-100 px-0.5 rounded">==</code>).
-          </p>
         </section>
       </div>
     </aside>

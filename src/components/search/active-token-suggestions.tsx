@@ -670,6 +670,20 @@ export function ActiveTokenSuggestions({
  * judge:rob<cursor>" case works exactly as before. Plain end-of-string
  * behavior emerges when `cursor === text.length`.
  */
+// Roots that are recognized for path-traversal even though they're not in
+// TOKEN_MAP. These are the canonical *Ref names produced by FIELD_ALIASES
+// (`judge` → `judgeRef`) — the picker also fires when the user types the
+// canonical form directly (`judgeRef->displayName==...`).
+const PATH_ROOT_ALIASES = new Set([
+  'judgeRef',
+  'lawyerRef',
+  'movantRef',
+  'respondentRef',
+  'clerkRef',
+  'reporterRef',
+  'caseRef',
+]);
+
 // Match `<prefix><op><partial>` where:
 //   <prefix> is one or more `\w+` segments joined by `->` (Task #65 — path
 //     traversal: `reporterRef->displayName`, `case->jurisdiction`, etc.)

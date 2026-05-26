@@ -166,6 +166,20 @@ function quote(s: string): string {
 
 /** Format a field chip into a single Haystack filter term (without leading `and`). */
 function termFor(chip: { key: string; value: string; label?: string; op?: FieldChipOp }): string | null {
+  // Task #65: multi-segment path chip (`reporterRef->displayName`). Emit the
+  // path verbatim, with the value quoted as a string. TOKEN_MAP doesn't have
+  // an entry for the joined path, so we short-circuit before the lookup.
+  if (chip.key.includes('->')) {
+    const v = chip.value.trim();
+    if (!v) return null;
+    const op = chip.op ?? '==';
+    // Ref by `@uuid` if value starts with `@`; bare uuid string → keep as is.
+    if (v.startsWith('@')) {
+      return `${chip.key}${op}${v}`;
+    }
+    // Quote string values for Haystack/Axon parser stability.
+    return `${chip.key}${op}${quote(v)}`;
+  }
   const def = TOKEN_MAP[chip.key];
   if (!def) return null;
   // Chip-stored op (user-typed) wins, then TOKEN_MAP default, then `==`.

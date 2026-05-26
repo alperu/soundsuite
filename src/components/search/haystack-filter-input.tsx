@@ -468,7 +468,7 @@ export const HaystackFilterInput = forwardRef<
       // Active token but no list (date/number/empty refs): Enter commits the
       // user's typed partial verbatim as the chip value.
       if (activeToken && pickerOptions.length === 0 && e.key === 'Enter') {
-        const def = TOKEN_MAP[activeToken.prefix];
+        const def = TOKEN_MAP[activeToken.path[0]];
         if (def && (def.category === 'date' || def.category === 'number') && activeToken.partial.trim()) {
           e.preventDefault();
           commitChip(
@@ -632,9 +632,11 @@ export const HaystackFilterInput = forwardRef<
               </button>
             );
           }
-          // Default: field-op chip (legacy shape).
+          // Default: field-op chip (legacy shape). For task-#65 path chips
+          // (e.g. `reporterRef->displayName`) the joined key isn't in
+          // TOKEN_MAP — use the first segment for category/color.
           const fc = c as { key: string; value: string; label?: string; op?: FieldChipOp };
-          const def = TOKEN_MAP[fc.key];
+          const def = TOKEN_MAP[fc.key] ?? TOKEN_MAP[fc.key.split('->')[0]];
           const cat = def?.category ?? 'text';
           // Prefer the chip's saved op, fall back to TOKEN_MAP default, then `==`.
           const op = fc.op ?? def?.op ?? '==';
