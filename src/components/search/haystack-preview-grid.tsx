@@ -29,6 +29,12 @@ interface GridResponse {
   rows: any[]
   table: string
   filter: string
+  resolvedFilter?: string
+  debug?: {
+    traversalCount: number
+    intermediateIds?: number
+    droppedClauses?: string[]
+  }
   error?: string
 }
 
@@ -41,6 +47,22 @@ const DEFAULT_COLUMNS: Record<string, string[]> = {
   Person: ['id', 'name', 'firstName', 'lastName'],
   PersonRole: ['id', 'personRef', 'caseRef', 'role'],
   Hearing: ['id', 'caseRef', 'hearingDate', 'department'],
+}
+
+function zeroStateMessage(data: GridResponse): string {
+  const tc = data.debug?.traversalCount ?? 0
+  const ii = data.debug?.intermediateIds
+  const dropped = data.debug?.droppedClauses ?? []
+  if (tc > 0 && ii === 0) {
+    return 'Traversed records but found no matching case IDs.'
+  }
+  if (tc > 0 && (ii ?? 0) > 0) {
+    return `Found ${ii} matching case${ii === 1 ? '' : 's'} but no records in ${data.table}.`
+  }
+  if (dropped.length > 0) {
+    return `Some constraints couldn't be applied to ${data.table}: ${dropped.join(', ')}.`
+  }
+  return 'No records matched the compiled query.'
 }
 
 function shortId(v: any): string {
@@ -182,6 +204,16 @@ export function HaystackPreviewGrid({ filter, kind, disabled }: Props) {
         <pre className="text-[11px] font-mono text-gray-800 bg-white border border-gray-200 rounded px-2 py-1 overflow-x-auto whitespace-pre">
 {trimmedFilter}
         </pre>
+        {data?.resolvedFilter ? (
+          <div className="mt-1" data-testid="hpg-resolved">
+            <div className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-0.5">
+              SQL (resolved)
+            </div>
+            <pre className="text-[11px] font-mono text-gray-700 bg-white border border-gray-200 rounded px-2 py-1 overflow-x-auto whitespace-pre">
+{data.resolvedFilter}
+            </pre>
+          </div>
+        ) : null}
         <div className="text-[10px] text-gray-500 mt-1 flex justify-between">
           <span>Table: <span className="font-mono">{data?.table ?? '—'}</span></span>
           <span data-testid="hpg-count">
@@ -207,7 +239,9 @@ export function HaystackPreviewGrid({ filter, kind, disabled }: Props) {
             <div className="w-5 h-5 border-2 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
           </div>
         ) : data && data.rows.length === 0 ? (
-          <div className="text-center text-gray-400 text-sm py-8">No records matched.</div>
+          <div className="text-center text-gray-400 text-sm py-8" data-testid="hpg-zero">
+            {zeroStateMessage(data)}
+          </div>
         ) : data ? (
           <table className="w-full text-[11px]">
             <thead className="sticky top-0 bg-white border-b border-gray-200 z-[1]">

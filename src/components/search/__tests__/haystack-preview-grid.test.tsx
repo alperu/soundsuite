@@ -84,6 +84,61 @@ maybe('HaystackPreviewGrid', () => {
     expect(screen.getByText(/Demurrer/)).toBeTruthy();
   });
 
+  it('renders the resolved SQL block when the server returns resolvedFilter', async () => {
+    const { render, screen, waitFor, act } = RTL;
+    const fetchMock = mockFetchResponse({
+      count: 1,
+      table: 'Document',
+      filter: 'documentType=="order"',
+      resolvedFilter: '"documentType" = \'order\'',
+      rows: [{ id: 'd1', documentType: 'order' }],
+      debug: { traversalCount: 0 },
+    });
+    global.fetch = fetchMock as any;
+    render(<HaystackPreviewGrid filter="documentType==&quot;order&quot;" />);
+    await act(async () => { jest.advanceTimersByTime(550); });
+    await waitFor(() => {
+      expect(screen.getByTestId('hpg-resolved')).toBeTruthy();
+    });
+    expect(screen.getByTestId('hpg-resolved').textContent).toMatch(/documentType/);
+  });
+
+  it('shows traversal zero-state when intermediateIds=0', async () => {
+    const { render, screen, waitFor, act } = RTL;
+    const fetchMock = mockFetchResponse({
+      count: 0,
+      table: 'Document',
+      filter: 'case->judge->displayName=="Nobody"',
+      resolvedFilter: '"caseId" IN (\'__no_match__\')',
+      rows: [],
+      debug: { traversalCount: 1, intermediateIds: 0 },
+    });
+    global.fetch = fetchMock as any;
+    render(<HaystackPreviewGrid filter='case->judge->displayName=="Nobody"' />);
+    await act(async () => { jest.advanceTimersByTime(550); });
+    await waitFor(() => {
+      expect(screen.getByTestId('hpg-zero').textContent).toMatch(/no matching case IDs/i);
+    });
+  });
+
+  it('shows dropped-clauses zero-state when constraints could not be applied', async () => {
+    const { render, screen, waitFor, act } = RTL;
+    const fetchMock = mockFetchResponse({
+      count: 0,
+      table: 'Case',
+      filter: 'volumeNumber==3',
+      resolvedFilter: '1 = 1',
+      rows: [],
+      debug: { traversalCount: 0, droppedClauses: ["volume_number = '3'"] },
+    });
+    global.fetch = fetchMock as any;
+    render(<HaystackPreviewGrid filter="volumeNumber==3" />);
+    await act(async () => { jest.advanceTimersByTime(550); });
+    await waitFor(() => {
+      expect(screen.getByTestId('hpg-zero').textContent).toMatch(/constraints couldn't be applied/i);
+    });
+  });
+
   it('shows an error bar on a 500 response', async () => {
     const { render, screen, waitFor, act } = RTL;
     const fetchMock = mockFetchResponse({ error: 'Parse failure: unexpected token' }, false);
