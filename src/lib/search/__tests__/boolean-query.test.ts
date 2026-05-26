@@ -333,15 +333,15 @@ describe('astSerialize — round-trip', () => {
 });
 
 describe('parseBooleanQuery — field-qualified terms', () => {
-  test('F1. simple field:value', () => {
+  test('F1. simple field:value (legacy `:` normalizes to `==`)', () => {
     const r = ok('motionType:disqualification');
     expect(r.hasOperators).toBe(false);
-    expect(r.ast).toEqual({ op: 'TERM', value: 'disqualification', phrase: false, field: 'motionType' });
+    expect(r.ast).toEqual({ op: 'TERM', value: 'disqualification', phrase: false, path: ['motionType'], compareOp: '==' });
   });
 
   test('F2. field:"quoted phrase"', () => {
     const r = ok('case:"23-CV-1234"');
-    expect(r.ast).toEqual({ op: 'TERM', value: '23-CV-1234', phrase: true, field: 'case' });
+    expect(r.ast).toEqual({ op: 'TERM', value: '23-CV-1234', phrase: true, path: ['case'], compareOp: '==' });
   });
 
   test('F3. two field terms OR-combined', () => {
@@ -350,8 +350,8 @@ describe('parseBooleanQuery — field-qualified terms', () => {
     expect(r.ast).toEqual({
       op: 'OR',
       children: [
-        { op: 'TERM', value: 'disqualification', phrase: false, field: 'motionType' },
-        { op: 'TERM', value: '23-CV-1234', phrase: false, field: 'case' },
+        { op: 'TERM', value: 'disqualification', phrase: false, path: ['motionType'], compareOp: '==' },
+        { op: 'TERM', value: '23-CV-1234', phrase: false, path: ['case'], compareOp: '==' },
       ],
     });
   });
@@ -374,7 +374,7 @@ describe('parseBooleanQuery — field-qualified terms', () => {
     expect(r.ast).toEqual({
       op: 'AND',
       children: [
-        { op: 'TERM', value: 'disqualification', phrase: false, field: 'motionType' },
+        { op: 'TERM', value: 'disqualification', phrase: false, path: ['motionType'], compareOp: '==' },
         { op: 'NOT', child: term('dismissed') },
       ],
     });
@@ -382,18 +382,18 @@ describe('parseBooleanQuery — field-qualified terms', () => {
 
   test('F7. field:"motion to compel" (phrase value)', () => {
     const r = ok('case:"motion to compel"');
-    expect(r.ast).toEqual({ op: 'TERM', value: 'motion to compel', phrase: true, field: 'case' });
+    expect(r.ast).toEqual({ op: 'TERM', value: 'motion to compel', phrase: true, path: ['case'], compareOp: '==' });
   });
 
   test('F8. and:foo is a field term, not an operator', () => {
     const r = ok('and:foo');
     expect(r.hasOperators).toBe(false);
-    expect(r.ast).toEqual({ op: 'TERM', value: 'foo', phrase: false, field: 'and' });
+    expect(r.ast).toEqual({ op: 'TERM', value: 'foo', phrase: false, path: ['and'], compareOp: '==' });
   });
 
   test('F9. caseAnd:foo — ident isn\'t split mid-token', () => {
     const r = ok('caseAnd:foo');
-    expect(r.ast).toEqual({ op: 'TERM', value: 'foo', phrase: false, field: 'caseAnd' });
+    expect(r.ast).toEqual({ op: 'TERM', value: 'foo', phrase: false, path: ['caseAnd'], compareOp: '==' });
   });
 
   test('F10. case: "23-CV-1234" (space after colon) → parse error', () => {
@@ -410,7 +410,7 @@ describe('parseBooleanQuery — field-qualified terms', () => {
 
   test('F12. bare-value case:23-CV-1234 (no quotes)', () => {
     const r = ok('case:23-CV-1234');
-    expect(r.ast).toEqual({ op: 'TERM', value: '23-CV-1234', phrase: false, field: 'case' });
+    expect(r.ast).toEqual({ op: 'TERM', value: '23-CV-1234', phrase: false, path: ['case'], compareOp: '==' });
   });
 
   test('F13. field-term round-trips through astSerialize', () => {
@@ -421,6 +421,195 @@ describe('parseBooleanQuery — field-qualified terms', () => {
     const r2 = parseBooleanQuery(ser);
     expect(r2.ok).toBe(true);
     if (r2.ok) expect(r2.ast).toEqual(r1.ast);
+  });
+});
+
+describe('parseBooleanQuery — Axon-style comparison operators', () => {
+  test('A1. field==value parses with compareOp=="==', () => {
+    const r = parseBooleanQuery('case=="23-CV-1234"');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.ast).toEqual({ op: 'TERM', value: '23-CV-1234', phrase: true, path: ['case'], compareOp: '==' });
+  });
+
+  test('A2. legacy field:value parses with compareOp normalized to ==', () => {
+    const r = parseBooleanQuery('case:23-CV-1234');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // `:` is a tokenize-time alias for `==` — every field-op TERM in the
+    // final AST has a concrete compareOp.
+    expect(r.ast).toEqual({ op: 'TERM', value: '23-CV-1234', phrase: false, path: ['case'], compareOp: '==' });
+  });
+
+  test('A3. != / >= / <= / > / < all recognized', () => {
+    for (const op of ['!=', '>=', '<=', '>', '<']) {
+      const r = parseBooleanQuery(`pageCount${op}10`);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.ast).toMatchObject({ op: 'TERM', value: '10', path: ['pageCount'], compareOp: op });
+    }
+  });
+
+  test('A4. == combines with AND/OR', () => {
+    const r = parseBooleanQuery('case=="X" AND motionType=="disqualify"');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.ast).toEqual({
+      op: 'AND',
+      children: [
+        { op: 'TERM', value: 'X', phrase: true, path: ['case'], compareOp: '==' },
+        { op: 'TERM', value: 'disqualify', phrase: true, path: ['motionType'], compareOp: '==' },
+      ],
+    });
+  });
+
+  test('A5. trailing == is parse error pointing at the operator', () => {
+    const r = parseBooleanQuery('case==');
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toMatch(/Expected value after field 'case=='/);
+  });
+
+  test('A6. == round-trips through astSerialize', () => {
+    const src = 'case=="23-CV-1234" AND pageCount>=10';
+    const r1 = parseBooleanQuery(src);
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const r2 = parseBooleanQuery(astSerialize(r1.ast));
+    expect(r2.ok).toBe(true);
+    if (r2.ok) expect(r2.ast).toEqual(r1.ast);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #53: unification — refs, path traversal, chip aliases, lowercase booleans.
+// ---------------------------------------------------------------------------
+
+describe('parseBooleanQuery — refs and aliases (task #53)', () => {
+  test('U1. caseRef==@uuid → ref leaf with bare uuid value', () => {
+    const r = ok('caseRef==@04a8cd94-359c-4feb');
+    expect(r.ast).toEqual({
+      op: 'TERM',
+      value: '04a8cd94-359c-4feb',
+      phrase: false,
+      path: ['caseRef'],
+      compareOp: '==',
+      isRef: true,
+    });
+  });
+
+  test('U2. judge==@uuid (alias) → judgeRef + isRef', () => {
+    const r = ok('judge==@person-roberts');
+    expect(r.ast).toEqual({
+      op: 'TERM',
+      value: 'person-roberts',
+      phrase: false,
+      path: ['judgeRef'],
+      compareOp: '==',
+      isRef: true,
+    });
+  });
+
+  test('U2b. judge==@x and judgeRef==@x produce identical ASTs', () => {
+    const a = ok('judge==@x').ast;
+    const b = ok('judgeRef==@x').ast;
+    expect(a).toEqual(b);
+  });
+
+  test('U3. case->jurisdiction=="TX" parses as multi-segment path', () => {
+    const r = ok('case->jurisdiction=="TX"');
+    expect(r.ast).toEqual({
+      op: 'TERM',
+      value: 'TX',
+      phrase: true,
+      path: ['case', 'jurisdiction'],
+      compareOp: '==',
+    });
+  });
+
+  test('U4. filedAfter:2026-01-01 alias rewrites field AND coerces op to >=', () => {
+    const r = ok('filedAfter:2026-01-01');
+    expect(r.ast).toEqual({
+      op: 'TERM',
+      value: '2026-01-01',
+      phrase: false,
+      path: ['courtFilingDate'],
+      compareOp: '>=',
+    });
+  });
+
+  test('U4b. filedAfter==X also coerces to >= (alias op wins unconditionally)', () => {
+    const r = ok('filedAfter==2026-01-01');
+    expect(r.ast).toMatchObject({
+      path: ['courtFilingDate'],
+      compareOp: '>=',
+      value: '2026-01-01',
+    });
+  });
+
+  test('U4c. filedBefore and filedOn aliases', () => {
+    expect(ok('filedBefore:2026-01-01').ast).toMatchObject({
+      path: ['courtFilingDate'], compareOp: '<=', value: '2026-01-01',
+    });
+    expect(ok('filedOn:2026-01-01').ast).toMatchObject({
+      path: ['courtFilingDate'], compareOp: '==', value: '2026-01-01',
+    });
+  });
+
+  test('U5. case=="X" and motion (lowercase boolean keyword)', () => {
+    const r = ok('case=="X" and motion');
+    expect(r.ast).toEqual({
+      op: 'AND',
+      children: [
+        { op: 'TERM', value: 'X', phrase: true, path: ['case'], compareOp: '==' },
+        term('motion'),
+      ],
+    });
+  });
+
+  test('U6. case:23-CV-1234 (legacy `:` normalizes to `==` in AST)', () => {
+    const r = ok('case:23-CV-1234');
+    expect(r.ast).toMatchObject({ path: ['case'], compareOp: '==', value: '23-CV-1234' });
+    expect((r.ast as { compareOp: string }).compareOp).toBe('==');
+  });
+
+  test('U7. multi-hop path case->judge->name=="Roberts" round-trips', () => {
+    const r1 = parseBooleanQuery('case->judge->name=="Roberts"');
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    expect(r1.ast).toEqual({
+      op: 'TERM',
+      value: 'Roberts',
+      phrase: true,
+      path: ['case', 'judge', 'name'],
+      compareOp: '==',
+    });
+    const ser = astSerialize(r1.ast);
+    expect(ser).toBe('case->judge->name=="Roberts"');
+    const r2 = parseBooleanQuery(ser);
+    expect(r2.ok).toBe(true);
+    if (r2.ok) expect(r2.ast).toEqual(r1.ast);
+  });
+
+  test('U8. parse → astSerialize → parse stability across refs + aliases + paths', () => {
+    const inputs = [
+      'caseRef==@04a8cd94',
+      'judge==@person-roberts',
+      'filedAfter:2026-01-01',
+      'case->jurisdiction=="TX"',
+      'case=="X" AND judge==@y',
+      'caseRef==@x OR motionType:disqualify',
+      'NOT judge==@x',
+    ];
+    for (const src of inputs) {
+      const r1 = parseBooleanQuery(src);
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) continue;
+      const ser = astSerialize(r1.ast);
+      const r2 = parseBooleanQuery(ser);
+      expect(r2.ok).toBe(true);
+      if (r2.ok) expect(r2.ast).toEqual(r1.ast);
+    }
   });
 });
 

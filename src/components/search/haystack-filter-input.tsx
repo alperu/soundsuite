@@ -129,7 +129,7 @@ export const HaystackFilterInput = forwardRef<
   freetext,
   onFreetextChange,
   onSubmit,
-  placeholder = 'Filter or ask… (try judge: hearingDate: motionType:)',
+  placeholder = 'Filter or ask… (try judge== hearingDate>= motionType==)',
   disabled,
   className,
   style,
@@ -255,15 +255,17 @@ export const HaystackFilterInput = forwardRef<
     (token: string) => {
       // When called from the left-rail panel, the freetext may not end in a
       // bare partial (the user could have advanced past it). Fall back to
-      // appending `<token>:` with a leading space in that case so clicks from
+      // appending `<token>==` with a leading space in that case so clicks from
       // the panel still work even when the regex doesn't match.
+      // Task #57: Axon-canonical `==` (the parser normalizes legacy `:` so
+      // both still parse, but the suggestion always offers canonical).
       const re = /(?:^|\s)(\w+)$/;
       const next = re.test(freetext)
         ? freetext.replace(re, (m) => {
             const ws = m.match(/^\s/) ? ' ' : '';
-            return `${ws}${token}:`;
+            return `${ws}${token}==`;
           })
-        : `${freetext.replace(/\s+$/, '')}${freetext.trim() ? ' ' : ''}${token}:`;
+        : `${freetext.replace(/\s+$/, '')}${freetext.trim() ? ' ' : ''}${token}==`;
       onFreetextChange(next);
       // Move cursor to end so activeTokenAtCursor picks up the new prefix.
       requestAnimationFrame(() => {

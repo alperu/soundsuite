@@ -1,108 +1,27 @@
 /**
- * Haystack-aware search endpoint.
+ * @deprecated — superseded by /api/search/unified (Task #54).
  *
- * Glue between the new structured filter UI (HaystackFilterInput) and:
- *   1. The Haystack HTTP server at `/api/haystack/read` (Agent 3 builds this).
- *   2. The existing semantic search pipeline (`query_case_knowledge` MCP tool).
+ * Kept for one release cycle as a thin forwarder so any in-flight client
+ * code keeps working. The legacy {filter, freetext} shape is mapped to the
+ * unified {query} shape by concatenating filter + freetext with a space.
  *
- * Behaviour:
- *   - POST { filter?: string, freetext?: string, caseId?: string, chatId?: string }
- *   - If `filter` is non-empty, forward to `/api/haystack/read?filter=...`. If the
- *     Haystack endpoint isn't live yet (404), surface a stub with a note so the
- *     UI keeps working.
- *   - If `freetext` is non-empty, also run a semantic search. Results are merged
- *     into the same response under separate keys so the UI can show provenance.
- *
- * This route is purely additive; it does not modify /api/search/deep or
- * deep-search-runner — the deep search pipeline keeps its current behaviour.
+ * Remove this file in the release after the chip composer ships (#55).
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
-import { interpretQuery, type InterpretContext, type PersonIndexEntry, type CaseIndexEntry } from '@/lib/search/freetext-interpreter';
 
-interface InterpretedHint {
-  compiledFilter: string;
-  freetextResidual: string;
-  confidence: 'high' | 'medium' | 'low';
-}
-
-/** Best-effort load of the person/case index for the interpreter. */
-async function loadInterpretContext(): Promise<InterpretContext> {
-  let personIndex: PersonIndexEntry[] = [];
-  let caseIndex: CaseIndexEntry[] = [];
-  try {
-    const repo: any = await import('@/lib/legal/repo' as any).catch(() => null);
-    if (repo?.findPerson) {
-      const rows: any[] = await repo.findPerson('person', 5000).catch(() => []);
-      personIndex = rows.map((r) => ({
-        id: String(r.id ?? ''),
-        displayName: String(r.displayName ?? r.id ?? ''),
-        intrinsicTags: {
-          judge: r.judge === true || r?.tags?.judge === true,
-          lawyer: r.lawyer === true || r?.tags?.lawyer === true,
-        },
-      })).filter((p) => p.id && p.displayName);
-    }
-    if (repo?.findCase) {
-      const rows: any[] = await repo.findCase('case', 5000).catch(() => []);
-      caseIndex = rows.map((r) => ({
-        id: String(r.id ?? ''),
-        causeNo: r.causeNo ?? undefined,
-        name: r.name ?? r.title ?? undefined,
-      })).filter((c) => c.id);
-    }
-  } catch {
-    /* schema not ready */
-  }
-  return { personIndex, caseIndex, now: new Date() };
-}
-
-interface HaystackSearchBody {
+interface LegacyHaystackBody {
   filter?: string;
   freetext?: string;
   caseId?: string;
   chatId?: string;
-  /** Limit for the semantic pass. */
   limit?: number;
 }
 
-interface HaystackResultRow {
-  id: string;
-  [key: string]: unknown;
-}
-
-async function callHaystackRead(
-  filter: string,
-  origin: string,
-): Promise<
-  | { ok: true; results: HaystackResultRow[] }
-  | { ok: false; status: number; note: string }
-> {
-  try {
-    const url = `${origin}/api/haystack/read?filter=${encodeURIComponent(filter)}`;
-    const res = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
-    if (res.status === 404) {
-      return { ok: false, status: 404, note: 'haystack endpoint not yet live' };
-    }
-    if (!res.ok) {
-      return { ok: false, status: res.status, note: `haystack read failed (${res.status})` };
-    }
-    const data = (await res.json()) as { results?: HaystackResultRow[]; rows?: HaystackResultRow[] };
-    return { ok: true, results: data.results ?? data.rows ?? [] };
-  } catch (err) {
-    return {
-      ok: false,
-      status: 0,
-      note: `haystack read errored: ${(err as Error).message}`,
-    };
-  }
-}
-
 export async function POST(request: NextRequest) {
-  let body: HaystackSearchBody;
+  let body: LegacyHaystackBody;
   try {
-    body = (await request.json()) as HaystackSearchBody;
+    body = (await request.json()) as LegacyHaystackBody;
   } catch {
     return NextResponse.json(
       { error: { message: 'Invalid JSON body' } },
@@ -110,99 +29,41 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  let filter = (body.filter ?? '').trim();
-  let freetext = (body.freetext ?? '').trim();
-  const limit = body.limit ?? 10;
-
+  const filter = (body.filter ?? '').trim();
+  const freetext = (body.freetext ?? '').trim();
   if (!filter && !freetext) {
     return NextResponse.json(
       { error: { message: 'Provide at least one of filter or freetext' } },
       { status: 400 },
     );
   }
+  const query = [filter, freetext].filter(Boolean).join(' ').trim();
 
-  // Magic: when caller provides only freetext, interpret it into chips +
-  // compiledFilter. The compiled filter feeds Haystack; the residual feeds
-  // the semantic pass. If the interpreter doesn't produce a filter (low
-  // confidence), fall through to pure semantic search.
-  let interpreted: InterpretedHint | null = null;
-  if (!filter && freetext) {
-    try {
-      const ctx = await loadInterpretContext();
-      const r = await interpretQuery(freetext, ctx);
-      interpreted = {
-        compiledFilter: r.compiledFilter,
-        freetextResidual: r.freetextResidual,
-        confidence: r.confidence,
-      };
-      if (r.compiledFilter) {
-        filter = r.compiledFilter;
-        freetext = r.freetextResidual;
-      }
-    } catch {
-      /* interpreter optional — fall back to pure semantic */
-    }
+  // Forward to /api/search/unified. Use same-origin fetch so middleware /
+  // auth headers carry through.
+  const url = `${request.nextUrl.origin}/api/search/unified`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query,
+      ...(body.caseId ? { caseId: body.caseId } : {}),
+      ...(body.chatId ? { chatId: body.chatId } : {}),
+      ...(body.limit ? { limit: body.limit } : {}),
+    }),
+  });
+  const json = await res.json();
+
+  // Surface the unified envelope under the legacy `{haystack, semantic}` shape
+  // so existing callers don't crash. `haystack.results` carries chunks.
+  if (!res.ok) {
+    return NextResponse.json(json, { status: res.status });
   }
-
-  const origin = request.nextUrl.origin;
-
-  // Run both branches in parallel where applicable.
-  const tasks: Promise<unknown>[] = [];
-
-  let haystackTask: ReturnType<typeof callHaystackRead> | null = null;
-  if (filter) {
-    haystackTask = callHaystackRead(filter, origin);
-    tasks.push(haystackTask);
-  }
-
-  type SemanticResult = { success: boolean; data?: unknown; error?: string };
-  let semanticTask: Promise<SemanticResult> | null = null;
-  if (freetext) {
-    semanticTask = (async (): Promise<SemanticResult> => {
-      try {
-        const registry = await getToolRegistry();
-        const result = await registry.execute('query_case_knowledge', {
-          query: freetext,
-          limit,
-          ...(body.caseId ? { caseId: body.caseId } : {}),
-          ...(body.chatId ? { chatId: body.chatId } : {}),
-        });
-        return result as SemanticResult;
-      } catch (err) {
-        return { success: false, error: (err as Error).message };
-      }
-    })();
-    tasks.push(semanticTask);
-  }
-
-  await Promise.all(tasks);
-
-  const response: {
-    filter: string;
-    freetext: string;
-    interpreted?: InterpretedHint;
-    haystack?: { results: HaystackResultRow[]; note?: string };
-    semantic?: { results: unknown; error?: string };
-  } = { filter, freetext };
-  if (interpreted) response.interpreted = interpreted;
-
-  if (haystackTask) {
-    const r = await haystackTask;
-    if (r.ok) {
-      response.haystack = { results: r.results };
-    } else {
-      response.haystack = { results: [], note: r.note };
-    }
-  }
-
-  if (semanticTask) {
-    const r = await semanticTask;
-    if (r.success) {
-      response.semantic = { results: r.data };
-    } else {
-      response.semantic = { results: [], error: r.error };
-    }
-  }
-
-  return NextResponse.json(response);
+  return NextResponse.json({
+    filter,
+    freetext,
+    deprecated: 'POST /api/search/haystack is deprecated — use /api/search/unified',
+    semantic: { results: { results: json.chunks ?? [] } },
+    haystack: { results: [], note: 'haystack route folded into unified pipeline' },
+  });
 }

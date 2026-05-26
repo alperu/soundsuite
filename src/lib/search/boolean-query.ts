@@ -1,11 +1,33 @@
 // Hand-rolled precedence-climbing parser for boolean search expressions.
 // Grammar: expr = OR of ANDs; AND between adjacent terms is implicit;
 // NOT and unary `-` negate; parens group; "..." is a phrase.
+//
+// AST shape decisions (task #53, search unification):
+//   - TERM nodes carry `path: string[]` (1+ segments) instead of a single
+//     `field?: string`. Single-segment paths are the common case
+//     (`case=="X"` → `path: ['case']`); multi-segment paths come from `->`
+//     traversal (`case->jurisdiction=="TX"` → `path: ['case', 'jurisdiction']`).
+//     Bare-term TERMs (no field) carry `path: []` so consumers can branch on
+//     `path.length === 0`.
+//   - Refs are NOT a separate node kind. A field-op TERM whose value started
+//     with `@` (unquoted) is marked `isRef: true` and stores the bare uuid in
+//     `value` (no `@`). astSerialize re-adds the `@`. This avoids duplicating
+//     the entire TERM shape (path/compareOp/phrase) for a single boolean flag.
+//   - Every field-op TERM has a concrete `compareOp`. The legacy `:` is
+//     normalized to `==` at tokenize time — there is no longer a "compareOp
+//     omitted for `:`" branch.
+//   - Chip aliases (`judge`→`judgeRef`, `filedAfter`→`courtFilingDate>=`,
+//     etc.) are absorbed by the parser via FIELD_ALIASES below. Aliases that
+//     declare an `op` REPLACE the user-typed operator (so `filedAfter==X` and
+//     `filedAfter:X` both become `courtFilingDate>=X`). This was an explicit
+//     design call so chip-UI shortcuts work in the typed input too.
+
+export type CompareOp = '==' | '!=' | '>=' | '<=' | '>' | '<';
 
 export type Node =
   | { op: 'AND' | 'OR'; children: Node[] }
   | { op: 'NOT'; child: Node }
-  | { op: 'TERM'; value: string; phrase: boolean; field?: string };
+  | { op: 'TERM'; value: string; phrase: boolean; path?: string[]; compareOp?: CompareOp; isRef?: boolean };
 
 export type ParseResult =
   | { ok: true; ast: Node; hasOperators: boolean }
@@ -13,7 +35,35 @@ export type ParseResult =
 
 type Tok =
   | { kind: 'AND' | 'OR' | 'NOT' | 'LP' | 'RP' | 'DASH'; pos: number; text: string }
-  | { kind: 'TERM'; pos: number; text: string; value: string; phrase: boolean; field?: string };
+  | { kind: 'TERM'; pos: number; text: string; value: string; phrase: boolean; path?: string[]; compareOp?: CompareOp; isRef?: boolean };
+
+// Field-alias map. The alias is applied to the FIRST segment of the path
+// (you can still traverse from an aliased root: `judge->displayName==...`
+// becomes `judgeRef->displayName==...`). When an alias defines `op`, that op
+// overrides whatever the user typed.
+interface FieldAlias {
+  field: string;          // canonical first-segment name
+  op?: CompareOp;         // optional operator coercion
+}
+
+export const FIELD_ALIASES: Record<string, FieldAlias> = {
+  judge:        { field: 'judgeRef' },
+  lawyer:       { field: 'lawyerRef' },
+  movant:       { field: 'movantRef' },
+  respondent:   { field: 'respondentRef' },
+  clerk:        { field: 'clerkRef' },
+  reporter:     { field: 'reporterRef' },
+  filedAfter:   { field: 'courtFilingDate', op: '>=' },
+  filedBefore:  { field: 'courtFilingDate', op: '<=' },
+  filedOn:      { field: 'courtFilingDate', op: '==' },
+};
+
+// Field-qualified term detection. Accepts `field(->field)*` followed by an
+// Axon comparison operator or the legacy `:` alias. Longest match wins for
+// multi-char ops (`==` before `=` if `=` were ever added; `>=` before `>`).
+// Operate on a single bare-term `buf` (no newlines possible — tokenizer
+// breaks on whitespace), so the `s` (dotAll) flag isn't needed.
+const FIELD_OP_RE = /^([A-Za-z][A-Za-z0-9_]*(?:->[A-Za-z][A-Za-z0-9_]*)*)(==|!=|>=|<=|>|<|:)(.*)$/;
 
 const OP_WORDS = new Set(['AND', 'OR', 'NOT', 'and', 'or', 'not']);
 
@@ -23,6 +73,19 @@ function isWs(c: string): boolean {
 
 function isTermChar(c: string): boolean {
   return !isWs(c) && c !== '(' && c !== ')' && c !== '"';
+}
+
+// Normalize a raw `field(->field)*` chain into a `path[]` and apply
+// FIELD_ALIASES to the first segment. Returns the canonical path plus an
+// optional operator override coming from the alias table.
+function normalizePath(rawPath: string): { path: string[]; opOverride?: CompareOp } {
+  const segments = rawPath.split('->');
+  const alias = FIELD_ALIASES[segments[0]];
+  if (alias) {
+    segments[0] = alias.field;
+    return { path: segments, opOverride: alias.op };
+  }
+  return { path: segments };
 }
 
 function tokenize(input: string): { ok: true; tokens: Tok[]; hasOperators: boolean } | { ok: false; error: string; position: number } {
@@ -90,55 +153,78 @@ function tokenize(input: string): { ok: true; tokens: Tok[]; hasOperators: boole
       return { ok: false, error: `Unexpected character '${c}'`, position: i };
     }
 
-    // Field-qualified term detection.
-    // Match the FIRST `:` in the bare term where the prefix is a valid ident.
-    // - Leading `:` (no prefix) → not a field; emit as bare term.
-    // - Trailing `:` (no inline value): if next char is `"`, consume the phrase as the value.
+    // Field-qualified term detection — supports Axon-style operators
+    // (`==`, `!=`, `>=`, `<=`, `>`, `<`), the legacy `:` alias for `==`,
+    // and `->` path traversal between identifiers.
+    // - Leading op (no prefix) → not a field; emit as bare term.
+    // - Trailing op (no inline value): if next char is `"`, consume the phrase as the value.
     //   If next char is whitespace/EOF/paren, parse error (no value).
-    // - Otherwise, value is whatever follows the first `:`.
-    // Note: `case: "23-CV-1234"` (space after colon) hits the trailing-colon branch
-    // and is reported as a parse error — that's the chosen consistent behavior.
+    // - Otherwise, value is whatever follows the operator.
+    // - `@<rest>` (unquoted) after the operator → emit a Ref leaf with
+    //   `isRef: true` and bare uuid as `value`.
+    // Note: `case: "23-CV-1234"` (space after operator) hits the trailing-op branch
+    // and is reported as a parse error — chosen consistent behavior.
     let fieldQualified = false;
-    if (buf.length > 0 && buf[0] !== ':') {
-      const colonIdx = buf.indexOf(':');
-      if (colonIdx > 0) {
-        const fieldName = buf.slice(0, colonIdx);
-        if (/^[A-Za-z][A-Za-z0-9_]*$/.test(fieldName)) {
-          const rest = buf.slice(colonIdx + 1);
-          if (rest.length > 0) {
-            // Inline value: `field:value`
-            tokens.push({ kind: 'TERM', pos: start, text: buf, value: rest, phrase: false, field: fieldName });
+    if (buf.length > 0) {
+      const m = buf.match(FIELD_OP_RE);
+      if (m) {
+        const rawPath = m[1];
+        let op = m[2] as CompareOp | ':';
+        const rest = m[3];
+        const opPos = rawPath.length;
+
+        // Normalize `:` → `==` always; apply alias on first path segment.
+        if (op === ':') op = '==';
+        const { path, opOverride } = normalizePath(rawPath);
+        if (opOverride) op = opOverride;
+
+        if (rest.length > 0) {
+          // Inline value: `path<op>value` — possibly a ref (`@uuid`).
+          let value = rest;
+          let isRef = false;
+          if (value.startsWith('@') && value.length > 1) {
+            isRef = true;
+            value = value.slice(1);
+          }
+          const tok: Tok = {
+            kind: 'TERM', pos: start, text: buf, value, phrase: false,
+            path, compareOp: op as CompareOp,
+          };
+          if (isRef) tok.isRef = true;
+          tokens.push(tok);
+          atWordBoundary = false;
+          fieldQualified = true;
+        } else {
+          // Trailing operator — look for a quoted phrase immediately following
+          if (i < n && input[i] === '"') {
+            const phraseStart = i;
+            i++;
+            let pbuf = '';
+            let closed = false;
+            while (i < n) {
+              const ch = input[i];
+              if (ch === '\\' && i + 1 < n) {
+                const nx = input[i + 1];
+                if (nx === '"' || nx === '\\') { pbuf += nx; i += 2; continue; }
+                pbuf += ch; i++; continue;
+              }
+              if (ch === '"') { closed = true; i++; break; }
+              pbuf += ch;
+              i++;
+            }
+            if (!closed) {
+              return { ok: false, error: 'Unclosed quoted phrase', position: phraseStart };
+            }
+            const phTok: Tok = {
+              kind: 'TERM', pos: start, text: input.slice(start, i), value: pbuf,
+              phrase: true, path, compareOp: op as CompareOp,
+            };
+            tokens.push(phTok);
+            hasOperators = true;
             atWordBoundary = false;
             fieldQualified = true;
           } else {
-            // Trailing colon — look for a quoted phrase immediately following
-            if (i < n && input[i] === '"') {
-              const phraseStart = i;
-              i++;
-              let pbuf = '';
-              let closed = false;
-              while (i < n) {
-                const ch = input[i];
-                if (ch === '\\' && i + 1 < n) {
-                  const nx = input[i + 1];
-                  if (nx === '"' || nx === '\\') { pbuf += nx; i += 2; continue; }
-                  pbuf += ch; i++; continue;
-                }
-                if (ch === '"') { closed = true; i++; break; }
-                pbuf += ch;
-                i++;
-              }
-              if (!closed) {
-                return { ok: false, error: 'Unclosed quoted phrase', position: phraseStart };
-              }
-              tokens.push({ kind: 'TERM', pos: start, text: input.slice(start, i), value: pbuf, phrase: true, field: fieldName });
-              hasOperators = true; // phrase counts as operator marker (matches existing behavior for quoted strings)
-              atWordBoundary = false;
-              fieldQualified = true;
-            } else {
-              // No value after field — parse error at the colon position
-              return { ok: false, error: `Expected value after field '${fieldName}:'`, position: start + colonIdx };
-            }
+            return { ok: false, error: `Expected value after field '${rawPath}${m[2]}'`, position: start + opPos };
           }
         }
       }
@@ -246,7 +332,9 @@ function parsePrimary(s: PState): Node | null {
     eat(s);
     const tt = t as Extract<Tok, { kind: 'TERM' }>;
     const node: Extract<Node, { op: 'TERM' }> = { op: 'TERM', value: tt.value, phrase: tt.phrase };
-    if (tt.field !== undefined) node.field = tt.field;
+    if (tt.path !== undefined) node.path = tt.path;
+    if (tt.compareOp !== undefined) node.compareOp = tt.compareOp;
+    if (tt.isRef) node.isRef = true;
     return node;
   }
   if (t.kind === 'RP') {
@@ -281,12 +369,25 @@ export function parseBooleanQuery(input: string): ParseResult {
   return { ok: true, ast, hasOperators: tk.hasOperators };
 }
 
-// Serialize an AST back to a canonical boolean-query string.
-// Used by deep-search to hand each OR-branch back to the existing pipeline
-// as a string the parser can round-trip.
+// Serialize an AST back to a canonical Axon-flavored boolean-query string.
+// Canonicalization rules:
+//   - field-op TERMs always render with `==`/`!=`/`>=`/etc. (never `:`).
+//   - Multi-segment paths render as `a->b->c`.
+//   - Ref values render as `@<uuid>` (the `@` is re-added).
+//   - Boolean operators always render as uppercase `AND`/`OR`/`NOT`.
+// Note: parse → astSerialize → parse must yield an AST equal to the first
+// parse's AST. The string form is NOT guaranteed equal to the user input
+// (e.g. `case:X` serializes to `case==X`).
 export function astSerialize(node: Node): string {
   if (node.op === 'TERM') {
-    const prefix = node.field ? `${node.field}:` : '';
+    const hasField = node.path && node.path.length > 0;
+    const fieldStr = hasField ? node.path!.join('->') : '';
+    const op = hasField ? (node.compareOp ?? '==') : '';
+    const prefix = hasField ? `${fieldStr}${op}` : '';
+    if (node.isRef) {
+      // Refs are never phrased — emit `@uuid`.
+      return `${prefix}@${node.value}`;
+    }
     if (node.phrase) {
       const escaped = node.value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       return `${prefix}"${escaped}"`;

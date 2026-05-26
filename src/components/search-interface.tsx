@@ -316,12 +316,22 @@ export default function SearchInterface({
 
   // AI search state
   const [aiQuery, setAiQuery] = useState('');
-  // Boolean ("Advanced") query mode — enables AND/OR/NOT/-foo/"phrase"/(group) parsing server-side
-  const [booleanMode, setBooleanMode] = usePersistedState<boolean>('search.booleanMode', false);
-  const [chipComposer, setChipComposer] = usePersistedState<boolean>('boolean-chip-composer', false);
+  // #55: the three "Advanced (boolean) / Chip composer / Use Haystack filters"
+  // checkboxes are gone. Axon-flavored boolean is the ONLY mode now — the
+  // backend parses every query through boolean-query.ts uniformly. The
+  // following hoisted constants preserve the few render-branches that still
+  // reference these flags; they're treated as always-on (booleanMode) or
+  // always-off (chipComposer/haystackMode). The persisted localStorage keys
+  // are cleared once on mount (see effect below).
+  const booleanMode = true;
+  const setBooleanMode = (_: boolean) => { /* no-op — canonical mode is locked on */ };
+  const chipComposer = false;
   const [boolParseResult, setBoolParseResult] = useState<ParseResult | null>(null);
-  const [boolHintDismissed, setBoolHintDismissed] = usePersistedState<boolean>('search.boolHintDismissed', false);
-  const [boolHintVisible, setBoolHintVisible] = useState(false);
+  // #55: boolean-mode hint banner removed (canonical mode is always on, so
+  // the "turn on Advanced" prompt is dead). The persisted dismissal key is
+  // cleared on mount by the migration effect below.
+  const boolHintDismissed = true;
+  const boolHintVisible = false;
   // Filter-logic left-rail collapsed state. Read from localStorage on mount to
   // stay SSR-safe (useEffect, not a useState initializer).
   const [filterLogicCollapsed, setFilterLogicCollapsed] = useState(false);
@@ -330,6 +340,23 @@ export default function SearchInterface({
       const raw = window.localStorage.getItem('filter-logic-panel-collapsed');
       if (raw === '1' || raw === 'true') setFilterLogicCollapsed(true);
     } catch {}
+  }, []);
+
+  // #55: one-time migration — wipe the persisted-mode keys left behind by
+  // the three retired checkboxes so users don't see stale state. Safe to
+  // run on every mount; localStorage.removeItem is a no-op when the key
+  // is absent.
+  useEffect(() => {
+    try {
+      const keys = [
+        'search.booleanMode',
+        'boolean-chip-composer',
+        'search.haystackMode',
+        'search.boolHintDismissed',
+        'boolean-composer-source-view',
+      ];
+      for (const k of keys) window.localStorage.removeItem(k);
+    } catch { /* SSR / private-mode — fine */ }
   }, []);
   const toggleFilterLogicCollapsed = useCallback(() => {
     setFilterLogicCollapsed(prev => {
@@ -377,10 +404,14 @@ export default function SearchInterface({
   const [uploadingCount, setUploadingCount] = useState(0);
   const dragDepthRef = useRef(0);
 
-  // Haystack filter mode — when on, the AI query input becomes a chip-aware
-  // structured filter that drives /api/search/haystack. Default ON; users can
-  // disable for legacy textarea behavior.
-  const [haystackMode, setHaystackMode] = usePersistedState<boolean>('search.haystackMode', true);
+  // #55: Haystack-mode toggle removed. The canonical boolean parser handles
+  // field-filter syntax uniformly now (see boolean-query.ts FIELD_ALIASES) and
+  // the /api/search/unified pipeline picks up field filters whether or not the
+  // input was authored through the structured-chip composer. The chip composer
+  // (haystack-filter-input.tsx) is still rendered — it's a power-user input
+  // that's now ALWAYS on; the previous "Use Haystack filters" checkbox is gone.
+  const haystackMode = true;
+  const setHaystackMode = (_: boolean) => { /* no-op — canonical mode is locked on */ };
   const [haystackChips, setHaystackChips] = useState<FilterChip[]>([]);
   const [haystackBusy, setHaystackBusy] = useState(false);
   const [haystackPreview, setHaystackPreview] = useState<{
@@ -669,17 +700,12 @@ export default function SearchInterface({
     const trimmed = aiQuery.trim();
     if (!trimmed) {
       setBoolParseResult(null);
-      setBoolHintVisible(false);
       return;
     }
     const t = setTimeout(() => {
       const r = parseBooleanQuery(trimmed);
       setBoolParseResult(r);
-      if (!booleanMode && !boolHintDismissed && r.ok && r.hasOperators) {
-        setBoolHintVisible(true);
-      } else {
-        setBoolHintVisible(false);
-      }
+      // #55: hint banner gone — booleanMode is always on now.
     }, 250);
     return () => clearTimeout(t);
   }, [aiQuery, booleanMode, boolHintDismissed]);
@@ -2049,7 +2075,7 @@ export default function SearchInterface({
                             handleAISearch(new Event('submit') as unknown as React.FormEvent);
                           }
                         }}
-                        placeholder={hasConversation ? 'Ask a follow-up… (try judge: hearingDate:)' : 'Filter or ask… (try judge: hearingDate: motionType:)'}
+                        placeholder={hasConversation ? 'Ask a follow-up… (try judge== hearingDate>=)' : 'Filter or ask… (try judge== hearingDate>= motionType==)'}
                         disabled={aiLoading || haystackBusy}
                         className="flex-1"
                         style={{ minHeight: inputHeight }}
@@ -2128,22 +2154,7 @@ export default function SearchInterface({
                         </div>
                       )
                     )}
-                    {boolHintVisible && (
-                      <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 px-2 py-1 rounded mb-1 flex items-center gap-2">
-                        <span className="flex-1">Looks like a boolean query — turn on Advanced to enable AND / OR / NOT / phrases.</span>
-                        <button
-                          type="button"
-                          onClick={() => { setBooleanMode(true); setBoolHintVisible(false); }}
-                          className="px-2 py-0.5 text-[10px] bg-amber-600 text-white rounded hover:bg-amber-700"
-                        >Enable</button>
-                        <button
-                          type="button"
-                          onClick={() => { setBoolHintDismissed(true); setBoolHintVisible(false); }}
-                          className="px-1 text-[10px] text-amber-700 hover:text-amber-900"
-                          aria-label="Dismiss"
-                        >×</button>
-                      </div>
-                    )}
+                    {/* #55: boolean-hint banner removed (canonical mode always on). */}
                     {booleanMode && (
                       <div className="flex items-center gap-2 flex-wrap text-[10px] text-gray-500 mb-1">
                         <span className="font-medium text-gray-600">Examples:</span>
@@ -2180,35 +2191,10 @@ export default function SearchInterface({
                     )}
                   </div>
                   <div className="flex items-center justify-center gap-3 mt-1.5 flex-wrap">
-                    <label className="inline-flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={booleanMode}
-                        onChange={e => setBooleanMode(e.target.checked)}
-                        className="w-3 h-3"
-                      />
-                      Advanced (boolean)
-                    </label>
-                    {booleanMode && (
-                      <label className="inline-flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={chipComposer}
-                          onChange={e => setChipComposer(e.target.checked)}
-                          className="w-3 h-3"
-                        />
-                        Chip composer
-                      </label>
-                    )}
-                    <label className="inline-flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={haystackMode}
-                        onChange={e => setHaystackMode(e.target.checked)}
-                        className="w-3 h-3"
-                      />
-                      Use Haystack filters
-                    </label>
+                    {/* #55: three checkboxes (Advanced boolean / Chip composer /
+                        Use Haystack filters) removed — canonical Axon-boolean
+                        is the only mode. The filter-chip pill below still
+                        renders when the user has composed structured chips. */}
                     {haystackMode && haystackChips.length > 0 && (
                       <span
                         className="text-[10px] font-mono text-purple-700 bg-purple-50 border border-purple-200 px-1.5 py-0.5 rounded max-w-md truncate"

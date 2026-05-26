@@ -12,7 +12,7 @@ import { QueryPreprocessor } from '../../search/query-preprocessor';
 import { rerank } from '../../search/reranker';
 import { getChatVectorStore } from '../../chat/chat-vector-store';
 import { parseBooleanQuery } from '../../search/boolean-query';
-import { astToLanceQuery, BooleanFtsConversionError, extractFieldFilters } from '../../search/boolean-to-fts';
+import { astToLanceQuery, BooleanFtsConversionError, extractFieldFilters, resolvePrismaFilters } from '../../search/boolean-to-fts';
 
 export interface QueryCaseKnowledgeParams {
   query: string;
@@ -155,8 +155,23 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
         if (parsed.ok) {
           // Extract field filters first — strips field-qualified TERMs whose
           // ancestors are all AND, returns SQL where-clauses + rewritten AST.
-          const { whereClauses, ast: strippedAst } = extractFieldFilters(parsed.ast);
+          // Async path: resolve prisma-traverse requests against the legal
+          // schema and merge their where-clauses in too.
+          const { whereClauses, prismaRequests, ast: strippedAst } = extractFieldFilters(parsed.ast);
           fieldWhereClauses.push(...whereClauses);
+          if (prismaRequests.length > 0) {
+            try {
+              const { whereClauses: prismaWhere } = await resolvePrismaFilters(
+                prismaRequests,
+                context.database as any,
+              );
+              fieldWhereClauses.push(...prismaWhere);
+            } catch (err) {
+              context.logger.warn?.('Prisma traversal batch failed — continuing without those filters', {
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
 
           // If the AST still has boolean operators OR field filters were
           // extracted (a single field term should also engage the boolean path

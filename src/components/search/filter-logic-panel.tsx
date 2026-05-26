@@ -37,9 +37,9 @@ type Props = {
 
 const EXAMPLES: string[] = [
   '(motion AND compel) OR appeal',
-  'case:23-CV-1234 AND motionType:disqualification',
+  'case=="23-CV-1234" AND motionType=="disqualification"',
+  'pageCount >= 10 AND filingType=="RR"',
   '"order denying" -dismissed',
-  'appeal OR petition',
 ];
 
 function ChevronLeft({ className }: { className?: string }) {
@@ -121,16 +121,26 @@ export function FilterLogicPanel({ onInsertExample, collapsed = false, onToggleC
           </ul>
         </section>
 
-        {/* Field-qualified terms */}
+        {/* Field comparisons (Axon-style) */}
         <section>
           <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
-            Field-qualified terms
+            Field comparisons
           </h4>
           <ul className="space-y-1 text-[11px] leading-relaxed">
-            <li><code className="bg-gray-100 px-1 rounded">case:23-CV-1234</code></li>
-            <li><code className="bg-gray-100 px-1 rounded">filingType:RR</code></li>
-            <li><code className="bg-gray-100 px-1 rounded">documentType:&quot;order denying&quot;</code></li>
+            <li><code className="bg-gray-100 px-1 rounded">case==&quot;23-CV-1234&quot;</code></li>
+            <li><code className="bg-gray-100 px-1 rounded">filingType==&quot;RR&quot;</code></li>
+            <li><code className="bg-gray-100 px-1 rounded">documentType==&quot;order denying&quot;</code></li>
+            <li><code className="bg-gray-100 px-1 rounded">pageCount &gt;= 10</code></li>
+            <li><code className="bg-gray-100 px-1 rounded">filingDate &gt; 2026-01-01</code></li>
           </ul>
+          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+            Operators: <code className="bg-gray-100 px-0.5 rounded">==</code>{' '}
+            <code className="bg-gray-100 px-0.5 rounded">!=</code>{' '}
+            <code className="bg-gray-100 px-0.5 rounded">&gt;=</code>{' '}
+            <code className="bg-gray-100 px-0.5 rounded">&lt;=</code>{' '}
+            <code className="bg-gray-100 px-0.5 rounded">&gt;</code>{' '}
+            <code className="bg-gray-100 px-0.5 rounded">&lt;</code>
+          </p>
           <p className="text-[10px] text-gray-500 mt-1 leading-snug">
             Fields: <code className="bg-gray-100 px-0.5 rounded">case</code>,{' '}
             <code className="bg-gray-100 px-0.5 rounded">caseId</code>,{' '}
@@ -138,7 +148,23 @@ export function FilterLogicPanel({ onInsertExample, collapsed = false, onToggleC
             <code className="bg-gray-100 px-0.5 rounded">documentType</code>,{' '}
             <code className="bg-gray-100 px-0.5 rounded">motionType</code>.
             Unknown fields fall back to bare text. Field filters under an{' '}
-            <code className="bg-gray-100 px-0.5 rounded">OR</code> branch degrade to text match.
+            <code className="bg-gray-100 px-0.5 rounded">OR</code> branch currently degrade to text match.
+          </p>
+          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+            Legacy <code className="bg-gray-100 px-0.5 rounded">field:value</code> is accepted and auto-translated to{' '}
+            <code className="bg-gray-100 px-0.5 rounded">field==&quot;value&quot;</code>.
+          </p>
+        </section>
+
+        {/* Refs */}
+        <section>
+          <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Refs</h4>
+          <ul className="space-y-1 text-[11px] leading-relaxed">
+            <li><code className="bg-gray-100 px-1 rounded">caseRef==@04a8cd94-359c-4feb-…</code></li>
+            <li><code className="bg-gray-100 px-1 rounded">filingRef==@&lt;filing-uuid&gt;</code></li>
+          </ul>
+          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+            <code className="bg-gray-100 px-0.5 rounded">@id</code> is a typed reference — strictly identity, no fuzzy match.
           </p>
         </section>
 
