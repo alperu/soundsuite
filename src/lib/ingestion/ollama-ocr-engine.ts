@@ -54,8 +54,20 @@ export class OllamaOCREngine implements IOCREngine {
         return result;
       }
       const data: any = await res.json().catch(() => ({ models: [] }));
+      // Ollama's /api/tags returns names with an explicit tag suffix
+      // (e.g. "minicpm-v:latest"). Configured model often omits the tag.
+      // Treat bare "name" as equivalent to "name:latest" and accept any
+      // tag of the requested model.
+      const wanted = this.model.includes(':') ? this.model : `${this.model}:latest`;
+      const wantedBase = this.model.split(':')[0];
+      const matches = (s: unknown): boolean => {
+        if (typeof s !== 'string') return false;
+        if (s === this.model || s === wanted) return true;
+        // Accept any tag of the requested base name.
+        return s.split(':')[0] === wantedBase;
+      };
       const has = Array.isArray(data?.models)
-        && data.models.some((m: any) => m?.name === this.model || m?.model === this.model);
+        && data.models.some((m: any) => matches(m?.name) || matches(m?.model));
       if (!has) {
         const result = { ok: false, error: `model "${this.model}" not pulled on ${host}` };
         this.lastPreflight = { host, at: now, ...result };

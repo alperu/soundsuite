@@ -72,8 +72,18 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
         return result;
       }
       const data: any = await res.json().catch(() => ({ models: [] }));
+      // /api/tags returns tagged names (e.g. "qwen3-embedding:0.6b" or
+      // "model:latest"). Configured model may omit the tag. Match against
+      // the base name + accept "name:latest" when caller used a bare name.
+      const wanted = this.model.includes(':') ? this.model : `${this.model}:latest`;
+      const wantedBase = this.model.split(':')[0];
+      const matches = (s: unknown): boolean => {
+        if (typeof s !== 'string') return false;
+        if (s === this.model || s === wanted) return true;
+        return s.split(':')[0] === wantedBase;
+      };
       const has = Array.isArray(data?.models)
-        && data.models.some((m: any) => m?.name === this.model || m?.model === this.model);
+        && data.models.some((m: any) => matches(m?.name) || matches(m?.model));
       if (!has) {
         const result = { ok: false, error: `model "${this.model}" not pulled on ${host}` };
         this.lastPreflight = { host, at: now, ...result };
