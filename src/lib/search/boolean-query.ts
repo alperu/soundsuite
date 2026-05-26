@@ -59,11 +59,19 @@ export const FIELD_ALIASES: Record<string, FieldAlias> = {
 };
 
 // Field-qualified term detection. Accepts `field(->field)*` followed by an
-// Axon comparison operator or the legacy `:` alias. Longest match wins for
-// multi-char ops (`==` before `=` if `=` were ever added; `>=` before `>`).
+// Axon comparison operator. Longest match wins for multi-char ops
+// (`==` before `=` if `=` were ever added; `>=` before `>`).
 // Operate on a single bare-term `buf` (no newlines possible — tokenizer
 // breaks on whitespace), so the `s` (dotAll) flag isn't needed.
-const FIELD_OP_RE = /^([A-Za-z][A-Za-z0-9_]*(?:->[A-Za-z][A-Za-z0-9_]*)*)(==|!=|>=|<=|>|<|:)(.*)$/;
+//
+// Task #59 (locked decision 2026-05-26): the legacy `:` alias for `==` is no
+// longer accepted. Encountering `field:` emits a parse error pointing at the
+// colon with a specific suggestion to use `==`.
+const FIELD_OP_RE = /^([A-Za-z][A-Za-z0-9_]*(?:->[A-Za-z][A-Za-z0-9_]*)*)(==|!=|>=|<=|>|<)(.*)$/;
+
+// Detects a `field:` (legacy syntax) so we can emit a targeted error instead
+// of falling through to the bare-term branch.
+const LEGACY_COLON_RE = /^([A-Za-z][A-Za-z0-9_]*(?:->[A-Za-z][A-Za-z0-9_]*)*):/;
 
 const OP_WORDS = new Set(['AND', 'OR', 'NOT', 'and', 'or', 'not']);
 
@@ -154,27 +162,33 @@ function tokenize(input: string): { ok: true; tokens: Tok[]; hasOperators: boole
     }
 
     // Field-qualified term detection — supports Axon-style operators
-    // (`==`, `!=`, `>=`, `<=`, `>`, `<`), the legacy `:` alias for `==`,
-    // and `->` path traversal between identifiers.
+    // (`==`, `!=`, `>=`, `<=`, `>`, `<`), and `->` path traversal between
+    // identifiers.
     // - Leading op (no prefix) → not a field; emit as bare term.
     // - Trailing op (no inline value): if next char is `"`, consume the phrase as the value.
     //   If next char is whitespace/EOF/paren, parse error (no value).
     // - Otherwise, value is whatever follows the operator.
     // - `@<rest>` (unquoted) after the operator → emit a Ref leaf with
     //   `isRef: true` and bare uuid as `value`.
-    // Note: `case: "23-CV-1234"` (space after operator) hits the trailing-op branch
+    // - Legacy `field:value` is REJECTED with a specific error pointing at
+    //   the colon (task #59, locked 2026-05-26).
+    // Note: `case== "23-CV-1234"` (space after operator) hits the trailing-op branch
     // and is reported as a parse error — chosen consistent behavior.
     let fieldQualified = false;
     if (buf.length > 0) {
+      // Reject legacy `field:` before trying the Axon-op regex.
+      const legacy = buf.match(LEGACY_COLON_RE);
+      if (legacy) {
+        const colonPos = legacy[1].length;
+        return { ok: false, error: 'Use `==` for equality, not `:`.', position: start + colonPos };
+      }
       const m = buf.match(FIELD_OP_RE);
       if (m) {
         const rawPath = m[1];
-        let op = m[2] as CompareOp | ':';
+        let op = m[2] as CompareOp;
         const rest = m[3];
         const opPos = rawPath.length;
 
-        // Normalize `:` → `==` always; apply alias on first path segment.
-        if (op === ':') op = '==';
         const { path, opOverride } = normalizePath(rawPath);
         if (opOverride) op = opOverride;
 
@@ -374,10 +388,11 @@ export function parseBooleanQuery(input: string): ParseResult {
 //   - field-op TERMs always render with `==`/`!=`/`>=`/etc. (never `:`).
 //   - Multi-segment paths render as `a->b->c`.
 //   - Ref values render as `@<uuid>` (the `@` is re-added).
-//   - Boolean operators always render as uppercase `AND`/`OR`/`NOT`.
+//   - Boolean operators always render as lowercase `and`/`or`/`not`
+//     (task #59, locked 2026-05-26 — Axon-canonical).
 // Note: parse → astSerialize → parse must yield an AST equal to the first
 // parse's AST. The string form is NOT guaranteed equal to the user input
-// (e.g. `case:X` serializes to `case==X`).
+// (uppercase `AND` parses fine but serializes to lowercase `and`).
 export function astSerialize(node: Node): string {
   if (node.op === 'TERM') {
     const hasField = node.path && node.path.length > 0;
@@ -395,14 +410,14 @@ export function astSerialize(node: Node): string {
     return `${prefix}${node.value}`;
   }
   if (node.op === 'NOT') {
-    return `NOT ${wrapIfCompound(node.child)}`;
+    return `not ${wrapIfCompound(node.child)}`;
   }
   if (node.op === 'AND') {
     if (node.children.length === 0) return '';
-    return node.children.map(c => wrapIfOr(c)).join(' AND ');
+    return node.children.map(c => wrapIfOr(c)).join(' and ');
   }
   // OR
-  return node.children.map(c => wrapIfCompound(c)).join(' OR ');
+  return node.children.map(c => wrapIfCompound(c)).join(' or ');
 }
 
 function wrapIfCompound(n: Node): string {

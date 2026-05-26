@@ -46,6 +46,20 @@ describe('isLikelyMidTyping', () => {
   });
 
   it('suppresses error for trailing open paren', () => {
-    expect(isLikelyMidTyping('motion AND (', 12)).toBe(true);
+    expect(isLikelyMidTyping('motion and (', 12)).toBe(true);
+  });
+
+  // Task #59 — legacy `field:` is a real syntax error, not mid-typing.
+  it('does NOT suppress error for legacy `motionType:` (real syntax error)', () => {
+    expect(isLikelyMidTyping('motionType:', 10)).toBe(false);
+  });
+
+  it('does NOT suppress error for legacy `motionType:value` (real syntax error)', () => {
+    expect(isLikelyMidTyping('motionType:value', 10)).toBe(false);
+  });
+
+  // Trailing Axon op without value IS mid-typing (user still typing).
+  it('suppresses error for trailing `==` (mid-typing a value)', () => {
+    expect(isLikelyMidTyping('case==', 6)).toBe(true);
   });
 });

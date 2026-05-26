@@ -71,8 +71,8 @@ describe('FIELD_RESOLVERS map (schema audit)', () => {
 });
 
 describe('extractFieldFilters — AND-only ancestors', () => {
-  test('case:23-CV-1234 AND motion → where + MatchQuery', () => {
-    const ast = parse('case:23-CV-1234 AND motion');
+  test('case==23-CV-1234 AND motion → where + MatchQuery', () => {
+    const ast = parse('case==23-CV-1234 AND motion');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     void 0; // shape extended with prismaRequests in #54 — see unified-pipeline test
     expect(whereClauses).toEqual([`case_number = '23-CV-1234'`]);
@@ -85,16 +85,16 @@ describe('extractFieldFilters — AND-only ancestors', () => {
     expect(fq.field).toBe('text');
   });
 
-  test('motionType:disqualification (lone) → where + null AST', () => {
-    const ast = parse('motionType:disqualification');
+  test('motionType==disqualification (lone) → where + null AST', () => {
+    const ast = parse('motionType==disqualification');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     void 0; // shape extended with prismaRequests in #54 — see unified-pipeline test
     expect(whereClauses).toEqual([`document_type = 'disqualification'`]);
     expect(stripped).toBeNull();
   });
 
-  test("phrase field value: case:\"motion to compel\" AND granted", () => {
-    const ast = parse('case:"motion to compel" AND granted');
+  test("phrase field value: case==\"motion to compel\" AND granted", () => {
+    const ast = parse('case=="motion to compel" AND granted');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     void 0; // shape extended with prismaRequests in #54 — see unified-pipeline test
     expect(whereClauses).toEqual([`case_number = 'motion to compel'`]);
@@ -102,7 +102,7 @@ describe('extractFieldFilters — AND-only ancestors', () => {
   });
 
   test('two AND-ed field terms → two where clauses', () => {
-    const ast = parse('case:X AND filingType:RR');
+    const ast = parse('case==X AND filingType==RR');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     void 0; // shape extended with prismaRequests in #54 — see unified-pipeline test
     expect(whereClauses).toEqual([
@@ -112,8 +112,8 @@ describe('extractFieldFilters — AND-only ancestors', () => {
     expect(stripped).toBeNull();
   });
 
-  test("SQL injection guard: case:O'Hara", () => {
-    const ast = parse("case:O'Hara");
+  test("SQL injection guard: case==O'Hara", () => {
+    const ast = parse("case==O'Hara");
     const { whereClauses } = extractFieldFilters(ast);
     expect(whereClauses).toEqual([`case_number = 'O''Hara'`]);
   });
@@ -124,8 +124,8 @@ describe('extractFieldFilters — unknown fields fall back', () => {
     (logger.warn as jest.Mock).mockClear?.();
   });
 
-  test('purple:cow → bare text match against canonical literal "purple==cow"', () => {
-    const ast = parse('purple:cow');
+  test('purple==cow → bare text match against canonical literal "purple==cow"', () => {
+    const ast = parse('purple==cow');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     void 0; // shape extended with prismaRequests in #54 — see unified-pipeline test
     expect(whereClauses).toEqual([]);
@@ -147,8 +147,8 @@ describe('extractFieldFilters — OR-ancestor degradation', () => {
     (logger.warn as jest.Mock).mockClear?.();
   });
 
-  test('case:X OR keyword → field term degraded to bare text (logged)', () => {
-    const ast = parse('case:X OR keyword');
+  test('case==X OR keyword → field term degraded to bare text (logged)', () => {
+    const ast = parse('case==X OR keyword');
     const { whereClauses, ast: stripped } = extractFieldFilters(ast);
     void 0; // shape extended with prismaRequests in #54 — see unified-pipeline test
     expect(whereClauses).toEqual([]);

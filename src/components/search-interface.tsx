@@ -2097,7 +2097,7 @@ export default function SearchInterface({
                             }
                           }}
                           fieldNames={BOOLEAN_FIELD_NAMES}
-                          placeholder={hasConversation ? 'Ask a follow-up…' : 'Build a boolean query (AND / OR / NOT / phrases / fields)…'}
+                          placeholder={hasConversation ? 'Ask a follow-up…' : 'Build a boolean query (and / or / not / phrases / fields)…'}
                         />
                       </div>
                     ) : (
@@ -2159,9 +2159,9 @@ export default function SearchInterface({
                       <div className="flex items-center gap-2 flex-wrap text-[10px] text-gray-500 mb-1">
                         <span className="font-medium text-gray-600">Examples:</span>
                         {[
-                          'motion AND compel',
+                          'motion and compel',
                           '"23-CV-1234"',
-                          'appeal OR petition',
+                          'appeal or petition',
                           '-dismissed',
                         ].map(ex => (
                           <button

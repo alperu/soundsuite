@@ -29,7 +29,7 @@ describe('stringToTokens', () => {
   it('round-trips through tokensToString → parseBooleanQuery', () => {
     const inputs = [
       '(motion AND compel) OR appeal',
-      'case:23-CV-1234 AND motionType:disqualification',
+      'case==23-CV-1234 AND motionType==disqualification',
       '"order denying" -dismissed',
       'appeal OR petition',
     ];

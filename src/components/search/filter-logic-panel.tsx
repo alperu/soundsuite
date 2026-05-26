@@ -13,11 +13,13 @@ import React from 'react';
 export function isLikelyMidTyping(input: string, _errorPos: number): boolean {
   if (!input.trim()) return true;
   // trailing operator
-  if (/(?:^|\s)(AND|OR|NOT|-|\()\s*$/i.test(input)) return true;
-  // leading OR/AND
-  if (/^\s*(AND|OR)\b/i.test(input)) return true;
+  if (/(?:^|\s)(and|or|not|AND|OR|NOT|-|\()\s*$/.test(input)) return true;
+  // leading or/and
+  if (/^\s*(and|or|AND|OR)\b/.test(input)) return true;
   // operator/paren-only
-  if (/^[\s()\-]*(AND|OR|NOT)?[\s()\-]*$/i.test(input)) return true;
+  if (/^[\s()\-]*(and|or|not|AND|OR|NOT)?[\s()\-]*$/.test(input)) return true;
+  // Trailing Axon-op without a value (mid-typing `case==`, `motionType>=`).
+  if (/[A-Za-z0-9_)](==|!=|>=|<=|>|<)\s*$/.test(input)) return true;
   return false;
 }
 
@@ -36,9 +38,9 @@ type Props = {
 };
 
 const EXAMPLES: string[] = [
-  '(motion AND compel) OR appeal',
-  'case=="23-CV-1234" AND motionType=="disqualification"',
-  'pageCount >= 10 AND filingType=="RR"',
+  '(motion and compel) or appeal',
+  'case=="23-CV-1234" and motionType=="disqualification"',
+  'pageCount >= 10 and filingType=="RR"',
   '"order denying" -dismissed',
 ];
 
@@ -101,14 +103,18 @@ export function FilterLogicPanel({ onInsertExample, collapsed = false, onToggleC
       </div>
 
       <div className="p-3 space-y-4 text-xs text-gray-700">
+        <p className="text-[11px] text-gray-600 leading-snug">
+          Syntax is Axon — lowercase keywords, <code className="bg-gray-100 px-0.5 rounded">==</code> for equality.
+        </p>
+
         {/* Boolean operators */}
         <section>
           <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Boolean operators</h4>
           <ul className="space-y-1 text-[11px] leading-relaxed">
-            <li><code className="bg-gray-100 px-1 rounded">A AND B</code> — both terms match</li>
-            <li><code className="bg-gray-100 px-1 rounded">A OR B</code> — either term matches</li>
-            <li><code className="bg-gray-100 px-1 rounded">NOT B</code> or <code className="bg-gray-100 px-1 rounded">-foo</code> — exclude</li>
-            <li><code className="bg-gray-100 px-1 rounded">(A AND B) OR C</code> — group with parens</li>
+            <li><code className="bg-gray-100 px-1 rounded">a and b</code> — both terms match</li>
+            <li><code className="bg-gray-100 px-1 rounded">a or b</code> — either term matches</li>
+            <li><code className="bg-gray-100 px-1 rounded">not b</code> or <code className="bg-gray-100 px-1 rounded">-foo</code> — exclude</li>
+            <li><code className="bg-gray-100 px-1 rounded">(a and b) or c</code> — group with parens</li>
           </ul>
         </section>
 
@@ -148,11 +154,7 @@ export function FilterLogicPanel({ onInsertExample, collapsed = false, onToggleC
             <code className="bg-gray-100 px-0.5 rounded">documentType</code>,{' '}
             <code className="bg-gray-100 px-0.5 rounded">motionType</code>.
             Unknown fields fall back to bare text. Field filters under an{' '}
-            <code className="bg-gray-100 px-0.5 rounded">OR</code> branch currently degrade to text match.
-          </p>
-          <p className="text-[10px] text-gray-500 mt-1 leading-snug">
-            Legacy <code className="bg-gray-100 px-0.5 rounded">field:value</code> is accepted and auto-translated to{' '}
-            <code className="bg-gray-100 px-0.5 rounded">field==&quot;value&quot;</code>.
+            <code className="bg-gray-100 px-0.5 rounded">or</code> branch currently degrade to text match.
           </p>
         </section>
 
@@ -199,19 +201,19 @@ export function FilterLogicPanel({ onInsertExample, collapsed = false, onToggleC
             </thead>
             <tbody className="font-mono text-gray-700">
               <tr className="border-t border-gray-200">
-                <td className="py-0.5 pr-2">NOT</td>
+                <td className="py-0.5 pr-2">not</td>
                 <td className="py-0.5 pr-2">tightest</td>
-                <td className="py-0.5">NOT a</td>
+                <td className="py-0.5">not a</td>
               </tr>
               <tr className="border-t border-gray-200">
-                <td className="py-0.5 pr-2">AND</td>
+                <td className="py-0.5 pr-2">and</td>
                 <td className="py-0.5 pr-2">middle</td>
-                <td className="py-0.5">a AND b</td>
+                <td className="py-0.5">a and b</td>
               </tr>
               <tr className="border-t border-gray-200">
-                <td className="py-0.5 pr-2">OR</td>
+                <td className="py-0.5 pr-2">or</td>
                 <td className="py-0.5 pr-2">loosest</td>
-                <td className="py-0.5">a OR b</td>
+                <td className="py-0.5">a or b</td>
               </tr>
             </tbody>
           </table>
@@ -220,9 +222,10 @@ export function FilterLogicPanel({ onInsertExample, collapsed = false, onToggleC
         {/* Mid-typing note */}
         <section className="border-t border-gray-200 pt-3">
           <p className="text-[10px] text-gray-500 leading-snug">
-            Trailing <code className="bg-gray-100 px-0.5 rounded">AND</code> /{' '}
-            <code className="bg-gray-100 px-0.5 rounded">OR</code> is treated as incomplete, not an error.
-            Red bar appears only for real syntax problems like mismatched parens.
+            Trailing <code className="bg-gray-100 px-0.5 rounded">and</code> /{' '}
+            <code className="bg-gray-100 px-0.5 rounded">or</code> is treated as incomplete, not an error.
+            Red bar appears only for real syntax problems like mismatched parens
+            or legacy <code className="bg-gray-100 px-0.5 rounded">field:value</code> (use <code className="bg-gray-100 px-0.5 rounded">==</code>).
           </p>
         </section>
       </div>
