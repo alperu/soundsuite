@@ -36,11 +36,13 @@ import React, {
 } from 'react';
 import {
   FilterChip,
+  FieldChipOp,
   TOKEN_MAP,
   TOKEN_KEYS,
 } from '@/lib/search/haystack-query-builder';
 import {
   activeTokenAtCursor,
+  forceActiveTokenAtCursor,
   type ActiveToken,
   type PickedSuggestion,
 } from './active-token-suggestions';
@@ -254,8 +256,12 @@ export const HaystackFilterInput = forwardRef<
 
   const commitChip = useCallback(
     (token: string, value: string, label?: string, srcActive?: ActiveToken) => {
-      onChipsChange([...chips, { key: token, value, label }]);
-      // Strip the matching `token:partial` substring out of the freetext.
+      // Preserve the user-typed operator (==, >=, <=, etc.) on the chip.
+      // Falls back to the token's default op from TOKEN_MAP (e.g. `filedAfter`
+      // implies `>=`) and finally `==` for equality fields.
+      const op = (srcActive?.op ?? TOKEN_MAP[token]?.op ?? '==') as FieldChipOp;
+      onChipsChange([...chips, { key: token, value, label, op }]);
+      // Strip the matching `token<op>partial` substring out of the freetext.
       const a =
         srcActive ?? activeTokenAtCursor(freetext, cursor) ?? null;
       if (a) {
@@ -378,6 +384,39 @@ export const HaystackFilterInput = forwardRef<
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
+      // Ctrl+Space (or Cmd+Space) — force-open the value picker at the
+      // current cursor. If the user typed a bare field prefix (`case`), the
+      // helper synthesizes an empty-partial ActiveToken; we also append `==`
+      // to the freetext so the picker stays open as the user types the
+      // value and the parser sees canonical syntax.
+      if (e.key === ' ' && (e.ctrlKey || e.metaKey)) {
+        const el = inputRef.current;
+        const pos = el?.selectionStart ?? freetext.length;
+        const forced = forceActiveTokenAtCursor(freetext, pos);
+        if (forced) {
+          e.preventDefault();
+          // If the freetext doesn't already end in `==`, append it so the
+          // canonical syntax forms automatically.
+          if (!/==$/.test(freetext.slice(0, pos))) {
+            const next = freetext.slice(0, pos) + '==' + freetext.slice(pos);
+            onFreetextChange(next);
+            requestAnimationFrame(() => {
+              const e2 = inputRef.current;
+              if (e2) {
+                const newPos = pos + 2;
+                e2.focus();
+                e2.setSelectionRange(newPos, newPos);
+                setCursor(newPos);
+              }
+            });
+          }
+          // Tell the parent the picker should be open.
+          onActiveTokenChange?.(forced);
+          lastEmittedRef.current = `${forced.prefix}|${forced.partial}|${forced.startIndex}|${forced.endIndex}`;
+          return;
+        }
+      }
+
       // Active-token picker open: arrow / enter / escape
       if (activeToken && pickerOptions.length > 0) {
         if (e.key === 'ArrowDown') {
@@ -552,16 +591,19 @@ export const HaystackFilterInput = forwardRef<
             );
           }
           // Default: field-op chip (legacy shape).
-          const fc = c as { key: string; value: string; label?: string };
+          const fc = c as { key: string; value: string; label?: string; op?: FieldChipOp };
           const def = TOKEN_MAP[fc.key];
           const cat = def?.category ?? 'text';
+          // Prefer the chip's saved op, fall back to TOKEN_MAP default, then `==`.
+          const op = fc.op ?? def?.op ?? '==';
           return (
             <span
               key={`${fc.key}-${i}-${fc.value}`}
               className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium border rounded-full ${categoryClasses[cat] ?? categoryClasses.text}`}
-              title={`${fc.key}: ${fc.label ?? fc.value}`}
+              title={`${fc.key} ${op} ${fc.label ?? fc.value}`}
             >
-              <span className="opacity-70">{fc.key}:</span>
+              <span className="opacity-70">{fc.key}</span>
+              <span className="opacity-50 font-mono text-[10px]">{op}</span>
               <span>{fc.label ?? fc.value}</span>
               <button
                 type="button"

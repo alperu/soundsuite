@@ -36,14 +36,16 @@ export type ChipCategory = 'ref' | 'date' | 'enum' | 'number' | 'text';
  * chips in order instead of splitting the user input between freetext and
  * chip arrays.
  */
+export type FieldChipOp = '==' | '!=' | '>=' | '<=' | '>' | '<';
+
 export type FilterChip =
-  | { kind?: 'field'; key: string; value: string; label?: string }
+  | { kind?: 'field'; key: string; value: string; label?: string; op?: FieldChipOp }
   | { kind: 'term'; value: string; phrase?: boolean }
   | { kind: 'and' | 'or' | 'not' }
   | { kind: 'lparen' | 'rparen' };
 
 /** Type guard: is this a field-op chip (the legacy shape)? */
-export function isFieldChip(c: FilterChip): c is { kind?: 'field'; key: string; value: string; label?: string } {
+export function isFieldChip(c: FilterChip): c is { kind?: 'field'; key: string; value: string; label?: string; op?: FieldChipOp } {
   return (c as { kind?: string }).kind === undefined || (c as { kind?: string }).kind === 'field';
 }
 
@@ -163,10 +165,11 @@ function quote(s: string): string {
 }
 
 /** Format a field chip into a single Haystack filter term (without leading `and`). */
-function termFor(chip: { key: string; value: string; label?: string }): string | null {
+function termFor(chip: { key: string; value: string; label?: string; op?: FieldChipOp }): string | null {
   const def = TOKEN_MAP[chip.key];
   if (!def) return null;
-  const op = def.op ?? '==';
+  // Chip-stored op (user-typed) wins, then TOKEN_MAP default, then `==`.
+  const op = chip.op ?? def.op ?? '==';
   const v = chip.value.trim();
   if (!v) return null;
 

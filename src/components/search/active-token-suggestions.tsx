@@ -36,12 +36,17 @@ import { MOTION_TYPES } from '@/lib/filings/motion-types';
 // ---------------------------------------------------------------------------
 // Public types
 
+export type ActiveTokenOp = '==' | '!=' | '>=' | '<=' | '>' | '<';
+
 export interface ActiveToken {
   /** Surface token (e.g. `motionType`, `judge`). Always a key in TOKEN_MAP. */
   prefix: string;
-  /** What the user has typed after the colon. */
+  /** What the user has typed after the operator. */
   partial: string;
-  /** Text index where `<prefix>:` begins. */
+  /** The operator the user typed (`==`, `>=`, etc.). Defaults to `==` for
+   *  bare-prefix Ctrl+Space invocations. */
+  op: ActiveTokenOp;
+  /** Text index where `<prefix><op>` begins. */
   startIndex: number;
   /** Text index where the partial ends (= current cursor when typing). */
   endIndex: number;
@@ -355,12 +360,27 @@ export function ActiveTokenSuggestions({
         </p>
       </div>
 
-      {/* Date / number / unsupported tokens — just hint, no list. */}
+      {/* Date tokens — native date picker plus a hint for ranges. */}
       {isDateToken && (
-        <div className="px-4 py-3 text-xs text-gray-600">
-          Type a date as <span className="font-mono">YYYY-MM-DD</span>, or a
-          range <span className="font-mono">YYYY-MM-DD..YYYY-MM-DD</span>, then
-          press <kbd className="px-1.5 py-0.5 border border-gray-200 rounded text-[10px] bg-gray-50">Enter</kbd> to commit.
+        <div className="px-4 py-3 text-xs text-gray-600 space-y-2">
+          <label className="block">
+            <span className="text-[11px] uppercase tracking-wider text-gray-500">Pick a date</span>
+            <input
+              type="date"
+              className="mt-1 block w-full border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-500/30"
+              defaultValue={/^\d{4}-\d{2}-\d{2}$/.test(partial) ? partial : ''}
+              onMouseDown={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v) onPick({ value: v, label: v });
+              }}
+            />
+          </label>
+          <p className="leading-snug text-[11px] text-gray-500">
+            Or type <span className="font-mono">YYYY-MM-DD</span> / range
+            <span className="font-mono"> YYYY-MM-DD..YYYY-MM-DD</span> and press{' '}
+            <kbd className="px-1.5 py-0.5 border border-gray-200 rounded text-[10px] bg-gray-50">Enter</kbd>.
+          </p>
         </div>
       )}
       {isNumberToken && (
@@ -500,17 +520,51 @@ export function ActiveTokenSuggestions({
  * judge:rob<cursor>" case works exactly as before. Plain end-of-string
  * behavior emerges when `cursor === text.length`.
  */
+// Match `<prefix><op><partial>` where <op> is any Axon comparison operator.
+// `==` is the canonical equality; `>=`/`<=`/`>`/`<`/`!=` are valid for
+// date/number-typed fields (`hearingDate >= 2026-04-01`). Legacy `:` no
+// longer triggers the picker (per #59 it's a parse error).
+const ACTIVE_TOKEN_RE = /(?:^|\s)(\w+)\s*(==|!=|>=|<=|>|<)\s*([^\s]*)$/;
+
+// Match a bare prefix (no operator yet) — used by the Ctrl+Space hook so
+// `case<cursor>` can pop the picker without first typing `==`.
+const BARE_PREFIX_RE = /(?:^|\s)(\w+)$/;
+
 export function activeTokenAtCursor(text: string, cursor: number): ActiveToken | null {
   const slice = text.slice(0, cursor);
-  const m = slice.match(/(?:^|\s)(\w+):([^\s]*)$/);
+  const m = slice.match(ACTIVE_TOKEN_RE);
   if (!m) return null;
   const prefix = m[1];
   if (!TOKEN_MAP[prefix]) return null;
-  const partial = m[2];
-  // Compute the start index of `prefix:` (skip the leading whitespace match).
+  const op = m[2] as ActiveTokenOp;
+  const partial = m[3];
   const matchedAt = m.index ?? 0;
   const offset = m[0].startsWith(' ') ? 1 : 0;
   const startIndex = matchedAt + offset;
   const endIndex = cursor;
-  return { prefix, partial, startIndex, endIndex };
+  return { prefix, partial, op, startIndex, endIndex };
+}
+
+/**
+ * Force-open the picker at the cursor — used by Ctrl+Space.
+ * If the user already typed `prefix==`, behaves like `activeTokenAtCursor`.
+ * If they typed just `prefix` (no operator), synthesize an ActiveToken with
+ * an empty partial so the picker can offer values for the field; the caller
+ * is responsible for appending `==` to the text before the partial fills in.
+ */
+export function forceActiveTokenAtCursor(text: string, cursor: number): ActiveToken | null {
+  const primary = activeTokenAtCursor(text, cursor);
+  if (primary) return primary;
+  const slice = text.slice(0, cursor);
+  const m = slice.match(BARE_PREFIX_RE);
+  if (!m) return null;
+  const prefix = m[1];
+  if (!TOKEN_MAP[prefix]) return null;
+  const matchedAt = m.index ?? 0;
+  const offset = m[0].startsWith(' ') ? 1 : 0;
+  const startIndex = matchedAt + offset;
+  // Default to the field's preferred op (e.g. date fields use `>=` for `filedAfter`)
+  // and fall back to `==` for equality fields.
+  const defOp = (TOKEN_MAP[prefix]?.op ?? '==') as ActiveTokenOp;
+  return { prefix, partial: '', op: defOp, startIndex, endIndex: cursor };
 }
