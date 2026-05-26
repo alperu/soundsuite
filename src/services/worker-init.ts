@@ -438,6 +438,15 @@ async function startCoreServicesIfNeeded(
     } catch (err) {
       logger.warn('Failed to start sidecar reconnect watchdog', { error: (err as Error).message });
     }
+
+    // --- Stale JobLog Reaper (closes orphan jobs from worker crashes/restarts) ---
+    try {
+      const { startJobLogReaper } = await import('@/lib/ingestion/joblog-reaper');
+      startJobLogReaper();
+      logger.info('JobLog reaper started');
+    } catch (err) {
+      logger.warn('Failed to start JobLog reaper', { error: (err as Error).message });
+    }
   } catch (err) {
     logger.error('Failed to start core services', err);
     coreServicesStarted = false; // allow retry on next worker init

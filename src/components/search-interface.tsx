@@ -2,6 +2,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { deepSearchRunner } from '@/lib/search/deep-search-runner';
+import { aiSearchRunner } from '@/lib/search/ai-search-runner';
 import { useRouter } from 'next/navigation';
 import { AI_PROVIDERS, AI_PROVIDER_KEYS, AIProviderKey, AIModelDef } from '@/lib/ai/models';
 import { getPreference, setPreference } from '@/lib/indexed-db';
@@ -592,16 +593,21 @@ export default function SearchInterface({
   useEffect(() => {
     const sync = () => {
       const s = deepSearchRunner.getSnapshot();
-      setDeepProgress(s.progress);
-      setStreamingAnswer(s.streamingAnswer);
-      setStreamTokenCount(s.streamTokenCount);
-      setSearchWarnings(s.warnings);
-      setAiProgressLog(s.progressLog.map(p => ({
-        type: 'progress',
-        step: p.step,
-        message: p.message,
-        timestamp: p.timestamp,
-      })) as AIProgressEntry[]);
+      // If a regular AI run is in flight, let its mirror own the streaming
+      // surface; otherwise mirror deep-runner state.
+      const aiSnap = aiSearchRunner.getSnapshot();
+      if (!aiSnap.loading) {
+        setDeepProgress(s.progress);
+        setStreamingAnswer(s.streamingAnswer);
+        setStreamTokenCount(s.streamTokenCount);
+        setSearchWarnings(s.warnings);
+        setAiProgressLog(s.progressLog.map(p => ({
+          type: 'progress',
+          step: p.step,
+          message: p.message,
+          timestamp: p.timestamp,
+        })) as AIProgressEntry[]);
+      }
       // If the runner is still running, force aiLoading true so the spinner
       // and stop button reappear when the user navigates back mid-search.
       if (s.loading) setAiLoading(true);
@@ -619,6 +625,44 @@ export default function SearchInterface({
     };
     sync();
     return deepSearchRunner.subscribe(sync);
+  }, [currentSessionId]);
+
+  // Mirror the singleton regular-AI runner. Same pattern as deep-search above:
+  // the runner outlives the component so an in-flight /api/search/ai stream
+  // keeps producing tokens after the user navigates away from /search.
+  useEffect(() => {
+    const sync = () => {
+      const s = aiSearchRunner.getSnapshot();
+      // Only own the streaming surface when this runner is active or just
+      // finished with a result for the current session. Avoid clobbering
+      // deep-search visuals when the user is in deep mode.
+      if (s.loading) {
+        setAiLoading(true);
+        setStreamingAnswer(s.streamingAnswer);
+        setStreamTokenCount(s.streamTokenCount);
+        setAiProgressLog(s.progressLog);
+      } else if (s.streamingAnswer === null && s.progressLog.length === 0) {
+        // Runner cleared its in-flight visuals on completion. If we still hold
+        // a streaming buffer locally, clear it.
+        // (Don't reset progressLog here — let local state hold the final log.)
+      }
+      // Mirror completed turns scoped to this chat session into local aiTurns.
+      if (s.sessionId === currentSessionId) {
+        const turns = s.turns
+          .filter(t => t.sessionId === currentSessionId && t.result)
+          .map(t => ({
+            query: t.query,
+            result: t.result!,
+            searchTime: Math.max(0, t.completedAt - s.startTime),
+          }));
+        if (turns.length > 0) {
+          // Merge: prefer the runner's turns if it has more than local state.
+          setAiTurns(prev => (turns.length > prev.length ? turns : prev));
+        }
+      }
+    };
+    sync();
+    return aiSearchRunner.subscribe(sync);
   }, [currentSessionId]);
 
   const uploadChatFiles = useCallback(async (files: File[]) => {
@@ -946,7 +990,9 @@ export default function SearchInterface({
     }
   };
 
-  // AI search — streaming NDJSON
+  // AI search — delegates to module-scoped singleton runner so the request
+  // survives page navigation. Local UI state is mirrored via the subscribe
+  // effect below.
   const doAISearch = async (
     provider: string,
     model: string,
@@ -954,94 +1000,26 @@ export default function SearchInterface({
     history?: Array<{ role: 'user' | 'assistant'; content: string }>,
   ): Promise<AISearchResult> => {
     const q = (query || aiQuery).trim();
-    const signal = aiAbortRef.current?.signal;
-    const res = await fetch('/api/search/ai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        query: q,
-        provider,
-        model,
-        caseId: aiCaseId || undefined,
-        chatId: currentSessionId,
-        thinking: thinkingMode,
-        maxTokens,
-        effort,
-        useRlm,
-        ...(booleanMode ? { mode: 'boolean' } : {}),
-        ...(history && history.length > 0 ? { history } : {}),
-        ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
-      }),
-      signal: aiAbortRef.current?.signal,
-    });
-
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || 'AI search failed');
-    }
-
-    const reader = res.body?.getReader();
-    if (!reader) throw new Error('No response stream');
-
-    // Reset streaming state for this search
-    setAiProgressLog([]);
     setSearchStartTime(prev => prev || Date.now());
     setThinkingExpanded(true);
-    setStreamingAnswer(null);
-
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let finalResult: AISearchResult | null = null;
-
-    while (true) {
-      if (signal?.aborted) {
-        try { await reader.cancel(); } catch { /* noop */ }
-        const err = new Error('aborted');
-        (err as any).name = 'AbortError';
-        throw err;
-      }
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (signal?.aborted) break;
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line);
-          if (event.type === 'progress') {
-            setAiProgressLog(prev => [...prev, { ...event, timestamp: Date.now() }]);
-          } else if (event.type === 'token') {
-            setStreamingAnswer(prev => (prev ?? '') + event.text);
-            setStreamTokenCount(c => c + Math.max(1, Math.round((event.text as string).length / 4)));
-          } else if (event.type === 'result') {
-            finalResult = event.data as AISearchResult;
-          } else if (event.type === 'error') {
-            throw new Error(event.error);
-          }
-        } catch (e) {
-          if (e instanceof Error && e.message !== line) throw e;
-        }
-      }
-    }
-
-    // Process remaining buffer
-    if (buffer.trim()) {
-      try {
-        const event = JSON.parse(buffer);
-        if (event.type === 'result') finalResult = event.data as AISearchResult;
-        else if (event.type === 'error') throw new Error(event.error);
-      } catch { /* ignore */ }
-    }
-
-    setStreamingAnswer(null);
+    const result = await aiSearchRunner.start({
+      query: q,
+      provider,
+      model,
+      caseId: aiCaseId || undefined,
+      sessionId: currentSessionId,
+      thinking: thinkingMode,
+      maxTokens,
+      effort,
+      useRlm,
+      booleanMode,
+      ...(history && history.length > 0 ? { history } : {}),
+      ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
+    });
     // Auto-collapse thinking log after result arrives
     setTimeout(() => setThinkingExpanded(false), 300);
-    if (!finalResult) throw new Error('AI search completed without result');
-    return finalResult;
+    if (!result) throw new Error('AI search completed without result');
+    return result;
   };
 
   const doDeepSearch = async (
@@ -1315,9 +1293,10 @@ export default function SearchInterface({
   const handleStopAI = useCallback(() => {
     aiStoppedRef.current = true;
     if (aiAbortRef.current) aiAbortRef.current.abort();
-    // The deep-search runner lives outside this component (so it can survive
-    // page navigation), so abort it explicitly too.
+    // Both runners live outside this component (so they can survive page
+    // navigation), so abort them explicitly too.
     deepSearchRunner.abort();
+    aiSearchRunner.abort();
     setAiStopping(true);
     setAiError('Search stopped');
     setDeepProgress(null);
@@ -1343,6 +1322,7 @@ export default function SearchInterface({
     const nextSession = `session-${Date.now()}`;
     setCurrentSessionId(nextSession);
     deepSearchRunner.reset(nextSession);
+    aiSearchRunner.reset(nextSession);
     aiQueryRef.current?.focus();
   }, []);
 

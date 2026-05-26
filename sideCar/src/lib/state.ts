@@ -105,10 +105,18 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     // Cap vLLM at 70% of the host GPU (34/48 ≈ 0.71). Without this, vLLM's
     // default --gpu-memory-utilization=0.9 fills ~43 GB on a 48 GB card,
     // evicting embedding + ocr. --max-model-len bounds KV-cache pre-allocation.
+    //
+    // Tool-calling: master's runRlmWithTools (src/lib/ai/stream-rlm.ts) drives
+    // Phase B recursive RAG via OpenAI tool_choice='auto'. vLLM disables this
+    // path by default and returns HTTP 400 unless explicitly enabled. The
+    // 'hermes' parser handles Qwen-family tool tokens correctly — Qwen3
+    // uses ChatML + Hermes-style <tool_call>...</tool_call> blocks.
     vllmArgs: [
       '--gpu-memory-utilization', '0.7',
       '--max-model-len', '32768',
       '--dtype', 'bfloat16',
+      '--enable-auto-tool-choice',
+      '--tool-call-parser', 'hermes',
     ],
   },
   cuda: {

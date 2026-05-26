@@ -282,6 +282,29 @@ export function removeSidecarFromCache(agentUrl: string): void {
 }
 
 /**
+ * Drop the cached container entry for a single role on a sidecar.
+ *
+ * Called when an operator removes/disables a role via /admin/gpu so that
+ * resolveEndpoint stops routing to it immediately, without waiting for the
+ * next heartbeat (~5 s) to refresh the container map. The next heartbeat
+ * will repopulate the entry if the sidecar still reports it (e.g. operator
+ * is just disabling without stopping the container).
+ *
+ * `role` is the short role name ('ocr', 'embedding', etc.) — same key used
+ * in CachedSidecarStatus.containers.
+ */
+export function clearSidecarRole(agentUrl: string, role: string): void {
+  const normalized = agentUrl.replace(/\/+$/, '');
+  const entry = cache.get(normalized);
+  if (!entry) return;
+  if (!entry.containers || !(role in entry.containers)) return;
+  const { [role]: _removed, ...rest } = entry.containers;
+  void _removed;
+  entry.containers = rest;
+  cache.set(normalized, entry);
+}
+
+/**
  * Mark a sidecar as disconnected (e.g., WS closed).
  */
 export function markSidecarDisconnected(agentUrl: string): void {

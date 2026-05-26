@@ -32,6 +32,30 @@ export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-completion', 'ss-ocr',
 export type HostOs = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | 'unknown';
 export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner';
 
+/**
+ * vLLM serve args appended to the rlm container cmd. Must be kept in sync
+ * with state.ts:defaultRegistry.rlm.vllmArgs — both code paths construct an
+ * rlm ContainerDef and the master `/config` push overwrites the registry
+ * entry built by `defaultRegistry`, so this template version is what the
+ * running container actually inherits at runtime.
+ *
+ * --gpu-memory-utilization 0.7 caps vLLM at ~34 GB of a 48 GB A6000 so
+ * embedding+ocr don't get evicted. --max-model-len 32768 bounds the KV
+ * cache pre-allocation. --dtype bfloat16 matches the published weights.
+ *
+ * --enable-auto-tool-choice + --tool-call-parser hermes opt vLLM into
+ * OpenAI tool-calling so master's runRlmWithTools can drive Phase B
+ * recursive RAG; without these flags vLLM 400s on tool_choice='auto'.
+ * 'hermes' parses Qwen3's ChatML <tool_call>...</tool_call> blocks.
+ */
+const RLM_VLLM_ARGS: string[] = [
+  '--gpu-memory-utilization', '0.7',
+  '--max-model-len', '32768',
+  '--dtype', 'bfloat16',
+  '--enable-auto-tool-choice',
+  '--tool-call-parser', 'hermes',
+];
+
 /** Strip "ss-" prefix → registry/state key. */
 export function modeToRole(mode: ModeName): string {
   return mode.replace(/^ss-/, '');
@@ -203,6 +227,7 @@ export function resolveMode(
         containerName,
         priority: 'high',
         runtime: 'docker',
+        vllmArgs: RLM_VLLM_ARGS,
       };
 
     default:
@@ -362,6 +387,7 @@ function resolveModeForRuntime(
         containerName,
         priority: 'high',
         runtime: 'docker',
+        vllmArgs: RLM_VLLM_ARGS,
       };
     }
     return null;

@@ -1,24 +1,10 @@
 #!/usr/bin/env bash
 # Sound Suite Sidecar — Download & Install (Linux/macOS)
 # Usage:
-#   ./install.sh                                    # defaults to http://172.16.16.9:3000
-#   ./install.sh http://192.168.1.50:3000           # custom server
-#   ./install.sh --docker http://192.168.1.50:3000  # install AND start in Docker mode
-#   INSTALL_DIR=/opt/sidecar ./install.sh           # custom install path
+#   ./install.sh                          # defaults to http://172.16.16.9:3000
+#   ./install.sh http://192.168.1.50:3000 # custom server
+#   INSTALL_DIR=/opt/sidecar ./install.sh # custom install path
 set -euo pipefail
-
-# Pull --docker (or -d) out of the positional args. When present, the
-# installer chains directly into start.sh --docker after the install
-# completes so operators get one-line install-and-run.
-START_AFTER_DOCKER=0
-ARGS=()
-for arg in "$@"; do
-  case "$arg" in
-    --docker|-d) START_AFTER_DOCKER=1 ;;
-    *) ARGS+=("$arg") ;;
-  esac
-done
-set -- "${ARGS[@]:-}"
 
 SERVER="${1:-http://172.16.16.9:3000}"
 # Default install dir: <cwd>/sidecar — keeps the user on the drive/folder they
@@ -172,19 +158,7 @@ echo "================================"
 echo " Installed v$VERSION"
 echo "================================"
 echo ""
-
-# When --docker was passed, chain straight into start.sh so the operator
-# gets a one-line install-and-run experience. exec replaces this process
-# so logs/Ctrl-C work as expected.
-if [ "$START_AFTER_DOCKER" = "1" ]; then
-  echo "[install.sh] --docker passed — chaining into start.sh --docker $SERVER"
-  echo "  (cd $INSTALL_DIR && exec ./start.sh --docker $SERVER)"
-  echo ""
-  cd "$INSTALL_DIR"
-  exec ./start.sh --docker "$SERVER"
-fi
-
 echo "Start the sidecar:"
 echo "  cd $INSTALL_DIR"
-echo "  ./start.sh $SERVER          # Node mode (or --docker for container mode)"
+echo "  ./start.sh $SERVER"
 echo ""

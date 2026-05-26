@@ -6,6 +6,30 @@ import {
   removeAssignment,
   type AssignmentInput,
 } from '@/lib/db/role-registry';
+import { clearSidecarRole } from '@/lib/gpu/status-cache';
+
+/**
+ * Mode names ("ss-ocr") → role keys used in CachedSidecarStatus.containers
+ * ("ocr"). Both the sidecar and the route resolver index by the short name.
+ */
+function modeToRoleKey(mode: string): string {
+  return mode.startsWith('ss-') ? mode.slice(3) : mode;
+}
+
+/**
+ * Best-effort: push the updated role config to the sidecar so it stops the
+ * container. Cache invalidation already prevents new routes, but pushing
+ * here also frees VRAM. Errors are swallowed — the sidecar may be offline
+ * and that's fine; the route is already unselected.
+ */
+async function syncSidecar(sidecarUrl: string): Promise<void> {
+  try {
+    const { pushModelRegistry } = await import('@/lib/gpu/fleet-router');
+    await pushModelRegistry(sidecarUrl);
+  } catch {
+    /* sidecar may be offline; routing already updated locally */
+  }
+}
 
 /**
  * GET /api/admin/role-assignments?sidecarUrl=...
@@ -61,6 +85,14 @@ export async function POST(req: NextRequest) {
       );
     }
     const row = await setAssignment({ ...body, sidecarUrl: body.sidecarUrl, mode } as AssignmentInput);
+    // If the role was disabled, invalidate the local route cache for this
+    // (host, role) pair and push the new config so the sidecar stops the
+    // container. Without this, resolveEndpoint keeps routing to the host
+    // until the next heartbeat (~5 s) and documents fail with fetch errors.
+    if (body.enabled === false) {
+      clearSidecarRole(body.sidecarUrl, modeToRoleKey(mode));
+      void syncSidecar(body.sidecarUrl);
+    }
     return NextResponse.json({ assignment: row });
   } catch (err) {
     return NextResponse.json(
@@ -89,6 +121,11 @@ export async function DELETE(req: NextRequest) {
       );
     }
     await removeAssignment(sidecarUrl, mode);
+    // Invalidate the route cache immediately so the resolver stops picking
+    // this host for the deleted role. Also push the config so the sidecar
+    // tears down the container.
+    clearSidecarRole(sidecarUrl, modeToRoleKey(mode));
+    void syncSidecar(sidecarUrl);
     return NextResponse.json({ ok: true });
   } catch (err) {
     return NextResponse.json(
