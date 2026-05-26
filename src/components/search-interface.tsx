@@ -419,6 +419,9 @@ export default function SearchInterface({
   const [activeToken, setActiveToken] = useState<ActiveToken | null>(null);
   const [pickerOptions, setPickerOptions] = useState<PickedSuggestion[]>([]);
   const [pickerHighlight, setPickerHighlight] = useState(0);
+  // Task #63: lifted multi-select state. Set is populated by Shift/Cmd-click
+  // in ActiveTokenSuggestions; commitMultiSelection splices the chip batch.
+  const [pickerSelectedValues, setPickerSelectedValues] = useState<Set<string>>(new Set());
 
   // Token-name suggestions (e.g. `fi` → `filedAfter` / `filedBefore`). Mirrors
   // the partial-name list from HaystackFilterInput so the left rail can render
@@ -451,12 +454,62 @@ export default function SearchInterface({
       setActiveToken(null);
       setPickerHighlight(0);
       setPickerOptions([]);
+      setPickerSelectedValues(new Set());
       // The row's onMouseDown calls e.preventDefault() which keeps focus in
       // the input — no manual refocus needed. The legacy aiQueryRef points
       // at the <textarea> path and isn't valid in haystack mode anyway.
     },
     [activeToken],
   );
+
+  // Task #63: batch commit — Shift/Cmd-clicked rows are committed together,
+  // OR-joined and paren-wrapped: `( judgeRef==@v1 or judgeRef==@v2 )`. The
+  // parens preserve precedence when this batch sits next to an existing AND
+  // clause; without them `case==X and (a or b)` would otherwise parse as
+  // `case==X and a or b` = `(case==X and a) or b`.
+  const handlePickManyActiveToken = useCallback(
+    (picked: PickedSuggestion[]) => {
+      if (!activeToken || picked.length === 0) return;
+      const op = activeToken.op;
+      const key = activeToken.prefix;
+      const batch: FilterChip[] = [{ kind: 'lparen' }];
+      picked.forEach((p, idx) => {
+        if (idx > 0) batch.push({ kind: 'or' });
+        batch.push({ key, value: p.value, label: p.label, op });
+      });
+      batch.push({ kind: 'rparen' });
+      setHaystackChips((prev) => [...prev, ...batch]);
+      setAiQuery((prev) => {
+        const before = prev.slice(0, activeToken.startIndex);
+        const after = prev.slice(activeToken.endIndex);
+        return (before + after).replace(/\s+$/, '');
+      });
+      setActiveToken(null);
+      setPickerHighlight(0);
+      setPickerOptions([]);
+      setPickerSelectedValues(new Set());
+    },
+    [activeToken],
+  );
+
+  const handleSelectedValuesChange = useCallback(
+    (next: Set<string>, _anchor: string | null) => {
+      setPickerSelectedValues(next);
+    },
+    [],
+  );
+
+  // Bridged commit used by haystack-filter-input's Enter handler. Picks the
+  // current selection in display order from `pickerOptions` and forwards to
+  // `handlePickManyActiveToken`.
+  const handleCommitMultiSelection = useCallback(() => {
+    if (pickerSelectedValues.size === 0) return;
+    const orderedOpts: PickedSuggestion[] = [];
+    for (const opt of pickerOptions) {
+      if (pickerSelectedValues.has(opt.value)) orderedOpts.push(opt);
+    }
+    if (orderedOpts.length > 0) handlePickManyActiveToken(orderedOpts);
+  }, [pickerSelectedValues, pickerOptions, handlePickManyActiveToken]);
 
   // Run the haystack-aware search whenever the user submits while in
   // structured mode. Sends both the compiled filter and any residual freetext
@@ -1766,8 +1819,11 @@ export default function SearchInterface({
                   active={activeToken}
                   highlight={pickerHighlight}
                   onPick={handlePickActiveToken}
+                  onPickMany={handlePickManyActiveToken}
                   onOptionsChange={setPickerOptions}
                   onHighlightReset={() => setPickerHighlight(0)}
+                  selectedValues={pickerSelectedValues}
+                  onSelectedValuesChange={handleSelectedValuesChange}
                 />
               ) : (
                 <SampleQueryPanel
@@ -2082,6 +2138,8 @@ export default function SearchInterface({
                         onPickerHighlightChange={setPickerHighlight}
                         onTokenSuggestionsChange={setTokenSuggestions}
                         onTokenHighlightChange={setTokenSuggestionHighlight}
+                        pendingMultiSelectionCount={pickerSelectedValues.size}
+                        onCommitMultiSelection={handleCommitMultiSelection}
                       />
                     ) : booleanMode && chipComposer ? (
                       <div className="flex-1">

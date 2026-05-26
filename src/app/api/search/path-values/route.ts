@@ -79,6 +79,30 @@ export async function GET(request: NextRequest) {
     const root = segments[0];
     const attrSeg = segments[segments.length - 1];
 
+    // The Prisma client's `$extends` return type doesn't surface the model
+    // delegates cleanly here, so we narrow with a local cast. Reads only;
+    // never mutates.
+    const client = prisma as unknown as {
+      case: {
+        findMany: (args: {
+          where: unknown;
+          distinct?: unknown;
+          select?: unknown;
+          take?: number;
+          orderBy?: unknown;
+        }) => Promise<Array<Record<string, unknown>>>;
+      };
+      person: {
+        findMany: (args: {
+          where: unknown;
+          distinct?: unknown;
+          select?: unknown;
+          take?: number;
+          orderBy?: unknown;
+        }) => Promise<Array<Record<string, unknown>>>;
+      };
+    };
+
     // — case->{attr}: Case-attribute traversal —
     if (root === 'case' && segments.length === 2) {
       const col = CASE_ATTRS[attrSeg];
@@ -86,19 +110,17 @@ export async function GET(request: NextRequest) {
       const where: Record<string, unknown> = prefix
         ? { [col]: { startsWith: prefix } }
         : { [col]: { not: null } };
-      const rows = await prisma.case.findMany({
+      const rows = await client.case.findMany({
         where,
-        distinct: [col as 'jurisdiction'],
-        select: { id: true, [col]: true } as { id: true },
+        distinct: [col],
+        select: { id: true, [col]: true },
         take: limit,
-        orderBy: { [col]: 'asc' } as { [k: string]: 'asc' },
+        orderBy: { [col]: 'asc' },
       });
       const options: PathValueOption[] = [];
-      for (const r of rows as Array<Record<string, unknown>>) {
+      for (const r of rows) {
         const v = r[col];
         if (typeof v !== 'string' || !v) continue;
-        // Quote string values that contain whitespace so the chip stores them
-        // as a Haystack phrase. Caller does the wrapping; we return the bare value.
         options.push({ value: v, label: v, id: r.id as string });
       }
       return NextResponse.json({ options });
@@ -112,28 +134,28 @@ export async function GET(request: NextRequest) {
       const where: Record<string, unknown> = prefix
         ? { [col]: { startsWith: prefix } }
         : { [col]: { not: null } };
-      const rows = await prisma.person.findMany({
+      const rows = await client.person.findMany({
         where,
-        distinct: [col as 'displayName'],
+        distinct: [col],
         select: { id: true, displayName: true, email: true, barNumber: true },
         take: limit,
-        orderBy: { [col]: 'asc' } as { [k: string]: 'asc' },
+        orderBy: { [col]: 'asc' },
       });
       const options: PathValueOption[] = [];
       for (const r of rows) {
-        const v = (r as Record<string, unknown>)[col];
+        const v = r[col];
         if (typeof v !== 'string' || !v) continue;
         const secondary =
           col === 'displayName'
-            ? r.email ?? r.barNumber ?? undefined
+            ? (r.email as string | null) ?? (r.barNumber as string | null) ?? undefined
             : col === 'email'
-              ? r.displayName ?? undefined
-              : r.displayName ?? undefined;
+              ? (r.displayName as string | null) ?? undefined
+              : (r.displayName as string | null) ?? undefined;
         options.push({
           value: v,
           label: v,
           secondary: secondary ?? undefined,
-          id: r.id,
+          id: r.id as string,
         });
       }
       return NextResponse.json({ options });

@@ -176,6 +176,19 @@ export interface HaystackFilterInputProps {
   onTokenSuggestionsChange?: (suggestions: string[]) => void;
   /** Highlight index for the token-name list. */
   onTokenHighlightChange?: (next: number) => void;
+  /**
+   * Task #63: number of values currently selected in the value picker via
+   * Shift/Ctrl-click multi-select. The Enter handler uses this to dispatch
+   * between single-pick commit (commit the highlighted row) and batch commit
+   * (call `onCommitMultiSelection`).
+   */
+  pendingMultiSelectionCount?: number;
+  /**
+   * Task #63: invoked when the user hits Enter with a non-empty multi-
+   * selection. The parent owns the picked-values + options state and emits
+   * the chip batch via `onChipsChange`.
+   */
+  onCommitMultiSelection?: () => void;
 }
 
 /**
@@ -208,6 +221,8 @@ export const HaystackFilterInput = forwardRef<
   onPickerHighlightChange,
   onTokenSuggestionsChange,
   onTokenHighlightChange,
+  pendingMultiSelectionCount = 0,
+  onCommitMultiSelection,
 }: HaystackFilterInputProps, ref) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [cursor, setCursor] = useState<number>(0);
@@ -453,6 +468,11 @@ export const HaystackFilterInput = forwardRef<
         }
         if (e.key === 'Enter') {
           e.preventDefault();
+          // Task #63: multi-selection takes precedence over single-highlight.
+          if (pendingMultiSelectionCount > 0 && onCommitMultiSelection) {
+            onCommitMultiSelection();
+            return;
+          }
           if (commitHighlightedOption()) return;
         }
         if (e.key === 'Escape') {
@@ -550,6 +570,8 @@ export const HaystackFilterInput = forwardRef<
       completeToken,
       onChipsChange,
       onSubmit,
+      pendingMultiSelectionCount,
+      onCommitMultiSelection,
     ],
   );
 

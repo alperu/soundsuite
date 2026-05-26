@@ -67,7 +67,8 @@ export function SampleQueryPanel({ onSelectQuery, onSelectToken }: SampleQueryPa
     >
       <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
         <h3 className="text-sm font-semibold text-gray-800">How to ask</h3>
-        <p className="text-[11px] text-gray-500 mt-0.5">
+        <GenerateAxonBox onSelectQuery={onSelectQuery} />
+        <p className="text-[11px] text-gray-500 mt-2">
           Click a prompt to populate the search bar.
         </p>
       </div>
@@ -150,5 +151,120 @@ export function SampleQueryPanel({ onSelectQuery, onSelectToken }: SampleQueryPa
         </div>
       </div>
     </aside>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Generate-from-English box (task #70)
+// ---------------------------------------------------------------------------
+
+interface GenerateAxonBoxProps {
+  onSelectQuery: (q: SampleQuery) => void;
+}
+
+function GenerateAxonBox({ onSelectQuery }: GenerateAxonBoxProps) {
+  const [text, setText] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const trimmed = text.trim();
+  const disabled = !trimmed || loading;
+
+  const handleGenerate = async () => {
+    if (disabled) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/search/axon-generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ english: trimmed }),
+      });
+      let data: { ok?: boolean; axon?: string; error?: string } = {};
+      try {
+        data = await res.json();
+      } catch {
+        /* ignore — handled below */
+      }
+      if (!res.ok || !data?.ok || typeof data.axon !== 'string') {
+        setError(data?.error || `Request failed (${res.status})`);
+        return;
+      }
+      onSelectQuery({
+        englishPrompt: data.axon,
+        compiledFilter: data.axon,
+        description: 'Generated from English',
+        category: 'date',
+      });
+      setText('');
+    } catch (e) {
+      setError((e as Error).message || 'Network error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="mt-2">
+      <label
+        htmlFor="axon-generate-input"
+        className="block text-[10px] uppercase tracking-wide text-gray-500 mb-1"
+      >
+        Generate from English
+      </label>
+      <textarea
+        id="axon-generate-input"
+        rows={2}
+        maxLength={500}
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          if (error) setError(null);
+        }}
+        placeholder="e.g. motions filed by Judge Roberts in April 2026"
+        className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 resize-none bg-white"
+      />
+      <div className="mt-1.5 flex items-center justify-between gap-2">
+        <span className="text-[10px] text-gray-400">{text.length}/500</span>
+        <button
+          type="button"
+          onClick={handleGenerate}
+          disabled={disabled}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md bg-purple-600 text-white hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+        >
+          {loading && (
+            <svg
+              className="animate-spin h-3 w-3 text-white"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+              />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+              />
+            </svg>
+          )}
+          Generate Axon
+        </button>
+      </div>
+      {error && (
+        <div
+          role="alert"
+          className="mt-1.5 text-[10px] text-red-700 bg-red-50 border border-red-200 rounded px-1.5 py-1 break-words"
+        >
+          {error}
+        </div>
+      )}
+    </div>
   );
 }

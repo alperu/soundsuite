@@ -24,7 +24,7 @@
  *   - `revisionSeq`          → hint ("Type a number")
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ENUM_VALUES,
   personFilterForToken,
@@ -76,10 +76,22 @@ export interface ActiveTokenSuggestionsProps {
   highlight: number;
   /** Called when the user clicks a row OR options arrive after a query. */
   onPick(picked: PickedSuggestion): void;
+  /**
+   * Task #63: commit a batch of selected values, OR-joined and paren-wrapped.
+   * The parent splices `( v1 or v2 ... )` chips at the caret position in one
+   * `onChipsChange` so the batch is atomic w.r.t. undo/redo and re-render.
+   */
+  onPickMany?(picked: PickedSuggestion[]): void;
   /** Surface the visible option list back to the parent for Enter-to-commit. */
   onOptionsChange(opts: PickedSuggestion[]): void;
   /** Reset the highlight when the option set changes. */
   onHighlightReset?(): void;
+  /**
+   * Task #63: lifted multi-select state. Owned by the parent so the input's
+   * Enter handler can commit the pending batch.
+   */
+  selectedValues?: Set<string>;
+  onSelectedValuesChange?(next: Set<string>, anchor: string | null): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -367,9 +379,88 @@ export function ActiveTokenSuggestions({
   active,
   highlight,
   onPick,
+  onPickMany,
   onOptionsChange,
   onHighlightReset,
+  selectedValues,
+  onSelectedValuesChange,
 }: ActiveTokenSuggestionsProps) {
+  // Anchor for shift+click range select. Kept local — the parent only cares
+  // about which values are selected, not the anchor.
+  const anchorRef = useRef<string | null>(null);
+
+  // Reset multi-selection when the active token disappears.
+  useEffect(() => {
+    if (!active && selectedValues && selectedValues.size > 0) {
+      onSelectedValuesChange?.(new Set(), null);
+      anchorRef.current = null;
+    }
+  }, [active, selectedValues, onSelectedValuesChange]);
+
+  // Helper: row-click dispatcher used by every option row. Honors
+  // Shift/Ctrl/Cmd modifiers for range / toggle selection; plain click clears
+  // any pending multi-selection and commits the single value.
+  const onRowClick = useCallback(
+    (
+      e: React.MouseEvent,
+      opt: PickedSuggestion,
+      orderedValues: string[],
+    ) => {
+      e.preventDefault();
+      if (e.shiftKey && anchorRef.current && onSelectedValuesChange) {
+        // Range select from anchor to clicked value (inclusive).
+        const a = orderedValues.indexOf(anchorRef.current);
+        const b = orderedValues.indexOf(opt.value);
+        if (a >= 0 && b >= 0) {
+          const [lo, hi] = a < b ? [a, b] : [b, a];
+          const next = new Set(selectedValues ?? []);
+          for (let i = lo; i <= hi; i++) next.add(orderedValues[i]);
+          onSelectedValuesChange(next, opt.value);
+          return;
+        }
+      }
+      if ((e.metaKey || e.ctrlKey) && onSelectedValuesChange) {
+        const next = new Set(selectedValues ?? []);
+        if (next.has(opt.value)) next.delete(opt.value);
+        else next.add(opt.value);
+        anchorRef.current = opt.value;
+        onSelectedValuesChange(next, opt.value);
+        return;
+      }
+      // Plain click — clear multi-selection and commit single value.
+      if (selectedValues && selectedValues.size > 0) {
+        onSelectedValuesChange?.(new Set(), null);
+        anchorRef.current = null;
+      }
+      onPick(opt);
+    },
+    [onPick, onSelectedValuesChange, selectedValues],
+  );
+
+  // Commit the pending multi-selection as a batch (Add-N-filters button).
+  const commitMultiSelection = useCallback(() => {
+    if (!selectedValues || selectedValues.size === 0) return;
+    if (!onPickMany) return;
+    // Preserve the visible-list order so the resulting chip OR-chain reads
+    // left-to-right as the user saw it.
+    const orderedOpts: PickedSuggestion[] = [];
+    // We have the option list mirrored upstream via onOptionsChange, but we
+    // also need it here. Closure over `optionsRef` (set just before render).
+    // Use the latest emitted list captured below.
+    const list = lastOptionsRef.current;
+    for (const opt of list) {
+      if (selectedValues.has(opt.value)) orderedOpts.push(opt);
+    }
+    if (orderedOpts.length === 0) return;
+    onPickMany(orderedOpts);
+    onSelectedValuesChange?.(new Set(), null);
+    anchorRef.current = null;
+  }, [selectedValues, onPickMany, onSelectedValuesChange]);
+
+  // Mirror the last-emitted option list so `commitMultiSelection` can read
+  // it without a re-render dependency cycle.
+  const lastOptionsRef = useRef<PickedSuggestion[]>([]);
+
   const path = active?.path ?? [];
   const token = active ? path[0] ?? null : null;
   const partial = active?.partial ?? '';
@@ -417,6 +508,7 @@ export function ActiveTokenSuggestions({
       lastSig.current = sig;
       onHighlightReset?.();
     }
+    lastOptionsRef.current = options;
     onOptionsChange(options);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [options]);
@@ -465,6 +557,43 @@ export function ActiveTokenSuggestions({
           )}
         </p>
       </div>
+
+      {/* Task #63: multi-select summary + commit button. Visible when the
+          user has Ctrl/Cmd-clicked or Shift+clicked at least one row. The
+          button OR-joins all selected values, paren-wrapped, and splices the
+          batch at the caret position. */}
+      {selectedValues && selectedValues.size > 0 && onPickMany && (
+        <div className="px-3 py-2 border-b border-purple-200 bg-purple-50/70 flex items-center justify-between gap-2">
+          <span className="text-[11px] text-purple-700">
+            {selectedValues.size} value{selectedValues.size === 1 ? '' : 's'} selected
+          </span>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onSelectedValuesChange?.(new Set(), null);
+                anchorRef.current = null;
+              }}
+              className="text-[10px] text-gray-500 hover:text-gray-800 px-1.5 py-0.5"
+              aria-label="Clear selection"
+            >
+              clear
+            </button>
+            <button
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                commitMultiSelection();
+              }}
+              className="text-[11px] font-medium px-2 py-0.5 rounded border border-purple-400 bg-white text-purple-700 hover:bg-purple-100"
+              aria-label={`Add ${selectedValues.size} filters joined with or`}
+            >
+              Add {selectedValues.size} (or)
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Date tokens — native date picker plus a hint for ranges. */}
       {isDateToken && (
@@ -582,29 +711,46 @@ export function ActiveTokenSuggestions({
             </div>
           )}
           <ul className="py-1">
-            {pathRemote.options.map((opt, i) => (
-              <li key={`pt-${opt.value}-${i}`}>
-                <button
-                  type="button"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    onPick(opt);
-                  }}
-                  className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-purple-50 ${
-                    i === highlight ? 'bg-purple-100' : ''
-                  }`}
-                >
-                  <div className="font-medium text-gray-800 leading-snug">
-                    {opt.label}
-                  </div>
-                  {opt.secondary && (
-                    <div className="text-[10px] text-gray-500 leading-snug mt-0.5">
-                      {opt.secondary}
-                    </div>
-                  )}
-                </button>
-              </li>
-            ))}
+            {pathRemote.options.map((opt, i) => {
+              const isSel = selectedValues?.has(opt.value) ?? false;
+              const orderedValues = pathRemote.options.map((o) => o.value);
+              return (
+                <li key={`pt-${opt.value}-${i}`}>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => onRowClick(e, opt, orderedValues)}
+                    className={`flex items-start gap-2 w-full text-left px-3 py-1.5 text-xs hover:bg-purple-50 ${
+                      isSel ? 'bg-purple-50' : ''
+                    } ${i === highlight ? 'bg-purple-100' : ''}`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`mt-0.5 inline-flex w-3 h-3 rounded-sm border ${
+                        isSel
+                          ? 'bg-purple-600 border-purple-600 text-white items-center justify-center'
+                          : 'border-gray-300'
+                      }`}
+                    >
+                      {isSel && (
+                        <svg viewBox="0 0 12 12" className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth={2}>
+                          <path d="M2 6 L5 9 L10 3" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      )}
+                    </span>
+                    <span className="flex-1 min-w-0">
+                      <div className="font-medium text-gray-800 leading-snug truncate">
+                        {opt.label}
+                      </div>
+                      {opt.secondary && (
+                        <div className="text-[10px] text-gray-500 leading-snug mt-0.5 truncate">
+                          {opt.secondary}
+                        </div>
+                      )}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
@@ -626,29 +772,46 @@ export function ActiveTokenSuggestions({
             </div>
           )}
           <ul className="py-1">
-            {remote.options.map((opt, i) => (
-              <li key={opt.value}>
-                <button
-                  type="button"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    onPick(opt);
-                  }}
-                  className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-purple-50 ${
-                    i === highlight ? 'bg-purple-100' : ''
-                  }`}
-                >
-                  <div className="font-medium text-gray-800 leading-snug">
-                    {opt.label}
-                  </div>
-                  {opt.secondary && (
-                    <div className="text-[10px] text-gray-500 leading-snug mt-0.5">
-                      {opt.secondary}
-                    </div>
-                  )}
-                </button>
-              </li>
-            ))}
+            {remote.options.map((opt, i) => {
+              const isSel = selectedValues?.has(opt.value) ?? false;
+              const orderedValues = remote.options.map((o) => o.value);
+              return (
+                <li key={opt.value}>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => onRowClick(e, opt, orderedValues)}
+                    className={`flex items-start gap-2 w-full text-left px-3 py-1.5 text-xs hover:bg-purple-50 ${
+                      isSel ? 'bg-purple-50' : ''
+                    } ${i === highlight ? 'bg-purple-100' : ''}`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`mt-0.5 inline-flex w-3 h-3 rounded-sm border ${
+                        isSel
+                          ? 'bg-purple-600 border-purple-600 text-white items-center justify-center'
+                          : 'border-gray-300'
+                      }`}
+                    >
+                      {isSel && (
+                        <svg viewBox="0 0 12 12" className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth={2}>
+                          <path d="M2 6 L5 9 L10 3" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      )}
+                    </span>
+                    <span className="flex-1 min-w-0">
+                      <div className="font-medium text-gray-800 leading-snug truncate">
+                        {opt.label}
+                      </div>
+                      {opt.secondary && (
+                        <div className="text-[10px] text-gray-500 leading-snug mt-0.5 truncate">
+                          {opt.secondary}
+                        </div>
+                      )}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
@@ -704,10 +867,10 @@ export function activeTokenAtCursor(text: string, cursor: number): ActiveToken |
   if (!m) return null;
   const prefix = m[1];
   const path = prefix.split('->');
-  // First segment must be a known TOKEN_MAP key — that's how we know the
-  // picker has anything to offer. (For multi-segment paths the value-source
-  // is selected by the *last* segment; see the dispatcher below.)
-  if (!TOKEN_MAP[path[0]]) return null;
+  // First segment must be a known TOKEN_MAP key OR a canonical *Ref name
+  // (Task #65). For multi-segment paths the value-source is selected by the
+  // *last* segment; see the dispatcher below.
+  if (!TOKEN_MAP[path[0]] && !PATH_ROOT_ALIASES.has(path[0])) return null;
   const op = m[2] as ActiveTokenOp;
   const partial = m[3];
   const matchedAt = m.index ?? 0;
@@ -732,7 +895,7 @@ export function forceActiveTokenAtCursor(text: string, cursor: number): ActiveTo
   if (!m) return null;
   const prefix = m[1];
   const path = prefix.split('->');
-  if (!TOKEN_MAP[path[0]]) return null;
+  if (!TOKEN_MAP[path[0]] && !PATH_ROOT_ALIASES.has(path[0])) return null;
   const matchedAt = m.index ?? 0;
   const offset = m[0].startsWith(' ') ? 1 : 0;
   const startIndex = matchedAt + offset;

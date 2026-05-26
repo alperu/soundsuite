@@ -109,6 +109,42 @@ export const FIELD_RESOLVERS: Record<string, FieldResolver> = {
   reporterRef: { kind: 'prisma-traverse', via: 'motion-person', personTag: 'courtReporter' },
 };
 
+// Task #66: XETO marker-tag allowlist. These names appear on `Case.tags`
+// JSON (and analogous Motion.tags) as `markerName: true` presence flags.
+// The list is intentionally finite — we mirror the marker dictionary used in
+// production XETO ingestion (`src/lib/legal/types.ts:CaseTags`) plus the
+// US-jurisdiction markers used in case-management seed data
+// (`jurisdictionCa`, `jurisdictionTx`, etc.). Adding a marker here is a
+// one-line change.
+//
+// Validation invariants:
+//   - Members are camelCase identifiers — `[A-Za-z][A-Za-z0-9]*` — so they
+//     can be safely interpolated into a Prisma `path` array without risk of
+//     SQL or JSON-path injection.
+//   - The marker name itself is the JSON key on `tags`. We never coerce it.
+const US_JURISDICTION_CODES = [
+  'al','ak','az','ar','ca','co','ct','de','fl','ga','hi','id','il','in','ia','ks',
+  'ky','la','me','md','ma','mi','mn','ms','mo','mt','ne','nv','nh','nj','nm','ny',
+  'nc','nd','oh','ok','or','pa','ri','sc','sd','tn','tx','ut','vt','va','wa','wv',
+  'wi','wy','dc','pr','vi','gu','as','mp',
+];
+
+const CASE_MARKER_ALLOWLIST: Set<string> = new Set([
+  // Core XETO Case markers (see CaseTags in src/lib/legal/types.ts)
+  'case', 'site',
+  // Jurisdiction markers — one per US state/territory, camelCase suffix
+  ...US_JURISDICTION_CODES.map(
+    (c) => `jurisdiction${c.charAt(0).toUpperCase()}${c.slice(1)}`,
+  ),
+]);
+
+/** Exported for the filter-logic-panel docs. Top-N marker names. */
+export const CASE_MARKER_NAMES: string[] = Array.from(CASE_MARKER_ALLOWLIST);
+
+// Defensive regex — the parser already enforces this shape, but we re-check
+// at the resolver boundary to make the SQL-injection guarantee local.
+const SAFE_MARKER_NAME_RE = /^[A-Za-z][A-Za-z0-9]*$/;
+
 // Allowed second segments after a leading `case` root. The allowlist guards
 // SQL injection and prevents accidental traversal into unknown columns. Each
 // entry maps the user-typed segment to the actual Prisma field.
@@ -340,7 +376,11 @@ function validateTraversalPath(path: string[]): boolean {
   // case->X (2-hop case-attribute) or case->{judge|movant|respondent}->Y (3-hop)
   if (root === 'case') {
     if (path.length === 2) {
-      return path[1] in CASE_ATTRIBUTE_ALLOWLIST;
+      // Column-backed attribute OR XETO marker tag (#66).
+      return (
+        path[1] in CASE_ATTRIBUTE_ALLOWLIST ||
+        CASE_MARKER_ALLOWLIST.has(path[1])
+      );
     }
     if (path.length === 3) {
       return path[1] in CASE_PERSON_HOPS && path[2] in PERSON_ATTRIBUTE_ALLOWLIST;
@@ -465,9 +505,33 @@ async function resolveOne(
     return null;
   }
 
-  // — 2-hop: case->attribute —
+  // — 2-hop: case->attribute or case->markerTag (Task #66) —
   if (path[0] === 'case' && path.length === 2) {
-    const prismaField = CASE_ATTRIBUTE_ALLOWLIST[path[1]];
+    const seg = path[1];
+    // Marker-tag form: `case->markerName == true|false`. The JSON predicate
+    // `tags.path = [seg].equals = bool` is well-supported by Prisma's SQLite
+    // driver. Marker names are validated against the allowlist + a defensive
+    // regex so we never embed a user-typed key into a query.
+    if (CASE_MARKER_ALLOWLIST.has(seg) && SAFE_MARKER_NAME_RE.test(seg)) {
+      if (cmp !== '==' && cmp !== '!=') return null;
+      const truthy = value === 'true' || value === '1';
+      const falsy = value === 'false' || value === '0';
+      if (!truthy && !falsy) return null;
+      const want = (cmp === '==') ? truthy : !truthy; // `!=true` ⇒ want false
+      const where: { tags: { path: string[]; equals: boolean } } = {
+        tags: { path: [seg], equals: want },
+      };
+      try {
+        const cases = await client.case.findMany({ where, select: { id: true } });
+        return capFanout(cases.map((c) => c.id as string), req);
+      } catch (err) {
+        logger?.warn?.('Prisma JSON marker filter failed — degrading', {
+          marker: seg, op: cmp, error: err instanceof Error ? err.message : String(err),
+        });
+        return null;
+      }
+    }
+    const prismaField = CASE_ATTRIBUTE_ALLOWLIST[seg];
     if (!prismaField) return null;
     const where = buildScalarWhere(prismaField, cmp, value);
     if (!where) return null;
