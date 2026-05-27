@@ -33,6 +33,7 @@ import { HaystackPreviewGrid } from './search/haystack-preview-grid';
 import { FilterLogicPanel, isLikelyMidTyping } from './search/filter-logic-panel';
 import BooleanChipComposer from './search/boolean-chip-composer';
 import { MustachePicker } from './search/mustache-picker';
+import { GenerateAxonPopover } from './search/generate-axon-popover';
 
 // Known boolean-query field names (kept in sync with FIELD_RESOLVERS in
 // src/lib/search/boolean-to-fts.ts; replicated here to avoid pulling the
@@ -2516,6 +2517,45 @@ export default function SearchInterface({
                           >
                             Filter
                           </button>
+                          {/* Generate-from-English — composer-mounted entry
+                              point for the axon generator. Only useful when
+                              Filter mode is on (output must materialise as
+                              chips, otherwise it lands as raw `{{ }}` text). */}
+                          {useHaystackFilters && (
+                            <GenerateAxonPopover
+                              onInsert={(axon) => {
+                                // Splice as a closed mustache so the same
+                                // extraction regex used in the textarea
+                                // onChange handler can turn it into chips
+                                // here, synchronously — without waiting for
+                                // a user keystroke to trigger onChange.
+                                const wrapped = `{{ ${axon} }}`;
+                                const extractedChips: typeof haystackChips = [];
+                                wrapped.replace(/\{\{\s*([^{}]*?)\s*\}\}/g, (_m, raw) => {
+                                  const content = String(raw).trim();
+                                  if (!content) return '';
+                                  const fm = /^([^=!<>]+?)\s*(==|!=|>=|<=|>|<)\s*(.+)$/.exec(content);
+                                  if (fm) {
+                                    extractedChips.push({
+                                      kind: 'field',
+                                      key: fm[1].trim(),
+                                      op: fm[2] as '==' | '!=' | '>=' | '<=' | '>' | '<',
+                                      value: fm[3].trim().replace(/^["']|["']$/g, ''),
+                                    });
+                                  } else {
+                                    extractedChips.push({ kind: 'term', value: content });
+                                  }
+                                  return '';
+                                });
+                                if (extractedChips.length > 0) {
+                                  setHaystackChips((prev) => [...prev, ...extractedChips]);
+                                }
+                                // Refocus the composer so the user can
+                                // continue typing immediately.
+                                requestAnimationFrame(() => aiQueryRef.current?.focus());
+                              }}
+                            />
+                          )}
                         </div>
                       </div>
                     )}
