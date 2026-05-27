@@ -308,12 +308,31 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     }
 
     // Rerank results using cross-encoder if enabled.
-    // Pass explicit topN = limit so the reranker trims from the expanded pool.
-    searchResults = await rerank(query, searchResults, limit, context.pushWarning ? (w) => {
+    // Pass explicit topN = retrievalLimit (not limit) so the reranker keeps
+    // the full pool around for the transcript-intent boost below. We trim
+    // to `limit` after that boost runs.
+    searchResults = await rerank(query, searchResults, retrievalLimit, context.pushWarning ? (w) => {
       context.pushWarning!({ source: w.source, host: w.host, reason: w.reason, message: w.message });
     } : undefined);
 
-    // Safety trim: if reranking was disabled, ensure we return at most `limit` results
+    // Transcript-intent boost — mirrors the same heuristic in
+    // src/lib/search/deep-search.ts so /api/search/semantic doesn't punish
+    // Reporter's Record chunks against shorter clerk's-record snippets when
+    // the user is actually asking about testimony / hearings / transcripts.
+    const RR_INTENT_RE = /\b(hearing|testimony|testif|deposition|cross[\s-]?examination|direct[\s-]?examination|witness|RR\b|reporter['’]?s?\s*record|transcript|stenograph|cite\s+line|line\s*\d{1,4})/i;
+    if (RR_INTENT_RE.test(query)) {
+      const TRANSCRIPT_FILING_RE = /\b(reporter['’]?s?\s*record|reporters_record|transcript|RR)\b/i;
+      const TRANSCRIPT_BOOST = 1.35;
+      for (const r of searchResults) {
+        const ft = r.metadata.filingType;
+        if (ft && TRANSCRIPT_FILING_RE.test(ft)) {
+          r.score *= TRANSCRIPT_BOOST;
+        }
+      }
+      searchResults.sort((a, b) => b.score - a.score);
+    }
+
+    // Safety trim to user-requested limit
     if (searchResults.length > limit) {
       searchResults = searchResults.slice(0, limit);
     }

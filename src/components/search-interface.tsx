@@ -2235,38 +2235,77 @@ export default function SearchInterface({
                       // up to max-h, wraps long lines (overflow-wrap: anywhere),
                       // submit anchored bottom-right inside the box.
                       <div className="relative w-full rounded-2xl border border-gray-300 bg-white shadow-sm focus-within:ring-2 focus-within:ring-purple-500 focus-within:border-transparent transition-shadow">
-                        {/* Haystack chip strip — only renders when Filter
-                            mode is ON. Chips here are extracted from
-                            `{{ key==value }}` blocks the user types into
-                            the textarea (see onChange handler below). Each
-                            chip is deletable via its × button. */}
-                        {useHaystackFilters && haystackChips.length > 0 && (
-                          <div className="px-4 pt-3 pb-1 flex flex-wrap gap-1.5 border-b border-gray-100">
-                            {haystackChips.map((chip, i) => {
-                              const label = ((): string => {
-                                if ('key' in chip) return `${chip.key}${chip.op || '=='}${chip.value}`;
-                                if (chip.kind === 'term') return `"${chip.value}"`;
-                                if (chip.kind === 'and') return 'and';
-                                if (chip.kind === 'or') return 'or';
-                                if (chip.kind === 'not') return 'not';
-                                if (chip.kind === 'lparen') return '(';
-                                if (chip.kind === 'rparen') return ')';
-                                return '?';
-                              })();
-                              return (
-                                <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-mono">
-                                  {label}
-                                  <button
-                                    type="button"
-                                    onClick={() => setHaystackChips(prev => prev.filter((_, j) => j !== i))}
-                                    className="opacity-50 hover:opacity-100 hover:text-red-600 -mr-0.5"
-                                    title="Remove filter"
-                                  >×</button>
+                        {/* Haystack chip strip — when Filter mode is ON,
+                            always visible (even with zero chips) so the
+                            user has a fixed home for filter syntax.
+                            Chips here are extracted from CLOSED
+                            `{{ key==value }}` blocks in the textarea
+                            (see onChange handler below). Each chip is
+                            deletable via its × button.
+
+                            Additionally, an UNCLOSED `{{ ... ` is shown
+                            as a dashed-border "pending chip" with the
+                            in-progress content updating live as the user
+                            types — so it's visually obvious you're inside
+                            a filter rather than typing freetext. When the
+                            user types `}}`, the onChange handler extracts
+                            the chip; the pending preview disappears. */}
+                        {useHaystackFilters && (() => {
+                          // Find an unclosed `{{` (the LAST one — earlier
+                          // closed blocks have already been extracted by
+                          // onChange). Empty content is fine — show a
+                          // placeholder chip until the user types.
+                          const lastOpen = aiQuery.lastIndexOf('{{');
+                          const hasUnclosed = lastOpen !== -1 && !aiQuery.slice(lastOpen + 2).includes('}}');
+                          const pendingRaw = hasUnclosed ? aiQuery.slice(lastOpen + 2) : null;
+                          const pendingPreview = pendingRaw === null ? null : pendingRaw.trim() || '​';
+                          if (haystackChips.length === 0 && !hasUnclosed) {
+                            // Strip is empty — render a faint hint so users
+                            // know what to type.
+                            return (
+                              <div className="px-4 pt-3 pb-2 text-[11px] text-gray-400 border-b border-gray-100">
+                                Filter mode on. Type <code className="px-1 py-0.5 bg-gray-100 rounded text-gray-600 font-mono text-[10px]">{'{{ key==value }}'}</code> to add a chip — natural-language text outside <code className="px-1 py-0.5 bg-gray-100 rounded text-gray-600 font-mono text-[10px]">{'{{ }}'}</code> goes to the question.
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="px-4 pt-3 pb-2 flex flex-wrap gap-1.5 items-center border-b border-gray-100">
+                              {haystackChips.map((chip, i) => {
+                                const label = ((): string => {
+                                  if ('key' in chip) return `${chip.key}${chip.op || '=='}${chip.value}`;
+                                  if (chip.kind === 'term') return `"${chip.value}"`;
+                                  if (chip.kind === 'and') return 'and';
+                                  if (chip.kind === 'or') return 'or';
+                                  if (chip.kind === 'not') return 'not';
+                                  if (chip.kind === 'lparen') return '(';
+                                  if (chip.kind === 'rparen') return ')';
+                                  return '?';
+                                })();
+                                return (
+                                  <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-mono">
+                                    {label}
+                                    <button
+                                      type="button"
+                                      onClick={() => setHaystackChips(prev => prev.filter((_, j) => j !== i))}
+                                      className="opacity-50 hover:opacity-100 hover:text-red-600 -mr-0.5"
+                                      title="Remove filter"
+                                    >×</button>
+                                  </span>
+                                );
+                              })}
+                              {hasUnclosed && (
+                                <span
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-50 border border-dashed border-purple-400 text-purple-600 rounded text-xs font-mono animate-pulse"
+                                  title={'In-progress filter — close with }} to finalize'}
+                                >
+                                  <span className="text-purple-400">{'{{'}</span>
+                                  <span className="font-medium">{pendingPreview}</span>
+                                  <span className="text-purple-300">…</span>
                                 </span>
-                              );
-                            })}
-                          </div>
-                        )}
+                              )}
+                            </div>
+                          );
+                        })()}
                         <textarea
                           id="ai-query"
                           ref={aiQueryRef}
