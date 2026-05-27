@@ -540,6 +540,35 @@ export default function SearchInterface({
     if (nextJoined !== prevJoined) setTokenSuggestions(filtered);
   }, [aiQuery, aiQueryCursor, useHaystackFilters]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ---------------------------------------------------------------------------
+  // Strip ↔ main editor sync
+  //
+  // Whenever haystackChips changes (from either editor's onChange or from
+  // programmatic calls like handlePickActiveToken), push the new chip set into
+  // the strip editor — but only if the serialized chip list actually changed.
+  // The syncingRef source tag prevents the strip's own onChange from echoing
+  // back and creating an update cycle.
+
+  /** Stable chip-list signature for equality checks. */
+  function chipSig(chips: FilterChip[]): string {
+    return chips.map((c) =>
+      (c as { kind?: string }).kind === 'expression'
+        ? (c as { raw: string }).raw
+        : `${'key' in c ? c.key : ''}${'op' in c ? c.op ?? '==' : ''}${'value' in c ? c.value : ''}`,
+    ).join('|');
+  }
+
+  useEffect(() => {
+    if (!useHaystackFilters) return;
+    const sig = chipSig(haystackChips);
+    if (sig === lastStripChipSig.current) return; // already in sync
+    lastStripChipSig.current = sig;
+    syncingRef.current = 'main';
+    stripEditorRef.current?.setContents('', haystackChips);
+    queueMicrotask(() => { syncingRef.current = null; });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [haystackChips, useHaystackFilters]);
+
   // Rail click handler for a token-name row: splice the chosen field name
   // (with its canonical operator) inside the active `{{ }}` block.
   const handleRailPickTokenName = useCallback(
@@ -1037,6 +1066,15 @@ export default function SearchInterface({
 // TipTap editor handle — populated when Filter mode is on so the picker
 // `handlePickActiveToken` can insert chip nodes directly.
 const chipEditorRef = useRef<ChipEditorHandle | null>(null);
+// Strip editor handle — the chipsOnly editor above the main composer.
+const stripEditorRef = useRef<ChipEditorHandle | null>(null);
+// Sync guard: tracks which editor last triggered a haystackChips update so
+// the other editor doesn't echo it back and cause an infinite loop.
+// 'main' = main editor was source, 'strip' = strip editor was source.
+const syncingRef = useRef<'main' | 'strip' | null>(null);
+// Serialized chip signature — used to skip no-op setContents calls that
+// would destroy in-progress inline edit state in FilterChipNodeView.
+const lastStripChipSig = useRef<string>('');
 // Hovered chip (Phase 5) — when set, HaystackPreviewGrid rescopes to that
 // chip's filter only. null = combined-grid mode.
 const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: string | null } | null>(null);
@@ -2480,72 +2518,76 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                             a filter rather than typing freetext. When the
                             user types `}}`, the onChange handler extracts
                             the chip; the pending preview disappears. */}
-                        {/* Chip status strip — text view of every chip
-                            currently in the editor, with click-to-edit and
-                            delete. Sits above the TipTap editor so the user
-                            sees the structured filter state at a glance and
-                            knows that `{{` opens a new one. */}
+                        {/* Chip strip — a chipsOnly ChipEditor that mirrors
+                            haystackChips. Chips are editable inline (click to
+                            enter edit mode) — no window.prompt. The "+" button
+                            appends a blank mustache for the user to fill in.
+                            Synced bidirectionally with the main editor via
+                            syncingRef + lastStripChipSig guards. */}
                         {useHaystackFilters && (
-                          <div className="px-4 pt-3 pb-2 border-b border-gray-100">
-                            {haystackChips.length === 0 ? (
-                              <div className="text-[11px] text-gray-400">
-                                Type <code className="px-1 py-0.5 bg-gray-100 rounded text-purple-700 font-mono text-[10px]">{'{{'}</code> to start a filter expression. Each <code className="px-1 py-0.5 bg-gray-100 rounded text-purple-700 font-mono text-[10px]">{'{{ … }}'}</code> is one Axon sub-expression; multiple chips AND together.
-                              </div>
-                            ) : (
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="text-[10px] uppercase tracking-wider text-gray-400 shrink-0">Filters</span>
-                                {haystackChips.map((c, i) => {
-                                  const expr = (c as { kind?: string; raw?: string; key?: string; value?: string; op?: string }).kind === 'expression'
-                                    ? (c as { raw: string }).raw
-                                    : 'key' in c
-                                      ? `${c.key}${c.op ?? '=='}${c.value}`
-                                      : '';
-                                  if (!expr) return null;
-                                  return (
-                                    <span
-                                      key={`strip-${i}`}
-                                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-50 text-purple-700 rounded text-[11px] font-mono border border-purple-200 hover:border-purple-400 hover:bg-purple-100 cursor-pointer transition-colors max-w-[24rem]"
-                                      title={`{{ ${expr} }} — click to edit, × to remove`}
-                                      onClick={() => {
-                                        const next = prompt('Edit filter expression:', expr);
-                                        if (next === null) return;
-                                        const trimmed = next.trim();
-                                        const updated = [...haystackChips];
-                                        if (!trimmed) {
-                                          updated.splice(i, 1);
-                                        } else {
-                                          updated[i] = { kind: 'expression', raw: trimmed };
-                                        }
-                                        setHaystackChips(updated);
-                                        // Push back into the editor so the
-                                        // visible chip pills match.
-                                        chipEditorRef.current?.setContents(aiQuery, updated);
-                                      }}
-                                    >
-                                      <span className="opacity-50">{'{{'}</span>
-                                      <span className="truncate">{expr}</span>
-                                      <span className="opacity-50">{'}}'}</span>
-                                      <button
-                                        type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          const updated = haystackChips.filter((_, j) => j !== i);
-                                          setHaystackChips(updated);
-                                          chipEditorRef.current?.setContents(aiQuery, updated);
-                                        }}
-                                        className="opacity-50 hover:opacity-100 hover:text-red-600 -mr-0.5"
-                                        aria-label="Remove filter"
-                                      >
-                                        ×
-                                      </button>
-                                    </span>
-                                  );
-                                })}
-                                <span className="text-[10px] text-gray-400 ml-1">
-                                  · type <code className="px-1 py-0.5 bg-gray-100 rounded text-purple-700 font-mono text-[10px]">{'{{'}</code> for a new one
+                          <div
+                            className="relative border-b border-gray-100"
+                            style={{ minHeight: '2.5rem', maxHeight: '30vh', overflowY: 'auto' }}
+                          >
+                            {/* Empty-state hint — absolutely positioned so the
+                                editor is always mounted (the "+" button needs
+                                it to be mountd to insert content). */}
+                            {haystackChips.length === 0 && (
+                              <div
+                                className="absolute inset-0 flex items-center px-4 pointer-events-none"
+                                style={{ zIndex: 1 }}
+                              >
+                                <span className="text-[11px] text-gray-400">
+                                  Type{' '}
+                                  <code className="px-1 py-0.5 bg-gray-100 rounded text-purple-700 font-mono text-[10px]">{'{{'}</code>
+                                  {' '}or click{' '}
+                                  <span className="font-semibold text-purple-600">+</span>
+                                  {' '}to add a filter expression.
                                 </span>
                               </div>
                             )}
+                            <div className="flex items-start gap-1 pr-10">
+                              <ChipEditor
+                                ref={stripEditorRef}
+                                initialText=""
+                                initialChips={haystackChips}
+                                chipsOnly
+                                minHeight={36}
+                                maxHeight={200}
+                                onChange={(_text, chips) => {
+                                  // Guard against echoing back a sync we
+                                  // initiated from the main editor.
+                                  if (syncingRef.current === 'main') return;
+                                  syncingRef.current = 'strip';
+                                  const sig = chipSig(chips);
+                                  lastStripChipSig.current = sig;
+                                  setHaystackChips(chips);
+                                  // Also update the main editor so the two
+                                  // stay visually in sync.
+                                  chipEditorRef.current?.setContents(aiQuery.trimStart(), chips);
+                                  queueMicrotask(() => { syncingRef.current = null; });
+                                }}
+                                className="flex-1 min-w-0"
+                              />
+                            </div>
+                            {/* "+" button — inserts a blank {{ }} mustache
+                                into the strip editor so the user can type the
+                                expression without reaching for the keyboard
+                                shortcut. The materialization plugin won't fire
+                                until they type a non-empty expression inside. */}
+                            <button
+                              type="button"
+                              title="Add a filter expression"
+                              onClick={() => {
+                                // cursorOffsetFromEnd=3 places caret after
+                                // `{{ ` so typing immediately fills the expr.
+                                stripEditorRef.current?.insertText('{{  }}', 3);
+                              }}
+                              className="absolute top-1 right-2 flex items-center justify-center w-6 h-6 rounded text-purple-500 hover:text-purple-700 hover:bg-purple-50 transition-colors text-base leading-none"
+                              aria-label="Add filter"
+                            >
+                              +
+                            </button>
                           </div>
                         )}
                         {/* ChipEditor — TipTap-based composer with inline
