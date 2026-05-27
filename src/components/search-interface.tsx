@@ -2096,85 +2096,228 @@ export default function SearchInterface({
                       return;
                     }
                     handleAISearch(e);
-                  }} className="flex items-end gap-3">
+                  }} className="block">
                     {haystackMode ? (
-                      <HaystackFilterInput
-                        ref={haystackInputRef}
-                        chips={haystackChips}
-                        onChipsChange={setHaystackChips}
-                        freetext={aiQuery}
-                        onFreetextChange={setAiQuery}
-                        onSubmit={() => {
-                          if (haystackChips.length > 0) {
-                            void runHaystackSearch();
-                          } else if (aiQuery.trim() && !aiLoading) {
-                            handleAISearch(new Event('submit') as unknown as React.FormEvent);
-                          }
-                        }}
-                        placeholder={hasConversation ? 'Ask a follow-up… (try judge== hearingDate>=)' : 'Filter or ask… (try judge== hearingDate>= motionType==)'}
-                        disabled={aiLoading || haystackBusy}
-                        className="flex-1"
-                        style={{ minHeight: inputHeight }}
-                        onActiveTokenChange={setActiveToken}
-                        pickerOptions={pickerOptions}
-                        pickerHighlight={pickerHighlight}
-                        onPickerHighlightChange={setPickerHighlight}
-                        onTokenSuggestionsChange={setTokenSuggestions}
-                        onTokenHighlightChange={setTokenSuggestionHighlight}
-                        pendingMultiSelectionCount={pickerSelectedValues.size}
-                        onCommitMultiSelection={handleCommitMultiSelection}
-                      />
+                      // Option A composer for haystack/filter mode — one
+                      // rounded card holds the chip filter input + bottom
+                      // action bar (mode pills left, submit right).
+                      <div className="relative w-full rounded-2xl border border-gray-300 bg-white shadow-sm focus-within:ring-2 focus-within:ring-purple-500 focus-within:border-transparent transition-shadow">
+                        <div className="px-3 pt-3 pb-14">
+                          <HaystackFilterInput
+                            ref={haystackInputRef}
+                            chips={haystackChips}
+                            onChipsChange={setHaystackChips}
+                            freetext={aiQuery}
+                            onFreetextChange={setAiQuery}
+                            onSubmit={() => {
+                              if (haystackChips.length > 0) {
+                                void runHaystackSearch();
+                              } else if (aiQuery.trim() && !aiLoading) {
+                                handleAISearch(new Event('submit') as unknown as React.FormEvent);
+                              }
+                            }}
+                            placeholder={hasConversation ? 'Ask a follow-up… (try judge== hearingDate>=)' : 'Filter or ask… (try judge== hearingDate>= motionType==)'}
+                            disabled={aiLoading || haystackBusy}
+                            className="w-full"
+                            style={{ minHeight: 96 }}
+                            onActiveTokenChange={setActiveToken}
+                            pickerOptions={pickerOptions}
+                            pickerHighlight={pickerHighlight}
+                            onPickerHighlightChange={setPickerHighlight}
+                            onTokenSuggestionsChange={setTokenSuggestions}
+                            onTokenHighlightChange={setTokenSuggestionHighlight}
+                            pendingMultiSelectionCount={pickerSelectedValues.size}
+                            onCommitMultiSelection={handleCommitMultiSelection}
+                          />
+                        </div>
+                        {/* Action bar — mode pills left, submit right */}
+                        <div className="absolute bottom-2.5 left-3 flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newDeep = !deepSearchMode;
+                              setDeepSearchMode(newDeep);
+                              if (newDeep && compareMode) setCompareMode(false);
+                            }}
+                            className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${deepSearchMode ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                            title="Deep Search — multi-query decomposition for complex research"
+                          >Deep</button>
+                          <button
+                            type="button"
+                            onClick={() => setUseRlm(!useRlm)}
+                            className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${useRlm ? 'bg-emerald-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                            title="Route synthesis through ss-rlm (Recursive Language Model)"
+                          >RLM</button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newCompare = !compareMode;
+                              setCompareMode(newCompare);
+                              if (newCompare) setDeepSearchMode(false);
+                            }}
+                            className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${compareMode ? 'bg-amber-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                            title="Compare answers across providers/models"
+                          >Compare</button>
+                        </div>
+                        <div className="absolute bottom-2.5 right-2.5">
+                          {aiLoading ? (
+                            <button
+                              type="button"
+                              onClick={handleStopAI}
+                              disabled={aiStopping}
+                              className="px-3.5 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:bg-red-400 disabled:cursor-wait transition-colors whitespace-nowrap inline-flex items-center gap-1.5 shadow"
+                            >
+                              <span className="inline-block w-2.5 h-2.5 bg-white rounded-sm" />
+                              {aiStopping ? 'Stopping…' : 'Stop'}
+                            </button>
+                          ) : (
+                            <button
+                              type="submit"
+                              disabled={!aiQuery.trim() && haystackChips.length === 0}
+                              className="px-3.5 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed transition-colors whitespace-nowrap inline-flex items-center gap-1.5 shadow"
+                              title={compareMode ? 'Compare' : deepSearchMode ? 'Deep Search' : 'Ask AI'}
+                            >
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14M12 5l7 7-7 7" />
+                              </svg>
+                              {compareMode ? 'Compare' : deepSearchMode ? 'Deep Search' : 'Ask AI'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     ) : booleanMode && chipComposer ? (
-                      <div className="flex-1">
-                        <BooleanChipComposer
-                          value={aiQuery}
-                          onChange={setAiQuery}
-                          onSubmit={() => {
-                            if (aiQuery.trim() && !aiLoading) {
-                              handleAISearch(new Event('submit') as unknown as React.FormEvent);
-                            }
-                          }}
-                          fieldNames={BOOLEAN_FIELD_NAMES}
-                          placeholder={hasConversation ? 'Ask a follow-up…' : 'Build a boolean query (and / or / not / phrases / fields)…'}
-                        />
+                      <div className="flex items-end gap-3">
+                        <div className="flex-1">
+                          <BooleanChipComposer
+                            value={aiQuery}
+                            onChange={setAiQuery}
+                            onSubmit={() => {
+                              if (aiQuery.trim() && !aiLoading) {
+                                handleAISearch(new Event('submit') as unknown as React.FormEvent);
+                              }
+                            }}
+                            fieldNames={BOOLEAN_FIELD_NAMES}
+                            placeholder={hasConversation ? 'Ask a follow-up…' : 'Build a boolean query (and / or / not / phrases / fields)…'}
+                          />
+                        </div>
+                        {aiLoading ? (
+                          <button type="button" onClick={handleStopAI} disabled={aiStopping}
+                            className="px-5 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:bg-red-400 disabled:cursor-wait transition-colors whitespace-nowrap inline-flex items-center gap-2">
+                            <span className="inline-block w-2.5 h-2.5 bg-white rounded-sm" />
+                            {aiStopping ? 'Stopping…' : 'Stop'}
+                          </button>
+                        ) : (
+                          <button type="submit" disabled={!aiQuery.trim()}
+                            className="px-5 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors whitespace-nowrap">
+                            {compareMode ? 'Compare' : deepSearchMode ? 'Deep Search' : 'Ask AI'}
+                          </button>
+                        )}
                       </div>
                     ) : (
-                      <textarea
-                        id="ai-query"
-                        ref={aiQueryRef}
-                        value={aiQuery}
-                        onChange={e => setAiQuery(e.target.value)}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            if (aiQuery.trim() && !aiLoading) {
-                              handleAISearch(e as unknown as React.FormEvent);
+                      // ── Option A composer: textarea + inline action chips +
+                      // submit button all share one rounded card. Auto-grows
+                      // up to max-h, wraps long lines (overflow-wrap: anywhere),
+                      // submit anchored bottom-right inside the box.
+                      <div className="relative w-full rounded-2xl border border-gray-300 bg-white shadow-sm focus-within:ring-2 focus-within:ring-purple-500 focus-within:border-transparent transition-shadow">
+                        <textarea
+                          id="ai-query"
+                          ref={aiQueryRef}
+                          value={aiQuery}
+                          onChange={e => {
+                            setAiQuery(e.target.value);
+                            // Auto-grow up to max-height. Reset height first
+                            // so shrinking works when user deletes text.
+                            const el = e.currentTarget;
+                            el.style.height = 'auto';
+                            const max = 320;
+                            el.style.height = Math.min(el.scrollHeight, max) + 'px';
+                          }}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              if (aiQuery.trim() && !aiLoading) {
+                                handleAISearch(e as unknown as React.FormEvent);
+                              }
                             }
-                          }
-                        }}
-                        placeholder={hasConversation ? 'Ask a follow-up...' : 'Ask a question about your legal documents...'}
-                        className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent resize-none overflow-y-auto"
-                        style={{ height: inputHeight }}
-                      />
-                    )}
-                    {aiLoading ? (
-                      <button
-                        type="button"
-                        onClick={handleStopAI}
-                        disabled={aiStopping}
-                        className="px-5 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:bg-red-400 disabled:cursor-wait transition-colors whitespace-nowrap inline-flex items-center gap-2"
-                      >
-                        <span className="inline-block w-2.5 h-2.5 bg-white rounded-sm" />
-                        {aiStopping ? 'Stopping…' : 'Stop'}
-                      </button>
-                    ) : (
-                      <button
-                        type="submit"
-                        disabled={!aiQuery.trim()}
-                        className="px-5 py-2.5 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
-                      >
-                        {compareMode ? 'Compare' : deepSearchMode ? 'Deep Search' : 'Ask AI'}
-                      </button>
+                          }}
+                          placeholder={hasConversation ? 'Ask a follow-up...' : 'Ask a question about your legal documents...'}
+                          rows={3}
+                          className="block w-full resize-none bg-transparent px-5 pt-4 pb-14 text-sm text-gray-900 placeholder-gray-400 focus:outline-none rounded-2xl"
+                          style={{
+                            // Long lines must wrap inside the textarea — not
+                            // get a horizontal scrollbar.
+                            whiteSpace: 'pre-wrap',
+                            overflowWrap: 'anywhere',
+                            overflowX: 'hidden',
+                            overflowY: 'auto',
+                            minHeight: 96,
+                            maxHeight: 320,
+                          }}
+                        />
+                        {/* Submit / stop action — anchored bottom-right inside the box */}
+                        <div className="absolute bottom-2.5 right-2.5 flex items-center gap-2">
+                          {aiLoading ? (
+                            <button
+                              type="button"
+                              onClick={handleStopAI}
+                              disabled={aiStopping}
+                              className="px-3.5 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:bg-red-400 disabled:cursor-wait transition-colors whitespace-nowrap inline-flex items-center gap-1.5 shadow"
+                            >
+                              <span className="inline-block w-2.5 h-2.5 bg-white rounded-sm" />
+                              {aiStopping ? 'Stopping…' : 'Stop'}
+                            </button>
+                          ) : (
+                            <button
+                              type="submit"
+                              disabled={!aiQuery.trim()}
+                              className="px-3.5 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed transition-colors whitespace-nowrap inline-flex items-center gap-1.5 shadow"
+                              title={compareMode ? 'Compare' : deepSearchMode ? 'Deep Search' : 'Ask AI'}
+                            >
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14M12 5l7 7-7 7" />
+                              </svg>
+                              {compareMode ? 'Compare' : deepSearchMode ? 'Deep Search' : 'Ask AI'}
+                            </button>
+                          )}
+                        </div>
+                        {/* Inline mode chips — bottom-left, mirror existing
+                            top-toolbar state. Click to toggle; keeps muscle
+                            memory of chat-app composers (Claude / ChatGPT). */}
+                        <div className="absolute bottom-2.5 left-3 flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newDeep = !deepSearchMode;
+                              setDeepSearchMode(newDeep);
+                              if (newDeep && compareMode) setCompareMode(false);
+                            }}
+                            className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${deepSearchMode ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                            title="Deep Search — multi-query decomposition for complex research"
+                          >
+                            Deep
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setUseRlm(!useRlm)}
+                            className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${useRlm ? 'bg-emerald-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                            title="Route synthesis through ss-rlm (Recursive Language Model)"
+                          >
+                            RLM
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newCompare = !compareMode;
+                              setCompareMode(newCompare);
+                              if (newCompare) setDeepSearchMode(false);
+                            }}
+                            className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${compareMode ? 'bg-amber-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                            title="Compare answers across providers/models"
+                          >
+                            Compare
+                          </button>
+                        </div>
+                      </div>
                     )}
                   </form>
                   {/* Boolean (advanced) query syntax — toggle, live syntax check, examples */}
