@@ -369,6 +369,50 @@ export function extractFieldFilters(input: Node): {
     }
     // AND / OR. Note: the `negated` flag is NEVER propagated past a compound
     // operator — only direct TERM children of a NOT carry it (handled above).
+    //
+    // OR over uniform scalar/ref columns — collapse to a single
+    // `(col1 IN (v1, v2) OR col2 IN (v3, v4))` SQL clause instead of
+    // degrading each leaf to a text match. Safe because all leaves resolve
+    // to LanceDB scalar columns that live on chunks.
+    if (node.op === 'OR' && !frozen && !underOr) {
+      const groups = new Map<string, string[]>();
+      let allEligible = true;
+      for (const c of node.children) {
+        if (c.op !== 'TERM' || !c.path || c.path.length !== 1) { allEligible = false; break; }
+        const cmp: CompareOp = c.compareOp ?? '==';
+        if (cmp !== '==') { allEligible = false; break; }
+        const isRef = !!c.isRef;
+        const rawField = c.path[0];
+        // Apply the same REF_ALIAS used in the TERM branch — refs typed as
+        // `case`/`judge`/etc. with @uuid values redirect to their *Ref column.
+        const REF_ALIAS: Record<string, string> = {
+          case: 'caseRef', document: 'documentRef', filing: 'filingRef',
+          judge: 'judgeRef', lawyer: 'lawyerRef', movant: 'movantRef',
+          respondent: 'respondentRef', clerk: 'clerkRef', reporter: 'reporterRef',
+        };
+        const field = (isRef && REF_ALIAS[rawField] && FIELD_RESOLVERS[REF_ALIAS[rawField]])
+          ? REF_ALIAS[rawField]
+          : rawField;
+        const resolver = FIELD_RESOLVERS[field];
+        if (!resolver) { allEligible = false; break; }
+        if (resolver.kind !== 'lance-scalar' && resolver.kind !== 'lance-scalar-ref') {
+          allEligible = false; break;
+        }
+        const arr = groups.get(resolver.column) ?? [];
+        arr.push(c.value);
+        groups.set(resolver.column, arr);
+      }
+      if (allEligible && groups.size > 0) {
+        const parts: string[] = [];
+        for (const [col, values] of groups) {
+          const escaped = values.map((v) => `'${sqlEscape(v)}'`).join(', ');
+          parts.push(`${col} IN (${escaped})`);
+        }
+        whereClauses.push(parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`);
+        return null;
+      }
+    }
+
     const childUnderOr = underOr || node.op === 'OR';
     const newChildren: Node[] = [];
     for (const c of node.children) {
