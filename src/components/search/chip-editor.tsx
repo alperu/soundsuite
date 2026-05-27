@@ -230,7 +230,13 @@ function FilterChipNodeView({ node, getPos, editor, deleteNode }: ChipNodeViewPr
           if ((e.target as HTMLElement).closest('[data-chip-delete]')) return;
           e.preventDefault();
           e.stopPropagation();
-          setEditing(true);
+          // Dispatch chip-focus so the parent's SelectedChipEditor can open.
+          // Editing happens in the top multi-line editor, not inline.
+          document.dispatchEvent(
+            new CustomEvent('chip-focus', {
+              detail: { pos: getPos(), expression },
+            }),
+          );
         }}
         data-chip-expression={expression}
       >
@@ -664,6 +670,10 @@ export interface ChipEditorHandle {
    * of the inserted text — use `3` for `'{{  }}'` to land between the spaces.
    */
   insertText(text: string, cursorOffsetFromEnd?: number): void;
+  /** Patch the expression attr of the filterChip node at the given PM position. */
+  patchChipAt(pos: number, newExpression: string): void;
+  /** Delete the filterChip node at the given PM position. */
+  deleteChipAt(pos: number): void;
 }
 
 export interface ChipEditorProps {
@@ -1016,6 +1026,24 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
         const pos = editor.state.selection.to - cursorOffsetFromEnd;
         editor.commands.setTextSelection(Math.max(0, pos));
       }
+    },
+    patchChipAt(pos, newExpression) {
+      if (!editor) return;
+      editor.commands.command(({ tr, state }) => {
+        const node = state.doc.nodeAt(pos);
+        if (!node || node.type.name !== 'filterChip') return false;
+        tr.setNodeMarkup(pos, undefined, { ...node.attrs, expression: newExpression, displayName: null });
+        return true;
+      });
+    },
+    deleteChipAt(pos) {
+      if (!editor) return;
+      editor.commands.command(({ tr, state }) => {
+        const node = state.doc.nodeAt(pos);
+        if (!node || node.type.name !== 'filterChip') return false;
+        tr.delete(pos, pos + node.nodeSize);
+        return true;
+      });
     },
   }), [editor]);
 
