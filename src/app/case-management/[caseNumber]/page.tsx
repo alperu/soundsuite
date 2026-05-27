@@ -145,6 +145,10 @@ export default function CaseDetailPage() {
   const [filesLoading, setFilesLoading] = useState(false);
   const [parseLoading, setParseLoading] = useState(false);
   const [fillTagsLoading, setFillTagsLoading] = useState(false);
+  // Per-filing fill-haystack-tags spinner state. Keyed by filingId so each
+  // row's button has its own loading indicator independent of the case-wide
+  // toolbar action above.
+  const [perFilingFillLoading, setPerFilingFillLoading] = useState<Set<string>>(new Set());
   // Phase-2 tag-fill review panel state. Lifted here so the panel can sit
   // alongside the file tree without re-running the extractor on every render.
   const [tagFillSuggestions, setTagFillSuggestions] = useState<FillTagSuggestion[] | null>(null);
@@ -1329,6 +1333,78 @@ export default function CaseDetailPage() {
   };
 
   /**
+   * Per-filing "Fill Haystack Tags" — mirrors the single-filing page button
+   * at src/app/case-management/[caseNumber]/[filingSlug]/page.tsx so users
+   * can fire the extractor for one filing without leaving the case overview.
+   *
+   * Flow: dryRun=true → auto-accept every returned suggestion → log to
+   * ActionLog with logType='tag-fill' (same type as the case-wide flow so
+   * audit + revert tooling sees both).
+   */
+  const handleFillHaystackTagsForFiling = async (filingId: string, filingTitle: string) => {
+    if (!caseRecord) return;
+    if (perFilingFillLoading.has(filingId)) return;
+    setPerFilingFillLoading(prev => { const next = new Set(prev); next.add(filingId); return next; });
+    const uiLogId = addLog('Tag-fill (filing)', filingTitle.slice(0, 40));
+    try {
+      const dryRes = await fetch(`/api/cases/${caseRecord.id}/fill-haystack-tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filingIds: [filingId], dryRun: true }),
+      });
+      if (!dryRes.ok) throw new Error(`suggest HTTP ${dryRes.status}`);
+      const dryData = await dryRes.json();
+      const suggestions: Array<{ filingId: string; field: string }> = Array.isArray(dryData?.suggestions) ? dryData.suggestions : [];
+
+      if (suggestions.length === 0) {
+        persistActionLog({
+          caseId: caseRecord.id,
+          action: 'fill-haystack-tags',
+          target: filingTitle,
+          status: 'success',
+          detail: 'No suggestions returned for this filing',
+          logType: 'tag-fill',
+        });
+        setActionLogs(prev => prev.map(l => l.id === uiLogId ? { ...l, status: 'done', file: 'no suggestions' } : l));
+        return;
+      }
+
+      const accept = suggestions.map(s => ({ filingId: s.filingId, field: s.field }));
+      const applyRes = await fetch(`/api/cases/${caseRecord.id}/fill-haystack-tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filingIds: [filingId], dryRun: false, accept }),
+      });
+      if (!applyRes.ok) throw new Error(`apply HTTP ${applyRes.status}`);
+      const applyData = await applyRes.json();
+      const appliedCount = Array.isArray(applyData?.applied) ? applyData.applied.length : 0;
+
+      persistActionLog({
+        caseId: caseRecord.id,
+        action: 'fill-haystack-tags',
+        target: filingTitle,
+        status: appliedCount > 0 ? 'success' : 'partial',
+        detail: `Applied ${appliedCount} of ${suggestions.length} suggestion(s)`,
+        logType: 'tag-fill',
+      });
+      setActionLogs(prev => prev.map(l => l.id === uiLogId ? { ...l, status: 'done', file: `${appliedCount}/${suggestions.length} applied` } : l));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      persistActionLog({
+        caseId: caseRecord.id,
+        action: 'fill-haystack-tags',
+        target: filingTitle,
+        status: 'error',
+        detail: msg,
+        logType: 'tag-fill',
+      });
+      setActionLogs(prev => prev.map(l => l.id === uiLogId ? { ...l, status: 'error', file: msg.slice(0, 60) } : l));
+    } finally {
+      setPerFilingFillLoading(prev => { const next = new Set(prev); next.delete(filingId); return next; });
+    }
+  };
+
+  /**
    * Reopen the review panel from the last persisted batch (no AI call). The
    * user can run the extractor once and come back to finish review later.
    */
@@ -1677,6 +1753,26 @@ export default function CaseDetailPage() {
                   title={tracked.filingTitle}
                 >
                   {tracked.filingTitle.length > 20 ? tracked.filingTitle.slice(0, 20) + '...' : tracked.filingTitle}
+                </button>
+              )}
+              {/* Per-filing Fill Haystack Tags action — scopes the extractor
+                  to this single filing so the user can fill without touching
+                  the case-wide toolbar button. */}
+              {tracked?.filingId && tracked?.filingTitle && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleFillHaystackTagsForFiling(tracked.filingId!, tracked.filingTitle!);
+                  }}
+                  disabled={perFilingFillLoading.has(tracked.filingId)}
+                  className="p-0.5 text-gray-300 hover:text-indigo-600 transition-colors opacity-0 group-hover/file:opacity-100 disabled:opacity-100 disabled:text-indigo-600 flex-shrink-0"
+                  title="Fill Haystack Tags (this filing only)"
+                >
+                  {perFilingFillLoading.has(tracked.filingId) ? (
+                    <svg className="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                  ) : (
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 L9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.091 3.091Z" /></svg>
+                  )}
                 </button>
               )}
             </div>

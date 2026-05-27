@@ -91,14 +91,12 @@ export function ChunkPreviewGrid({ filter, freetext = '', disabled }: Props) {
 
     void (async () => {
       try {
-        const res = await fetch('/api/search/unified', {
+        // Lightweight SQL-only endpoint: no embedding, no reranker. Returns
+        // chunks matching the structured filter in tens of milliseconds.
+        const res = await fetch('/api/search/chunk-preview', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            query: composed,
-            limit: 30,
-            searchMode: 'hybrid',
-          }),
+          body: JSON.stringify({ filter: trimmedFilter, limit: 30 }),
           signal: ctrl.signal,
         });
         if (!res.ok) {
@@ -108,14 +106,14 @@ export function ChunkPreviewGrid({ filter, freetext = '', disabled }: Props) {
           setLoading(false);
           return;
         }
-        const json = (await res.json()) as { chunks?: ChunkRow[]; total?: number; error?: { message: string } };
+        const json = (await res.json()) as { rows?: ChunkRow[]; total?: number; where?: string; error?: string };
         if (json.error) {
-          setError(json.error.message);
-          setRows([]);
+          setError(json.error);
+          setRows(json.rows ?? []);
         } else {
-          setRows(json.chunks ?? []);
-          setTotal(json.total ?? json.chunks?.length ?? 0);
+          setRows(json.rows ?? []);
         }
+        setTotal(json.total ?? json.rows?.length ?? 0);
       } catch (e) {
         if ((e as Error).name === 'AbortError') return;
         setError((e as Error).message);

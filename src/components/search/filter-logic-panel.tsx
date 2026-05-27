@@ -109,6 +109,22 @@ export function FilterLogicPanel({ onInsertExample, collapsed = false, onToggleC
         >
           <ChevronRight className="w-4 h-4" />
         </button>
+        {/* Sideways title — readable along the collapsed rail so users can
+            see what the minimized strip is. Clicking it also expands. */}
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          aria-label="Expand filter logic panel"
+          title="Expand"
+          className="mt-3 select-none text-xs font-semibold text-gray-500 uppercase tracking-wider hover:text-gray-700"
+          style={{
+            writingMode: 'vertical-rl',
+            transform: 'rotate(180deg)',
+            letterSpacing: '0.1em',
+          }}
+        >
+          Filter Logic
+        </button>
       </aside>
     );
   }

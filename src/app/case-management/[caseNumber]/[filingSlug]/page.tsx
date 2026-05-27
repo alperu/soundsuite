@@ -37,6 +37,7 @@ function buildFilingEntityTagPatch(
 import { SelectedEntityProvider } from '@/components/case/selected-entity-context';
 import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { ExtractModal } from '@/components/personas/extract-modal';
+import { persistActionLog } from '@/lib/action-log';
 
 // pdfjs is heavy — lazy-load the embedded viewer only when this page renders
 const EmbeddedCourtViewer = dynamic(
@@ -114,6 +115,26 @@ export default function FilingDetailPage() {
   // Reparse state
   const [reparseLoading, setReparseLoading] = useState(false);
 
+  // Fill-haystack-tags state (per-filing scope)
+  const [fillTagsLoading, setFillTagsLoading] = useState(false);
+
+  // Action-log panel state (bottom-of-page audit list scoped to this filing).
+  // Sourced from /api/admin/action-logs with caseId + a title-based search,
+  // covering both the client-side summary row this page writes and the
+  // per-field commit rows the fill-haystack-tags route writes.
+  type ActionLogRow = {
+    id: string;
+    caseId: string | null;
+    action: string;
+    target: string;
+    status: string;
+    detail: string | null;
+    logType: string;
+    createdAt: string;
+  };
+  const [actionLogs, setActionLogs] = useState<ActionLogRow[]>([]);
+  const [actionLogsLoading, setActionLogsLoading] = useState(false);
+
   // Drag-and-drop state
   const [dragOver, setDragOver] = useState(false);
   const [dropLoading, setDropLoading] = useState(false);
@@ -147,6 +168,40 @@ export default function FilingDetailPage() {
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { fetchFiling(); }, [caseNumberParam, filingSlugParam]);
+
+  /**
+   * Fetch recent ActionLog rows for this case, then filter client-side to
+   * just those tied to the current filing.id. We don't use the endpoint's
+   * `search` param because its OR match over action/target/detail is too
+   * loose — sibling filings' rows include the current filing's words in
+   * their detail JSON. filingId is the authoritative match key:
+   *   - route-handler per-field rows embed `"filingId":"<id>"` in detail
+   *   - client-side summary rows from this page use the filing.title as target
+   */
+  const fetchActionLogs = () => {
+    if (!caseId || !filing) return;
+    setActionLogsLoading(true);
+    const params = new URLSearchParams({ caseId, limit: '200' });
+    fetch(`/api/admin/action-logs?${params.toString()}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!Array.isArray(data?.logs)) return;
+        const fid = filing.id;
+        const title = filing.title;
+        const filtered = (data.logs as ActionLogRow[]).filter(l => {
+          if (l.detail && l.detail.includes(`"filingId":"${fid}"`)) return true;
+          if (l.target === title) return true;
+          if (l.target?.startsWith(`${title} · `)) return true;
+          return false;
+        }).slice(0, 25);
+        setActionLogs(filtered);
+      })
+      .catch(() => { /* silent — log panel is non-critical */ })
+      .finally(() => setActionLogsLoading(false));
+  };
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { fetchActionLogs(); }, [caseId, filing?.id]);
 
   // Notify the layout's right-hand TagPanel that we're viewing a Filing,
   // routing the EntityKind by the Filing's classified type (Motion vs.
@@ -394,6 +449,80 @@ export default function FilingDetailPage() {
     finally { setReparseLoading(false); }
   };
 
+  /**
+   * Per-filing "Fill Haystack Tags". Mirrors the case-wide handler in
+   * src/app/case-management/[caseNumber]/page.tsx but scopes to a single
+   * filingId so the user can fill tags for just the filing they're viewing.
+   *
+   * Flow: dryRun=true → if suggestions exist, dryRun=false with auto-accept of
+   * every returned suggestion. Logs both the suggestion run and the apply step
+   * to ActionLog with logType='tag-fill' (same type as the case-wide flow so
+   * audit + revert tooling sees both).
+   */
+  const handleFillHaystackTags = async () => {
+    if (!caseId || !filing || fillTagsLoading) return;
+    setFillTagsLoading(true);
+    const target = filing.title || filing.slug || filing.id;
+    try {
+      const dryRes = await fetch(`/api/cases/${caseId}/fill-haystack-tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filingIds: [filing.id], dryRun: true }),
+      });
+      if (!dryRes.ok) throw new Error(`suggest HTTP ${dryRes.status}`);
+      const dryData = await dryRes.json();
+      const suggestions: Array<{ filingId: string; field: string }> = Array.isArray(dryData?.suggestions) ? dryData.suggestions : [];
+
+      if (suggestions.length === 0) {
+        persistActionLog({
+          caseId,
+          action: 'fill-haystack-tags',
+          target,
+          status: 'success',
+          detail: 'No suggestions returned for this filing',
+          logType: 'tag-fill',
+        });
+        alert('No haystack tag suggestions found for this filing.');
+        return;
+      }
+
+      const accept = suggestions.map(s => ({ filingId: s.filingId, field: s.field }));
+      const applyRes = await fetch(`/api/cases/${caseId}/fill-haystack-tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filingIds: [filing.id], dryRun: false, accept }),
+      });
+      if (!applyRes.ok) throw new Error(`apply HTTP ${applyRes.status}`);
+      const applyData = await applyRes.json();
+      const appliedCount = Array.isArray(applyData?.applied) ? applyData.applied.length : 0;
+
+      persistActionLog({
+        caseId,
+        action: 'fill-haystack-tags',
+        target,
+        status: appliedCount > 0 ? 'success' : 'partial',
+        detail: `Applied ${appliedCount} of ${suggestions.length} suggestion(s)`,
+        logType: 'tag-fill',
+      });
+      alert(`Filled ${appliedCount} haystack tag${appliedCount === 1 ? '' : 's'} on this filing.`);
+      fetchFiling();
+      fetchActionLogs();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      persistActionLog({
+        caseId,
+        action: 'fill-haystack-tags',
+        target,
+        status: 'error',
+        detail: msg,
+        logType: 'tag-fill',
+      });
+      alert(`Failed to fill haystack tags: ${msg}`);
+    } finally {
+      setFillTagsLoading(false);
+    }
+  };
+
   const getStatusBadge = (status: string) => {
     const colors: Record<string, string> = {
       QUEUED: 'bg-gray-200 text-gray-700',
@@ -492,6 +621,14 @@ export default function FilingDetailPage() {
             <button onClick={() => setExtractOpen(true)} disabled={filing.documents.length === 0}
               className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded transition-colors disabled:opacity-30" title="Extract Persona (right-click motion title for menu)">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+            </button>
+            <button onClick={handleFillHaystackTags} disabled={fillTagsLoading || filing.documents.length === 0}
+              className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors disabled:opacity-30" title="Fill Haystack Tags (this filing only)">
+              {fillTagsLoading ? (
+                <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+              ) : (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 L9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.091 3.091Z" /></svg>
+              )}
             </button>
             <button onClick={handleReparse} disabled={reparseLoading || filing.documents.length === 0}
               className="p-1.5 text-gray-400 hover:text-orange-600 hover:bg-orange-50 rounded transition-colors disabled:opacity-30" title="Reparse All Documents">
@@ -597,6 +734,57 @@ export default function FilingDetailPage() {
           documentId={mainDocs[0]?.id ?? exhibits[0]?.id ?? null}
           height="60vh"
         />
+      </div>
+
+      {/* Action log panel — shows recent ActionLog rows whose target matches
+          this filing's title. Includes the per-field commits the
+          fill-haystack-tags route writes (e.g. "<title> · filedOn") plus the
+          client-side summary rows this page writes. Auto-refreshes after each
+          Fill Haystack Tags click. */}
+      <div className="p-4 border-t border-gray-100">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-medium text-gray-700">Action Log</h3>
+          <button
+            onClick={fetchActionLogs}
+            disabled={actionLogsLoading}
+            className="text-xs text-gray-400 hover:text-blue-600 disabled:opacity-50"
+            title="Refresh action log"
+          >
+            {actionLogsLoading ? 'Loading…' : 'Refresh'}
+          </button>
+        </div>
+        {actionLogs.length === 0 ? (
+          <p className="text-xs text-gray-400">No action log entries for this filing yet.</p>
+        ) : (
+          <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-64 overflow-y-auto">
+            {actionLogs.map(l => {
+              const statusColor =
+                l.status === 'success' || l.status === 'committed' ? 'text-green-700 bg-green-50' :
+                l.status === 'error' ? 'text-red-700 bg-red-50' :
+                l.status === 'partial' ? 'text-amber-700 bg-amber-50' :
+                'text-gray-600 bg-gray-100';
+              const when = new Date(l.createdAt).toLocaleString();
+              return (
+                <div key={l.id} className="px-3 py-2 text-xs hover:bg-gray-50">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="font-mono text-gray-500">{when}</span>
+                    <span className={`px-1.5 py-0.5 rounded ${statusColor}`}>{l.status}</span>
+                    <span className="font-semibold text-gray-700">{l.action}</span>
+                    {l.logType !== 'general' && (
+                      <span className="text-gray-400">[{l.logType}]</span>
+                    )}
+                  </div>
+                  <div className="text-gray-700 truncate" title={l.target}>{l.target}</div>
+                  {l.detail && (
+                    <div className="text-gray-500 mt-0.5 font-mono break-all line-clamp-2" title={l.detail}>
+                      {l.detail.length > 200 ? l.detail.slice(0, 200) + '…' : l.detail}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Edit Filing Dialog */}
