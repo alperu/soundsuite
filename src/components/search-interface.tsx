@@ -32,6 +32,7 @@ import { SampleQueryPanel } from './search/sample-query-panel';
 import { HaystackPreviewGrid } from './search/haystack-preview-grid';
 import { FilterLogicPanel, isLikelyMidTyping } from './search/filter-logic-panel';
 import BooleanChipComposer from './search/boolean-chip-composer';
+import { MustachePicker } from './search/mustache-picker';
 
 // Known boolean-query field names (kept in sync with FIELD_RESOLVERS in
 // src/lib/search/boolean-to-fts.ts; replicated here to avoid pulling the
@@ -438,6 +439,13 @@ export default function SearchInterface({
   // Task #63: lifted multi-select state. Set is populated by Shift/Cmd-click
   // in ActiveTokenSuggestions; commitMultiSelection splices the chip batch.
   const [pickerSelectedValues, setPickerSelectedValues] = useState<Set<string>>(new Set());
+
+  // Mustache picker (restored) — tracks the caret position inside the
+  // `{{ }}` composer so MustachePicker can detect the active block and
+  // surface field-name / value suggestions.
+  const [aiQueryCursor, setAiQueryCursor] = useState(0);
+  const [aiQueryRect, setAiQueryRect] = useState<DOMRect | null>(null);
+  const [mustachePickerOpen, setMustachePickerOpen] = useState(true);
 
   // Token-name suggestions (e.g. `fi` → `filedAfter` / `filedBefore`). Mirrors
   // the partial-name list from HaystackFilterInput so the left rail can render
@@ -2315,9 +2323,39 @@ export default function SearchInterface({
                         })()}
                         <textarea
                           id="ai-query"
-                          ref={aiQueryRef}
+                          ref={(el) => {
+                            (aiQueryRef as React.MutableRefObject<HTMLTextAreaElement | null>).current = el;
+                            if (el) {
+                              const rect = el.getBoundingClientRect();
+                              if (
+                                !aiQueryRect ||
+                                aiQueryRect.top !== rect.top ||
+                                aiQueryRect.left !== rect.left ||
+                                aiQueryRect.bottom !== rect.bottom ||
+                                aiQueryRect.width !== rect.width
+                              ) {
+                                setAiQueryRect(rect);
+                              }
+                            }
+                          }}
                           value={aiQuery}
+                          onSelect={e => {
+                            setAiQueryCursor((e.currentTarget as HTMLTextAreaElement).selectionStart ?? 0);
+                          }}
+                          onClick={e => {
+                            setAiQueryCursor((e.currentTarget as HTMLTextAreaElement).selectionStart ?? 0);
+                          }}
+                          onKeyUp={e => {
+                            setAiQueryCursor((e.currentTarget as HTMLTextAreaElement).selectionStart ?? 0);
+                          }}
+                          onFocus={e => {
+                            setAiQueryCursor((e.currentTarget as HTMLTextAreaElement).selectionStart ?? 0);
+                            setMustachePickerOpen(true);
+                          }}
                           onChange={e => {
+                            // Re-open picker on every edit (Esc-dismiss is per-state)
+                            setMustachePickerOpen(true);
+                            setAiQueryCursor(e.currentTarget.selectionStart ?? 0);
                             let next = e.target.value;
                             // Mustache extraction: when Filter mode is ON
                             // and the text contains a CLOSED {{ ... }}
@@ -2384,6 +2422,30 @@ export default function SearchInterface({
                             maxHeight: Math.max(inputHeight + 200, Math.min(typeof window !== 'undefined' ? window.innerHeight * 0.6 : 600, 800)),
                           }}
                         />
+                        {useHaystackFilters && mustachePickerOpen && (
+                          <MustachePicker
+                            value={aiQuery}
+                            cursorPos={aiQueryCursor}
+                            anchorRect={aiQueryRect}
+                            onInsert={(nextValue, nextCursor) => {
+                              setAiQuery(nextValue);
+                              setAiQueryCursor(nextCursor);
+                              // Restore caret + focus after React re-renders
+                              requestAnimationFrame(() => {
+                                const el = aiQueryRef.current;
+                                if (el) {
+                                  el.focus();
+                                  el.setSelectionRange(nextCursor, nextCursor);
+                                }
+                              });
+                            }}
+                            onClose={() => {
+                              setMustachePickerOpen(false);
+                              // Re-focus the textarea so Esc doesn't strand focus
+                              requestAnimationFrame(() => aiQueryRef.current?.focus());
+                            }}
+                          />
+                        )}
                         {/* Submit / stop action — anchored bottom-right inside the box */}
                         <div className="absolute bottom-2.5 right-2.5 flex items-center gap-2">
                           {aiLoading ? (
