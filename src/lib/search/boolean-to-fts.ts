@@ -271,7 +271,25 @@ export function extractFieldFilters(input: Node): {
         return null;
       }
 
-      const field = path[0];
+      // Ref-shaped values (`@uuid`) on a non-ref field redirect to the field's
+      // ref alias. e.g. `case==@uuid` should resolve to `case_id`, not
+      // `case_number`. Same for judge/lawyer/movant/respondent/clerk/reporter
+      // → their *Ref siblings.
+      const REF_ALIAS: Record<string, string> = {
+        case: 'caseRef',
+        document: 'documentRef',
+        filing: 'filingRef',
+        judge: 'judgeRef',
+        lawyer: 'lawyerRef',
+        movant: 'movantRef',
+        respondent: 'respondentRef',
+        clerk: 'clerkRef',
+        reporter: 'reporterRef',
+      };
+      const rawField = path[0];
+      const field = (isRef && REF_ALIAS[rawField] && FIELD_RESOLVERS[REF_ALIAS[rawField]])
+        ? REF_ALIAS[rawField]
+        : rawField;
       const resolver = FIELD_RESOLVERS[field];
       if (!resolver) {
         logger?.warn?.('Unknown field in boolean query — degrading to bare text match', {

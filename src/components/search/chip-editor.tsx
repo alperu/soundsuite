@@ -179,8 +179,8 @@ function FilterChipNodeView({ node, getPos, editor, deleteNode }: ChipNodeViewPr
   return (
     <NodeViewWrapper as="span" className="inline-block align-baseline">
       <span
-        className="inline-flex flex-nowrap whitespace-nowrap items-center gap-1 px-2 py-0.5 mx-0.5 bg-purple-100 text-purple-700 rounded text-xs font-mono cursor-pointer select-none border border-purple-200 hover:border-purple-400 hover:bg-purple-50 transition-colors"
-        style={{ maxWidth: '32rem' }}
+        className="inline-flex items-center gap-1 px-2 py-0.5 mx-0.5 bg-purple-100 text-purple-700 rounded text-xs font-mono cursor-pointer select-none border border-purple-200 hover:border-purple-400 hover:bg-purple-50 transition-colors align-top"
+        style={{ maxWidth: '100%', wordBreak: 'break-word' }}
         title={`{{ ${expression} }} — click to edit`}
         onMouseEnter={onMouseEnter}
         onMouseLeave={onMouseLeave}
@@ -194,7 +194,7 @@ function FilterChipNodeView({ node, getPos, editor, deleteNode }: ChipNodeViewPr
         data-chip-expression={expression}
       >
         <span className="opacity-50 shrink-0">{'{{'}</span>
-        <span className="font-medium truncate min-w-0" style={{ maxWidth: '24rem' }}>{renderedExpression}</span>
+        <span className="font-medium min-w-0" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{renderedExpression}</span>
         <span className="opacity-50 shrink-0">{'}}'}</span>
         <button
           type="button"
@@ -384,6 +384,59 @@ const ChipsOnlyExtension = Extension.create({
   },
 });
 
+// Track in-flight lazy fetches AND uuids we've already attempted but couldn't
+// resolve, so the decoration plugin doesn't retry on every doc change.
+const lazyResolveInflight = new Set<string>();
+const lazyResolveTried = new Set<string>();
+
+/**
+ * Kick off a background resolve for an `@uuid` that the user typed/pasted
+ * but never went through the picker (so the cache wasn't pre-populated).
+ * On success, fires a custom event to refresh decorations across all
+ * mounted editors.
+ */
+function lazyResolveUuid(atUuid: string): void {
+  if (uuidDisplayCache.has(atUuid)) return;
+  if (lazyResolveInflight.has(atUuid)) return;
+  if (lazyResolveTried.has(atUuid)) return;
+  lazyResolveInflight.add(atUuid);
+  // Try the case namespace first, then person. Either is fine — we accept the
+  // first non-empty label match.
+  const uuid = atUuid.slice(1);
+  void (async () => {
+    try {
+      const tries: Array<{ path: string; prefix?: string }> = [
+        { path: 'case->name' },
+        { path: 'judgeRef->displayName' },
+        { path: 'lawyerRef->displayName' },
+        { path: 'reporterRef->displayName' },
+        { path: 'clerkRef->displayName' },
+        { path: 'filingRef' },
+      ];
+      for (const t of tries) {
+        const params = new URLSearchParams({ path: t.path, prefix: '', limit: '50' });
+        const res = await fetch(`/api/search/path-values?${params.toString()}`);
+        if (!res.ok) continue;
+        const json = (await res.json()) as { options?: Array<{ value: string; label: string; id?: string }> };
+        const hit = json.options?.find((o) => o.id === uuid || o.value === atUuid);
+        if (hit?.label) {
+          uuidDisplayCache.set(atUuid, hit.label);
+          // Notify any mounted editor to refresh decorations.
+          document.dispatchEvent(new CustomEvent('uuid-cache-update', { detail: atUuid }));
+          return;
+        }
+      }
+    } catch {
+      /* best-effort */
+    } finally {
+      lazyResolveInflight.delete(atUuid);
+      // Mark as tried regardless of success — avoids endless retries on a
+      // doc that contains a stale/unknown @uuid.
+      lazyResolveTried.add(atUuid);
+    }
+  })();
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function buildDecorationSet(doc: any): DecorationSet {
   const docNode = doc;
@@ -399,7 +452,12 @@ function buildDecorationSet(doc: any): DecorationSet {
     while ((m = UUID_RE.exec(text)) !== null) {
       const atUuid = m[0];
       const displayName = uuidDisplayCache.get(atUuid);
-      if (!displayName) continue;
+      if (!displayName) {
+        // Kick off a background fetch — when it lands, the editor's
+        // `uuid-cache-update` listener will dispatch a refresh transaction.
+        lazyResolveUuid(atUuid);
+        continue;
+      }
       const from = pos + m.index;
       const to = from + atUuid.length;
       decorations.push(
@@ -799,6 +857,16 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
     document.addEventListener('chip-hover', handler as EventListener);
     return () => document.removeEventListener('chip-hover', handler as EventListener);
   }, [onHoverChip]);
+
+  // Refresh decorations when a lazy @uuid → displayName resolve lands.
+  useEffect(() => {
+    if (!editor) return;
+    const handler = () => {
+      editor.view.dispatch(editor.view.state.tr.setMeta('refresh-decorations', true));
+    };
+    document.addEventListener('uuid-cache-update', handler as EventListener);
+    return () => document.removeEventListener('uuid-cache-update', handler as EventListener);
+  }, [editor]);
 
   // Imperative handle for the parent picker integration.
   useImperativeHandle(forwardedRef, () => ({

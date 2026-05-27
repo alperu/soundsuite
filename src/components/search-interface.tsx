@@ -2552,8 +2552,8 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                                 initialText=""
                                 initialChips={haystackChips}
                                 chipsOnly
-                                minHeight={36}
-                                maxHeight={200}
+                                minHeight={64}
+                                maxHeight={320}
                                 onChange={(_text, chips) => {
                                   // Guard against echoing back a sync we
                                   // initiated from the main editor.
