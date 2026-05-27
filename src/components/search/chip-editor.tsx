@@ -45,16 +45,34 @@ import type { FilterChip } from '@/lib/search/haystack-query-builder';
 
 type ChipOp = '==' | '!=' | '>=' | '<=' | '>' | '<';
 
+/**
+ * A chip wraps a single `{{ ... }}` Axon sub-expression. Examples:
+ *   - `case==@04a8cd94…`
+ *   - `case==@A or case==@B`
+ *   - `(judge==@X and motion)`
+ *   - `documentType=="Reporter's Record"`
+ *
+ * `displayName` is an OPTIONAL pretty label used when the expression is a
+ * single `tag==@uuid` ref — we substitute the human name for the uuid in the
+ * pill. Otherwise the chip shows the raw expression truncated with ellipsis.
+ */
 interface ChipNodeAttrs {
-  tag: string;
-  op: ChipOp;
-  value: string;
+  expression: string;
   displayName: string | null;
 }
 
 interface ChipEditorChipShape extends ChipNodeAttrs {
   /** Position in the doc — used for hover dispatch. */
   pos?: number;
+}
+
+/** Detect whether an expression is a single `tag op value` atom — used for
+ *  display-name swap on simple ref chips. */
+function parseSimpleAtom(expr: string | undefined | null): { tag: string; op: ChipOp; value: string } | null {
+  if (!expr || typeof expr !== 'string') return null;
+  const m = /^([A-Za-z_][\w]*)\s*(==|!=|>=|<=|>|<)\s*(.+)$/.exec(expr.trim());
+  if (!m) return null;
+  return { tag: m[1], op: m[2] as ChipOp, value: m[3].trim().replace(/^["']|["']$/g, '') };
 }
 
 interface ChipNodeViewProps {
@@ -64,42 +82,122 @@ interface ChipNodeViewProps {
   deleteNode: () => void;
 }
 
-function FilterChipNodeView({ node, deleteNode }: ChipNodeViewProps) {
-  const { tag, op, value, displayName } = node.attrs;
-  const label = displayName && displayName.length > 0 ? displayName : value;
-  const raw = `${tag}${op}${value}`;
+function FilterChipNodeView({ node, getPos, editor, deleteNode }: ChipNodeViewProps) {
+  const expression = (node.attrs.expression ?? '') as string;
+  const displayName = (node.attrs.displayName ?? null) as string | null;
 
-  // Dispatch hover events to the editor host so the right panel can rescope.
-  // We use a plain CustomEvent on the editor root rather than a context to
-  // keep the NodeView self-contained.
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState(expression);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Reset draft when entering edit mode.
+  React.useEffect(() => {
+    if (editing) {
+      setDraft(expression);
+      requestAnimationFrame(() => inputRef.current?.select());
+    }
+  }, [editing, expression]);
+
+  const commitEdit = useCallback(
+    (next: string) => {
+      const trimmed = next.trim();
+      if (!trimmed) {
+        deleteNode();
+        return;
+      }
+      if (trimmed === expression) {
+        setEditing(false);
+        return;
+      }
+      // Patch the node's expression attr in place. Clear displayName because
+      // it may no longer apply to the new expression.
+      editor.commands.command(({ tr, state }) => {
+        const pos = getPos();
+        const n = state.doc.nodeAt(pos);
+        if (!n) return false;
+        tr.setNodeMarkup(pos, undefined, { ...n.attrs, expression: trimmed, displayName: null });
+        return true;
+      });
+      setEditing(false);
+    },
+    [expression, editor, getPos, deleteNode],
+  );
+
+  const atom = parseSimpleAtom(expression);
+  const renderedExpression: string = atom && displayName
+    ? `${atom.tag}${atom.op}${displayName}`
+    : expression;
+
   const onMouseEnter = useCallback(() => {
     const evt = new CustomEvent('chip-hover', {
-      detail: { tag, op, value, displayName },
+      detail: { expression, displayName },
       bubbles: true,
     });
     document.dispatchEvent(evt);
-  }, [tag, op, value, displayName]);
+  }, [expression, displayName]);
 
   const onMouseLeave = useCallback(() => {
     document.dispatchEvent(new CustomEvent('chip-hover', { detail: null, bubbles: true }));
   }, []);
 
+  if (editing) {
+    return (
+      <NodeViewWrapper as="span" className="inline-block align-baseline">
+        <span
+          className="inline-flex flex-nowrap whitespace-nowrap items-center gap-1 px-2 py-0.5 mx-0.5 bg-white text-purple-700 rounded text-xs font-mono border-2 border-purple-500 shadow-sm"
+          style={{ maxWidth: '36rem' }}
+        >
+          <span className="opacity-50 shrink-0">{'{{'}</span>
+          <input
+            ref={inputRef}
+            type="text"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commitEdit(draft);
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                setEditing(false);
+              }
+              // Stop other keys from leaking to the editor's shortcuts.
+              e.stopPropagation();
+            }}
+            onBlur={() => commitEdit(draft)}
+            className="bg-transparent outline-none border-none p-0 m-0 font-mono text-xs text-purple-800 min-w-0"
+            style={{ width: `${Math.max(8, Math.min(draft.length + 1, 60))}ch` }}
+          />
+          <span className="opacity-50 shrink-0">{'}}'}</span>
+        </span>
+      </NodeViewWrapper>
+    );
+  }
+
   return (
     <NodeViewWrapper as="span" className="inline-block align-baseline">
       <span
-        className="inline-flex items-center gap-1 px-2 py-0.5 mx-0.5 bg-purple-100 text-purple-700 rounded text-xs font-mono max-w-[12rem] cursor-default select-none border border-purple-200 hover:border-purple-400 transition-colors"
-        title={raw}
+        className="inline-flex flex-nowrap whitespace-nowrap items-center gap-1 px-2 py-0.5 mx-0.5 bg-purple-100 text-purple-700 rounded text-xs font-mono cursor-pointer select-none border border-purple-200 hover:border-purple-400 hover:bg-purple-50 transition-colors"
+        style={{ maxWidth: '32rem' }}
+        title={`{{ ${expression} }} — click to edit`}
         onMouseEnter={onMouseEnter}
         onMouseLeave={onMouseLeave}
-        data-chip-tag={tag}
-        data-chip-value={value}
+        onClick={(e) => {
+          // Don't enter edit mode when clicking the × button.
+          if ((e.target as HTMLElement).closest('[data-chip-delete]')) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setEditing(true);
+        }}
+        data-chip-expression={expression}
       >
-        <span className="opacity-60">{tag}</span>
-        <span className="opacity-40">{op}</span>
-        <span className="font-medium truncate" style={{ maxWidth: '8rem' }}>{label}</span>
+        <span className="opacity-50 shrink-0">{'{{'}</span>
+        <span className="font-medium truncate min-w-0" style={{ maxWidth: '24rem' }}>{renderedExpression}</span>
+        <span className="opacity-50 shrink-0">{'}}'}</span>
         <button
           type="button"
           tabIndex={-1}
+          data-chip-delete
           onMouseDown={(e) => {
             e.preventDefault();
             deleteNode();
@@ -124,9 +222,7 @@ const FilterChipNode = Node.create({
 
   addAttributes() {
     return {
-      tag: { default: '' },
-      op: { default: '==' },
-      value: { default: '' },
+      expression: { default: '' },
       displayName: { default: null },
     };
   },
@@ -145,26 +241,21 @@ const FilterChipNode = Node.create({
   },
 
   addInputRules() {
-    // Match `{{ key==value }}` (including ==, !=, >=, <=, >, <).
-    // Triggered as the user types — once the closing `}}` lands, swap the
-    // matched range for a FilterChipNode.
+    // Match any `{{ ... }}` block — the inner content is a raw Axon
+    // sub-expression. Triggered as the user types the closing `}}`; the whole
+    // span gets swapped for a FilterChipNode whose `expression` attr holds
+    // the verbatim inner content.
     return [
       new InputRule({
-        find: /\{\{\s*([^{}=!<>]+?)\s*(==|!=|>=|<=|>|<)\s*([^{}]+?)\s*\}\}$/,
+        find: /\{\{\s*([^{}]+?)\s*\}\}$/,
         handler: ({ state, range, match }) => {
-          const [, tag, op, value] = match;
-          if (!tag || !value) return null;
+          const expression = (match[1] ?? '').trim();
+          if (!expression) return null;
           const { tr } = state;
-          const cleanValue = value.trim().replace(/^["']|["']$/g, '');
           tr.replaceWith(
             range.from,
             range.to,
-            this.type.create({
-              tag: tag.trim(),
-              op: op as ChipOp,
-              value: cleanValue,
-              displayName: null,
-            }),
+            this.type.create({ expression, displayName: null }),
           );
           return null;
         },
@@ -187,27 +278,54 @@ function serializeDoc(editor: Editor): { text: string; chips: FilterChip[] } {
   editor.state.doc.descendants((node) => {
     if (node.type.name === 'filterChip') {
       const attrs = node.attrs as ChipNodeAttrs;
+      const raw = (attrs.expression ?? '') as string;
+      if (!raw) return false; // skip malformed chips
       chips.push({
-        kind: 'field',
-        key: attrs.tag,
-        op: attrs.op,
-        value: attrs.value,
+        kind: 'expression',
+        raw,
+        label: attrs.displayName ?? undefined,
       });
-      // Don't recurse into atom nodes.
       return false;
     }
     if (node.isText) {
       parts.push(node.text ?? '');
     }
     if (node.type.name === 'paragraph') {
-      // Paragraph break — insert a single newline. We don't separate before
-      // the first paragraph though.
       if (parts.length > 0) parts.push('\n');
     }
     return true;
   });
-  // Strip leading/trailing whitespace introduced by paragraph walking.
   return { text: parts.join('').replace(/^\n+|\n+$/g, ''), chips };
+}
+
+/** Build a chip node payload from an arbitrary FilterChip — used when
+ *  hydrating `initialChips` (which may be legacy field-shaped chips from URL
+ *  state) into the editor doc. */
+function chipToNodePayload(chip: FilterChip): Record<string, unknown> | null {
+  if ((chip as { kind?: string }).kind === 'expression') {
+    const ec = chip as { raw: string; label?: string };
+    if (!ec.raw) return null;
+    return {
+      type: 'filterChip',
+      attrs: { expression: ec.raw, displayName: ec.label ?? null },
+    };
+  }
+  // Legacy field-shaped chip → compose `tag op value` into a single expression.
+  if ('key' in chip) {
+    const op = chip.op ?? '==';
+    let value = chip.value;
+    if (!value.startsWith('@') && /[\s"]/.test(value)) {
+      value = `"${value.replace(/"/g, '\\"')}"`;
+    }
+    return {
+      type: 'filterChip',
+      attrs: {
+        expression: `${chip.key}${op}${value}`,
+        displayName: chip.label ?? null,
+      },
+    };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,8 +366,16 @@ async function resolveDisplayName(tag: string, atValue: string): Promise<string 
 // Public component
 
 export interface ChipEditorHandle {
-  /** Insert a chip at the current selection. Called by the parent's picker. */
-  insertChip(attrs: { tag: string; op?: ChipOp; value: string; displayName?: string | null }): void;
+  /**
+   * Insert a chip at the current selection. The parent passes either a simple
+   * atom (`{tag, op, value}` — assembled into `tag op value`) OR a raw
+   * `expression` (the full Axon sub-expression). `displayName` is optional and
+   * only meaningful when the chip is a simple ref atom.
+   */
+  insertChip(attrs:
+    | { tag: string; op?: ChipOp; value: string; displayName?: string | null }
+    | { expression: string; displayName?: string | null }
+  ): void;
   /** Focus the editor. */
   focus(): void;
   /** Replace the entire editor state (used to load from URL state or reset). */
@@ -277,9 +403,9 @@ export interface ChipEditorProps {
   /** Whether the parent's picker is currently active (drives Enter behavior). */
   pickerActive?: boolean;
   /** Picker key dispatch — parent owns highlight + commit. */
-  onPickerKey?(key: 'ArrowDown' | 'ArrowUp' | 'Enter' | 'Tab' | 'Escape'): void;
+  onPickerKey?(key: 'ArrowDown' | 'ArrowUp' | 'Enter' | 'Tab' | 'Escape' | 'Space'): void;
   /** Fired when hover state of any chip changes (Phase 5). */
-  onHoverChip?(chip: { tag: string; op: ChipOp; value: string; displayName: string | null } | null): void;
+  onHoverChip?(chip: { expression: string; displayName: string | null } | null): void;
   className?: string;
 }
 
@@ -307,16 +433,9 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
   const initialContent = useMemo(() => {
     const content: Array<Record<string, unknown>> = [];
     for (const chip of initialChips) {
-      if ('key' in chip) {
-        content.push({
-          type: 'filterChip',
-          attrs: {
-            tag: chip.key,
-            op: chip.op ?? '==',
-            value: chip.value,
-            displayName: chip.label ?? null,
-          },
-        });
+      const payload = chipToNodePayload(chip);
+      if (payload) {
+        content.push(payload);
         content.push({ type: 'text', text: ' ' });
       }
     }
@@ -398,6 +517,13 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
               }
               return false;
             },
+            Space: () => {
+              if (pickerActiveRef.current) {
+                onPickerKeyRef.current?.('Space');
+                return true;
+              }
+              return false;
+            },
           };
         },
       }),
@@ -413,22 +539,23 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
     onUpdate({ editor }) {
       const { text, chips } = serializeDoc(editor);
       onChange?.(text, chips);
-      // Resolve displayName for any @uuid chip missing one.
-      editor.state.doc.descendants((node, pos) => {
+      // For simple-atom chips (`tag op @uuid`), resolve a displayName so the
+      // pill renders the human label instead of the raw uuid. Compound
+      // expressions skip this — they show their raw content.
+      editor.state.doc.descendants((node) => {
         if (node.type.name !== 'filterChip') return true;
         const attrs = node.attrs as ChipNodeAttrs;
-        if (attrs.displayName || !attrs.value.startsWith('@')) return false;
-        const tagKey = attrs.tag;
-        const val = attrs.value;
-        void resolveDisplayName(tagKey, val).then((label) => {
+        if (attrs.displayName) return false;
+        const atom = parseSimpleAtom(attrs.expression);
+        if (!atom || !atom.value.startsWith('@')) return false;
+        const exprKey = attrs.expression;
+        void resolveDisplayName(atom.tag, atom.value).then((label) => {
           if (!label) return;
-          // Patch the node's displayName attr. The doc may have moved by then,
-          // so search by tag+value rather than by pos.
           editor.commands.command(({ tr, state }) => {
             state.doc.descendants((n, p) => {
               if (n.type.name === 'filterChip') {
                 const a = n.attrs as ChipNodeAttrs;
-                if (a.tag === tagKey && a.value === val && !a.displayName) {
+                if (a.expression === exprKey && !a.displayName) {
                   tr.setNodeMarkup(p, undefined, { ...a, displayName: label });
                 }
               }
@@ -480,17 +607,24 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
   useImperativeHandle(forwardedRef, () => ({
     insertChip(attrs) {
       if (!editor) return;
+      let expression: string;
+      if ('expression' in attrs) {
+        expression = attrs.expression ?? '';
+      } else {
+        const op = attrs.op ?? '==';
+        let value = attrs.value ?? '';
+        if (!value.startsWith('@') && /[\s"]/.test(value)) {
+          value = `"${value.replace(/"/g, '\\"')}"`;
+        }
+        expression = `${attrs.tag}${op}${value}`;
+      }
+      if (!expression) return; // refuse empty chips
       editor
         .chain()
         .focus()
         .insertContent({
           type: 'filterChip',
-          attrs: {
-            tag: attrs.tag,
-            op: attrs.op ?? '==',
-            value: attrs.value,
-            displayName: attrs.displayName ?? null,
-          },
+          attrs: { expression, displayName: attrs.displayName ?? null },
         })
         .insertContent(' ')
         .run();
@@ -502,16 +636,9 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
       if (!editor) return;
       const content: Array<Record<string, unknown>> = [];
       for (const chip of chips) {
-        if ('key' in chip) {
-          content.push({
-            type: 'filterChip',
-            attrs: {
-              tag: chip.key,
-              op: chip.op ?? '==',
-              value: chip.value,
-              displayName: chip.label ?? null,
-            },
-          });
+        const payload = chipToNodePayload(chip);
+        if (payload) {
+          content.push(payload);
           content.push({ type: 'text', text: ' ' });
         }
       }

@@ -42,7 +42,11 @@ export type FilterChip =
   | { kind?: 'field'; key: string; value: string; label?: string; op?: FieldChipOp }
   | { kind: 'term'; value: string; phrase?: boolean }
   | { kind: 'and' | 'or' | 'not' }
-  | { kind: 'lparen' | 'rparen' };
+  | { kind: 'lparen' | 'rparen' }
+  // A compound `{{ ... }}` block whose inner content is a raw Axon
+  // sub-expression (e.g. `case==@A or case==@B`, `(judge==X and motion)`).
+  // Stored verbatim and emitted as a parenthesized group at compile time.
+  | { kind: 'expression'; raw: string; label?: string };
 
 /** Type guard: is this a field-op chip (the legacy shape)? */
 export function isFieldChip(c: FilterChip): c is { kind?: 'field'; key: string; value: string; label?: string; op?: FieldChipOp } {
@@ -277,6 +281,11 @@ function buildLinear(chips: FilterChip[]): string {
     else if (kind === 'not') parts.push('not');
     else if (kind === 'lparen') parts.push('(');
     else if (kind === 'rparen') parts.push(')');
+    else if (kind === 'expression') {
+      const ec = c as { kind: 'expression'; raw: string };
+      const raw = ec.raw.trim();
+      if (raw) parts.push(`(${raw})`);
+    }
     else if (kind === 'term') {
       const tc = c as { kind: 'term'; value: string; phrase?: boolean };
       const v = tc.value.trim();
@@ -305,6 +314,26 @@ function hasInlineOperators(chips: FilterChip[]): boolean {
     if (k && k !== 'field') return true;
   }
   return false;
+}
+
+/** Linear builder for the "all field chips + expression chips" case.
+ *  When the chip array is exclusively field chips and one-or-more expression
+ *  chips, we want to AND them together instead of routing the field chips
+ *  through `groupByKey` (which strips order and adds implied-kind). */
+function buildMixedLinear(chips: FilterChip[]): string {
+  const parts: string[] = [];
+  for (const c of chips) {
+    const kind = (c as { kind?: string }).kind;
+    if (kind === 'expression') {
+      const raw = (c as { raw: string }).raw.trim();
+      if (raw) parts.push(`(${raw})`);
+    } else {
+      // Treat as field chip.
+      const term = termFor(c as { key: string; value: string; op?: FieldChipOp });
+      if (term) parts.push(term);
+    }
+  }
+  return parts.join(' and ');
 }
 
 export interface BuildResult {

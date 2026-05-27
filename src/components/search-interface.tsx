@@ -568,23 +568,16 @@ export default function SearchInterface({
       // partial — strip the typed `tag==<partial>` from the editor text and
       // insert the chip atom in its place.
       if (chipEditorRef.current) {
-        // The editor uses an absolute caret offset over its serialized text.
-        // We know `activeToken.startIndex` already points to where the prefix
-        // started in the editor's text (set by the cursor effect).
+        // Splice the picked value INSIDE the open `{{ ... ` mustache as TEXT
+        // — do NOT create a chip yet. The chip materializes only when the
+        // user closes with `}}` (InputRule). This lets the user keep typing
+        // `or X`, `and Y`, etc. before committing.
         const editor = chipEditorRef.current;
         const fullText = editor.getText();
+        const replacement = `${activeToken.prefix}${activeToken.op}${quoteIfNeeded(picked.value)}`;
         const before = fullText.slice(0, activeToken.startIndex);
         const after = fullText.slice(activeToken.endIndex);
-        editor.setContents(before + after, haystackChips);
-        // After setContents, the caret lands at start. We accept that and
-        // append the chip — the user's mental model is "pick a value, get a
-        // chip, keep typing". A future polish could restore caret precisely.
-        editor.insertChip({
-          tag: activeToken.path[0],
-          op: activeToken.op as '==' | '!=' | '>=' | '<=' | '>' | '<',
-          value: picked.value,
-          displayName: picked.label,
-        });
+        editor.setContents(before + replacement + after, haystackChips);
         setActiveToken(null);
         setPickerHighlight(0);
         setPickerOptions([]);
@@ -619,21 +612,47 @@ export default function SearchInterface({
   // parens preserve precedence when this batch sits next to an existing AND
   // clause; without them `case==X and (a or b)` would otherwise parse as
   // `case==X and a or b` = `(case==X and a) or b`.
+  // Commit the user's literal typed partial as a chip — bypasses the picker.
+  // Used when Enter is pressed and the user has typed a value they want as-is
+  // (e.g. `case==A` should chip-ify to value "A", not the first matching case).
+  // Enter inside a `{{ ... ` mustache: just close the picker. The literal
+  // typed value is already in the editor as text — the user is responsible
+  // for typing `}}` when ready to commit the chip.
+  const handleLiteralCommit = useCallback(() => {
+    setActiveToken(null);
+    setPickerHighlight(0);
+    setPickerOptions([]);
+    setPickerSelectedValues(new Set());
+  }, []);
+
   const handlePickManyActiveToken = useCallback(
     (picked: PickedSuggestion[]) => {
       if (!activeToken || picked.length === 0) return;
       const op = activeToken.op;
       const key = activeToken.prefix;
-      // Build a paren-wrapped OR group as plain text inside the mustache:
-      //   ( key==v1 or key==v2 ... )
-      // The mustache extractor will turn each into its own chip on next edit;
-      // for now this expresses intent in-place where the picker fired.
       const inner = picked
         .map((p) => `${key}${op}${quoteIfNeeded(p.value)}`)
         .join(' or ');
-      const replacement = picked.length > 1 ? `( ${inner} )` : inner;
+      const expression = picked.length > 1 ? `(${inner})` : inner;
+      // ChipEditor path: splice the OR-group as TEXT inside the open
+      // mustache — no chip yet. The user types `}}` to commit.
+      if (chipEditorRef.current) {
+        const editor = chipEditorRef.current;
+        const fullText = editor.getText();
+        const before = fullText.slice(0, activeToken.startIndex);
+        const after = fullText.slice(activeToken.endIndex);
+        const replacement = picked.length > 1 ? `(${inner})` : inner;
+        editor.setContents(before + replacement + after, haystackChips);
+        setActiveToken(null);
+        setPickerHighlight(0);
+        setPickerOptions([]);
+        setPickerSelectedValues(new Set());
+        return;
+      }
+      // Legacy textarea path.
       const before = aiQuery.slice(0, activeToken.startIndex);
       const after = aiQuery.slice(activeToken.endIndex);
+      const replacement = picked.length > 1 ? `( ${inner} )` : inner;
       const next = before + replacement + after;
       const nextCursor = before.length + replacement.length;
       setAiQuery(next);
@@ -650,7 +669,7 @@ export default function SearchInterface({
         }
       });
     },
-    [activeToken, aiQuery],
+    [activeToken, aiQuery, haystackChips],
   );
 
   const handleSelectedValuesChange = useCallback(
@@ -991,7 +1010,7 @@ export default function SearchInterface({
 const chipEditorRef = useRef<ChipEditorHandle | null>(null);
 // Hovered chip (Phase 5) — when set, HaystackPreviewGrid rescopes to that
 // chip's filter only. null = combined-grid mode.
-const [hoverChip, setHoverChip] = useState<{ tag: string; op: string; value: string; displayName: string | null } | null>(null);
+const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: string | null } | null>(null);
   const directQueryRef = useRef<HTMLInputElement>(null);
 
   // URL-driven navigation helpers
@@ -1963,13 +1982,29 @@ const [hoverChip, setHoverChip] = useState<{ tag: string; op: string; value: str
               {activeToken ? (
                 <ActiveTokenSuggestions
                   active={activeToken}
-                  scope={haystackChips
-                    .filter((c): c is { kind?: 'field'; key: string; value: string; op?: '=='|'!='|'>='|'<='|'>'|'<' } =>
-                      (c as { kind?: string }).kind === undefined || (c as { kind?: string }).kind === 'field')
-                    .map((c) => {
-                      const def = (TOKEN_MAP as Record<string, { tag: string }>)[c.key];
-                      return { tag: def?.tag ?? c.key, op: c.op ?? '==', value: c.value };
-                    })}
+                  scope={haystackChips.flatMap((c) => {
+                    // Field chips: map key → tag and forward as-is.
+                    if ((c as { kind?: string }).kind === undefined || (c as { kind?: string }).kind === 'field') {
+                      const fc = c as { key: string; value: string; op?: '=='|'!='|'>='|'<='|'>'|'<' };
+                      const def = (TOKEN_MAP as Record<string, { tag: string }>)[fc.key];
+                      return [{ tag: def?.tag ?? fc.key, op: fc.op ?? '==', value: fc.value }];
+                    }
+                    // Expression chips: parse the raw expression and extract
+                    // any top-level `tag==@uuid` atoms so the picker can
+                    // cascade on them (e.g. case==@A inside a chip should
+                    // still scope a downstream filingRef picker).
+                    if ((c as { kind?: string }).kind === 'expression') {
+                      const ec = c as { raw: string };
+                      const atoms: Array<{ tag: string; op: string; value: string }> = [];
+                      const re = /\b([A-Za-z_][\w]*)\s*(==|!=|>=|<=|>|<)\s*(@[\w-]+|"[^"]*"|[\w-]+)/g;
+                      let m: RegExpExecArray | null;
+                      while ((m = re.exec(ec.raw)) !== null) {
+                        atoms.push({ tag: m[1], op: m[2], value: m[3].replace(/^["']|["']$/g, '') });
+                      }
+                      return atoms;
+                    }
+                    return [];
+                  })}
                   highlight={pickerHighlight}
                   onPick={handlePickActiveToken}
                   onPickMany={handlePickManyActiveToken}
@@ -2415,6 +2450,74 @@ const [hoverChip, setHoverChip] = useState<{ tag: string; op: string; value: str
                             a filter rather than typing freetext. When the
                             user types `}}`, the onChange handler extracts
                             the chip; the pending preview disappears. */}
+                        {/* Chip status strip — text view of every chip
+                            currently in the editor, with click-to-edit and
+                            delete. Sits above the TipTap editor so the user
+                            sees the structured filter state at a glance and
+                            knows that `{{` opens a new one. */}
+                        {useHaystackFilters && (
+                          <div className="px-4 pt-3 pb-2 border-b border-gray-100">
+                            {haystackChips.length === 0 ? (
+                              <div className="text-[11px] text-gray-400">
+                                Type <code className="px-1 py-0.5 bg-gray-100 rounded text-purple-700 font-mono text-[10px]">{'{{'}</code> to start a filter expression. Each <code className="px-1 py-0.5 bg-gray-100 rounded text-purple-700 font-mono text-[10px]">{'{{ … }}'}</code> is one Axon sub-expression; multiple chips AND together.
+                              </div>
+                            ) : (
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="text-[10px] uppercase tracking-wider text-gray-400 shrink-0">Filters</span>
+                                {haystackChips.map((c, i) => {
+                                  const expr = (c as { kind?: string; raw?: string; key?: string; value?: string; op?: string }).kind === 'expression'
+                                    ? (c as { raw: string }).raw
+                                    : 'key' in c
+                                      ? `${c.key}${c.op ?? '=='}${c.value}`
+                                      : '';
+                                  if (!expr) return null;
+                                  return (
+                                    <span
+                                      key={`strip-${i}`}
+                                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-50 text-purple-700 rounded text-[11px] font-mono border border-purple-200 hover:border-purple-400 hover:bg-purple-100 cursor-pointer transition-colors max-w-[24rem]"
+                                      title={`{{ ${expr} }} — click to edit, × to remove`}
+                                      onClick={() => {
+                                        const next = prompt('Edit filter expression:', expr);
+                                        if (next === null) return;
+                                        const trimmed = next.trim();
+                                        const updated = [...haystackChips];
+                                        if (!trimmed) {
+                                          updated.splice(i, 1);
+                                        } else {
+                                          updated[i] = { kind: 'expression', raw: trimmed };
+                                        }
+                                        setHaystackChips(updated);
+                                        // Push back into the editor so the
+                                        // visible chip pills match.
+                                        chipEditorRef.current?.setContents(aiQuery, updated);
+                                      }}
+                                    >
+                                      <span className="opacity-50">{'{{'}</span>
+                                      <span className="truncate">{expr}</span>
+                                      <span className="opacity-50">{'}}'}</span>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          const updated = haystackChips.filter((_, j) => j !== i);
+                                          setHaystackChips(updated);
+                                          chipEditorRef.current?.setContents(aiQuery, updated);
+                                        }}
+                                        className="opacity-50 hover:opacity-100 hover:text-red-600 -mr-0.5"
+                                        aria-label="Remove filter"
+                                      >
+                                        ×
+                                      </button>
+                                    </span>
+                                  );
+                                })}
+                                <span className="text-[10px] text-gray-400 ml-1">
+                                  · type <code className="px-1 py-0.5 bg-gray-100 rounded text-purple-700 font-mono text-[10px]">{'{{'}</code> for a new one
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        )}
                         {/* ChipEditor — TipTap-based composer with inline
                             FilterChipNode atoms. Replaces the chip-strip +
                             textarea pair when Filter mode is ON. */}
@@ -2445,17 +2548,47 @@ const [hoverChip, setHoverChip] = useState<{ tag: string; op: string; value: str
                               const tokenOpts = tokenSuggestions.length;
                               const valuePickerActive = activeToken !== null && valueOpts > 0;
                               const tokenPickerActive = tokenOpts > 0 && !valuePickerActive;
+                              const hasMultiSelection = pickerSelectedValues.size > 0;
+                              if (key === 'Space' && valuePickerActive) {
+                                // Toggle highlighted option in the OR-group selection.
+                                const picked = pickerOptions[pickerHighlight];
+                                if (picked) {
+                                  const next = new Set(pickerSelectedValues);
+                                  if (next.has(picked.value)) next.delete(picked.value);
+                                  else next.add(picked.value);
+                                  setPickerSelectedValues(next);
+                                }
+                                return;
+                              }
                               if (key === 'ArrowDown') {
                                 if (valuePickerActive) setPickerHighlight(i => (i + 1) % valueOpts);
                                 else if (tokenPickerActive) setTokenSuggestionHighlight(i => (i + 1) % tokenOpts);
                               } else if (key === 'ArrowUp') {
                                 if (valuePickerActive) setPickerHighlight(i => (i - 1 + valueOpts) % valueOpts);
                                 else if (tokenPickerActive) setTokenSuggestionHighlight(i => (i - 1 + tokenOpts) % tokenOpts);
-                              } else if (key === 'Enter' || key === 'Tab') {
+                              } else if (key === 'Tab') {
+                                // Tab → commit picker highlight (the suggestion).
                                 if (valuePickerActive) {
                                   const picked = pickerOptions[pickerHighlight];
                                   if (picked) handlePickActiveToken(picked);
                                 } else if (tokenPickerActive) {
+                                  const picked = tokenSuggestions[tokenSuggestionHighlight];
+                                  if (picked) handleRailPickTokenName(picked);
+                                }
+                              } else if (key === 'Enter') {
+                                // Enter behavior:
+                                //  - With a multi-selection → commit OR-group
+                                //  - Otherwise → commit LITERAL typed value
+                                //  - Picker highlight is committed via Tab
+                                if (valuePickerActive && hasMultiSelection) {
+                                  handleCommitMultiSelection();
+                                } else if (valuePickerActive) {
+                                  handleLiteralCommit();
+                                } else if (tokenPickerActive) {
+                                  // No literal token-name commit makes sense
+                                  // (token names are a fixed catalogue); fall
+                                  // back to highlight commit so Enter still
+                                  // closes the rail prefix-mode quickly.
                                   const picked = tokenSuggestions[tokenSuggestionHighlight];
                                   if (picked) handleRailPickTokenName(picked);
                                 }
@@ -2619,6 +2752,15 @@ const [hoverChip, setHoverChip] = useState<{ tag: string; op: string; value: str
                             }
 
                             if (pickerActive) {
+                              if (e.key === ' ' && valuePickerActive && pickerOptions[pickerHighlight]) {
+                                e.preventDefault();
+                                const picked = pickerOptions[pickerHighlight];
+                                const next = new Set(pickerSelectedValues);
+                                if (next.has(picked.value)) next.delete(picked.value);
+                                else next.add(picked.value);
+                                setPickerSelectedValues(next);
+                                return;
+                              }
                               if (e.key === 'ArrowDown') {
                                 e.preventDefault();
                                 if (valuePickerActive) {
@@ -2637,11 +2779,23 @@ const [hoverChip, setHoverChip] = useState<{ tag: string; op: string; value: str
                                 }
                                 return;
                               }
-                              if (e.key === 'Enter' || e.key === 'Tab') {
+                              if (e.key === 'Tab') {
                                 e.preventDefault();
                                 if (valuePickerActive) {
                                   const picked = pickerOptions[pickerHighlight];
                                   if (picked) handlePickActiveToken(picked);
+                                } else {
+                                  const picked = tokenSuggestions[tokenSuggestionHighlight];
+                                  if (picked) handleRailPickTokenName(picked);
+                                }
+                                return;
+                              }
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                if (valuePickerActive && pickerSelectedValues.size > 0) {
+                                  handleCommitMultiSelection();
+                                } else if (valuePickerActive) {
+                                  handleLiteralCommit();
                                 } else {
                                   const picked = tokenSuggestions[tokenSuggestionHighlight];
                                   if (picked) handleRailPickTokenName(picked);
@@ -3136,11 +3290,7 @@ const [hoverChip, setHoverChip] = useState<{ tag: string; op: string; value: str
             // Phase 5: when a chip is hovered, rescope the grid to just that
             // chip's filter. Otherwise show the combined preview.
             if (hoverChip) {
-              const op = hoverChip.op || '==';
-              const value = hoverChip.value.startsWith('@') || /^\d/.test(hoverChip.value)
-                ? hoverChip.value
-                : `"${hoverChip.value.replace(/"/g, '\\"')}"`;
-              const soloFilter = `${hoverChip.tag}${op}${value}`;
+              const soloFilter = hoverChip.expression;
               return (
                 <div>
                   <div className="px-3 py-1.5 text-[11px] text-purple-700 bg-purple-50 border-b border-purple-200">
