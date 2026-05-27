@@ -89,7 +89,15 @@ export function resolveMode(
   runtime?: RuntimeChoice,
 ): ContainerDef | null {
   const role = modeToRole(mode);
-  const containerName = `${CONTAINER_PREFIX}${role}`;
+  // Defensive: CONTAINER_PREFIX is `export const CONTAINER_PREFIX = 'ss-'`
+  // in state.ts, but the v2.3.x sidecar bundle has been observed serving
+  // `undefined` for this re-export at runtime — producing container names
+  // like "undefinedrlm" in admin UI rows. Same class of bug as the
+  // `(0 , l.fZ) is not a function` Webpack/Turbopack module-reference issue.
+  // Hard-fallback to the literal so this code path is robust to bundling
+  // weirdness while the underlying bundle issue is investigated.
+  const prefix: string = (typeof CONTAINER_PREFIX === 'string' && CONTAINER_PREFIX.length > 0) ? CONTAINER_PREFIX : 'ss-';
+  const containerName = `${prefix}${role}`;
 
   // When the master explicitly picked a runtime, honor it (subject to compat
   // checks against the host's actual capabilities). Falls through to the

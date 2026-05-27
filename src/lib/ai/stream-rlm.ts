@@ -117,6 +117,33 @@ export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> 
           probed.push(`${cand.hostname}:live-probe-err-${(err as Error).message.slice(0, 40)}`);
         }
       }
+
+      // Last-resort: vLLM is sometimes running on the host with no
+      // sidecar-tracked container — observed when an operator deletes &
+      // recreates ss-rlm out-of-band, or when vLLM was started bare-metal.
+      // The sidecar reports rlm.status='not_found' but :8100/v1/models on
+      // the same host answers 200 OK. Trust that signal directly.
+      console.log(`[RLM] live-probe still empty — last-resort: probing :${RLM_PORT}/v1/models on each transitional host`);
+      for (const cand of transitional) {
+        try {
+          const host = new URL(cand.url).hostname;
+          const probeUrl = `http://${host}:${RLM_PORT}/v1/models`;
+          const r = await fetch(probeUrl, { signal: AbortSignal.timeout(2500) });
+          if (!r.ok) { probed.push(`${cand.hostname}:vllm-probe-http-${r.status}`); continue; }
+          // Sanity check: response must look like an OpenAI /v1/models payload
+          // mentioning the RLM model id, so we don't latch onto an unrelated
+          // service that happens to answer on port 8100.
+          const body = await r.text().catch(() => '');
+          if (!body.includes(RLM_MODEL_ID)) {
+            probed.push(`${cand.hostname}:vllm-probe-wrong-model`);
+            continue;
+          }
+          console.warn(`[RLM] endpoint resolved via vLLM direct probe — sidecar says rlm not_found but vLLM is serving (operator deleted/recreated container out-of-band?). host=${host}`);
+          return { endpoint: `http://${host}:${RLM_PORT}`, host };
+        } catch (err) {
+          probed.push(`${cand.hostname}:vllm-probe-err-${(err as Error).message.slice(0, 40)}`);
+        }
+      }
     }
 
     console.warn(`[RLM] endpoint NOT resolved — no sidecar has rlm=running. Fleet check: ${probed.join(', ') || '(empty fleet)'}`);
