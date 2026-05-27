@@ -517,13 +517,11 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
               }
               return false;
             },
-            Space: () => {
-              if (pickerActiveRef.current) {
-                onPickerKeyRef.current?.('Space');
-                return true;
-              }
-              return false;
-            },
+            // NOTE: Space is NOT a TipTap shortcut here. Intercepting it
+            // breaks ordinary typing inside a `{{ ... ` mustache (spaces
+            // between tokens get eaten). The parent listens for the rail's
+            // own Space keydown on the picker UI element instead — and a
+            // dedicated "Add N (or)" button still exists for mouse users.
           };
         },
       }),
@@ -652,6 +650,9 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
           },
         ],
       });
+      // After a setContent the caret defaults to the start; move it to the
+      // end of the doc so typing continues where the user was.
+      editor.commands.focus('end');
     },
     getCursorOffset() {
       if (!editor) return 0;
