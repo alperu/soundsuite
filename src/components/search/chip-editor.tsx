@@ -517,11 +517,17 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
               }
               return false;
             },
-            // NOTE: Space is NOT a TipTap shortcut here. Intercepting it
-            // breaks ordinary typing inside a `{{ ... ` mustache (spaces
-            // between tokens get eaten). The parent listens for the rail's
-            // own Space keydown on the picker UI element instead — and a
-            // dedicated "Add N (or)" button still exists for mouse users.
+            // Shift+Space toggles the highlighted picker option into the
+            // multi-select OR-group. Plain Space stays as a literal space so
+            // ordinary typing inside `{{ ... }}` works. Mouse equivalents
+            // are still Ctrl/Cmd+Click (toggle) and Shift+Click (range).
+            'Shift-Space': () => {
+              if (pickerActiveRef.current) {
+                onPickerKeyRef.current?.('Space');
+                return true;
+              }
+              return false;
+            },
           };
         },
       }),

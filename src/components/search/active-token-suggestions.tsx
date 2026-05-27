@@ -586,10 +586,17 @@ export function ActiveTokenSuggestions({
         </p>
       </div>
 
-      {/* Task #63: multi-select summary + commit button. Visible when the
-          user has Ctrl/Cmd-clicked or Shift+clicked at least one row. The
-          button OR-joins all selected values, paren-wrapped, and splices the
-          batch at the caret position. */}
+      {/* Hint: keyboard multi-select uses Shift+Space (Space alone stays as
+          a literal space inside the mustache). */}
+      {(!selectedValues || selectedValues.size === 0) && onPickMany && (
+        <div className="px-3 py-1.5 border-b border-gray-100 bg-gray-50 text-[10px] text-gray-500">
+          <span>
+            <kbd className="px-1 py-0.5 border border-gray-300 rounded bg-white text-[9px]">Tab</kbd> commit · {' '}
+            <kbd className="px-1 py-0.5 border border-gray-300 rounded bg-white text-[9px]">Shift</kbd>+<kbd className="px-1 py-0.5 border border-gray-300 rounded bg-white text-[9px]">Space</kbd> add to OR-group · {' '}
+            <kbd className="px-1 py-0.5 border border-gray-300 rounded bg-white text-[9px]">⌘</kbd>+click toggle
+          </span>
+        </div>
+      )}
       {selectedValues && selectedValues.size > 0 && onPickMany && (
         <div className="px-3 py-2 border-b border-purple-200 bg-purple-50/70 flex items-center justify-between gap-2">
           <span className="text-[11px] text-purple-700">

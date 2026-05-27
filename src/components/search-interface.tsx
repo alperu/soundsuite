@@ -2752,7 +2752,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                             }
 
                             if (pickerActive) {
-                              if (e.key === ' ' && valuePickerActive && pickerOptions[pickerHighlight]) {
+                              if (e.key === ' ' && e.shiftKey && valuePickerActive && pickerOptions[pickerHighlight]) {
                                 e.preventDefault();
                                 const picked = pickerOptions[pickerHighlight];
                                 const next = new Set(pickerSelectedValues);
@@ -3045,7 +3045,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                       </span>
                     )}
                     <p className="text-[10px] text-gray-400">
-                      Shift+Enter to send · Enter picks suggestion / new line · ↑↓ to navigate
+                      {'Shift+Enter to send · Tab picks rail suggestion · Shift+Space toggles multi-select · `}}` materializes a chip · ↑↓ to navigate'}
                     </p>
                     {embeddingInfo && (
                       <span className="inline-flex items-center gap-1 text-[10px] text-gray-400" title={`Embedding: ${formatEmbeddingLabel(embeddingInfo)}`}>
