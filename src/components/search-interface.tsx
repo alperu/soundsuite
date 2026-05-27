@@ -2504,12 +2504,68 @@ export default function SearchInterface({
                             el.style.height = Math.max(inputHeight, Math.min(el.scrollHeight, max)) + 'px';
                           }}
                           onKeyDown={e => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
+                            // Keyboard bindings:
+                            //   Shift+Enter → submit (Deep Search / Ask AI / Compare)
+                            //   Enter (picker active) → commit highlighted suggestion
+                            //   Enter (no picker) → newline (default textarea behavior)
+                            //   ↑ / ↓ (picker active) → move highlight
+                            //   Tab (picker active) → commit highlight
+                            //   Esc (picker active) → close picker
+                            const valueOpts = pickerOptions.length;
+                            const tokenOpts = tokenSuggestions.length;
+                            const valuePickerActive = useHaystackFilters && activeToken !== null && valueOpts > 0;
+                            const tokenPickerActive = useHaystackFilters && tokenOpts > 0 && !valuePickerActive;
+                            const pickerActive = valuePickerActive || tokenPickerActive;
+
+                            // Shift+Enter always submits regardless of picker
+                            if (e.key === 'Enter' && e.shiftKey) {
                               e.preventDefault();
                               if (aiQuery.trim() && !aiLoading) {
                                 handleAISearch(e as unknown as React.FormEvent);
                               }
+                              return;
                             }
+
+                            if (pickerActive) {
+                              if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                if (valuePickerActive) {
+                                  setPickerHighlight(i => (i + 1) % valueOpts);
+                                } else {
+                                  setTokenSuggestionHighlight(i => (i + 1) % tokenOpts);
+                                }
+                                return;
+                              }
+                              if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                if (valuePickerActive) {
+                                  setPickerHighlight(i => (i - 1 + valueOpts) % valueOpts);
+                                } else {
+                                  setTokenSuggestionHighlight(i => (i - 1 + tokenOpts) % tokenOpts);
+                                }
+                                return;
+                              }
+                              if (e.key === 'Enter' || e.key === 'Tab') {
+                                e.preventDefault();
+                                if (valuePickerActive) {
+                                  const picked = pickerOptions[pickerHighlight];
+                                  if (picked) handlePickActiveToken(picked);
+                                } else {
+                                  const picked = tokenSuggestions[tokenSuggestionHighlight];
+                                  if (picked) handleRailPickTokenName(picked);
+                                }
+                                return;
+                              }
+                              if (e.key === 'Escape') {
+                                e.preventDefault();
+                                setPickerOptions([]);
+                                setTokenSuggestions([]);
+                                setActiveToken(null);
+                                return;
+                              }
+                            }
+                            // Plain Enter (no picker) → let the textarea
+                            // insert a newline. Use Shift+Enter to submit.
                           }}
                           placeholder={hasConversation ? 'Ask a follow-up...' : 'Ask a question about your legal documents...'}
                           rows={3}
@@ -2743,7 +2799,7 @@ export default function SearchInterface({
                       </span>
                     )}
                     <p className="text-[10px] text-gray-400">
-                      Enter to send, Shift+Enter for new line
+                      Shift+Enter to send · Enter picks suggestion / new line · ↑↓ to navigate
                     </p>
                     {embeddingInfo && (
                       <span className="inline-flex items-center gap-1 text-[10px] text-gray-400" title={`Embedding: ${formatEmbeddingLabel(embeddingInfo)}`}>
