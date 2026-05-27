@@ -64,6 +64,39 @@ export interface PathValueOption {
   id?: string;
 }
 
+/**
+ * Parse the `scope` query param. It's a URL-encoded JSON array of
+ * `{tag, op, value}` chips currently present in the composer. We only act on
+ * a `caseRef==<id>` chip for now (used to scope the filingRef picker).
+ */
+interface ScopeChip {
+  tag: string;
+  op?: string;
+  value: string;
+}
+
+function parseScope(raw: string | null): ScopeChip[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (c): c is ScopeChip =>
+        c && typeof c === 'object' && typeof c.tag === 'string' && typeof c.value === 'string',
+    );
+  } catch {
+    return [];
+  }
+}
+
+function caseIdFromScope(scope: ScopeChip[]): string | null {
+  const chip = scope.find(
+    (c) => (c.tag === 'caseRef' || c.tag === 'case') && (c.op ?? '==') === '==',
+  );
+  if (!chip) return null;
+  return chip.value.startsWith('@') ? chip.value.slice(1) : chip.value;
+}
+
 export async function GET(request: NextRequest) {
   try {
     const url = new URL(request.url);
@@ -71,13 +104,58 @@ export async function GET(request: NextRequest) {
     const prefix = (url.searchParams.get('prefix') ?? '').trim();
     const limitRaw = Number(url.searchParams.get('limit') ?? '20');
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 20;
+    const scope = parseScope(url.searchParams.get('scope'));
 
     const segments = pathParam.split('->').filter((s) => s.length > 0);
-    if (segments.length < 2) {
+    if (segments.length < 1) {
       return NextResponse.json({ options: [] satisfies PathValueOption[] });
     }
     const root = segments[0];
     const attrSeg = segments[segments.length - 1];
+
+    // — filingRef: pick from Filing table, optionally scoped to a case== chip. —
+    // Single-segment path (`filingRef`) returns filings; the picker uses the
+    // returned `value` as the @id and `label` as the human-readable title.
+    if (root === 'filingRef' || root === 'filing') {
+      const filingClient = prisma as unknown as {
+        filing: {
+          findMany: (args: {
+            where: unknown;
+            select?: unknown;
+            take?: number;
+            orderBy?: unknown;
+          }) => Promise<Array<Record<string, unknown>>>;
+        };
+      };
+      const scopedCaseId = caseIdFromScope(scope);
+      const where: Record<string, unknown> = {};
+      if (scopedCaseId) where.caseId = scopedCaseId;
+      if (prefix) {
+        where.OR = [
+          { title: { contains: prefix } },
+          { filingType: { contains: prefix } },
+        ];
+      }
+      const rows = await filingClient.filing.findMany({
+        where,
+        select: { id: true, title: true, filingType: true, filingDate: true },
+        take: limit,
+        orderBy: [{ filingDate: 'desc' }, { title: 'asc' }],
+      });
+      const options: PathValueOption[] = rows.map((r) => {
+        const id = r.id as string;
+        const title = (r.title as string) ?? '';
+        const ftype = (r.filingType as string | null) ?? '';
+        const date = r.filingDate ? String(r.filingDate).slice(0, 10) : '';
+        return {
+          value: `@${id}`,
+          label: title || ftype || id,
+          secondary: [ftype, date].filter(Boolean).join(' · ') || undefined,
+          id,
+        };
+      });
+      return NextResponse.json({ options });
+    }
 
     // The Prisma client's `$extends` return type doesn't surface the model
     // delegates cleanly here, so we narrow with a local cast. Reads only;

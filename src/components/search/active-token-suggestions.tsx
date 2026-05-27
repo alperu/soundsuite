@@ -70,8 +70,21 @@ export interface PickedSuggestion {
   value: string;
 }
 
+/** Minimal scope chip shape passed to path-values for cascading pickers. */
+export interface ScopeChipLite {
+  tag: string;
+  op?: string;
+  value: string;
+}
+
 export interface ActiveTokenSuggestionsProps {
   active: ActiveToken | null;
+  /**
+   * Chips currently present in the composer. Forwarded to /api/search/path-values
+   * via the `scope` query param so cascading pickers (e.g. filingRef scoped by
+   * the current case==) can narrow their result set.
+   */
+  scope?: ScopeChipLite[];
   /** Highlighted row index (driven by parent for ↑/↓ keyboard nav). */
   highlight: number;
   /** Called when the user clicks a row OR options arrive after a query. */
@@ -265,6 +278,7 @@ function usePathTraversalSuggestions(
   path: string[],
   partial: string,
   enabled: boolean,
+  scope: ScopeChipLite[] = [],
 ): { options: RemoteOption[]; loading: boolean; error: string | null } {
   const [state, setState] = useState<{
     options: RemoteOption[];
@@ -274,13 +288,21 @@ function usePathTraversalSuggestions(
 
   const lastKeyRef = useRef('');
   const joined = path.join('->');
+  // Stable scope key — only the bits the server actually uses.
+  const scopeKey = scope
+    .map((c) => `${c.tag}${c.op ?? '=='}${c.value}`)
+    .join(',');
 
   useEffect(() => {
-    if (!enabled || path.length < 2) {
+    // path-values now also handles single-segment ref pickers (filingRef).
+    // Allow length === 1 when root is a known single-segment ref root.
+    const singleSegmentRefRoots = new Set(['filingRef', 'filing']);
+    const isSingleSegmentRef = path.length === 1 && singleSegmentRefRoots.has(path[0]);
+    if (!enabled || (path.length < 2 && !isSingleSegmentRef)) {
       setState({ options: [], loading: false, error: null });
       return;
     }
-    const key = `${joined}|${partial}`;
+    const key = `${joined}|${partial}|${scopeKey}`;
     lastKeyRef.current = key;
     let cancelled = false;
 
@@ -292,6 +314,7 @@ function usePathTraversalSuggestions(
           prefix: partial,
           limit: '20',
         });
+        if (scope.length > 0) params.set('scope', JSON.stringify(scope));
         const res = await fetch(`/api/search/path-values?${params.toString()}`);
         if (cancelled || lastKeyRef.current !== key) return;
         if (!res.ok) {
@@ -335,7 +358,7 @@ function usePathTraversalSuggestions(
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [joined, partial, enabled, path.length]);
+  }, [joined, partial, enabled, path.length, scopeKey]);
 
   return state;
 }
@@ -377,6 +400,7 @@ const DATE_TOKENS = new Set([
 
 export function ActiveTokenSuggestions({
   active,
+  scope = [],
   highlight,
   onPick,
   onPickMany,
@@ -466,7 +490,11 @@ export function ActiveTokenSuggestions({
   const partial = active?.partial ?? '';
   // Task #65: multi-segment paths (`reporterRef->displayName`) route through
   // /api/search/path-values instead of the haystack-proxy person/case picker.
-  const isPathTraversal = active != null && path.length > 1;
+  // Single-segment `filingRef` also uses the path-values endpoint (with the
+  // current chips passed as `scope` so the picker can cascade on case==).
+  const isSingleSegmentPathRoot = active != null && path.length === 1
+    && (path[0] === 'filingRef' || path[0] === 'filing');
+  const isPathTraversal = active != null && (path.length > 1 || isSingleSegmentPathRoot);
 
   // -------------------------------------------------------------------------
   // Sourcing dispatch
@@ -483,7 +511,7 @@ export function ActiveTokenSuggestions({
   const isRefToken = !isPathTraversal && token != null && REF_TOKENS.has(token);
   const remote = useRemoteSuggestions(isRefToken ? token : null, partial, isRefToken);
 
-  const pathRemote = usePathTraversalSuggestions(path, partial, isPathTraversal);
+  const pathRemote = usePathTraversalSuggestions(path, partial, isPathTraversal, scope);
 
   const isDateToken = !isPathTraversal && token != null && DATE_TOKENS.has(token);
   const isNumberToken = !isPathTraversal && token != null && TOKEN_MAP[token]?.category === 'number';

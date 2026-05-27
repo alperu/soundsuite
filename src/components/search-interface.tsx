@@ -1927,6 +1927,13 @@ export default function SearchInterface({
               {activeToken ? (
                 <ActiveTokenSuggestions
                   active={activeToken}
+                  scope={haystackChips
+                    .filter((c): c is { kind?: 'field'; key: string; value: string; op?: '=='|'!='|'>='|'<='|'>'|'<' } =>
+                      (c as { kind?: string }).kind === undefined || (c as { kind?: string }).kind === 'field')
+                    .map((c) => {
+                      const def = (TOKEN_MAP as Record<string, { tag: string }>)[c.key];
+                      return { tag: def?.tag ?? c.key, op: c.op ?? '==', value: c.value };
+                    })}
                   highlight={pickerHighlight}
                   onPick={handlePickActiveToken}
                   onPickMany={handlePickManyActiveToken}

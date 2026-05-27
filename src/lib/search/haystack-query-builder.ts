@@ -86,6 +86,9 @@ export const TOKEN_MAP: Record<string, TokenDef> = {
   respondent: { impliedKind: 'motion', tag: 'respondentRef', category: 'ref' },
   clerk: { impliedKind: 'motionEvent', tag: 'clerkRef', category: 'ref' },
   reporter: { impliedKind: 'motionEvent', tag: 'reporterRef', category: 'ref' },
+  // Filing ref — picker cascades on the current case== chip (see path-values
+  // route `scope` param) so the user only sees filings under that case.
+  filingRef: { tag: 'filingRef', category: 'ref' },
 
   // Dates
   hearingDate: { impliedKind: 'motion', tag: 'hearingDate', category: 'date' },
@@ -98,6 +101,10 @@ export const TOKEN_MAP: Record<string, TokenDef> = {
   motionType: { impliedKind: 'motion', tag: 'motionType', category: 'enum', quote: true },
   kind: { impliedKind: 'motionEvent', tag: 'kind', category: 'enum', quote: true },
   attachmentKind: { impliedKind: 'motionAttachment', tag: 'attachmentKind', category: 'enum', quote: true },
+  // Document-level kind. Filters the LanceDB `document_type` scalar column,
+  // which holds the title-cased Filing.filingType strings ("Reporter's Record",
+  // "Clerk's Record", "Motion", etc.). Surface enum values mirror DB exactly.
+  documentType: { tag: 'documentType', category: 'enum', quote: true },
 
   // Numbers
   revisionSeq: { tag: 'revisionSeq', category: 'number' },
@@ -137,6 +144,33 @@ export const ENUM_VALUES: Record<string, string[]> = {
     'exhibit',
     'affidavit',
     'declaration',
+  ],
+  // Mirrors the `Document.documentType` values present in production
+  // (SELECT DISTINCT documentType FROM Document on 2026-05-27).
+  documentType: [
+    "Reporter's Record",
+    "Clerk's Record",
+    'Motion',
+    'Order',
+    'Brief',
+    'Response',
+    'Reply',
+    'Notice',
+    'Letter',
+    'Petition',
+    'Affidavit',
+    'Judgment',
+    'Decree',
+    'Transcript',
+    'Settlement',
+    'Bill of Review',
+    'Demand Letter',
+    'Designation',
+    'Objection',
+    'Request',
+    'Return of Service',
+    'Supplement',
+    'Other',
   ],
 };
 
