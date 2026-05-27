@@ -40,23 +40,34 @@ describe('decomposeQuery — boolean bypass', () => {
     expect(r.subQueries.length).toBeGreaterThan(0);
   });
 
-  test('boolean query with operators skips LLM, splits at or', async () => {
+  test('boolean query with parens + or skips LLM, splits at or', async () => {
     const r = await decomposeQuery('(motion and compel) or appeal');
     expect(callLLMJsonMock).not.toHaveBeenCalled();
     expect(r.subQueries.length).toBe(2);
-    // Each branch should be parseable as boolean
     expect(r.intent).toBe('(motion and compel) or appeal');
   });
 
-  test('boolean query without or yields a single branch, still skips LLM', async () => {
-    const r = await decomposeQuery('motion and compel');
-    expect(callLLMJsonMock).not.toHaveBeenCalled();
-    expect(r.subQueries.length).toBe(1);
+  test('natural-language "X and Y" — bare lowercase and is NOT structured, calls LLM', async () => {
+    // Regression: a paragraph of English ("Now, she may have used... and I,
+    // in no way, ignored my obligation...") was being treated as a boolean
+    // query because of the bare lowercase "and" / "no" / "not" words. The
+    // bypass now requires structured syntax (parens, quotes, field ops,
+    // unary -term) before triggering.
+    callLLMJsonMock.mockResolvedValueOnce({ subQueries: ['x'], intent: 'i' });
+    await decomposeQuery('motion and compel');
+    expect(callLLMJsonMock).toHaveBeenCalledTimes(1);
   });
 
-  test('phrase-only query skips LLM (operators detected)', async () => {
+  test('phrase-only query skips LLM (quoted phrase counts as structured)', async () => {
     const r = await decomposeQuery('"motion to compel"');
     expect(callLLMJsonMock).not.toHaveBeenCalled();
     expect(r.subQueries).toEqual(['"motion to compel"']);
+  });
+
+  test('long natural-language paragraph with stray "and"/"or"/"not" does NOT bypass', async () => {
+    callLLMJsonMock.mockResolvedValueOnce({ subQueries: ['a', 'b'], intent: 'i' });
+    const longPaste = "Now, she may have used to say similar to a trust, but I, in no way, ignored my obligation to correct that testimony that was previously given, and after it was corrected, I did confirm.";
+    await decomposeQuery(longPaste);
+    expect(callLLMJsonMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -1883,7 +1883,7 @@ export default function SearchInterface({
 
               {/* Scrollable conversation area */}
               <div ref={chatScrollRef} onScroll={handleChatScroll} className="flex-1 overflow-y-auto px-6 py-6 relative">
-                <div className="max-w-3xl mx-auto space-y-4">
+                <div className={`${(filterLogicCollapsed || !booleanMode) ? 'max-w-5xl' : 'max-w-3xl'} mx-auto space-y-4`}>
                   {/* Empty state — shown when no conversation */}
                   {!hasConversation && !aiLoading && !aiError && (
                     <div className="flex flex-col items-center justify-center h-full min-h-[300px] text-center">
@@ -2097,7 +2097,14 @@ export default function SearchInterface({
                   title="Drag to resize input area"
                 />
                 <div className="px-6 py-4">
-                <div className="max-w-3xl mx-auto">
+                {/* Composer container — when the Filter Logic left-rail
+                    panel is collapsed (or absent because booleanMode=off),
+                    widen the max-width so the textarea flows alongside the
+                    collapsed 32px rail instead of staying centered in a
+                    skinny 768px column. Operator request 2026-05-27:
+                    "When i minimize Filter Logic can you place the text
+                    along side it". */}
+                <div className={(filterLogicCollapsed || !booleanMode) ? 'max-w-5xl mx-auto' : 'max-w-3xl mx-auto'}>
                   <form onSubmit={e => {
                     if (haystackMode && (haystackChips.length > 0 || /\w+:/.test(aiQuery))) {
                       e.preventDefault();

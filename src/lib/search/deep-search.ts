@@ -171,15 +171,32 @@ export async function decomposeQuery(
   query: string,
   options?: { provider?: string; model?: string; history?: ConversationTurn[]; thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal },
 ): Promise<DecompositionResult> {
-  // Boolean-syntax bypass — when the user wrote explicit operators, top-level
-  // OR branches become parallel sub-queries; everything else is left intact.
-  // Each branch is re-serialized so the downstream pipeline can re-parse it.
-  const parsedBool = parseBooleanQuery(query);
-  if (parsedBool.ok && parsedBool.hasOperators) {
-    const branches = parsedBool.ast.op === 'OR' ? parsedBool.ast.children : [parsedBool.ast];
-    const subQueries = branches.map(astSerialize).filter(s => s.trim().length > 0);
-    if (subQueries.length > 0) {
-      return { subQueries, intent: query };
+  // Boolean-syntax bypass — when the user wrote a structured query, split
+  // top-level OR branches into parallel sub-queries.
+  //
+  // CRITICAL: parseBooleanQuery flags `hasOperators=true` for lowercase
+  // English words "and"/"or"/"not" as bare tokens. That makes natural-
+  // language pastes (e.g. "Now, she may have used... in no way, ignored")
+  // get treated as structured queries — each English word then becomes a
+  // bare AND term, astSerialize joins them with " and ", and the user
+  // sees their paragraph mangled with " and " between every word.
+  //
+  // Gate the bypass on STRUCTURED signals only: parentheses, quoted
+  // phrases, field operators (==/!=/>=/<=/>/<), or unary dash negation.
+  // Bare lowercase operator words by themselves are NOT enough.
+  const hasStructuredSyntax = (
+    /[()"]/.test(query)            // parens or quoted phrases
+    || /\b\w+\s*(==|!=|>=|<=|>|<)/.test(query)   // field operator
+    || /(?:^|\s)-[\w"]/.test(query)              // unary negation: "-term" or "-\"phrase\""
+  );
+  if (hasStructuredSyntax) {
+    const parsedBool = parseBooleanQuery(query);
+    if (parsedBool.ok && parsedBool.hasOperators) {
+      const branches = parsedBool.ast.op === 'OR' ? parsedBool.ast.children : [parsedBool.ast];
+      const subQueries = branches.map(astSerialize).filter(s => s.trim().length > 0);
+      if (subQueries.length > 0) {
+        return { subQueries, intent: query };
+      }
     }
   }
 
