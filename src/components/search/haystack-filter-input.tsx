@@ -418,7 +418,7 @@ export const HaystackFilterInput = forwardRef<
   // Keyboard
 
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
+    (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       // Ctrl+Space (or Cmd+Space) — force-open the value picker at the
       // current cursor. If the user typed a bare field prefix (`case`), the
       // helper synthesizes an empty-partial ActiveToken; we also append `==`
@@ -701,9 +701,14 @@ export const HaystackFilterInput = forwardRef<
           }
           return inner;
         })}
-        <input
-          ref={inputRef}
-          type="text"
+        {/* Swapped <input type="text"> → <textarea> so pasted/typed long
+            text WRAPS instead of becoming a single horizontally-scrolling
+            line. <input> is single-line by design and ignores white-space
+            CSS. Submit-on-Enter still works because handleKeyDown calls
+            preventDefault() on Enter. Shift+Enter inserts a newline. */}
+        <textarea
+          ref={inputRef as unknown as React.RefObject<HTMLTextAreaElement>}
+          rows={1}
           value={freetext}
           onChange={(e) => {
             const next = e.target.value;
@@ -753,9 +758,25 @@ export const HaystackFilterInput = forwardRef<
           onClick={syncCursor}
           onSelect={syncCursor}
           onFocus={syncCursor}
+          onInput={(e) => {
+            // Auto-grow: reset to a single line, then expand to scrollHeight
+            // up to a soft cap so very long pastes still wrap inside the
+            // visible composer rather than pushing past the bottom of it.
+            const el = e.currentTarget;
+            el.style.height = 'auto';
+            const cap = 240;
+            el.style.height = Math.min(el.scrollHeight, cap) + 'px';
+          }}
           placeholder={chips.length === 0 ? placeholder : ''}
           disabled={disabled}
-          className="flex-1 min-w-[120px] px-1 py-1 text-sm bg-transparent outline-none border-0"
+          className="flex-1 min-w-[120px] px-1 py-1 text-sm bg-transparent outline-none border-0 resize-none"
+          style={{
+            whiteSpace: 'pre-wrap',
+            overflowWrap: 'anywhere',
+            overflowX: 'hidden',
+            overflowY: 'auto',
+            maxHeight: 240,
+          }}
         />
       </div>
 

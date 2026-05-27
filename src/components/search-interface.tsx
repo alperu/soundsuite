@@ -408,8 +408,14 @@ export default function SearchInterface({
   // input was authored through the structured-chip composer. The chip composer
   // (haystack-filter-input.tsx) is still rendered — it's a power-user input
   // that's now ALWAYS on; the previous "Use Haystack filters" checkbox is gone.
-  const haystackMode = true;
-  const setHaystackMode = (_: boolean) => { /* no-op — canonical mode is locked on */ };
+  // Filter mode toggle. When ON, `{{ key==value }}` blocks in the textarea
+  // are extracted into a chip strip above the input on every keystroke.
+  // When OFF (default), `{{ }}` is plain literal text and the textarea wraps
+  // naturally — important since natural-language pastes were getting
+  // single-line-jammed by the prior locked-on chip-composer behavior.
+  const [useHaystackFilters, setUseHaystackFilters] = usePersistedState<boolean>('search.useHaystackFilters', false);
+  const haystackMode = useHaystackFilters;
+  const setHaystackMode = setUseHaystackFilters;
   const [haystackChips, setHaystackChips] = useState<FilterChip[]>([]);
   const [haystackBusy, setHaystackBusy] = useState(false);
   const [haystackPreview, setHaystackPreview] = useState<{
@@ -2222,12 +2228,74 @@ export default function SearchInterface({
                       // up to max-h, wraps long lines (overflow-wrap: anywhere),
                       // submit anchored bottom-right inside the box.
                       <div className="relative w-full rounded-2xl border border-gray-300 bg-white shadow-sm focus-within:ring-2 focus-within:ring-purple-500 focus-within:border-transparent transition-shadow">
+                        {/* Haystack chip strip — only renders when Filter
+                            mode is ON. Chips here are extracted from
+                            `{{ key==value }}` blocks the user types into
+                            the textarea (see onChange handler below). Each
+                            chip is deletable via its × button. */}
+                        {useHaystackFilters && haystackChips.length > 0 && (
+                          <div className="px-4 pt-3 pb-1 flex flex-wrap gap-1.5 border-b border-gray-100">
+                            {haystackChips.map((chip, i) => {
+                              const label = ((): string => {
+                                if ('key' in chip) return `${chip.key}${chip.op || '=='}${chip.value}`;
+                                if (chip.kind === 'term') return `"${chip.value}"`;
+                                if (chip.kind === 'and') return 'and';
+                                if (chip.kind === 'or') return 'or';
+                                if (chip.kind === 'not') return 'not';
+                                if (chip.kind === 'lparen') return '(';
+                                if (chip.kind === 'rparen') return ')';
+                                return '?';
+                              })();
+                              return (
+                                <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-mono">
+                                  {label}
+                                  <button
+                                    type="button"
+                                    onClick={() => setHaystackChips(prev => prev.filter((_, j) => j !== i))}
+                                    className="opacity-50 hover:opacity-100 hover:text-red-600 -mr-0.5"
+                                    title="Remove filter"
+                                  >×</button>
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
                         <textarea
                           id="ai-query"
                           ref={aiQueryRef}
                           value={aiQuery}
                           onChange={e => {
-                            setAiQuery(e.target.value);
+                            let next = e.target.value;
+                            // Mustache extraction: when Filter mode is ON
+                            // and the text contains a CLOSED {{ ... }}
+                            // block, extract the contents as filter chips,
+                            // strip the mustache from the textarea text,
+                            // and keep the cursor at a sensible position.
+                            // When the toggle is OFF, `{{ }}` is plain text.
+                            if (useHaystackFilters && /\{\{[^{}]*\}\}/.test(next)) {
+                              const extractedChips: typeof haystackChips = [];
+                              next = next.replace(/\{\{\s*([^{}]*?)\s*\}\}/g, (_match, raw) => {
+                                const content = String(raw).trim();
+                                if (!content) return '';
+                                // key OP value — where OP is ==, !=, >=, <=, >, <
+                                const m = /^([^=!<>]+?)\s*(==|!=|>=|<=|>|<)\s*(.+)$/.exec(content);
+                                if (m) {
+                                  extractedChips.push({
+                                    kind: 'field',
+                                    key: m[1].trim(),
+                                    op: m[2] as '==' | '!=' | '>=' | '<=' | '>' | '<',
+                                    value: m[3].trim().replace(/^["']|["']$/g, ''),
+                                  });
+                                } else {
+                                  extractedChips.push({ kind: 'term', value: content });
+                                }
+                                return '';
+                              }).replace(/  +/g, ' ').trim();
+                              if (extractedChips.length > 0) {
+                                setHaystackChips(prev => [...prev, ...extractedChips]);
+                              }
+                            }
+                            setAiQuery(next);
                             // Auto-grow within [inputHeight, max]. Reset
                             // first so shrinking works when user deletes
                             // text — but never below the operator-set
@@ -2324,6 +2392,14 @@ export default function SearchInterface({
                             title="Compare answers across providers/models"
                           >
                             Compare
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setUseHaystackFilters(!useHaystackFilters)}
+                            className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${useHaystackFilters ? 'bg-purple-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                            title="Enable {{ key==value }} filter syntax — wrapped content becomes a chip above the input. When off, {{ }} is plain text."
+                          >
+                            Filter
                           </button>
                         </div>
                       </div>
