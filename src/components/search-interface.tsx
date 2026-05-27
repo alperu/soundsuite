@@ -32,7 +32,7 @@ import { SampleQueryPanel } from './search/sample-query-panel';
 import { HaystackPreviewGrid } from './search/haystack-preview-grid';
 import { FilterLogicPanel, isLikelyMidTyping } from './search/filter-logic-panel';
 import BooleanChipComposer from './search/boolean-chip-composer';
-import { MustachePicker } from './search/mustache-picker';
+import { MustachePicker, detectMustacheActive } from './search/mustache-picker';
 import { GenerateAxonPopover } from './search/generate-axon-popover';
 
 // Known boolean-query field names (kept in sync with FIELD_RESOLVERS in
@@ -43,9 +43,11 @@ import { parseBooleanQuery, type ParseResult } from '@/lib/search/boolean-query'
 import { TokenNameSuggestions } from './search/token-name-suggestions';
 import {
   ActiveTokenSuggestions,
+  activeTokenAtCursor,
   type ActiveToken,
   type PickedSuggestion,
 } from './search/active-token-suggestions';
+import { TOKEN_KEYS } from '@/lib/search/haystack-query-builder';
 import type { SampleQuery } from '@/lib/search/sample-queries';
 import {
   buildHaystackFilter,
@@ -458,33 +460,128 @@ export default function SearchInterface({
   const [tokenSuggestionHighlight, setTokenSuggestionHighlight] = useState(0);
   const haystackInputRef = useRef<HaystackFilterInputHandle>(null);
 
-  // Commit a chip from the picker: appends to chips + strips the matching
-  // `token:partial` substring out of freetext. The HaystackFilterInput's own
-  // commitChip path covers Enter-to-commit; this callback handles mouse clicks
-  // on rows in the rail (where the input doesn't have focus during the click).
+  // Derive `activeToken` + `tokenSuggestions` from the mustache cursor in the
+  // textarea. When the caret is inside an unclosed `{{ ... ` block:
+  //   - if a `key<op>` has been typed → expose ActiveToken with ABSOLUTE
+  //     textarea indices (so handlePickActiveToken can splice directly).
+  //   - if only a partial field name → populate tokenSuggestions from
+  //     TOKEN_KEYS prefix-match.
+  // Outside any mustache, both clear.
+  useEffect(() => {
+    if (!useHaystackFilters) {
+      if (activeToken !== null) setActiveToken(null);
+      if (tokenSuggestions.length > 0) setTokenSuggestions([]);
+      return;
+    }
+    const m = detectMustacheActive(aiQuery, aiQueryCursor);
+    if (!m) {
+      if (activeToken !== null) setActiveToken(null);
+      if (tokenSuggestions.length > 0) setTokenSuggestions([]);
+      return;
+    }
+    // Mustache content starts at openIndex + 2 (after `{{`); strip leading ws.
+    const blockStart = m.openIndex + 2;
+    const leadingWs = m.raw.length - m.raw.replace(/^\s+/, '').length;
+    const trimmedStart = blockStart + leadingWs;
+    const innerText = aiQuery.slice(trimmedStart, aiQueryCursor);
+    const innerCursor = innerText.length;
+
+    if (m.op !== null && m.fieldKey.length > 0) {
+      // Phase B — feed into activeTokenAtCursor (relative). It expects to find
+      // a `key op partial` pattern; build one and run.
+      const tok = activeTokenAtCursor(innerText, innerCursor);
+      if (tok) {
+        const absToken: ActiveToken = {
+          ...tok,
+          startIndex: trimmedStart + tok.startIndex,
+          endIndex: trimmedStart + tok.endIndex,
+        };
+        if (
+          !activeToken ||
+          activeToken.prefix !== absToken.prefix ||
+          activeToken.partial !== absToken.partial ||
+          activeToken.op !== absToken.op ||
+          activeToken.startIndex !== absToken.startIndex ||
+          activeToken.endIndex !== absToken.endIndex
+        ) {
+          setActiveToken(absToken);
+        }
+        if (tokenSuggestions.length > 0) setTokenSuggestions([]);
+        return;
+      }
+    }
+
+    // Phase A — token-name partial. Filter TOKEN_KEYS by case-insensitive
+    // substring against `fieldPartial`.
+    if (activeToken !== null) setActiveToken(null);
+    const q = m.fieldPartial.trim().toLowerCase();
+    const filtered = TOKEN_KEYS.filter((k) => !q || k.toLowerCase().includes(q)).slice(0, 12);
+    // Only update state if it actually changed (cheap deep equality on joined).
+    const nextJoined = filtered.join('|');
+    const prevJoined = tokenSuggestions.join('|');
+    if (nextJoined !== prevJoined) setTokenSuggestions(filtered);
+  }, [aiQuery, aiQueryCursor, useHaystackFilters]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Rail click handler for a token-name row: splice the chosen field name
+  // (with its canonical operator) inside the active `{{ }}` block.
+  const handleRailPickTokenName = useCallback(
+    (tok: string) => {
+      const m = detectMustacheActive(aiQuery, aiQueryCursor);
+      if (!m) return;
+      const blockStart = m.openIndex + 2;
+      const leadingWs = m.raw.length - m.raw.replace(/^\s+/, '').length;
+      const trimmedStart = blockStart + leadingWs;
+      const op = (TOKEN_MAP[tok]?.op ?? '==') as string;
+      const replacement = `${tok}${op}`;
+      const before = aiQuery.slice(0, trimmedStart);
+      const after = aiQuery.slice(aiQueryCursor);
+      const next = before + replacement + after;
+      const nextCursor = before.length + replacement.length;
+      setAiQuery(next);
+      setAiQueryCursor(nextCursor);
+      requestAnimationFrame(() => {
+        const el = aiQueryRef.current;
+        if (el) {
+          el.focus();
+          el.setSelectionRange(nextCursor, nextCursor);
+        }
+      });
+    },
+    [aiQuery, aiQueryCursor],
+  );
+
+  // Quote helper — wrap value in double quotes if it contains whitespace or
+  // mustache-meta chars. Mirrors MustachePicker's auto-quote rule.
+  const quoteIfNeeded = (v: string): string =>
+    /[\s"{}]/.test(v) ? `"${v.replace(/"/g, '\\"')}"` : v;
+
+  // Splice a value pick INSIDE the active `{{ ... }}` mustache block in the
+  // textarea. `activeToken.startIndex/endIndex` are absolute textarea
+  // positions (the effect below translates from mustache-relative to absolute
+  // before storing). Replacement is `<prefix><op><quoted-value>`.
   const handlePickActiveToken = useCallback(
     (picked: PickedSuggestion) => {
       if (!activeToken) return;
-      setHaystackChips((prev) => [
-        ...prev,
-        // Preserve the user-typed operator (>=, <=, etc.) — without this the
-        // chip falls back to `==` and the chip render shows the wrong op.
-        { key: activeToken.prefix, value: picked.value, label: picked.label, op: activeToken.op },
-      ]);
-      setAiQuery((prev) => {
-        const before = prev.slice(0, activeToken.startIndex);
-        const after = prev.slice(activeToken.endIndex);
-        return (before + after).replace(/\s+$/, '');
-      });
+      const replacement = `${activeToken.prefix}${activeToken.op}${quoteIfNeeded(picked.value)}`;
+      const before = aiQuery.slice(0, activeToken.startIndex);
+      const after = aiQuery.slice(activeToken.endIndex);
+      const next = before + replacement + after;
+      const nextCursor = before.length + replacement.length;
+      setAiQuery(next);
+      setAiQueryCursor(nextCursor);
       setActiveToken(null);
       setPickerHighlight(0);
       setPickerOptions([]);
       setPickerSelectedValues(new Set());
-      // The row's onMouseDown calls e.preventDefault() which keeps focus in
-      // the input — no manual refocus needed. The legacy aiQueryRef points
-      // at the <textarea> path and isn't valid in haystack mode anyway.
+      requestAnimationFrame(() => {
+        const el = aiQueryRef.current;
+        if (el) {
+          el.focus();
+          el.setSelectionRange(nextCursor, nextCursor);
+        }
+      });
     },
-    [activeToken],
+    [activeToken, aiQuery],
   );
 
   // Task #63: batch commit — Shift/Cmd-clicked rows are committed together,
@@ -497,24 +594,33 @@ export default function SearchInterface({
       if (!activeToken || picked.length === 0) return;
       const op = activeToken.op;
       const key = activeToken.prefix;
-      const batch: FilterChip[] = [{ kind: 'lparen' }];
-      picked.forEach((p, idx) => {
-        if (idx > 0) batch.push({ kind: 'or' });
-        batch.push({ key, value: p.value, label: p.label, op });
-      });
-      batch.push({ kind: 'rparen' });
-      setHaystackChips((prev) => [...prev, ...batch]);
-      setAiQuery((prev) => {
-        const before = prev.slice(0, activeToken.startIndex);
-        const after = prev.slice(activeToken.endIndex);
-        return (before + after).replace(/\s+$/, '');
-      });
+      // Build a paren-wrapped OR group as plain text inside the mustache:
+      //   ( key==v1 or key==v2 ... )
+      // The mustache extractor will turn each into its own chip on next edit;
+      // for now this expresses intent in-place where the picker fired.
+      const inner = picked
+        .map((p) => `${key}${op}${quoteIfNeeded(p.value)}`)
+        .join(' or ');
+      const replacement = picked.length > 1 ? `( ${inner} )` : inner;
+      const before = aiQuery.slice(0, activeToken.startIndex);
+      const after = aiQuery.slice(activeToken.endIndex);
+      const next = before + replacement + after;
+      const nextCursor = before.length + replacement.length;
+      setAiQuery(next);
+      setAiQueryCursor(nextCursor);
       setActiveToken(null);
       setPickerHighlight(0);
       setPickerOptions([]);
       setPickerSelectedValues(new Set());
+      requestAnimationFrame(() => {
+        const el = aiQueryRef.current;
+        if (el) {
+          el.focus();
+          el.setSelectionRange(nextCursor, nextCursor);
+        }
+      });
     },
-    [activeToken],
+    [activeToken, aiQuery],
   );
 
   const handleSelectedValuesChange = useCallback(
@@ -1803,7 +1909,7 @@ export default function SearchInterface({
 
         {/* Main Content */}
         <main
-          className={`flex-1 bg-gray-50 ${mode === 'analysis' ? 'flex overflow-hidden' : ''} ${mode === 'ai' ? `relative flex ${haystackMode ? 'flex-row' : 'flex-col'} overflow-hidden` : ''} ${mode === 'direct' ? 'overflow-auto' : ''}`}
+          className={`flex-1 bg-gray-50 ${mode === 'analysis' ? 'flex overflow-hidden' : ''} ${mode === 'ai' ? `relative flex ${useHaystackFilters ? 'flex-row' : 'flex-col'} overflow-hidden` : ''} ${mode === 'direct' ? 'overflow-auto' : ''}`}
           onDragEnter={mode === 'ai' ? handleDragEnter : undefined}
           onDragOver={mode === 'ai' ? handleDragOver : undefined}
           onDragLeave={mode === 'ai' ? handleDragLeave : undefined}
@@ -1816,8 +1922,8 @@ export default function SearchInterface({
               off, the outer is flex-col (legacy single-column) and no rail.
               The chat column itself is always flex-col with the scrollable
               conversation + fixed input. */}
-          {mode === 'ai' && haystackMode && (
-            <div className="flex flex-col min-w-0 gap-2">
+          {mode === 'ai' && useHaystackFilters && (
+            <div className="flex flex-col min-w-0 gap-2 w-80 flex-shrink-0 border-r border-gray-200 bg-white overflow-y-auto p-2">
               {activeToken ? (
                 <ActiveTokenSuggestions
                   active={activeToken}
@@ -1839,13 +1945,13 @@ export default function SearchInterface({
                 <TokenNameSuggestions
                   suggestions={tokenSuggestions}
                   highlight={tokenSuggestionHighlight}
-                  onPick={(tok) => haystackInputRef.current?.completeToken(tok)}
+                  onPick={handleRailPickTokenName}
                 />
               )}
             </div>
           )}
           {mode === 'ai' && (
-            <div className={haystackMode ? 'flex-1 flex flex-col overflow-hidden min-w-0' : 'contents'}>
+            <div className={useHaystackFilters ? 'flex-1 flex flex-col overflow-hidden min-w-0' : 'contents'}>
               {isDraggingFiles && (
                 <div className="absolute inset-0 z-30 pointer-events-none flex items-center justify-center bg-blue-500/10 border-4 border-dashed border-blue-400 rounded-lg">
                   <div className="bg-white px-6 py-4 rounded-lg shadow-lg border border-blue-200">
@@ -2423,7 +2529,11 @@ export default function SearchInterface({
                             maxHeight: Math.max(inputHeight + 200, Math.min(typeof window !== 'undefined' ? window.innerHeight * 0.6 : 600, 800)),
                           }}
                         />
-                        {useHaystackFilters && mustachePickerOpen && (
+                        {/* MustachePicker disabled — replaced by the left-side full-height rail
+                            (ActiveTokenSuggestions / SampleQueryPanel / TokenNameSuggestions) gated
+                            by `useHaystackFilters`. The picker component is kept around as dead
+                            code in src/components/search/mustache-picker.tsx. */}
+                        {false && useHaystackFilters && mustachePickerOpen && (
                           <MustachePicker
                             value={aiQuery}
                             cursorPos={aiQueryCursor}
