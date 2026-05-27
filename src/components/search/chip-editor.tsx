@@ -86,7 +86,23 @@ interface ChipNodeViewProps {
 
 function FilterChipNodeView({ node, getPos, editor, deleteNode }: ChipNodeViewProps) {
   const expression = (node.attrs.expression ?? '') as string;
-  const displayName = (node.attrs.displayName ?? null) as string | null;
+  // Two display-name sources:
+  //   1. The node's own `displayName` attr (set by the async resolver on
+  //      onUpdate, or seeded by chipToNodePayload for legacy chips).
+  //   2. The shared module-level `uuidDisplayCache` (populated by the picker
+  //      pick handler in search-interface.tsx). This one renders instantly
+  //      the moment the chip materializes — without waiting for the async
+  //      resolver to fetch.
+  const attrDisplay = (node.attrs.displayName ?? null) as string | null;
+  // If this chip is a single `tag op @uuid` atom, prefer the picker-populated
+  // shared cache as a fallback when the chip's attr hasn't been resolved yet.
+  const sharedDisplay: string | null = (() => {
+    if (attrDisplay) return null;
+    const simple = parseSimpleAtom(expression);
+    if (!simple || !simple.value.startsWith('@')) return null;
+    return uuidDisplayCache.get(simple.value) ?? null;
+  })();
+  const displayName = attrDisplay ?? sharedDisplay;
 
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(expression);
@@ -99,6 +115,20 @@ function FilterChipNodeView({ node, getPos, editor, deleteNode }: ChipNodeViewPr
       requestAnimationFrame(() => inputRef.current?.select());
     }
   }, [editing, expression]);
+
+  // Lazy-resolve any @uuids inside the chip's expression that aren't in the
+  // shared cache yet. The background fetch updates the cache and fires
+  // `uuid-cache-update`, which the editor listens for and uses to dispatch a
+  // refresh transaction — and re-rendering this NodeView picks up the new
+  // sharedDisplay value.
+  React.useEffect(() => {
+    if (!expression) return;
+    const re = /@[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(expression)) !== null) {
+      lazyResolveUuid(m[0]);
+    }
+  }, [expression]);
 
   const commitEdit = useCallback(
     (next: string) => {
@@ -126,9 +156,20 @@ function FilterChipNodeView({ node, getPos, editor, deleteNode }: ChipNodeViewPr
   );
 
   const atom = parseSimpleAtom(expression);
-  const renderedExpression: string = atom && displayName
-    ? `${atom.tag}${atom.op}${displayName}`
-    : expression;
+  const renderedExpression: string = (() => {
+    if (atom && displayName) return `${atom.tag}${atom.op}${displayName}`;
+    // For compound expressions, substitute every cached @uuid with its label.
+    // The underlying expression text is unchanged; this only affects what the
+    // user sees in the pill.
+    let out = expression;
+    if (/@[a-f0-9-]{36}/i.test(out)) {
+      out = out.replace(/@[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi, (uuid) => {
+        const label = uuidDisplayCache.get(uuid);
+        return label ?? uuid;
+      });
+    }
+    return out;
+  })();
 
   const onMouseEnter = useCallback(() => {
     const evt = new CustomEvent('chip-hover', {
@@ -858,11 +899,43 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
     return () => document.removeEventListener('chip-hover', handler as EventListener);
   }, [onHoverChip]);
 
-  // Refresh decorations when a lazy @uuid → displayName resolve lands.
+  // Refresh decorations AND patch chip attrs when a lazy @uuid → displayName
+  // resolve lands. Decorations re-emit when the meta flag is set; chip
+  // NodeViews only re-render when their attrs change, so for simple-atom
+  // chips matching the resolved uuid we also patch their `displayName` attr.
+  // For compound chips containing the uuid, we touch the `displayName` attr
+  // to a sentinel-truthy value (' ') so the NodeView re-renders and picks up
+  // the cache via its render-time substitution.
   useEffect(() => {
     if (!editor) return;
-    const handler = () => {
+    const handler = (e: Event) => {
+      const atUuid = (e as CustomEvent).detail as string | undefined;
+      // Always refresh decorations (covers @uuids in free text).
       editor.view.dispatch(editor.view.state.tr.setMeta('refresh-decorations', true));
+      if (!atUuid) return;
+      const label = uuidDisplayCache.get(atUuid);
+      if (!label) return;
+      // Patch chip attrs in a single command for the matching uuid.
+      editor.commands.command(({ tr, state }) => {
+        let touched = false;
+        state.doc.descendants((node, pos) => {
+          if (node.type.name !== 'filterChip') return true;
+          const attrs = node.attrs as ChipNodeAttrs;
+          if (!attrs.expression || !attrs.expression.includes(atUuid)) return false;
+          const atom = parseSimpleAtom(attrs.expression);
+          if (atom && atom.value === atUuid) {
+            tr.setNodeMarkup(pos, undefined, { ...attrs, displayName: label });
+            touched = true;
+          } else {
+            // Compound — touch attr to force re-render; renderedExpression
+            // picks the label from the shared cache at render time.
+            tr.setNodeMarkup(pos, undefined, { ...attrs, displayName: attrs.displayName ?? ' ' });
+            touched = true;
+          }
+          return false;
+        });
+        return touched;
+      });
     };
     document.addEventListener('uuid-cache-update', handler as EventListener);
     return () => document.removeEventListener('uuid-cache-update', handler as EventListener);
