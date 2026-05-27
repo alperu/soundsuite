@@ -27,10 +27,11 @@
  */
 
 import React, { useCallback, useEffect, useImperativeHandle, useMemo, useRef } from 'react';
-import { Node, mergeAttributes, InputRule } from '@tiptap/core';
+import { Node, Extension, mergeAttributes, InputRule } from '@tiptap/core';
 import { EditorContent, ReactNodeViewRenderer, NodeViewWrapper, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
+import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { Editor } from '@tiptap/core';
 import type { FilterChip } from '@/lib/search/haystack-query-builder';
 
@@ -309,6 +310,74 @@ const FilterChipNode = Node.create({
 });
 
 // ---------------------------------------------------------------------------
+// UuidDecorationExtension — visually replaces `@<uuid>` text nodes with the
+// resolved displayName via a CSS pseudo-element decoration. The underlying
+// TEXT is unchanged so InputRules / appendTransaction keep working.
+
+const UUID_RE = /@[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/g;
+const uuidDecorationKey = new PluginKey('uuid-display-decoration');
+
+const UuidDecorationExtension = Extension.create({
+  name: 'uuidDisplayDecoration',
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: uuidDecorationKey,
+        state: {
+          init(_, state) {
+            return buildDecorationSet(state.doc);
+          },
+          apply(tr, _old, _oldState, newState) {
+            if (!tr.docChanged && !tr.getMeta('refresh-decorations')) {
+              return _old;
+            }
+            return buildDecorationSet(newState.doc);
+          },
+        },
+        props: {
+          decorations(state) {
+            return uuidDecorationKey.getState(state) as DecorationSet;
+          },
+        },
+      }),
+    ];
+  },
+});
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildDecorationSet(doc: any): DecorationSet {
+  const docNode = doc;
+  const decorations: Decoration[] = [];
+
+  docNode.descendants((node: { isText: boolean; text?: string; type?: { name: string } }, pos: number) => {
+    // Skip atom nodes (FilterChipNode) — they have no inner text in PM terms.
+    if (node.type?.name === 'filterChip') return false;
+    if (!node.isText || !node.text) return true;
+
+    const text = node.text;
+    UUID_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = UUID_RE.exec(text)) !== null) {
+      const atUuid = m[0]; // e.g. "@04a8cd94-…"
+      const displayName = uuidDisplayCache.get(atUuid);
+      if (!displayName) continue;
+      const from = pos + m.index;
+      const to = from + atUuid.length;
+      decorations.push(
+        Decoration.inline(from, to, {
+          class: 'cl-ref-uuid',
+          'data-display-name': displayName,
+        }),
+      );
+    }
+    return true;
+  });
+
+  return DecorationSet.create(docNode, decorations);
+}
+
+// ---------------------------------------------------------------------------
 // Doc ↔ (text, chips) serialization
 //
 // Walk the editor doc tree, emitting text for text nodes and structured
@@ -379,6 +448,29 @@ function chipToNodePayload(chip: FilterChip): Record<string, unknown> | null {
 
 const displayNameCache = new Map<string, string>();
 const inflightFetches = new Set<string>();
+
+// ---------------------------------------------------------------------------
+// UUID → displayName cache for the decoration plugin (Task #35).
+// Keyed by `@<uuid>` (the literal text that appears in the editor, e.g.
+// `@04a8cd94-359c-4feb-be16-979592c3c235`). Populated via
+// `cacheDisplayNameForUuid` before the picker splices the value into the doc.
+
+const uuidDisplayCache = new Map<string, string>();
+
+/**
+ * Register a displayName for an `@<uuid>` token so the decoration plugin can
+ * visually replace the raw uuid with a human-readable label.
+ *
+ * Call this BEFORE `editor.setContents(...)` so the first render of the new
+ * text already finds the cache entry.
+ *
+ * @param atUuid  The `@<uuid>` string (e.g. `@04a8cd94-…`). Must start with `@`.
+ * @param label   Human-readable label (e.g. `"Smith v. Jones"`).
+ */
+export function cacheDisplayNameForUuid(atUuid: string, label: string): void {
+  if (!atUuid || !label) return;
+  uuidDisplayCache.set(atUuid, label);
+}
 
 async function resolveDisplayName(tag: string, atValue: string): Promise<string | null> {
   if (!atValue.startsWith('@')) return null;
@@ -519,6 +611,7 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
         codeBlock: false,
         horizontalRule: false,
       }),
+      UuidDecorationExtension,
       FilterChipNode.extend({
         addKeyboardShortcuts() {
           return {

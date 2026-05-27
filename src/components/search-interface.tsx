@@ -48,7 +48,7 @@ import {
   type PickedSuggestion,
 } from './search/active-token-suggestions';
 import { TOKEN_KEYS } from '@/lib/search/haystack-query-builder';
-import { ChipEditor, type ChipEditorHandle } from './search/chip-editor';
+import { ChipEditor, type ChipEditorHandle, cacheDisplayNameForUuid } from './search/chip-editor';
 import type { SampleQuery } from '@/lib/search/sample-queries';
 import {
   buildHaystackFilter,
@@ -594,6 +594,11 @@ export default function SearchInterface({
         const replacement = `${activeToken.prefix}${activeToken.op}${quoteIfNeeded(picked.value)}`;
         const before = fullText.slice(0, activeToken.startIndex);
         const after = fullText.slice(activeToken.endIndex);
+        // Populate the uuid→displayName cache BEFORE splicing so the first
+        // render of the decoration already has the label resolved.
+        if (picked.value.startsWith('@') && picked.label) {
+          cacheDisplayNameForUuid(picked.value, picked.label);
+        }
         editor.setContents(before + replacement + after, haystackChips);
         setActiveToken(null);
         setPickerHighlight(0);
@@ -659,6 +664,13 @@ export default function SearchInterface({
         const before = fullText.slice(0, activeToken.startIndex);
         const after = fullText.slice(activeToken.endIndex);
         const replacement = picked.length > 1 ? `(${inner})` : inner;
+        // Populate the uuid→displayName cache for every picked value BEFORE
+        // splicing so the decoration is resolved on the first render.
+        for (const p of picked) {
+          if (p.value.startsWith('@') && p.label) {
+            cacheDisplayNameForUuid(p.value, p.label);
+          }
+        }
         editor.setContents(before + replacement + after, haystackChips);
         setActiveToken(null);
         setPickerHighlight(0);

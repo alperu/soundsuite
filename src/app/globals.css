@@ -62,3 +62,24 @@ body {
 .textLayer.selecting ~ .annotationLayer {
   pointer-events: none;
 }
+
+/* ChipEditor: @uuid decoration overlay (Task #35).
+   The underlying @uuid text is hidden (font-size: 0) and the ::before
+   pseudo-element renders the resolved displayName as a styled pill.
+   The text itself remains in the ProseMirror doc — only the visual
+   rendering changes. */
+.cl-ref-uuid {
+  font-size: 0;
+  position: relative;
+}
+.cl-ref-uuid::before {
+  content: attr(data-display-name);
+  font-size: 0.75rem;
+  background: rgb(243 232 255);        /* purple-100 */
+  color: rgb(126 34 206);              /* purple-700 */
+  padding: 0 0.25rem;
+  border-radius: 0.25rem;
+  border: 1px solid rgb(216 180 254);  /* purple-300 */
+  margin: 0 0.125rem;
+  font-family: monospace;
+}
