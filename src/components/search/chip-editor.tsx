@@ -27,7 +27,7 @@
  */
 
 import React, { useCallback, useEffect, useImperativeHandle, useMemo, useRef } from 'react';
-import { Node, mergeAttributes, InputRule } from '@tiptap/core';
+import { Node, mergeAttributes, InputRule, Extension } from '@tiptap/core';
 import { EditorContent, ReactNodeViewRenderer, NodeViewWrapper, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
@@ -309,6 +309,49 @@ const FilterChipNode = Node.create({
 });
 
 // ---------------------------------------------------------------------------
+// ChipsOnly plugin — strips stray text from the editor when chipsOnly=true.
+//
+// Preserves text that contains `{` (an in-progress mustache the user is
+// typing) so the materialization plugin can later turn it into a chip.
+// Stray text that has no `{` at all is removed on every transaction.
+
+const ChipsOnlyExtension = Extension.create({
+  name: 'chipsOnly',
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey('chips-only-strip'),
+        appendTransaction(transactions, _oldState, newState) {
+          if (!transactions.some((t) => t.docChanged)) return null;
+          let tr = newState.tr;
+          let mutated = false;
+          // Collect deletions in reverse order so positions stay stable.
+          const deletions: Array<{ from: number; to: number }> = [];
+          newState.doc.descendants((node, pos) => {
+            if (node.type.name === 'filterChip') return false;
+            if (!node.isText) return true;
+            const text = node.text ?? '';
+            // Preserve any text that could be part of an in-progress mustache.
+            if (text.includes('{')) return true;
+            // Strip pure whitespace silently (spaces between chips are fine to
+            // keep but orphaned letters should go).
+            if (text.trim() === '') return true;
+            deletions.push({ from: pos, to: pos + node.nodeSize });
+            return true;
+          });
+          for (const { from, to } of deletions.reverse()) {
+            tr = tr.delete(from, to);
+            mutated = true;
+          }
+          return mutated ? tr : null;
+        },
+      }),
+    ];
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Doc ↔ (text, chips) serialization
 //
 // Walk the editor doc tree, emitting text for text nodes and structured
@@ -428,6 +471,13 @@ export interface ChipEditorHandle {
   getCursorOffset(): number;
   /** Return current serialized text. */
   getText(): string;
+  /**
+   * Insert raw text at the current caret position. Used by the "+" button in
+   * the strip editor to plant a `{{  }}` placeholder that the user can fill in.
+   * `cursorOffsetFromEnd` moves the caret back that many positions from the end
+   * of the inserted text — use `3` for `'{{  }}'` to land between the spaces.
+   */
+  insertText(text: string, cursorOffsetFromEnd?: number): void;
 }
 
 export interface ChipEditorProps {
@@ -438,6 +488,12 @@ export interface ChipEditorProps {
   placeholder?: string;
   minHeight?: number;
   maxHeight?: number;
+  /**
+   * When true, only FilterChipNodes are allowed — stray text (except
+   * in-progress `{{ ... }}` mustaches) is stripped automatically.
+   * Used for the filter-strip editor above the main composer.
+   */
+  chipsOnly?: boolean;
   /** Fired after every doc edit with the derived (text, chips) shape. */
   onChange?(text: string, chips: FilterChip[]): void;
   /** Caret position in serialized text — fired on selection updates. */
@@ -460,6 +516,7 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
     placeholder: _placeholder = 'Ask a question…',
     minHeight = 192,
     maxHeight = 800,
+    chipsOnly = false,
     onChange,
     onCursorChange,
     onSubmit,
@@ -519,6 +576,7 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
         codeBlock: false,
         horizontalRule: false,
       }),
+      ...(chipsOnly ? [ChipsOnlyExtension] : []),
       FilterChipNode.extend({
         addKeyboardShortcuts() {
           return {
@@ -579,9 +637,12 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
     content: initialContent,
     editorProps: {
       attributes: {
-        class:
-          'block w-full bg-transparent px-5 pt-4 pb-14 text-sm text-gray-900 placeholder-gray-400 focus:outline-none rounded-2xl prose prose-sm max-w-none [&_p]:my-0 [&_p]:leading-relaxed',
-        style: `min-height: ${minHeight}px; max-height: ${maxHeight}px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere;`,
+        class: chipsOnly
+          ? 'block w-full bg-transparent px-3 py-2 text-sm text-gray-900 focus:outline-none prose prose-sm max-w-none [&_p]:my-0 [&_p]:leading-relaxed'
+          : 'block w-full bg-transparent px-5 pt-4 pb-14 text-sm text-gray-900 placeholder-gray-400 focus:outline-none rounded-2xl prose prose-sm max-w-none [&_p]:my-0 [&_p]:leading-relaxed',
+        style: chipsOnly
+          ? `min-height: ${minHeight}px; max-height: ${maxHeight}px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere;`
+          : `min-height: ${minHeight}px; max-height: ${maxHeight}px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere;`,
       },
     },
     onUpdate({ editor }) {
@@ -718,6 +779,14 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
     getText() {
       if (!editor) return '';
       return serializeDoc(editor).text;
+    },
+    insertText(text: string, cursorOffsetFromEnd = 0) {
+      if (!editor) return;
+      editor.chain().focus().insertContent(text).run();
+      if (cursorOffsetFromEnd > 0) {
+        const pos = editor.state.selection.to - cursorOffsetFromEnd;
+        editor.commands.setTextSelection(Math.max(0, pos));
+      }
     },
   }), [editor]);
 
