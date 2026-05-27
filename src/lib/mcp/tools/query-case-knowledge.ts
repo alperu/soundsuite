@@ -102,7 +102,9 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     // Over-fetch candidates so the cross-encoder reranker has a larger pool to judge.
     // The reranker is far better at relevance scoring than embedding similarity,
     // so casting a wider retrieval net dramatically improves recall.
-    const retrievalLimit = limit * 3;
+    // Floor at 200 so FTS-matched chunks from docs with weaker embeddings
+    // (e.g. transcripts whose chunks are large/noisy) still enter the pool.
+    const retrievalLimit = Math.max(limit * 5, 200);
 
     // Preprocess the query to extract keywords, entities, legal terms, page references
     const processed = QueryPreprocessor.process(query);

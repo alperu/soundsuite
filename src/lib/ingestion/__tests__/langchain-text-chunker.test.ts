@@ -164,6 +164,39 @@ The court finds the following facts to be true.`,
       const chunks = await chunker.chunkPages(pages, 'doc-1', 'case-1');
       expect(chunks.length).toBeGreaterThan(1);
     });
+
+    it('should enforce HARD_MAX_CHUNK_CHARS when primary splitter returns oversized chunks', async () => {
+      // Initialize with a huge target chunkSize so the mocked primary
+      // splitter returns the page as one giant chunk — simulating the
+      // "1 chunk per page" degenerate path on transcript pages with no
+      // strong boundary characters.
+      const bigChunker = new LangChainTextChunker({ chunkSize: 2000, overlapSize: 50 });
+
+      // ~5000 characters of Q/A transcript text with no paragraph breaks
+      const transcriptPage = Array.from({ length: 50 }, (_, i) =>
+        `Q. Witness question line number ${i + 1} that asks about the trust fund. ` +
+        `A. Witness answer line ${i + 1} explaining the trust account history. `
+      ).join('');
+
+      expect(transcriptPage.length).toBeGreaterThan(4000);
+
+      const pages: PageText[] = [{ pageNumber: 1, text: transcriptPage }];
+      const chunks = await bigChunker.chunkPages(pages, 'doc-1', 'case-1');
+
+      // Hard cap forces multi-chunk output for a >1000-char page
+      expect(chunks.length).toBeGreaterThan(1);
+      // Every chunk body should be at or under the hard cap
+      // (small slop allowed for SAC prefix length / overlap accounting)
+      for (const c of chunks) {
+        expect(c.text.length).toBeLessThanOrEqual(1200);
+      }
+      // All chunks remain on page 1
+      for (const c of chunks) {
+        expect(c.metadata.pageNumber).toBe(1);
+      }
+
+      bigChunker.dispose();
+    });
   });
 
   describe('chunkExhibitText', () => {

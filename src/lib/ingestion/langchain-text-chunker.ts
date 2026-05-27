@@ -12,6 +12,9 @@ import { isSectionHeading } from './legal-text-splitter';
 
 /**
  * Legal-aware separators ordered from strongest to weakest boundary.
+ * Transcript markers (Q./A./THE COURT/etc.) precede generic boundaries so
+ * Reporter's Record pages get split at speaker turns instead of falling
+ * through to whitespace and emitting one chunk per page.
  */
 const LEGAL_SEPARATORS = [
   '\n\nSECTION ',
@@ -20,6 +23,16 @@ const LEGAL_SEPARATORS = [
   '\n\nORDER',
   '\n\nFINDINGS OF FACT',
   '\n\nCONCLUSIONS OF LAW',
+  '\nTHE COURT',
+  '\nTHE WITNESS',
+  '\nBY MS. ',
+  '\nBY MR. ',
+  '\nMS. ',
+  '\nMR. ',
+  '\nQ. ',
+  '\nA. ',
+  '\nQ ',
+  '\nA ',
   '\n\n',
   '\n',
   '. ',
@@ -29,6 +42,14 @@ const LEGAL_SEPARATORS = [
   ' ',
   '',
 ];
+
+/**
+ * Hard ceiling for a single chunk's body text (sacPrefix excluded).
+ * Any chunk exceeding this gets re-split with the aggressive splitter
+ * below. Prevents the "one chunk per page" degenerate case observed on
+ * OCR-heavy Reporter's Record transcripts.
+ */
+const HARD_MAX_CHUNK_CHARS = 1000;
 
 interface LangChainTextChunkerConfig {
   chunkSize?: number;      // in tokens (default: 512)
@@ -76,6 +97,7 @@ function splitIntoSections(text: string): Array<{ heading: string; body: string 
 
 export class LangChainTextChunker implements ITextChunker {
   private splitter: RecursiveCharacterTextSplitter;
+  private fallbackSplitter: RecursiveCharacterTextSplitter;
   private config: Required<LangChainTextChunkerConfig>;
 
   constructor(config: LangChainTextChunkerConfig = {}) {
@@ -94,6 +116,34 @@ export class LangChainTextChunker implements ITextChunker {
       chunkOverlap: overlapChars,
       separators: LEGAL_SEPARATORS,
     });
+
+    // Aggressive secondary splitter used only when a chunk exceeds
+    // HARD_MAX_CHUNK_CHARS. Forces sub-paragraph granularity with a
+    // bare-bones separator chain so even OCR-poor transcript text gets
+    // broken up rather than emitted as one giant chunk.
+    this.fallbackSplitter = new RecursiveCharacterTextSplitter({
+      chunkSize: HARD_MAX_CHUNK_CHARS,
+      chunkOverlap: Math.min(overlapChars, 100),
+      separators: ['\n', '. ', '? ', '! ', '; ', ', ', ' ', ''],
+    });
+  }
+
+  /**
+   * Enforce HARD_MAX_CHUNK_CHARS. Any chunk over the cap is run through
+   * the aggressive fallback splitter so OCR-poor transcript pages can't
+   * emit one chunk per page.
+   */
+  private async enforceMaxChunkSize(chunks: string[]): Promise<string[]> {
+    const out: string[] = [];
+    for (const chunk of chunks) {
+      if (chunk.length <= HARD_MAX_CHUNK_CHARS) {
+        out.push(chunk);
+        continue;
+      }
+      const subChunks = await this.fallbackSplitter.splitText(chunk);
+      out.push(...subChunks);
+    }
+    return out;
   }
 
   /**
@@ -121,13 +171,13 @@ export class LangChainTextChunker implements ITextChunker {
 
     // If no sections detected, just split the whole text
     if (sections.length === 0) {
-      const chunks = await this.splitter.splitText(text);
+      const chunks = await this.enforceMaxChunkSize(await this.splitter.splitText(text));
       return chunks.map(c => sacPrefix + c);
     }
 
     // If there's only one section with no heading, split normally
     if (sections.length === 1 && !sections[0].heading) {
-      const chunks = await this.splitter.splitText(text);
+      const chunks = await this.enforceMaxChunkSize(await this.splitter.splitText(text));
       return chunks.map(c => sacPrefix + c);
     }
 
@@ -148,8 +198,8 @@ export class LangChainTextChunker implements ITextChunker {
         continue;
       }
 
-      // Split the body text
-      const bodyChunks = await this.splitter.splitText(bodyText);
+      // Split the body text, then enforce hard size cap
+      const bodyChunks = await this.enforceMaxChunkSize(await this.splitter.splitText(bodyText));
 
       for (const chunk of bodyChunks) {
         // Prepend heading context to each child chunk
