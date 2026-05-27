@@ -89,12 +89,14 @@ function parseScope(raw: string | null): ScopeChip[] {
   }
 }
 
-function caseIdFromScope(scope: ScopeChip[]): string | null {
-  const chip = scope.find(
-    (c) => (c.tag === 'caseRef' || c.tag === 'case') && (c.op ?? '==') === '==',
-  );
-  if (!chip) return null;
-  return chip.value.startsWith('@') ? chip.value.slice(1) : chip.value;
+function caseIdsFromScope(scope: ScopeChip[]): string[] {
+  const ids: string[] = [];
+  for (const c of scope) {
+    if ((c.tag !== 'caseRef' && c.tag !== 'case') || (c.op ?? '==') !== '==') continue;
+    const id = c.value.startsWith('@') ? c.value.slice(1) : c.value;
+    if (id) ids.push(id);
+  }
+  return Array.from(new Set(ids));
 }
 
 export async function GET(request: NextRequest) {
@@ -127,9 +129,13 @@ export async function GET(request: NextRequest) {
           }) => Promise<Array<Record<string, unknown>>>;
         };
       };
-      const scopedCaseId = caseIdFromScope(scope);
+      const scopedCaseIds = caseIdsFromScope(scope);
       const where: Record<string, unknown> = {};
-      if (scopedCaseId) where.caseId = scopedCaseId;
+      if (scopedCaseIds.length === 1) {
+        where.caseId = scopedCaseIds[0];
+      } else if (scopedCaseIds.length > 1) {
+        where.caseId = { in: scopedCaseIds };
+      }
       if (prefix) {
         where.OR = [
           { title: { contains: prefix } },

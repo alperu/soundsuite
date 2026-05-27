@@ -90,9 +90,11 @@ export const TOKEN_MAP: Record<string, TokenDef> = {
   respondent: { impliedKind: 'motion', tag: 'respondentRef', category: 'ref' },
   clerk: { impliedKind: 'motionEvent', tag: 'clerkRef', category: 'ref' },
   reporter: { impliedKind: 'motionEvent', tag: 'reporterRef', category: 'ref' },
-  // Filing ref — picker cascades on the current case== chip (see path-values
-  // route `scope` param) so the user only sees filings under that case.
+  // Filing ref — picker cascades on the current case== chip(s) (see
+  // path-values route `scope` param). `filing` is the short ergonomic
+  // alias; both compile to the same Haystack `filingRef` tag.
   filingRef: { tag: 'filingRef', category: 'ref' },
+  filing: { tag: 'filingRef', category: 'ref' },
 
   // Dates
   hearingDate: { impliedKind: 'motion', tag: 'hearingDate', category: 'date' },
