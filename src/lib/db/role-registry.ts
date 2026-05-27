@@ -163,7 +163,19 @@ export async function setAssignment(input: AssignmentInput): Promise<AssignmentR
           : (input.enabled ?? true)
           ? 1
           : 0,
-      idleTimeoutMin: input.idleTimeoutMin ?? 5,
+      // Per-role idle-timeout default. vLLM-served roles (rlm, reranker)
+      // have a 60+ second cold-start (image load + weights → GPU + cuda
+      // graph capture), so evicting them after only 5 min of inactivity
+      // produces a "constantly flapping between provisioned and
+      // not_provisioned" UX: a user clicks search, waits for cold-start,
+      // gets answer, walks away for 6 min, clicks again, waits another
+      // cold-start. We pin those at 60 min so a typical multi-query
+      // research session keeps the model resident. Ollama roles (5 min)
+      // cycle cheaply enough that the default is fine.
+      idleTimeoutMin:
+        input.idleTimeoutMin != null
+          ? input.idleTimeoutMin
+          : (input.mode === 'ss-rlm' || input.mode === 'ss-reranker' ? 60 : 5),
       modelOverride: input.modelOverride ?? null,
       runtime: input.runtime ?? 'docker-ollama',
     },

@@ -116,7 +116,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
       '--max-model-len', '32768',
       '--dtype', 'bfloat16',
       '--enable-auto-tool-choice',
-      '--tool-call-parser', 'hermes',
+      '--tool-call-parser', 'pythonic',
     ],
   },
   cuda: {

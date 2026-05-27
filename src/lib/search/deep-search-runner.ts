@@ -269,6 +269,24 @@ class DeepSearchRunner {
           ],
         });
       }
+      // Handoff transition: the orchestrator emits a 'generating' step after
+      // RLM finishes its loop with a message containing "now drafting" — at
+      // that point inject a visual separator so RLM's preamble stays visible
+      // and the cloud LLM's tokens append below it as a distinct section.
+      // We deliberately do NOT clear streamingAnswer: clearing made the user
+      // think the system froze, since the next Anthropic call may take
+      // 5–30 s to produce its first token.
+      if (
+        p.step === 'generating'
+        && typeof p.message === 'string'
+        && /now drafting/i.test(p.message)
+        && this.state.streamingAnswer
+        && !this.state.streamingAnswer.includes('\n\n---\n\n## Final Report')
+      ) {
+        this.set({
+          streamingAnswer: `${this.state.streamingAnswer.trimEnd()}\n\n---\n\n## Final Report (${p.message.match(/handing off to (\S+)/i)?.[1] ?? 'cloud LLM'})\n\n`,
+        });
+      }
     } else if (event.type === 'token') {
       this.set({
         streamingAnswer: (this.state.streamingAnswer ?? '') + event.text,

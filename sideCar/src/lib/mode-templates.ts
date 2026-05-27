@@ -43,17 +43,22 @@ export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-m
  * embedding+ocr don't get evicted. --max-model-len 32768 bounds the KV
  * cache pre-allocation. --dtype bfloat16 matches the published weights.
  *
- * --enable-auto-tool-choice + --tool-call-parser hermes opt vLLM into
- * OpenAI tool-calling so master's runRlmWithTools can drive Phase B
- * recursive RAG; without these flags vLLM 400s on tool_choice='auto'.
- * 'hermes' parses Qwen3's ChatML <tool_call>...</tool_call> blocks.
+ * --enable-auto-tool-choice + --tool-call-parser pythonic opt vLLM
+ * into OpenAI tool-calling so master's runRlmWithTools can drive
+ * Phase B recursive RAG; without these flags vLLM 400s on
+ * tool_choice='auto'. The 'pythonic' parser extracts Python-style
+ * function calls — mit-oasys/rlm-qwen3-8b-v0.1 emits
+ *   query_case_knowledge("...")
+ * not the Hermes <tool_call> XML blocks Qwen3-base uses, so 'hermes'
+ * misses every call. Confirmed by inspecting the model's raw output
+ * during a Deep Search test on 2026-05-26.
  */
 const RLM_VLLM_ARGS: string[] = [
   '--gpu-memory-utilization', '0.7',
   '--max-model-len', '32768',
   '--dtype', 'bfloat16',
   '--enable-auto-tool-choice',
-  '--tool-call-parser', 'hermes',
+  '--tool-call-parser', 'pythonic',
 ];
 
 /** Strip "ss-" prefix → registry/state key. */

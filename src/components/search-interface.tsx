@@ -131,6 +131,9 @@ interface DeepSearchResult {
   };
   model: string;
   provider: string;
+  rlmAssisted?: boolean;
+  rlmHost?: string;
+  rlmExtraSourceCount?: number;
 }
 
 interface ToolInfo {
@@ -3176,7 +3179,17 @@ const DeepSearchResultCard = React.memo(function DeepSearchResultCard({ result, 
                 ss-rlm · {result.model.replace('mit-oasys/', '')}
               </span>
             ) : (
-              <span className="text-xs bg-white/60 px-1.5 py-0.5 rounded text-gray-600 font-mono">{getProviderName(result.provider)}: {result.model}</span>
+              <>
+                {result.rlmAssisted && (
+                  <span
+                    className="text-xs px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-medium border border-emerald-200"
+                    title={`ss-rlm gathered ${result.rlmExtraSourceCount ?? 0} additional sources${result.rlmHost ? ` via ${result.rlmHost}` : ''} before handing off to ${getProviderName(result.provider)} for synthesis`}
+                  >
+                    ss-rlm{typeof result.rlmExtraSourceCount === 'number' ? ` +${result.rlmExtraSourceCount}` : ''}
+                  </span>
+                )}
+                <span className="text-xs bg-white/60 px-1.5 py-0.5 rounded text-gray-600 font-mono">{getProviderName(result.provider)}: {result.model}</span>
+              </>
             )}
           </div>
           <div className="flex items-center gap-1.5">

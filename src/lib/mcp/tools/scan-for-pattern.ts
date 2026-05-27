@@ -105,13 +105,40 @@ export class ScanForPatternTool extends BaseMCPTool<
 
     context.logger.info('Handling scan_for_pattern', { pattern, caseId, limit });
 
-    const regex = new RegExp(pattern, 'i');
+    // Detect whether the input is an actual regex (has metacharacters) or a
+    // plain natural-language phrase. When users / callers pass natural text
+    // (e.g. "May 13 2026 hearing trust fund"), the strict regex post-filter
+    // below would require that contiguous string to appear in a chunk —
+    // which it never does (real text has commas, line breaks, different
+    // word order). All FTS candidates would be filtered to 0.
+    //
+    // For natural-language input we trust the FTS recall (BM25 already
+    // ranks by tokenized relevance). For real regex input we still apply
+    // the post-filter so callers asking for `\bMay\s+\d+\b` etc. get
+    // precise matches.
+    //
+    // Heuristic: the input is "regex-like" if it contains any unescaped
+    // regex metacharacter that has no plain-text meaning. We strip word
+    // chars / spaces / hyphens / commas / common punctuation first so a
+    // phrase like "Cross-Examination" doesn't trip the hyphen check.
+    const regexMeta = /[.*+?^${}()|[\]\\<>]|\\[bBdDwWsSn]/;
+    const looksLikeRegex = regexMeta.test(pattern);
 
-    // Extract literal keywords from the regex pattern for FTS recall
+    let regex: RegExp | null = null;
+    try {
+      regex = new RegExp(pattern, 'i');
+    } catch {
+      // Invalid regex — treat as natural-language input.
+      regex = null;
+    }
+
+    // Extract literal keywords from the pattern for FTS recall
     const keywords = extractKeywordsFromPattern(pattern);
 
-    // Fetch more candidates than needed so we can post-filter with regex
-    const fetchLimit = limit * 5;
+    // Fetch more candidates than needed so we can post-filter with regex.
+    // For natural-language input we fetch exactly `limit` since there's no
+    // post-filter that would shrink the set.
+    const fetchLimit = looksLikeRegex && regex ? limit * 5 : limit;
 
     // Build search query — use FTS keywords for initial recall
     const searchQuery: SearchQuery = {
@@ -136,8 +163,22 @@ export class ScanForPatternTool extends BaseMCPTool<
     // Perform initial recall search
     const searchResults = await context.vectorStore.search(searchQuery);
 
-    // Post-filter: apply the actual regex to each result
-    const matchedResults = searchResults.filter((result) => regex.test(result.text));
+    // Post-filter: only apply the regex if the input is actually regex-like
+    // AND the regex compiled. For natural-language queries, trust FTS recall.
+    const matchedResults = looksLikeRegex && regex
+      ? searchResults.filter((result) => regex!.test(result.text))
+      : searchResults;
+
+    if (looksLikeRegex && regex && matchedResults.length === 0 && searchResults.length > 0) {
+      // Useful diagnostic: regex post-filter dropped everything despite FTS
+      // returning candidates. Almost always means the caller passed a
+      // natural-language string with one stray metacharacter (parens,
+      // apostrophe etc.) and our heuristic mis-classified it.
+      context.logger.warn?.('scan_for_pattern: regex post-filter dropped all FTS candidates', {
+        pattern: pattern.slice(0, 120),
+        ftsCandidates: searchResults.length,
+      });
+    }
 
     // Take only the requested limit
     const limitedResults = matchedResults.slice(0, limit);
@@ -200,9 +241,22 @@ export class ScanForPatternTool extends BaseMCPTool<
           select: { fileName: true, filing: true, case: true, documentType: true },
         });
 
-        // Extract the matched text
-        const match = result.text.match(regex);
-        const matchedText = match ? match[0] : '';
+        // Extract the matched text. With the regex post-filter now optional,
+        // `regex` may be null (natural-language input). In that case we surface
+        // the first matching keyword instead so the UI's snippet field still
+        // shows something useful.
+        let matchedText = '';
+        if (regex) {
+          const m = result.text.match(regex);
+          matchedText = m ? m[0] : '';
+        }
+        if (!matchedText && keywords.length > 0) {
+          for (const kw of keywords) {
+            const kwRe = new RegExp(`\\b${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+            const m = result.text.match(kwRe);
+            if (m) { matchedText = m[0]; break; }
+          }
+        }
 
         // Build citation (same logic as query-case-knowledge)
         const filingType = result.metadata.filingType

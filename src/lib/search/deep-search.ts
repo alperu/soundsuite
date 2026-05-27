@@ -135,6 +135,12 @@ export interface DeepSearchResult {
   };
   model: string;
   provider: string;
+  /** True when RLM drove the evidence-gathering stage before cloud-LLM synthesis. */
+  rlmAssisted?: boolean;
+  /** Sidecar host that served the RLM tool-use loop. */
+  rlmHost?: string;
+  /** Number of extra sources RLM discovered via recursive tool calls. */
+  rlmExtraSourceCount?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -469,8 +475,72 @@ export async function deduplicateAndMerge(
     }) : undefined);
   }
 
-  // Sort by score descending
+  // Filing-type-aware boost when the user's question is clearly about
+  // testimony, a hearing, or a transcript. Without this, a clerk's record
+  // — which mentions every hearing date administratively — dominates the
+  // top N over the actual transcript that contains the witness's words.
+  // Observed 2026-05-27: top 8 of 10 for "May 13 2026 hearing trust fund"
+  // were clerk's record pages; the actual Cross-Examination transcript
+  // (49 of 73 chunks literally contained "May 13, 2026") didn't make it
+  // into the top 10. See docs/TODO-ocr-speedups.md neighbouring discussion.
+  const RR_INTENT_RE = /\b(hearing|testimony|testif|deposition|cross[\s-]?examination|direct[\s-]?examination|witness|RR\b|reporter['']?s?\s*record|transcript|stenograph|cite\s+line|line\s*\d{1,4})/i;
+  const wantsTranscript = RR_INTENT_RE.test(originalQuery);
+  if (wantsTranscript) {
+    // Heuristic: a doc is "transcript-like" if its filename or filing type
+    // matches RR/Reporter's Record/Transcript patterns. We use filename
+    // because documentType has been observed misclassified upstream (a
+    // valid RR was tagged as "Motion" during filing-detection in the same
+    // dataset that exposed this ranking bug).
+    const TRANSCRIPT_FILENAME_RE = /\b(RR|reporter['']?s?\s*record|transcript)\b/i;
+    const TRANSCRIPT_FILING_RE = /\b(reporter['']?s?\s*record|reporters_record|transcript|RR)\b/i;
+    const TRANSCRIPT_BOOST = 1.35; // empirically chosen — large enough to
+                                   // move RR pages past sibling-doc pages
+                                   // of similar reranker score, small
+                                   // enough that totally-irrelevant RR
+                                   // pages can't outrank a strong hit.
+    for (const source of merged) {
+      const isTranscript =
+        (source.document && TRANSCRIPT_FILENAME_RE.test(source.document))
+        || (source.filingType && TRANSCRIPT_FILING_RE.test(source.filingType));
+      if (isTranscript) source.score *= TRANSCRIPT_BOOST;
+    }
+  }
+
+  // Sort by score descending — needed before the diversity cap below.
   merged.sort((a, b) => b.score - a.score);
+
+  // Per-document diversity cap. Prevents one giant document (typically a
+  // clerk's record or a multi-volume RR) from monopolizing the top N
+  // when many of its chunks happen to score well. Without this, a doc
+  // with 80 high-scoring chunks fills 80 of the top 150 slots and
+  // crowds out shorter primary sources.
+  //
+  // Cap = max(8, ceil(targetN / distinctDocs * 0.4)) per document.
+  // Tuned so that on a 4-document case the cap is ~15 chunks/doc, and
+  // on a 30-document case it's ~5 — leaving room for every primary
+  // source to contribute regardless of overall length.
+  if (merged.length > 150) {
+    const distinctDocs = new Set(merged.map(s => s.document)).size;
+    const perDocCap = Math.max(8, Math.ceil((150 / Math.max(1, distinctDocs)) * 1.2));
+    const perDocCount = new Map<string, number>();
+    const capped: DeepSearchSource[] = [];
+    const overflow: DeepSearchSource[] = [];
+    for (const s of merged) {
+      const n = perDocCount.get(s.document) ?? 0;
+      if (n < perDocCap) {
+        perDocCount.set(s.document, n + 1);
+        capped.push(s);
+      } else {
+        overflow.push(s);
+      }
+      if (capped.length >= 150) break;
+    }
+    // If capping left us short of 150 (e.g. one-doc case), fill from overflow.
+    while (capped.length < 150 && overflow.length > 0) {
+      capped.push(overflow.shift()!);
+    }
+    merged = capped;
+  }
 
   return {
     sources: merged,
@@ -892,24 +962,13 @@ Write the body of this subsection now. Do not include the heading.`;
 // 4b. RLM Report Generation — recursive tool-use synthesis
 // ---------------------------------------------------------------------------
 
-const RLM_SYSTEM_PROMPT = `You are a legal research assistant analyzing court documents.
-
-You have one tool available:
-- query_case_knowledge: search the case's indexed transcripts/filings for additional excerpts. Use it when the provided excerpts don't cover an aspect of the question. Each call returns ranked chunks with citations.
+const RLM_SYSTEM_PROMPT = `You are an evidence-gathering assistant. The user has a research question. Your job is to call the query_case_knowledge tool 1-3 times to fetch any additional excerpts you think are needed beyond the initial set already in your context. Do NOT write a full report — that's the next stage's job. Once you have enough evidence, respond briefly (1-2 sentences) confirming you're done.
 
 Strategy:
 1. Read the user's research question and the initial excerpts.
-2. If you need more evidence on a specific aspect, call query_case_knowledge with a focused sub-query (under 20 words). You may call it up to 3 times across this conversation.
-3. Once you have enough evidence, write the final report.
-
-Final report format (markdown):
-- ## Summary — 1-2 paragraphs answering the question
-- ## Findings — 3-7 sections, organized by distinct topic, with inline citations like [Document, p.X]
-- ## Gaps — anything the evidence does not cover
-- ## Legal Significance — short interpretation
-- ## Next Steps — what to investigate next
-
-Use ONLY the citations present in the provided excerpts and any returned by query_case_knowledge. Never invent citations.`;
+2. Identify aspects that are under-covered by the initial set.
+3. Call query_case_knowledge with focused sub-queries (under 20 words each). Up to 3 calls.
+4. When done, reply with one short sentence like "Sufficient evidence gathered — N additional aspects retrieved." Do not write Findings, Summary, or any report sections.`;
 
 const RLM_TOOLS: RlmToolSpec[] = [
   {
@@ -984,7 +1043,7 @@ ${decomposition.intent}
 
 ${contextBlock}
 
-Now write the report. If you need more evidence on a specific aspect, call query_case_knowledge first.`;
+You are in evidence-gathering mode. Call query_case_knowledge for any aspects under-covered above. Do NOT write a report — the next stage handles synthesis.`;
 
   const executeTool = async (
     toolName: string,
@@ -1230,8 +1289,16 @@ export async function deepSearch(
   let finalSources: DeepSearchSource[] = sources;
   let resultProvider: string = provider || 'auto';
   let resultModel: string = model || 'auto';
+  let rlmAssisted = false;
+  let rlmHost: string | undefined;
+  let rlmExtraSourceCount = 0;
+
+  console.log(`[Deep Search] Synthesis branch: useRlm=${useRlm} (typeof=${typeof useRlm}, raw=${JSON.stringify(useRlm)})`);
 
   if (useRlm) {
+    // Stage 1: RLM drives the evidence-gathering loop. It does NOT write the
+    // final report — its job is just to call query_case_knowledge a few times
+    // to fill gaps in the initial reranked set.
     const rlmOut = await generateReportWithRlm(query, decomposition, sources, registry, {
       caseId,
       chatId,
@@ -1239,17 +1306,59 @@ export async function deepSearch(
       workflowContext,
       maxTokens,
       signal,
+      // Stream RLM's evidence-gathering output to the UI so the operator
+      // can SEE the model thinking + asking for more excerpts. The runner
+      // clears streamingAnswer on the 'generating' progress event that
+      // marks handoff to the cloud LLM, so the user gets a clean stream
+      // for the final Claude report.
       onToken,
       onProgress: emit,
       pushWarning,
       maxRounds: rlmMaxRounds,
     });
-    report = rlmOut.report;
+
+    rlmAssisted = true;
+    rlmHost = rlmOut.host || undefined;
+    rlmExtraSourceCount = rlmOut.extraSources.length;
+
+    // Merge RLM-discovered extras into the source pool. Dedup is already
+    // enforced inside generateReportWithRlm via seenKeys, so a plain concat
+    // here is safe. Skip re-rerank — pool stays small (typical 0-40 extras)
+    // and we want the user to see the cloud-LLM report ASAP.
     if (rlmOut.extraSources.length > 0) {
       finalSources = [...sources, ...rlmOut.extraSources];
     }
-    resultProvider = 'rlm';
-    resultModel = rlmOut.model;
+
+    // Stage 2: hand off to the standard synthesis path (Claude / user's
+    // chosen provider) with the enriched source list.
+    checkAbort();
+    emit({
+      step: 'generating',
+      message: `RLM gathered ${rlmOut.extraSources.length} additional sources — ${provider || 'cloud LLM'} now drafting the report (tokens will append below)...`,
+      subQueries: decomposition.subQueries,
+      intent: decomposition.intent,
+      searchStats: { ...stats, finalAfterRerank: finalSources.length, subQueryCount: decomposition.subQueries.length },
+    });
+
+    // Force single-pass synthesis after RLM. multiPass's outline call uses
+    // Anthropic forced tool-use (jsonMode=true) which returns structured
+    // JSON without streaming — that produces a ~2 min UI silence after RLM
+    // already cleared its preamble. Single-pass streams from token 1.
+    report = await generateReport(query, decomposition, finalSources, {
+      provider,
+      model,
+      history,
+      workflowContext,
+      thinking,
+      maxTokens,
+      effort,
+      signal,
+      onToken,
+      onThinking,
+      onProgress: emit,
+    });
+    // Provider/model reflect the FINAL stage (who wrote the report), not RLM.
+    // The rlmAssisted/rlmHost fields below carry the RLM contribution.
   } else {
     const reportFn = multiPass ? generateReportMultiPass : generateReport;
     report = await reportFn(query, decomposition, sources, {
@@ -1282,5 +1391,8 @@ export async function deepSearch(
     },
     model: resultModel,
     provider: resultProvider,
+    rlmAssisted: rlmAssisted || undefined,
+    rlmHost,
+    rlmExtraSourceCount: rlmAssisted ? rlmExtraSourceCount : undefined,
   };
 }

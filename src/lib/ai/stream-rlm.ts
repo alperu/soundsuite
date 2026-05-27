@@ -57,18 +57,72 @@ export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> 
   try {
     const { getFleetStatus } = await import('@/lib/gpu/fleet-router');
     const fleet = await getFleetStatus();
+    const probed: string[] = [];
+    // Track candidates whose cached rlm status is transitional ('not_found',
+    // 'created', 'starting') so we can re-probe their live /api/status if
+    // the cache is between heartbeats after a container restart.
+    const transitional: Array<{ url: string; hostname: string }> = [];
+
     for (const s of fleet.sidecars) {
-      if (s.status !== 'connected') continue;
+      if (s.status !== 'connected') { probed.push(`${s.hostname ?? s.url}:skip-not-connected`); continue; }
       const rlmCS = (s.sidecarStatus as { containers?: Record<string, { status?: string; image?: string }> } | undefined)?.containers?.rlm;
-      if (!rlmCS) continue;
-      if (rlmCS.status !== 'running') continue;
-      if (rlmCS.image === 'dmr' || rlmCS.image === 'host-ollama' || rlmCS.image === 'docker-model-runner') continue;
+      if (!rlmCS) {
+        // Sidecar might be alive but cache hasn't recorded the rlm container
+        // yet (heartbeat lag after assigning the role). Still worth probing.
+        transitional.push({ url: s.url, hostname: s.hostname ?? s.url });
+        probed.push(`${s.hostname ?? s.url}:skip-no-rlm`);
+        continue;
+      }
+      if (rlmCS.status !== 'running') {
+        // Transitional state — container being created, restarted, or just
+        // removed. Add to live-probe list in case the cache is stale.
+        if (rlmCS.status === 'not_found' || rlmCS.status === 'created' || rlmCS.status === 'starting' || rlmCS.status === 'restarting') {
+          transitional.push({ url: s.url, hostname: s.hostname ?? s.url });
+        }
+        probed.push(`${s.hostname ?? s.url}:skip-rlm-${rlmCS.status}`);
+        continue;
+      }
+      if (rlmCS.image === 'dmr' || rlmCS.image === 'host-ollama' || rlmCS.image === 'docker-model-runner') {
+        probed.push(`${s.hostname ?? s.url}:skip-synthetic-${rlmCS.image}`);
+        continue;
+      }
       try {
         const host = new URL(s.url).hostname;
+        console.log(`[RLM] endpoint resolved: ${s.hostname ?? s.url} → http://${host}:${RLM_PORT} (others: ${probed.join(', ') || 'none'})`);
         return { endpoint: `http://${host}:${RLM_PORT}`, host };
       } catch { /* skip */ }
     }
-  } catch { /* fleet-router unavailable */ }
+
+    // Cache miss — fall back to direct live probes of transitional sidecars
+    // so an in-flight container restart doesn't fail the user's search just
+    // because the next heartbeat hasn't arrived yet (typical lag is ~5s).
+    if (transitional.length > 0) {
+      console.log(`[RLM] cache miss — probing ${transitional.length} transitional sidecar(s) directly: ${transitional.map(t => t.hostname).join(', ')}`);
+      for (const cand of transitional) {
+        try {
+          const r = await fetch(`${cand.url.replace(/\/+$/, '')}/api/status`, { signal: AbortSignal.timeout(3000) });
+          if (!r.ok) { probed.push(`${cand.hostname}:live-probe-http-${r.status}`); continue; }
+          const live = await r.json() as { containers?: Record<string, { status?: string; image?: string }> };
+          const liveRlm = live.containers?.rlm;
+          if (!liveRlm) { probed.push(`${cand.hostname}:live-probe-no-rlm`); continue; }
+          if (liveRlm.status !== 'running') { probed.push(`${cand.hostname}:live-probe-rlm-${liveRlm.status}`); continue; }
+          if (liveRlm.image === 'dmr' || liveRlm.image === 'host-ollama' || liveRlm.image === 'docker-model-runner') {
+            probed.push(`${cand.hostname}:live-probe-synthetic-${liveRlm.image}`);
+            continue;
+          }
+          const host = new URL(cand.url).hostname;
+          console.log(`[RLM] endpoint resolved via live probe (cache was stale): ${cand.hostname} → http://${host}:${RLM_PORT}`);
+          return { endpoint: `http://${host}:${RLM_PORT}`, host };
+        } catch (err) {
+          probed.push(`${cand.hostname}:live-probe-err-${(err as Error).message.slice(0, 40)}`);
+        }
+      }
+    }
+
+    console.warn(`[RLM] endpoint NOT resolved — no sidecar has rlm=running. Fleet check: ${probed.join(', ') || '(empty fleet)'}`);
+  } catch (err) {
+    console.warn(`[RLM] endpoint resolve failed: fleet-router error: ${(err as Error).message}`);
+  }
   return null;
 }
 
@@ -235,6 +289,11 @@ export async function* runRlmWithTools(opts: {
   const { endpoint, host } = resolved;
   const model = RLM_MODEL_ID;
   const maxRounds = opts.maxRounds ?? 4;
+  const t0 = Date.now();
+
+  // Initial prompt size — operator wants to know "is the request actually big".
+  const initialPromptChars = opts.messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+  console.log(`[RLM] run start endpoint=${endpoint} model=${model} maxRounds=${maxRounds} tools=[${opts.tools.map(t => t.function.name).join(', ')}] initialPromptChars=${initialPromptChars} maxTokens=${opts.maxTokens ?? 2048}`);
 
   yield { type: 'start', host, model };
 
@@ -243,6 +302,9 @@ export async function* runRlmWithTools(opts: {
   let totalOutputTokens = 0;
 
   for (let round = 1; round <= maxRounds; round++) {
+    const roundT0 = Date.now();
+    const promptChars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+    console.log(`[RLM] round ${round}/${maxRounds} POST ${endpoint}/v1/chat/completions promptChars=${promptChars} messages=${messages.length}`);
     let res: Response;
     try {
       res = await fetch(`${endpoint}/v1/chat/completions`, {
@@ -260,18 +322,21 @@ export async function* runRlmWithTools(opts: {
         signal: opts.signal,
       });
     } catch (err) {
+      console.error(`[RLM] round ${round} fetch failed (elapsed=${Date.now() - roundT0}ms): ${(err as Error).message}`);
       yield { type: 'error', message: `RLM endpoint ${endpoint} unreachable: ${(err as Error).message}` };
       return;
     }
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
+      console.error(`[RLM] round ${round} HTTP ${res.status} (elapsed=${Date.now() - roundT0}ms): ${body.slice(0, 500)}`);
       yield { type: 'error', message: `RLM HTTP ${res.status} (round ${round}): ${body.slice(0, 300)}` };
       return;
     }
 
     let j: any;
     try { j = await res.json(); } catch (err) {
+      console.error(`[RLM] round ${round} JSON parse failed (elapsed=${Date.now() - roundT0}ms): ${(err as Error).message}`);
       yield { type: 'error', message: `RLM JSON parse error (round ${round}): ${(err as Error).message}` };
       return;
     }
@@ -280,12 +345,35 @@ export async function* runRlmWithTools(opts: {
       totalInputTokens += j.usage.prompt_tokens ?? 0;
       totalOutputTokens += j.usage.completion_tokens ?? 0;
     }
+    const roundElapsed = Date.now() - roundT0;
+    const rawToolCallCount = Array.isArray(j.choices?.[0]?.message?.tool_calls) ? j.choices[0].message.tool_calls.length : 0;
+    const contentLen = typeof j.choices?.[0]?.message?.content === 'string' ? j.choices[0].message.content.length : 0;
+    console.log(`[RLM] round ${round} response elapsed=${roundElapsed}ms vllm_tool_calls=${rawToolCallCount} content_chars=${contentLen} usage=${JSON.stringify(j.usage ?? null)}`);
 
     const choice = j.choices?.[0];
     const msg = choice?.message;
-    const toolCalls: ToolCall[] | undefined = msg?.tool_calls;
+    let toolCalls: ToolCall[] | undefined = msg?.tool_calls;
+
+    // Defensive fallback: when vLLM's tool-call parser misses the shape the
+    // model emitted, scan the assistant content for known tool-call forms
+    // (pythonic positional/kwargs, hermes <tool_call>, bare JSON line) for
+    // any of the tools the caller declared. See docs/search-unification — RLM
+    // was emitting `query_case_knowledge("...")` plain-text under hermes
+    // parser config and the loop terminated early.
+    if ((!toolCalls || toolCalls.length === 0) && typeof msg?.content === 'string' && msg.content.length > 0) {
+      const fallback = extractFallbackToolCalls(msg.content, opts.tools, round);
+      if (fallback.length > 0) {
+        console.warn(
+          `[RLM] round ${round} fallback parser fired: vLLM tool_calls empty but content matched ${fallback.length} call(s) for [${fallback.map(c => c.function.name).join(', ')}]. Parser config likely mismatched. Content preview: ${msg.content.slice(0, 200).replace(/\s+/g, ' ')}`,
+        );
+        toolCalls = fallback;
+      } else {
+        console.log(`[RLM] round ${round} no tool_calls and fallback parser found none in content (${msg.content.length} chars). Treating as final answer. Preview: ${msg.content.slice(0, 200).replace(/\s+/g, ' ')}`);
+      }
+    }
 
     if (toolCalls && toolCalls.length > 0) {
+      console.log(`[RLM] round ${round} executing ${toolCalls.length} tool call(s): [${toolCalls.map(c => c.function.name).join(', ')}]`);
       // Append assistant message with tool_calls (content may be null/empty)
       messages.push({
         role: 'assistant',
@@ -299,8 +387,13 @@ export async function* runRlmWithTools(opts: {
         let args: Record<string, unknown> = {};
         try { args = call.function.arguments ? JSON.parse(call.function.arguments) : {}; }
         catch { args = {}; }
+        const callT0 = Date.now();
+        const argsPreview = JSON.stringify(args).slice(0, 200);
+        console.log(`[RLM] round ${round} → tool ${call.function.name}(${argsPreview})`);
         yield { type: 'tool-call', round, toolName: call.function.name, args };
         const result = await opts.executeTool(call.function.name, args);
+        const callMs = Date.now() - callT0;
+        console.log(`[RLM] round ${round} ← tool ${call.function.name} ok=${result.ok} chunks=${result.chunkCount ?? 0} elapsed=${callMs}ms preview="${(result.preview ?? '').slice(0, 80)}"`);
         yield {
           type: 'tool-result',
           round,
@@ -323,6 +416,7 @@ export async function* runRlmWithTools(opts: {
     // request so the user sees tokens flow instead of waiting for the
     // round-trip we just did. We could return msg.content directly, but
     // streaming gives the UI a live feed and matches the other paths.
+    console.log(`[RLM] round ${round} no tool calls — streaming final answer (re-POST with stream=true)`);
     let stream: Response;
     try {
       stream = await fetch(`${endpoint}/v1/chat/completions`, {
@@ -394,6 +488,7 @@ export async function* runRlmWithTools(opts: {
       return;
     }
 
+    console.log(`[RLM] run done rounds=${round} totalElapsed=${Date.now() - t0}ms finalContentChars=${full.length} tokens=${totalInputTokens}in+${totalOutputTokens}out`);
     yield {
       type: 'done',
       content: full,
@@ -405,5 +500,156 @@ export async function* runRlmWithTools(opts: {
     return;
   }
 
+  console.warn(`[RLM] tool-use loop hit maxRounds=${maxRounds} without final answer — bailing`);
   yield { type: 'error', message: `RLM tool-use loop exceeded maxRounds=${maxRounds}` };
+}
+
+// ---------------------------------------------------------------------------
+// Fallback tool-call parser
+// ---------------------------------------------------------------------------
+
+/**
+ * Scan free-text assistant content for tool calls the vLLM parser missed.
+ * Detects four shapes per tool name:
+ *   - pythonic positional:  name("...")
+ *   - pythonic kwargs:      name(query="...", limit=20)
+ *   - hermes XML:           <tool_call>{"name":"...","arguments":{...}}</tool_call>
+ *   - bare JSON line:       {"name":"...","arguments":{...}}
+ */
+export function extractFallbackToolCalls(
+  content: string,
+  tools: RlmToolSpec[],
+  round: number,
+): ToolCall[] {
+  const out: ToolCall[] = [];
+
+  // Shape 0 — Qwen XML format. The mit-oasys RLM Qwen3-8B fine-tune emits:
+  //
+  //   <tool_call>
+  //   <function=NAME>
+  //   <parameter=KEY>VALUE</parameter>
+  //   ...
+  //   </function>
+  //   </tool_call>
+  //
+  // Neither vLLM's `hermes` (expects JSON-inside-<tool_call>) nor `pythonic`
+  // (expects `name(args)`) parses this. Confirmed empirically via
+  // scripts/test-rlm.ts on 2026-05-26 — model's first round emits exactly
+  // this XML shape and vLLM returns `tool_calls: []`. We catch it ourselves.
+  const qwenXmlRe = /<tool_call>\s*<function\s*=\s*([A-Za-z_][\w-]*)\s*>([\s\S]*?)<\/function>\s*<\/tool_call>/g;
+  const paramRe = /<parameter\s*=\s*([A-Za-z_][\w-]*)\s*>([\s\S]*?)<\/parameter>/g;
+  let qm: RegExpExecArray | null;
+  while ((qm = qwenXmlRe.exec(content)) !== null) {
+    const fnName = qm[1];
+    if (!tools.some(t => t.function.name === fnName)) continue;
+    const body = qm[2];
+    const args: Record<string, unknown> = {};
+    let pm: RegExpExecArray | null;
+    while ((pm = paramRe.exec(body)) !== null) {
+      const key = pm[1];
+      const raw = pm[2].trim();
+      // Coerce simple JSON-like primitives so the master's stub/tool gets
+      // typed args (e.g. limit:10 as a number, not "10").
+      if (/^-?\d+(?:\.\d+)?$/.test(raw)) args[key] = Number(raw);
+      else if (raw === 'true') args[key] = true;
+      else if (raw === 'false') args[key] = false;
+      else if (raw === 'null') args[key] = null;
+      else args[key] = raw;
+    }
+    out.push({
+      id: `fallback-${round}-${out.length}`,
+      type: 'function',
+      function: { name: fnName, arguments: JSON.stringify(args) },
+    });
+  }
+
+  // Shape 3 — hermes <tool_call>{...}</tool_call> (any tool name)
+  const hermesRe = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/g;
+  let m: RegExpExecArray | null;
+  while ((m = hermesRe.exec(content)) !== null) {
+    try {
+      const obj = JSON.parse(m[1]);
+      if (obj && typeof obj.name === 'string' && tools.some(t => t.function.name === obj.name)) {
+        const args = obj.arguments ?? obj.parameters ?? {};
+        out.push({
+          id: `fallback-${round}-${out.length}`,
+          type: 'function',
+          function: { name: obj.name, arguments: typeof args === 'string' ? args : JSON.stringify(args) },
+        });
+      }
+    } catch { /* skip malformed */ }
+  }
+
+  // Shape 4 — bare JSON line (only well-formed single-line objects)
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && typeof obj.name === 'string' && tools.some(t => t.function.name === obj.name)) {
+        const args = obj.arguments ?? obj.parameters ?? {};
+        // Skip if we already captured this exact call via hermes.
+        const argStr = typeof args === 'string' ? args : JSON.stringify(args);
+        if (out.some(c => c.function.name === obj.name && c.function.arguments === argStr)) continue;
+        out.push({
+          id: `fallback-${round}-${out.length}`,
+          type: 'function',
+          function: { name: obj.name, arguments: argStr },
+        });
+      }
+    } catch { /* skip */ }
+  }
+
+  // Shapes 1 & 2 — pythonic per-tool
+  for (const tool of tools) {
+    const name = tool.function.name;
+    // Escape regex meta in tool name (defensive — tool names are usually plain).
+    const safeName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // Pythonic positional: name("...") or name('...')  — capture first string arg
+    const posRe = new RegExp(`\\b${safeName}\\s*\\(\\s*(["'])((?:\\\\.|(?!\\1).)*)\\1\\s*\\)`, 'g');
+    let pm: RegExpExecArray | null;
+    while ((pm = posRe.exec(content)) !== null) {
+      const queryArg = pm[2].replace(/\\(["'\\])/g, '$1');
+      const argStr = JSON.stringify({ query: queryArg });
+      if (out.some(c => c.function.name === name && c.function.arguments === argStr)) continue;
+      out.push({
+        id: `fallback-${round}-${out.length}`,
+        type: 'function',
+        function: { name, arguments: argStr },
+      });
+    }
+
+    // Pythonic kwargs: name(key="val", key2=123, key3='x')
+    const kwRe = new RegExp(`\\b${safeName}\\s*\\(\\s*([a-zA-Z_][a-zA-Z0-9_]*\\s*=[^)]*)\\)`, 'g');
+    let km: RegExpExecArray | null;
+    while ((km = kwRe.exec(content)) !== null) {
+      const kwBody = km[1];
+      const args: Record<string, unknown> = {};
+      // Match key=value pairs: value is "..." | '...' | number | bareword
+      const pairRe = /([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:(["'])((?:\\.|(?!\2).)*)\2|(-?\d+(?:\.\d+)?)|([a-zA-Z_][a-zA-Z0-9_]*))/g;
+      let pm2: RegExpExecArray | null;
+      while ((pm2 = pairRe.exec(kwBody)) !== null) {
+        const k = pm2[1];
+        if (pm2[2] !== undefined) {
+          args[k] = pm2[3].replace(/\\(["'\\])/g, '$1');
+        } else if (pm2[4] !== undefined) {
+          args[k] = Number(pm2[4]);
+        } else if (pm2[5] !== undefined) {
+          const v = pm2[5];
+          args[k] = v === 'true' ? true : v === 'false' ? false : v === 'null' ? null : v;
+        }
+      }
+      if (Object.keys(args).length === 0) continue;
+      const argStr = JSON.stringify(args);
+      if (out.some(c => c.function.name === name && c.function.arguments === argStr)) continue;
+      out.push({
+        id: `fallback-${round}-${out.length}`,
+        type: 'function',
+        function: { name, arguments: argStr },
+      });
+    }
+  }
+
+  return out;
 }

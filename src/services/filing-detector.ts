@@ -29,14 +29,34 @@ const TYPE_PATTERNS: Array<{ type: string; patterns: RegExp[] }> = [
   { type: 'Bill of Review', patterns: [/bill\s+of\s+review/i] },
   { type: 'Return of Service', patterns: [/return\s+of\s+service/i] },
   { type: 'Demand Letter', patterns: [/demand\s+letter/i] },
-  { type: "Clerk's Record", patterns: [/clerk'?s?\s+record/i] },
-  { type: "Reporter's Record", patterns: [/reporter'?s?\s+record/i] },
+  { type: "Clerk's Record", patterns: [
+    /clerk'?s?\s+record/i,
+    // CR abbreviation as a standalone token. Leading \b prevents match
+    // inside words ("secretary", "lecture"). Trailing lookahead requires a
+    // volume/page/numeric token so we don't catch "-CR" suffixes etc. We
+    // drop the trailing \b because between a trailing dot and whitespace
+    // there is no word boundary; the lookahead alone anchors.
+    /\bC\.?\s*R\.?(?=\s+(?:vol(?:ume)?|page|p\.?|\d))/i,
+  ] },
+  { type: "Reporter's Record", patterns: [
+    /reporter'?s?\s+record/i,
+    // RR abbreviation. Same shape as CR above — requires a following
+    // volume/page/numeric token so "RR" isn't matched in legal phrases like
+    // "ERR" or "Carrera." Covers: "RR", "R.R.", "Supp RR", "2nd Supp RR Vol 2"
+    /\bR\.?\s*R\.?(?=\s+(?:vol(?:ume)?|page|p\.?|\d))/i,
+    // Standalone "Supp RR" / "Supplemental RR" — anchors filenames like
+    // "1 Supp. RR" that don't always have a numeric Vol after the RR.
+    /\b(?:supp(?:lemental|lement)?\.?)\s+R\.?\s*R\.?\b/i,
+  ] },
   // Single-word types, ordered by specificity
   { type: 'Transcript', patterns: [/transcript/i, /\bdeposition\b/i] },
   { type: 'Settlement', patterns: [/settlement/i, /\bmediat/i] },
   { type: 'Affidavit', patterns: [/affidavit/i, /\bsworn\s+(?:statement|declaration)/i] },
   { type: 'Subpoena', patterns: [/subpoena/i, /\bduces\s+tecum\b/i] },
   { type: 'Designation', patterns: [/designation/i] },
+  // "Supp" / "Supplement" intentionally ranked AFTER Reporter's Record and
+  // Clerk's Record so a filename like "2nd Supp RR Vol 2" picks up RR rather
+  // than the modifier "Supp". The earlier regexes consume the combined token.
   { type: 'Supplement', patterns: [/supplement/i] },
   { type: 'Petition', patterns: [/petition/i] },
   { type: 'Judgment', patterns: [/judgment/i, /\bjudgement\b/i] },
