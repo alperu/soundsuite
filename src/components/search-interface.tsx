@@ -381,7 +381,10 @@ export default function SearchInterface({
   const [maxTokens, setMaxTokens] = usePersistedState<number>('search.maxTokens', 2048);
   const [effort, setEffort] = usePersistedState<'low' | 'medium' | 'high' | 'xhigh' | 'max'>('search.effort', 'medium');
   const [multiPass, setMultiPass] = usePersistedState<boolean>('search.multiPass', false);
-  const [inputHeight, setInputHeight] = usePersistedState<number>('search.inputHeight', 72);
+  // Composer baseline height. Doubled from the previous 72 → 192 so the
+  // box has room for a paragraph-sized query by default. Operator can drag
+  // the resize handle above the composer to make it taller (or shorter).
+  const [inputHeight, setInputHeight] = usePersistedState<number>('search.inputHeight', 192);
   const [aiTurns, setAiTurns] = useState<AIConversationTurn[]>([]);
   const [deepTurns, setDeepTurns] = useState<DeepSearchTurn[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>(() => `session-${Date.now()}`);
@@ -2119,7 +2122,7 @@ export default function SearchInterface({
                             placeholder={hasConversation ? 'Ask a follow-up… (try judge== hearingDate>=)' : 'Filter or ask… (try judge== hearingDate>= motionType==)'}
                             disabled={aiLoading || haystackBusy}
                             className="w-full"
-                            style={{ minHeight: 96 }}
+                            style={{ minHeight: inputHeight }}
                             onActiveTokenChange={setActiveToken}
                             pickerOptions={pickerOptions}
                             pickerHighlight={pickerHighlight}
@@ -2225,12 +2228,14 @@ export default function SearchInterface({
                           value={aiQuery}
                           onChange={e => {
                             setAiQuery(e.target.value);
-                            // Auto-grow up to max-height. Reset height first
-                            // so shrinking works when user deletes text.
+                            // Auto-grow within [inputHeight, max]. Reset
+                            // first so shrinking works when user deletes
+                            // text — but never below the operator-set
+                            // baseline from the drag handle.
                             const el = e.currentTarget;
                             el.style.height = 'auto';
-                            const max = 320;
-                            el.style.height = Math.min(el.scrollHeight, max) + 'px';
+                            const max = Math.max(inputHeight + 200, Math.min(window.innerHeight * 0.6, 800));
+                            el.style.height = Math.max(inputHeight, Math.min(el.scrollHeight, max)) + 'px';
                           }}
                           onKeyDown={e => {
                             if (e.key === 'Enter' && !e.shiftKey) {
@@ -2250,8 +2255,12 @@ export default function SearchInterface({
                             overflowWrap: 'anywhere',
                             overflowX: 'hidden',
                             overflowY: 'auto',
-                            minHeight: 96,
-                            maxHeight: 320,
+                            // Baseline height comes from `inputHeight` (set
+                            // by the drag handle above the composer). Auto-
+                            // grow can extend up to ~60% of the viewport
+                            // before vertical scrolling kicks in.
+                            minHeight: inputHeight,
+                            maxHeight: Math.max(inputHeight + 200, Math.min(typeof window !== 'undefined' ? window.innerHeight * 0.6 : 600, 800)),
                           }}
                         />
                         {/* Submit / stop action — anchored bottom-right inside the box */}
