@@ -105,6 +105,10 @@ export interface ActiveTokenSuggestionsProps {
    */
   selectedValues?: Set<string>;
   onSelectedValuesChange?(next: Set<string>, anchor: string | null): void;
+  /** Set of values that are already present in the current mustache expression.
+   *  Rows whose value is in this set are rendered with a "✓ in this filter"
+   *  badge and subdued styling. */
+  alreadyInExpression?: Set<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +412,7 @@ export function ActiveTokenSuggestions({
   onHighlightReset,
   selectedValues,
   onSelectedValuesChange,
+  alreadyInExpression = new Set<string>(),
 }: ActiveTokenSuggestionsProps) {
   // Anchor for shift+click range select. Kept local — the parent only cares
   // about which values are selected, not the anchor.
@@ -748,6 +753,7 @@ export function ActiveTokenSuggestions({
           <ul className="py-1">
             {pathRemote.options.map((opt, i) => {
               const isSel = selectedValues?.has(opt.value) ?? false;
+              const isAlready = alreadyInExpression.has(opt.value);
               const orderedValues = pathRemote.options.map((o) => o.value);
               return (
                 <li key={`pt-${opt.value}-${i}`}>
@@ -756,7 +762,7 @@ export function ActiveTokenSuggestions({
                     onMouseDown={(e) => onRowClick(e, opt, orderedValues)}
                     className={`flex items-start gap-2 w-full text-left px-3 py-1.5 text-xs hover:bg-purple-50 ${
                       isSel ? 'bg-purple-50' : ''
-                    } ${i === highlight ? 'bg-purple-100' : ''}`}
+                    } ${i === highlight ? 'bg-purple-100' : ''} ${isAlready ? 'opacity-60' : ''}`}
                   >
                     <span
                       aria-hidden="true"
@@ -782,6 +788,11 @@ export function ActiveTokenSuggestions({
                         </div>
                       )}
                     </span>
+                    {isAlready && (
+                      <span className="ml-auto text-[10px] text-purple-600 font-medium bg-purple-50 px-1.5 py-0.5 rounded shrink-0">
+                        ✓ in filter
+                      </span>
+                    )}
                   </button>
                 </li>
               );
@@ -809,6 +820,7 @@ export function ActiveTokenSuggestions({
           <ul className="py-1">
             {remote.options.map((opt, i) => {
               const isSel = selectedValues?.has(opt.value) ?? false;
+              const isAlready = alreadyInExpression.has(opt.value);
               const orderedValues = remote.options.map((o) => o.value);
               return (
                 <li key={opt.value}>
@@ -817,7 +829,7 @@ export function ActiveTokenSuggestions({
                     onMouseDown={(e) => onRowClick(e, opt, orderedValues)}
                     className={`flex items-start gap-2 w-full text-left px-3 py-1.5 text-xs hover:bg-purple-50 ${
                       isSel ? 'bg-purple-50' : ''
-                    } ${i === highlight ? 'bg-purple-100' : ''}`}
+                    } ${i === highlight ? 'bg-purple-100' : ''} ${isAlready ? 'opacity-60' : ''}`}
                   >
                     <span
                       aria-hidden="true"
@@ -843,6 +855,11 @@ export function ActiveTokenSuggestions({
                         </div>
                       )}
                     </span>
+                    {isAlready && (
+                      <span className="ml-auto text-[10px] text-purple-600 font-medium bg-purple-50 px-1.5 py-0.5 rounded shrink-0">
+                        ✓ in filter
+                      </span>
+                    )}
                   </button>
                 </li>
               );

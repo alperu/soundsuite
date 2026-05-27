@@ -443,6 +443,9 @@ export default function SearchInterface({
   // Task #63: lifted multi-select state. Set is populated by Shift/Cmd-click
   // in ActiveTokenSuggestions; commitMultiSelection splices the chip batch.
   const [pickerSelectedValues, setPickerSelectedValues] = useState<Set<string>>(new Set());
+  // Task #36: values already present in the current mustache expression, so
+  // the picker can mark them with a "✓ in filter" badge.
+  const [alreadyInExpression, setAlreadyInExpression] = useState<Set<string>>(new Set());
 
   // Mustache picker (restored) — tracks the caret position inside the
   // `{{ }}` composer so MustachePicker can detect the active block and
@@ -472,12 +475,14 @@ export default function SearchInterface({
     if (!useHaystackFilters) {
       if (activeToken !== null) setActiveToken(null);
       if (tokenSuggestions.length > 0) setTokenSuggestions([]);
+      setAlreadyInExpression(new Set());
       return;
     }
     const m = detectMustacheActive(aiQuery, aiQueryCursor);
     if (!m) {
       if (activeToken !== null) setActiveToken(null);
       if (tokenSuggestions.length > 0) setTokenSuggestions([]);
+      setAlreadyInExpression(new Set());
       return;
     }
     // Mustache content starts at openIndex + 2 (after `{{`); strip leading ws.
@@ -508,6 +513,17 @@ export default function SearchInterface({
           setActiveToken(absToken);
         }
         if (tokenSuggestions.length > 0) setTokenSuggestions([]);
+        // Phase B post-process: parse mustache content for atoms matching the
+        // active token's prefix so the picker can mark already-picked rows.
+        const prefix = absToken.path[0];
+        const atomRe = new RegExp(`\\b${prefix}\\s*(?:==|!=)\\s*(@?[\\w-]+|"[^"]*")`, 'g');
+        const found = new Set<string>();
+        let am: RegExpExecArray | null;
+        while ((am = atomRe.exec(m.raw)) !== null) {
+          const v = am[1].replace(/^["']|["']$/g, '');
+          if (v !== absToken.partial) found.add(v);
+        }
+        setAlreadyInExpression(found);
         return;
       }
     }
@@ -515,6 +531,7 @@ export default function SearchInterface({
     // Phase A — token-name partial. Filter TOKEN_KEYS by case-insensitive
     // substring against `fieldPartial`.
     if (activeToken !== null) setActiveToken(null);
+    setAlreadyInExpression(new Set());
     const q = m.fieldPartial.trim().toLowerCase();
     const filtered = TOKEN_KEYS.filter((k) => !q || k.toLowerCase().includes(q)).slice(0, 12);
     // Only update state if it actually changed (cheap deep equality on joined).
@@ -2012,6 +2029,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                   onHighlightReset={() => setPickerHighlight(0)}
                   selectedValues={pickerSelectedValues}
                   onSelectedValuesChange={handleSelectedValuesChange}
+                  alreadyInExpression={alreadyInExpression}
                 />
               ) : (
                 <SampleQueryPanel
@@ -2550,14 +2568,29 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                               const tokenPickerActive = tokenOpts > 0 && !valuePickerActive;
                               const hasMultiSelection = pickerSelectedValues.size > 0;
                               if (key === 'Space' && valuePickerActive) {
-                                // Toggle highlighted option in the OR-group selection.
                                 const picked = pickerOptions[pickerHighlight];
-                                if (picked) {
-                                  const next = new Set(pickerSelectedValues);
-                                  if (next.has(picked.value)) next.delete(picked.value);
-                                  else next.add(picked.value);
-                                  setPickerSelectedValues(next);
+                                if (!picked) return;
+                                if (alreadyInExpression.has(picked.value)) {
+                                  // Already in expression → REMOVE it from the mustache text.
+                                  if (chipEditorRef.current && activeToken) {
+                                    const editor = chipEditorRef.current;
+                                    const fullText = editor.getText();
+                                    const pfx = activeToken.path[0];
+                                    const atomEsc = picked.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                                    const removeRe = new RegExp(
+                                      `(?:\\s+(?:or|and)\\s+|\\s+)?\\b${pfx}\\s*(?:==|!=)\\s*"?${atomEsc}"?`,
+                                      'g'
+                                    );
+                                    const next = fullText.replace(removeRe, () => '');
+                                    editor.setContents(next, haystackChips);
+                                  }
+                                  return;
                                 }
+                                // Not yet present → toggle into pickerSelectedValues (existing behavior).
+                                const next = new Set(pickerSelectedValues);
+                                if (next.has(picked.value)) next.delete(picked.value);
+                                else next.add(picked.value);
+                                setPickerSelectedValues(next);
                                 return;
                               }
                               if (key === 'ArrowDown') {
@@ -2755,6 +2788,22 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                               if (e.key === ' ' && e.shiftKey && valuePickerActive && pickerOptions[pickerHighlight]) {
                                 e.preventDefault();
                                 const picked = pickerOptions[pickerHighlight];
+                                if (alreadyInExpression.has(picked.value)) {
+                                  // Already in expression → REMOVE it from the mustache text.
+                                  if (chipEditorRef.current && activeToken) {
+                                    const editor = chipEditorRef.current;
+                                    const fullText = editor.getText();
+                                    const pfx = activeToken.path[0];
+                                    const atomEsc = picked.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                                    const removeRe = new RegExp(
+                                      `(?:\\s+(?:or|and)\\s+|\\s+)?\\b${pfx}\\s*(?:==|!=)\\s*"?${atomEsc}"?`,
+                                      'g'
+                                    );
+                                    const next = fullText.replace(removeRe, () => '');
+                                    editor.setContents(next, haystackChips);
+                                  }
+                                  return;
+                                }
                                 const next = new Set(pickerSelectedValues);
                                 if (next.has(picked.value)) next.delete(picked.value);
                                 else next.add(picked.value);
