@@ -30,6 +30,7 @@ import React, { useCallback, useEffect, useImperativeHandle, useMemo, useRef } f
 import { Node, mergeAttributes, InputRule } from '@tiptap/core';
 import { EditorContent, ReactNodeViewRenderer, NodeViewWrapper, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
+import { Plugin, PluginKey } from '@tiptap/pm/state';
 import type { Editor } from '@tiptap/core';
 import type { FilterChip } from '@/lib/search/haystack-query-builder';
 
@@ -241,10 +242,10 @@ const FilterChipNode = Node.create({
   },
 
   addInputRules() {
-    // Match any `{{ ... }}` block — the inner content is a raw Axon
-    // sub-expression. Triggered as the user types the closing `}}`; the whole
-    // span gets swapped for a FilterChipNode whose `expression` attr holds
-    // the verbatim inner content.
+    // Cheap path for direct typing — the materialization plugin below is the
+    // canonical source of truth, but the InputRule lets the chip pop the
+    // instant the user types the second `}` without waiting for the next
+    // state cycle.
     return [
       new InputRule({
         find: /\{\{\s*([^{}]+?)\s*\}\}$/,
@@ -258,6 +259,49 @@ const FilterChipNode = Node.create({
             this.type.create({ expression, displayName: null }),
           );
           return null;
+        },
+      }),
+    ];
+  },
+
+  /**
+   * Materialization plugin — runs on every transaction. Scans the doc for
+   * closed `{{ ... }}` substrings and replaces them with FilterChipNodes.
+   *
+   * The InputRule above only fires on direct user input; after a `setContents`
+   * splice (picker pick), the user typing the final `}}` may not refire the
+   * rule. This plugin closes that gap by scanning whenever the doc changes,
+   * regardless of how the content got there (paste, programmatic insert,
+   * direct typing).
+   */
+  addProseMirrorPlugins() {
+    const nodeType = this.type;
+    return [
+      new Plugin({
+        key: new PluginKey('filter-chip-materialize'),
+        appendTransaction(transactions, _oldState, newState) {
+          if (!transactions.some((t) => t.docChanged)) return null;
+          let tr = newState.tr;
+          let mutated = false;
+          newState.doc.descendants((node, pos) => {
+            if (mutated) return false; // one mutation per cycle (positions shift)
+            if (!node.isText) return true;
+            const text = node.text ?? '';
+            const m = /\{\{\s*([^{}]+?)\s*\}\}/.exec(text);
+            if (!m) return true;
+            const expression = m[1].trim();
+            if (!expression) return true;
+            const start = pos + m.index;
+            const end = start + m[0].length;
+            tr = tr.replaceWith(
+              start,
+              end,
+              nodeType.create({ expression, displayName: null }),
+            );
+            mutated = true;
+            return false;
+          });
+          return mutated ? tr : null;
         },
       }),
     ];
