@@ -48,6 +48,7 @@ import {
   type PickedSuggestion,
 } from './search/active-token-suggestions';
 import { TOKEN_KEYS } from '@/lib/search/haystack-query-builder';
+import { ChipEditor, type ChipEditorHandle } from './search/chip-editor';
 import type { SampleQuery } from '@/lib/search/sample-queries';
 import {
   buildHaystackFilter,
@@ -562,6 +563,35 @@ export default function SearchInterface({
   const handlePickActiveToken = useCallback(
     (picked: PickedSuggestion) => {
       if (!activeToken) return;
+      // ChipEditor path: insert a real FilterChipNode at the caret. The pick
+      // typically arrived because the user typed `tag==` followed by a
+      // partial — strip the typed `tag==<partial>` from the editor text and
+      // insert the chip atom in its place.
+      if (chipEditorRef.current) {
+        // The editor uses an absolute caret offset over its serialized text.
+        // We know `activeToken.startIndex` already points to where the prefix
+        // started in the editor's text (set by the cursor effect).
+        const editor = chipEditorRef.current;
+        const fullText = editor.getText();
+        const before = fullText.slice(0, activeToken.startIndex);
+        const after = fullText.slice(activeToken.endIndex);
+        editor.setContents(before + after, haystackChips);
+        // After setContents, the caret lands at start. We accept that and
+        // append the chip — the user's mental model is "pick a value, get a
+        // chip, keep typing". A future polish could restore caret precisely.
+        editor.insertChip({
+          tag: activeToken.path[0],
+          op: activeToken.op as '==' | '!=' | '>=' | '<=' | '>' | '<',
+          value: picked.value,
+          displayName: picked.label,
+        });
+        setActiveToken(null);
+        setPickerHighlight(0);
+        setPickerOptions([]);
+        setPickerSelectedValues(new Set());
+        return;
+      }
+      // Legacy textarea path.
       const replacement = `${activeToken.prefix}${activeToken.op}${quoteIfNeeded(picked.value)}`;
       const before = aiQuery.slice(0, activeToken.startIndex);
       const after = aiQuery.slice(activeToken.endIndex);
@@ -581,7 +611,7 @@ export default function SearchInterface({
         }
       });
     },
-    [activeToken, aiQuery],
+    [activeToken, aiQuery, haystackChips],
   );
 
   // Task #63: batch commit — Shift/Cmd-clicked rows are committed together,
@@ -956,6 +986,12 @@ export default function SearchInterface({
 
   // Refs for Cmd+K
   const aiQueryRef = useRef<HTMLTextAreaElement>(null);
+// TipTap editor handle — populated when Filter mode is on so the picker
+// `handlePickActiveToken` can insert chip nodes directly.
+const chipEditorRef = useRef<ChipEditorHandle | null>(null);
+// Hovered chip (Phase 5) — when set, HaystackPreviewGrid rescopes to that
+// chip's filter only. null = combined-grid mode.
+const [hoverChip, setHoverChip] = useState<{ tag: string; op: string; value: string; displayName: string | null } | null>(null);
   const directQueryRef = useRef<HTMLInputElement>(null);
 
   // URL-driven navigation helpers
@@ -2379,15 +2415,64 @@ export default function SearchInterface({
                             a filter rather than typing freetext. When the
                             user types `}}`, the onChange handler extracts
                             the chip; the pending preview disappears. */}
-                        {useHaystackFilters && (() => {
-                          // Find an unclosed `{{` (the LAST one — earlier
-                          // closed blocks have already been extracted by
-                          // onChange). Empty content is fine — show a
-                          // placeholder chip until the user types.
+                        {/* ChipEditor — TipTap-based composer with inline
+                            FilterChipNode atoms. Replaces the chip-strip +
+                            textarea pair when Filter mode is ON. */}
+                        {useHaystackFilters && (
+                          <ChipEditor
+                            ref={chipEditorRef}
+                            initialText={aiQuery}
+                            initialChips={haystackChips}
+                            placeholder={hasConversation ? 'Ask a follow-up…' : 'Ask a question about your legal documents…'}
+                            minHeight={inputHeight}
+                            maxHeight={Math.max(inputHeight + 200, Math.min(typeof window !== 'undefined' ? window.innerHeight * 0.6 : 600, 800))}
+                            onChange={(text, chips) => {
+                              setAiQuery(text);
+                              setHaystackChips(chips);
+                            }}
+                            onCursorChange={(_text, cursor) => setAiQueryCursor(cursor)}
+                            onSubmit={() => {
+                              if (aiQuery.trim() && !aiLoading) {
+                                handleAISearch({ preventDefault() {} } as React.FormEvent);
+                              }
+                            }}
+                            pickerActive={
+                              (activeToken !== null && pickerOptions.length > 0) ||
+                              tokenSuggestions.length > 0
+                            }
+                            onPickerKey={(key) => {
+                              const valueOpts = pickerOptions.length;
+                              const tokenOpts = tokenSuggestions.length;
+                              const valuePickerActive = activeToken !== null && valueOpts > 0;
+                              const tokenPickerActive = tokenOpts > 0 && !valuePickerActive;
+                              if (key === 'ArrowDown') {
+                                if (valuePickerActive) setPickerHighlight(i => (i + 1) % valueOpts);
+                                else if (tokenPickerActive) setTokenSuggestionHighlight(i => (i + 1) % tokenOpts);
+                              } else if (key === 'ArrowUp') {
+                                if (valuePickerActive) setPickerHighlight(i => (i - 1 + valueOpts) % valueOpts);
+                                else if (tokenPickerActive) setTokenSuggestionHighlight(i => (i - 1 + tokenOpts) % tokenOpts);
+                              } else if (key === 'Enter' || key === 'Tab') {
+                                if (valuePickerActive) {
+                                  const picked = pickerOptions[pickerHighlight];
+                                  if (picked) handlePickActiveToken(picked);
+                                } else if (tokenPickerActive) {
+                                  const picked = tokenSuggestions[tokenSuggestionHighlight];
+                                  if (picked) handleRailPickTokenName(picked);
+                                }
+                              } else if (key === 'Escape') {
+                                setPickerOptions([]);
+                                setTokenSuggestions([]);
+                                setActiveToken(null);
+                              }
+                            }}
+                            onHoverChip={setHoverChip}
+                          />
+                        )}
+                        {false && (() => {
                           const lastOpen = aiQuery.lastIndexOf('{{');
                           const hasUnclosed = lastOpen !== -1 && !aiQuery.slice(lastOpen + 2).includes('}}');
-                          const pendingRaw = hasUnclosed ? aiQuery.slice(lastOpen + 2) : null;
-                          const pendingPreview = pendingRaw === null ? null : pendingRaw.trim() || '​';
+                          const pendingRaw = hasUnclosed ? aiQuery.slice(lastOpen + 2) : '';
+                          const pendingPreview = pendingRaw.trim() || '​';
                           if (haystackChips.length === 0 && !hasUnclosed) {
                             // Strip is empty — render a faint hint so users
                             // know what to type.
@@ -2435,7 +2520,7 @@ export default function SearchInterface({
                             </div>
                           );
                         })()}
-                        <textarea
+                        {!useHaystackFilters && <textarea
                           id="ai-query"
                           ref={(el) => {
                             (aiQueryRef as React.MutableRefObject<HTMLTextAreaElement | null>).current = el;
@@ -2591,7 +2676,7 @@ export default function SearchInterface({
                             minHeight: inputHeight,
                             maxHeight: Math.max(inputHeight + 200, Math.min(typeof window !== 'undefined' ? window.innerHeight * 0.6 : 600, 800)),
                           }}
-                        />
+                        />}
                         {/* MustachePicker disabled — replaced by the left-side full-height rail
                             (ActiveTokenSuggestions / SampleQueryPanel / TokenNameSuggestions) gated
                             by `useHaystackFilters`. The picker component is kept around as dead
@@ -3048,6 +3133,23 @@ export default function SearchInterface({
               : <SearchDocsPanel mode={mode} embeddingInfo={embeddingInfo} directMode={directMode} />
           )}
           {infoTab === 'haystack' && (() => {
+            // Phase 5: when a chip is hovered, rescope the grid to just that
+            // chip's filter. Otherwise show the combined preview.
+            if (hoverChip) {
+              const op = hoverChip.op || '==';
+              const value = hoverChip.value.startsWith('@') || /^\d/.test(hoverChip.value)
+                ? hoverChip.value
+                : `"${hoverChip.value.replace(/"/g, '\\"')}"`;
+              const soloFilter = `${hoverChip.tag}${op}${value}`;
+              return (
+                <div>
+                  <div className="px-3 py-1.5 text-[11px] text-purple-700 bg-purple-50 border-b border-purple-200">
+                    Preview scoped to hovered chip · <span className="font-mono">{soloFilter}</span>
+                  </div>
+                  <HaystackPreviewGrid filter={soloFilter} />
+                </div>
+              );
+            }
             const compiled = buildHaystackFilter(haystackChips, aiQuery);
             return (
               <HaystackPreviewGrid
