@@ -410,12 +410,15 @@ export default function SearchInterface({
   // that's now ALWAYS on; the previous "Use Haystack filters" checkbox is gone.
   // Filter mode toggle. When ON, `{{ key==value }}` blocks in the textarea
   // are extracted into a chip strip above the input on every keystroke.
-  // When OFF (default), `{{ }}` is plain literal text and the textarea wraps
-  // naturally — important since natural-language pastes were getting
-  // single-line-jammed by the prior locked-on chip-composer behavior.
+  // When OFF (default), `{{ }}` is plain literal text. Toggle controls
+  // ONLY the mustache parsing — it does NOT swap the composer to the
+  // legacy haystack chip-input branch. Critical: keeping haystackMode at
+  // `false` means the form ternary always renders the standard textarea
+  // (the one with all the pills + chip strip + Filter button), so toggling
+  // Filter on doesn't make the Filter button itself disappear.
   const [useHaystackFilters, setUseHaystackFilters] = usePersistedState<boolean>('search.useHaystackFilters', false);
-  const haystackMode = useHaystackFilters;
-  const setHaystackMode = setUseHaystackFilters;
+  const haystackMode = false;
+  const setHaystackMode = (_: boolean) => { /* legacy chip-composer permanently off; Filter pill drives mustache parsing instead */ };
   const [haystackChips, setHaystackChips] = useState<FilterChip[]>([]);
   const [haystackBusy, setHaystackBusy] = useState(false);
   const [haystackPreview, setHaystackPreview] = useState<{
@@ -2106,7 +2109,11 @@ export default function SearchInterface({
                     along side it". */}
                 <div className={(filterLogicCollapsed || !booleanMode) ? 'max-w-5xl mx-auto' : 'max-w-3xl mx-auto'}>
                   <form onSubmit={e => {
-                    if (haystackMode && (haystackChips.length > 0 || /\w+:/.test(aiQuery))) {
+                    // When Filter mode is on AND the user actually built
+                    // chips via {{ ... }}, route the search through the
+                    // haystack pipeline so the chips become structured
+                    // filters. Otherwise: standard AI search.
+                    if (useHaystackFilters && haystackChips.length > 0) {
                       e.preventDefault();
                       void runHaystackSearch();
                       return;

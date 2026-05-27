@@ -332,9 +332,34 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       searchResults.sort((a, b) => b.score - a.score);
     }
 
-    // Safety trim to user-requested limit
+    // Per-document diversity cap — prevents one giant document (typically a
+    // clerk's record or multi-volume RR) from monopolizing the top N when
+    // many of its chunks score similarly well. Mirrors the cap applied
+    // in deep-search.ts but tuned for the smaller `limit` used here.
+    // Cap = max(2, ceil(limit / distinctDocs * 1.2)) per document.
     if (searchResults.length > limit) {
-      searchResults = searchResults.slice(0, limit);
+      const distinctDocs = new Set(searchResults.map((r) => r.metadata.documentId)).size;
+      const perDocCap = Math.max(2, Math.ceil((limit / Math.max(1, distinctDocs)) * 1.2));
+      const perDocCount = new Map<string, number>();
+      const capped: typeof searchResults = [];
+      const overflow: typeof searchResults = [];
+      for (const r of searchResults) {
+        const key = r.metadata.documentId;
+        const n = perDocCount.get(key) ?? 0;
+        if (n < perDocCap) {
+          perDocCount.set(key, n + 1);
+          capped.push(r);
+        } else {
+          overflow.push(r);
+        }
+        if (capped.length >= limit) break;
+      }
+      // If capping left us short of `limit` (e.g. very few distinct docs),
+      // fill from overflow so we still hand back the requested count.
+      while (capped.length < limit && overflow.length > 0) {
+        capped.push(overflow.shift()!);
+      }
+      searchResults = capped;
     }
 
     // Look up case metadata for citation formatter selection
