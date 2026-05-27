@@ -30,6 +30,7 @@ import {
 } from './search/haystack-filter-input';
 import { SampleQueryPanel } from './search/sample-query-panel';
 import { HaystackPreviewGrid } from './search/haystack-preview-grid';
+import { ChunkPreviewGrid } from './search/chunk-preview-grid';
 import { FilterLogicPanel, isLikelyMidTyping } from './search/filter-logic-panel';
 import BooleanChipComposer from './search/boolean-chip-composer';
 import { MustachePicker, detectMustacheActive } from './search/mustache-picker';
@@ -3403,8 +3404,10 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
               : <SearchDocsPanel mode={mode} embeddingInfo={embeddingInfo} directMode={directMode} />
           )}
           {infoTab === 'haystack' && (() => {
-            // Phase 5: when a chip is hovered, rescope the grid to just that
-            // chip's filter. Otherwise show the combined preview.
+            // Chunk-level preview: shows actual matching documents/chunks
+            // from the SAME pipeline the real search uses (/api/search/unified).
+            // Replaces the old HaystackPreviewGrid which queried Hayson entity
+            // tables and choked on chip filters that crossed columns.
             if (hoverChip) {
               const soloFilter = hoverChip.expression;
               return (
@@ -3412,15 +3415,15 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                   <div className="px-3 py-1.5 text-[11px] text-purple-700 bg-purple-50 border-b border-purple-200">
                     Preview scoped to hovered chip · <span className="font-mono">{soloFilter}</span>
                   </div>
-                  <HaystackPreviewGrid filter={soloFilter} />
+                  <ChunkPreviewGrid filter={soloFilter} />
                 </div>
               );
             }
             const compiled = buildHaystackFilter(haystackChips, aiQuery);
             return (
-              <HaystackPreviewGrid
+              <ChunkPreviewGrid
                 filter={compiled.filter}
-                kind={compiled.impliedKind}
+                freetext={compiled.freetext}
               />
             );
           })()}
