@@ -374,42 +374,60 @@ export function extractFieldFilters(input: Node): {
     // `(col1 IN (v1, v2) OR col2 IN (v3, v4))` SQL clause instead of
     // degrading each leaf to a text match. Safe because all leaves resolve
     // to LanceDB scalar columns that live on chunks.
+    //
+    // Handles nested ORs by flattening: `(A or B) or (C or D)` is the same
+    // as `A or B or C or D` for this collapse.
     if (node.op === 'OR' && !frozen && !underOr) {
-      const groups = new Map<string, string[]>();
-      let allEligible = true;
-      for (const c of node.children) {
-        if (c.op !== 'TERM' || !c.path || c.path.length !== 1) { allEligible = false; break; }
-        const cmp: CompareOp = c.compareOp ?? '==';
-        if (cmp !== '==') { allEligible = false; break; }
-        const isRef = !!c.isRef;
-        const rawField = c.path[0];
-        // Apply the same REF_ALIAS used in the TERM branch — refs typed as
-        // `case`/`judge`/etc. with @uuid values redirect to their *Ref column.
+      const flatLeaves: Node[] = [];
+      const stack: Node[] = [node];
+      let canFlatten = true;
+      while (stack.length > 0) {
+        const cur = stack.pop()!;
+        if (cur.op === 'OR') {
+          // Push children right-to-left so flatLeaves preserves left-to-right order
+          for (let i = cur.children.length - 1; i >= 0; i--) stack.push(cur.children[i]);
+        } else if (cur.op === 'TERM') {
+          flatLeaves.push(cur);
+        } else {
+          canFlatten = false;
+          break;
+        }
+      }
+      if (canFlatten && flatLeaves.length > 0) {
+        const groups = new Map<string, string[]>();
+        let allEligible = true;
         const REF_ALIAS: Record<string, string> = {
           case: 'caseRef', document: 'documentRef', filing: 'filingRef',
           judge: 'judgeRef', lawyer: 'lawyerRef', movant: 'movantRef',
           respondent: 'respondentRef', clerk: 'clerkRef', reporter: 'reporterRef',
         };
-        const field = (isRef && REF_ALIAS[rawField] && FIELD_RESOLVERS[REF_ALIAS[rawField]])
-          ? REF_ALIAS[rawField]
-          : rawField;
-        const resolver = FIELD_RESOLVERS[field];
-        if (!resolver) { allEligible = false; break; }
-        if (resolver.kind !== 'lance-scalar' && resolver.kind !== 'lance-scalar-ref') {
-          allEligible = false; break;
+        for (const c of flatLeaves) {
+          if (!c.path || c.path.length !== 1) { allEligible = false; break; }
+          const cmp: CompareOp = c.compareOp ?? '==';
+          if (cmp !== '==') { allEligible = false; break; }
+          const isRef = !!c.isRef;
+          const rawField = c.path[0];
+          const field = (isRef && REF_ALIAS[rawField] && FIELD_RESOLVERS[REF_ALIAS[rawField]])
+            ? REF_ALIAS[rawField]
+            : rawField;
+          const resolver = FIELD_RESOLVERS[field];
+          if (!resolver) { allEligible = false; break; }
+          if (resolver.kind !== 'lance-scalar' && resolver.kind !== 'lance-scalar-ref') {
+            allEligible = false; break;
+          }
+          const arr = groups.get(resolver.column) ?? [];
+          arr.push(c.value);
+          groups.set(resolver.column, arr);
         }
-        const arr = groups.get(resolver.column) ?? [];
-        arr.push(c.value);
-        groups.set(resolver.column, arr);
-      }
-      if (allEligible && groups.size > 0) {
-        const parts: string[] = [];
-        for (const [col, values] of groups) {
-          const escaped = values.map((v) => `'${sqlEscape(v)}'`).join(', ');
-          parts.push(`${col} IN (${escaped})`);
+        if (allEligible && groups.size > 0) {
+          const parts: string[] = [];
+          for (const [col, values] of groups) {
+            const escaped = values.map((v) => `'${sqlEscape(v)}'`).join(', ');
+            parts.push(`${col} IN (${escaped})`);
+          }
+          whereClauses.push(parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`);
+          return null;
         }
-        whereClauses.push(parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`);
-        return null;
       }
     }
 
