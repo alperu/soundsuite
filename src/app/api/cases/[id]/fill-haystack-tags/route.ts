@@ -16,6 +16,8 @@ import {
   pickExcerpt,
   normalizeIsoDate,
   isLikelyValidName,
+  detectSignedOnDeterministic,
+  detectClerkRefDeterministic,
   type ChunkExcerpt,
   type ExtractedFields,
   type ResolvedFilingTarget,
@@ -32,7 +34,9 @@ export type HaystackTagField =
   | 'movantRef'
   | 'respondentRef'
   | 'reporterRef'
-  | 'fileRef';
+  | 'fileRef'
+  | 'signedOn'
+  | 'clerkRef';
 
 export const HAYSTACK_TAG_FIELDS: HaystackTagField[] = [
   'filedOn',
@@ -42,6 +46,8 @@ export const HAYSTACK_TAG_FIELDS: HaystackTagField[] = [
   'respondentRef',
   'reporterRef',
   'fileRef',
+  'signedOn',
+  'clerkRef',
 ];
 
 /**
@@ -72,7 +78,7 @@ export interface FillTagsRequest {
     filingId: string;
     field: HaystackTagField;
     proposedValue?: unknown;
-    personSeed?: { name: string; marker: 'judge' | 'courtReporter' | null };
+    personSeed?: { name: string; marker: 'judge' | 'courtReporter' | 'courtClerk' | null };
     /** Optional — used only for the ActionLog `beforeValue`. The server
      * re-reads the DB row for the authoritative current value before writing. */
     currentValue?: unknown;
@@ -117,7 +123,7 @@ export interface FillTagSuggestion {
    * sees the existing record rather than thinking a new one will be made. */
   personSeed?: {
     name: string;
-    marker: 'judge' | 'courtReporter' | null;
+    marker: 'judge' | 'courtReporter' | 'courtClerk' | null;
     existingMatch?: { id: string; displayName: string; score: number } | null;
   };
 }
@@ -549,7 +555,7 @@ async function detectFiledOnDeterministic(
  */
 async function findExistingPersonMatch(
   name: string,
-  marker: 'judge' | 'courtReporter' | null,
+  marker: 'judge' | 'courtReporter' | 'courtClerk' | null,
 ): Promise<{ id: string; displayName: string; score: number } | null> {
   const cleanName = name.trim();
   if (!cleanName) return null;
@@ -645,6 +651,51 @@ async function suggestForFiling(args: {
         });
         aiFields = aiFields.filter((f) => f !== 'filedOn');
       }
+    }
+  }
+
+  // ─── Deterministic `signedOn` ─────────────────────────────────────────────
+  if (aiFields.includes('signedOn')) {
+    const detected = detectSignedOnDeterministic(chunks);
+    if (detected) {
+      const current = readCurrentValue(target.row, 'signedOn');
+      const iso = normalizeIsoDate(detected.iso) ?? detected.iso;
+      if (!valuesEqual(current, iso)) {
+        out.push({
+          filingId: target.filingId,
+          filingTitle: target.filingTitle,
+          field: 'signedOn',
+          currentValue: current ?? null,
+          proposedValue: iso,
+          proposedDisplay: iso,
+          sourceExcerpt: detected.source,
+          confidence: detected.confidence,
+        });
+        aiFields = aiFields.filter((f) => f !== 'signedOn');
+      }
+    }
+  }
+
+  // ─── Deterministic `clerkRef` ─────────────────────────────────────────────
+  if (aiFields.includes('clerkRef')) {
+    const detected = detectClerkRefDeterministic(chunks);
+    if (detected) {
+      const current = readCurrentValue(target.row, 'clerkRef');
+      const existingMatch = await findExistingPersonMatch(detected.name, 'courtClerk');
+      // Bump to high if there's an exact match (score >= 100)
+      const confidence = (existingMatch?.score ?? 0) >= 100 ? 'high' : detected.confidence;
+      out.push({
+        filingId: target.filingId,
+        filingTitle: target.filingTitle,
+        field: 'clerkRef',
+        currentValue: current ?? null,
+        proposedValue: null,
+        proposedDisplay: detected.name,
+        personSeed: { name: detected.name, marker: 'courtClerk', existingMatch },
+        sourceExcerpt: detected.source,
+        confidence,
+      });
+      aiFields = aiFields.filter((f) => f !== 'clerkRef');
     }
   }
 
@@ -806,6 +857,36 @@ async function mapFieldFromExtraction(args: {
         personSeed: { name: name!, marker: 'courtReporter', existingMatch },
         sourceExcerpt: data.reporter?.evidenceQuote ?? pickExcerpt(chunks, name),
         confidence: 'high',
+      };
+    }
+    case 'signedOn': {
+      const iso = normalizeIsoDate(data.signedOn);
+      if (!iso) return null;
+      return {
+        filingId: target.filingId,
+        filingTitle: target.filingTitle,
+        field,
+        currentValue: current,
+        proposedValue: iso,
+        proposedDisplay: iso,
+        sourceExcerpt: pickExcerpt(chunks, iso) || pickExcerpt(chunks, 'SIGNED'),
+        confidence: 'medium',
+      };
+    }
+    case 'clerkRef': {
+      const name = data.clerk?.name;
+      if (!isLikelyValidName(name)) return null;
+      const existingMatch = await findExistingPersonMatch(name!, 'courtClerk');
+      return {
+        filingId: target.filingId,
+        filingTitle: target.filingTitle,
+        field,
+        currentValue: current,
+        proposedValue: null,
+        proposedDisplay: name!,
+        personSeed: { name: name!, marker: 'courtClerk', existingMatch },
+        sourceExcerpt: data.clerk?.evidenceQuote ?? pickExcerpt(chunks, name),
+        confidence: 'medium',
       };
     }
     default:
