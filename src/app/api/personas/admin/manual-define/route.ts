@@ -118,10 +118,22 @@ export async function POST(req: NextRequest) {
         if (typeof item.displayName !== 'string' || !item.displayName.trim()) continue
         dedupReport.push({ displayName: item.displayName, matches: item.dedupMatches })
 
+        // intrinsicTags accepts BOTH shapes:
+        //   ['courtClerk', 'judge']           ← what extract-manual-form sends
+        //   { courtClerk: true, judge: true } ← legacy object form
+        // The previous code only handled the object form, so picking
+        // 'Court Clerk' in the dialog silently never set tags.courtClerk.
         const intrinsic: Record<string, true> = { person: true }
-        for (const k of ALLOWED_INTRINSIC) {
-          if ((item.intrinsicTags as Record<string, boolean> | undefined)?.[k]) {
-            intrinsic[k] = true
+        const itag = item.intrinsicTags
+        if (Array.isArray(itag)) {
+          for (const k of itag) {
+            if (typeof k === 'string' && (ALLOWED_INTRINSIC as readonly string[]).includes(k)) {
+              intrinsic[k] = true
+            }
+          }
+        } else if (itag && typeof itag === 'object') {
+          for (const k of ALLOWED_INTRINSIC) {
+            if ((itag as Record<string, boolean>)[k]) intrinsic[k] = true
           }
         }
 
