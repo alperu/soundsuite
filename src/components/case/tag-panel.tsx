@@ -21,6 +21,7 @@ import { RefPicker, type PersonMarker, type RefTarget } from './ref-picker';
 import { MarkerPicker } from './marker-picker';
 import { MotionTypePicker } from './motion-type-picker';
 import { TagInfoPopover } from './tag-info-popover';
+import { TagRowActions } from './tag-row-actions';
 
 const TAG_PANEL_MIN_WIDTH = 240;
 const TAG_PANEL_MAX_WIDTH = 600;
@@ -891,13 +892,26 @@ function RefRow({
     if (!editMode && rawList.length === 0) return null;
     const hasTypedRefTarget = Boolean(spec.refTarget);
     return (
-      <div className="flex items-start gap-2 text-[11px]">
+      <div className="group flex items-start gap-2 text-[11px]">
         <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
           <span className="truncate" title={spec.name}>{spec.name}</span>
           <HelpDot spec={spec} onOpen={onInfoOpen} />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap gap-1 items-center">
+            <TagRowActions
+              spec={spec}
+              value={value}
+              editMode={editMode}
+              onPaste={(v) => {
+                // For list-valued ref slots, paste appends a single ref UUID
+                // to the existing list (keeps prior picks intact). The
+                // parsed value is a single `{_kind:'ref',val:<uuid>}` from
+                // parseClipboardForSpec.
+                const next = Array.isArray(value) ? [...(value as unknown[]), v] : [v];
+                onChange(next);
+              }}
+            />
             {rawList.length === 0 && (
               <span className="text-gray-400">—</span>
             )}
@@ -956,7 +970,7 @@ function RefRow({
   const hasTypedRefTarget = Boolean(spec.refTarget);
   const rawTooltip = rawDisplay && labelDisplay && rawDisplay !== labelDisplay ? rawDisplay : '';
   return (
-    <div className="flex items-start gap-2 text-[11px]">
+    <div className="group flex items-start gap-2 text-[11px]">
       <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
         <span className="truncate" title={spec.name}>{spec.name}</span>
         <HelpDot spec={spec} onOpen={onInfoOpen} />
@@ -971,6 +985,12 @@ function RefRow({
               >
                 {display || <span className="text-gray-400">—</span>}
               </div>
+              <TagRowActions
+                spec={spec}
+                value={value}
+                editMode={editMode}
+                onPaste={(v) => onChange(v)}
+              />
               {value != null && value !== '' && (
                 <button
                   type="button"
@@ -1001,13 +1021,16 @@ function RefRow({
             />
           )
         ) : (
-          <span className="text-gray-800 break-all" title={rawTooltip || undefined}>
-            {display}
-            {rawTooltip && (
-              <span className="text-[10px] text-gray-400 ml-1 font-mono">
-                {rawDisplay.replace(/^@/, '').slice(0, 8)}…
-              </span>
-            )}
+          <span className="inline-flex items-center gap-1">
+            <span className="text-gray-800 break-all" title={rawTooltip || undefined}>
+              {display}
+              {rawTooltip && (
+                <span className="text-[10px] text-gray-400 ml-1 font-mono">
+                  {rawDisplay.replace(/^@/, '').slice(0, 8)}…
+                </span>
+              )}
+            </span>
+            <TagRowActions spec={spec} value={value} editMode={false} onPaste={() => { /* read-only */ }} />
           </span>
         )}
       </div>
@@ -1045,8 +1068,23 @@ function ValueRow({
     ? rawString.slice(0, 10)
     : rawString;
   if (!editMode && !display) return null;
+  // Paste handler must mirror the same value-shape the date/number input
+  // commits — strings for text/date, numbers for number, bool for bool —
+  // so commitEntity treats it identically.
+  const onPasteValue = (v: unknown) => {
+    if (spec.valueType === 'date') {
+      // parseClipboardForSpec returns `{_kind:'date',val:'YYYY-MM-DD'}`; the
+      // existing onChange path stores the YYYY-MM-DD string (the date input
+      // emits the raw string, not the Hayson). Unwrap to match.
+      if (v && typeof v === 'object' && 'val' in v) {
+        onChange((v as { val: string }).val);
+        return;
+      }
+    }
+    onChange(v);
+  };
   return (
-    <div className="flex items-start gap-2 text-[11px]">
+    <div className="group flex items-start gap-2 text-[11px]">
       <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
         <span className="truncate" title={spec.name}>{spec.name}</span>
         <HelpDot spec={spec} onOpen={onInfoOpen} />
@@ -1067,6 +1105,7 @@ function ValueRow({
               }}
               className="flex-1 min-w-0 px-1.5 py-0.5 border border-gray-300 rounded text-[11px] focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
+            <TagRowActions spec={spec} value={value} editMode onPaste={onPasteValue} />
             {value != null && value !== '' && (
               <button
                 type="button"
@@ -1079,7 +1118,10 @@ function ValueRow({
             )}
           </div>
         ) : (
-          <span className="text-gray-800 break-words">{display}</span>
+          <span className="inline-flex items-center gap-1">
+            <span className="text-gray-800 break-words">{display}</span>
+            <TagRowActions spec={spec} value={value} editMode={false} onPaste={onPasteValue} />
+          </span>
         )}
       </div>
     </div>

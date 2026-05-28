@@ -43,44 +43,48 @@ export async function POST(req: NextRequest) {
     const candidates = Array.isArray(body?.candidates) ? body.candidates : []
 
     // Accept motionId as an alternative to documentId. When the modal is
-    // opened against a motion (no specific document chosen yet), we resolve
-    // here to the motion's primary attached Document. Without this, the
-    // dialog 404'd because the synthetic 'motion:<id>' marker isn't a real
-    // Document row.
+    // opened against a motion (no specific document chosen yet), best-effort
+    // resolve to the motion's primary attached Document — but DON'T 404 if
+    // none exists, because users just want to add the Person (e.g. court
+    // clerk Jeffrey D. Kyle) without tying it to a document at all.
     if (!documentId && typeof motionId === 'string' && motionId) {
-      const docs = await (prisma as any).document.findMany({
-        where: {
-          motionAttachments: { some: { motionId } },
-        },
-        orderBy: { createdAt: 'asc' },
-        take: 1,
-      })
-      if (docs.length === 0) {
-        return NextResponse.json(
-          {
-            error: 'motion_has_no_document',
-            message: `Motion ${motionId} has no attached Document — upload or attach a file first.`,
-          },
-          { status: 404 },
-        )
+      try {
+        const docs = await (prisma as any).document.findMany({
+          where: { motionAttachments: { some: { motionId } } },
+          orderBy: { createdAt: 'asc' },
+          take: 1,
+        })
+        if (docs.length > 0) documentId = docs[0].id
+      } catch {
+        /* best-effort */
       }
-      documentId = docs[0].id
     }
 
-    if (typeof documentId !== 'string' || !documentId) {
-      return NextResponse.json(
-        { error: 'invalid_request', message: 'documentId or motionId required' },
-        { status: 400 },
-      )
-    }
     if (!candidates.length) {
       return NextResponse.json(
         { error: 'invalid_request', message: 'candidates array required' },
         { status: 400 },
       )
     }
-    const doc = await prisma.document.findUnique({ where: { id: documentId } })
-    if (!doc) return NextResponse.json({ error: 'document_not_found' }, { status: 404 })
+
+    // documentId is OPTIONAL. The dedup + Person create/merge path works
+    // standalone. Only the PersonRole creation (which lives inside the
+    // transaction below, gated on item.proposedRole.scopeKind/scopeId)
+    // requires document/motion context — and that's already opt-in via
+    // the candidate's proposedRole field.
+    let doc: { id: string } | null = null
+    if (typeof documentId === 'string' && documentId) {
+      doc = await (prisma as any).document.findUnique({ where: { id: documentId } })
+      if (!doc) {
+        return NextResponse.json(
+          {
+            error: 'document_not_found',
+            message: `Document ${documentId} not found. Omit documentId to add the Person without document linkage.`,
+          },
+          { status: 404 },
+        )
+      }
+    }
 
     // Compute dedup matches up-front for any candidate without an explicit action.
     const pool = await prisma.person.findMany({

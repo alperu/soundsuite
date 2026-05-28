@@ -24,6 +24,7 @@ import { tableFromFilter, navHierarchy, findCase, findMotion, findMotionEvent, f
 import { db } from '@/lib/legal/kysely'
 import { prisma } from '@/lib/db/prisma'
 import { PER_FILING_TYPE_KINDS } from '@/lib/filings/classify-entity-kind'
+import { enforceFileRefSync } from '@/lib/tag-fill/fileref-sync'
 
 export const dynamic = 'force-dynamic'
 
@@ -1619,6 +1620,7 @@ export async function commitEntity(input: {
   }
 
   const { columnPatch, tagPatch } = splitPatch(model, patch)
+  enforceFileRefSync(model, columnPatch, tagPatch)
 
   // ─── CREATE ─────────────────────────────────────────────────────────────
   if (!id) {
