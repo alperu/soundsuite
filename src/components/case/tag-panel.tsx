@@ -218,7 +218,21 @@ export function TagPanel({ entityKind, entityId, entityLabel, onRename }: Props)
     setInfoFor(null);
   }, [entityKind, entityId]);
 
-  // Fetch entity record when selection changes.
+  // Refetch the entity record on selection change OR after a `filings-changed`
+  // / `entity-updated` window event — the latter fires from the Fill Haystack
+  // apply flow so freshly-committed tags surface without a manual reload.
+  const [refetchTick, setRefetchTick] = useState(0);
+  useEffect(() => {
+    const handler = () => setRefetchTick((t) => t + 1);
+    window.addEventListener('filings-changed', handler);
+    window.addEventListener('entity-updated', handler);
+    return () => {
+      window.removeEventListener('filings-changed', handler);
+      window.removeEventListener('entity-updated', handler);
+    };
+  }, []);
+
+  // Fetch entity record when selection changes (or refetch is requested).
   useEffect(() => {
     if (!entityKind || !entityId) {
       setRecord(null);
@@ -251,7 +265,7 @@ export function TagPanel({ entityKind, entityId, entityLabel, onRename }: Props)
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [entityKind, entityId]);
+  }, [entityKind, entityId, refetchTick]);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);

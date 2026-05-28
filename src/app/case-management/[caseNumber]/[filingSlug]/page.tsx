@@ -906,14 +906,24 @@ export default function FilingDetailPage() {
       <div className="p-4 border-t border-gray-100">
         <div className="flex items-center justify-between mb-2">
           <h3 className="text-sm font-medium text-gray-700">Action Log</h3>
-          <button
-            onClick={fetchActionLogs}
-            disabled={actionLogsLoading}
-            className="text-xs text-gray-400 hover:text-blue-600 disabled:opacity-50"
-            title="Refresh action log"
-          >
-            {actionLogsLoading ? 'Loading…' : 'Refresh'}
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setActionLogs([])}
+              disabled={actionLogs.length === 0}
+              className="text-xs text-gray-400 hover:text-red-600 disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Clear visible log entries (soft — Refresh to reload from DB)"
+            >
+              Clear
+            </button>
+            <button
+              onClick={fetchActionLogs}
+              disabled={actionLogsLoading}
+              className="text-xs text-gray-400 hover:text-blue-600 disabled:opacity-50"
+              title="Refresh action log"
+            >
+              {actionLogsLoading ? 'Loading…' : 'Refresh'}
+            </button>
+          </div>
         </div>
         {actionLogs.length === 0 ? (
           <p className="text-xs text-gray-400">No action log entries for this filing yet.</p>
