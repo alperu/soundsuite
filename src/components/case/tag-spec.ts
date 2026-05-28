@@ -1103,6 +1103,12 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // the volume preparer (often a senior clerk), distinct from clerkRef
     // which is the deputy who file-stamped.
     {
+      name: 'judgeRef',
+      tier: 'ref',
+      doc: 'Presiding judge for the motion(s) compiled in this clerk\'s-record volume. Some venues rotate judges per motion, so the judge here can differ from the case-level judgeRef.',
+      refTarget: 'person',
+    },
+    {
       name: 'clerkRef',
       tier: 'ref',
       doc: "Deputy clerk who certified or stamped this clerk's-record volume.",
@@ -1162,6 +1168,12 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // courtClerkRefs which is the multi-person list. The extractor fills this
     // from "/s/ <Name>, Deputy Clerk" patterns; the existing courtClerkRefs
     // stays for the multi-line cover-sheet list.
+    {
+      name: 'judgeRef',
+      tier: 'ref',
+      doc: 'Presiding judge for the hearing(s) transcribed in this reporter\'s-record volume. Some venues rotate judges per motion, so the judge here can differ from the case-level judgeRef.',
+      refTarget: 'person',
+    },
     {
       name: 'clerkRef',
       tier: 'ref',

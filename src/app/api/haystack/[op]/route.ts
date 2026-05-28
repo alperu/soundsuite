@@ -380,6 +380,12 @@ const REF_TARGET_TABLE: Record<string, 'Case' | 'Motion' | 'Person' | 'Court' | 
   servedOn: 'Person',
   courtClerkRef: 'Person',
   courtClerkRefs: 'Person',
+  // `clerkRef` is the tag name used on Order / Decree / clerk-stamped entries
+  // (introduced with the clerkRef extractor — commits 12596cb / beda95b).
+  // Without this entry inlineRefLabels skips it and the panel renders the
+  // raw cuid instead of the resolved Person name.
+  clerkRef: 'Person',
+  clerkRefs: 'Person',
   courtReporterRef: 'Person',
   courtReporterRefs: 'Person',
   reporterRef: 'Person',
