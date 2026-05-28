@@ -28,7 +28,9 @@ export type HaystackTagField =
   | 'movantRef'
   | 'respondentRef'
   | 'reporterRef'
-  | 'fileRef';
+  | 'fileRef'
+  | 'signedOn'
+  | 'clerkRef';
 
 // ─── kind → Prisma model name ────────────────────────────────────────────────
 //
@@ -90,6 +92,8 @@ export interface ExtractedFields {
   movant?: { name: string; evidenceQuote?: string } | null;
   respondent?: { name: string; evidenceQuote?: string } | null;
   reporter?: { name: string; csrNumber?: string; evidenceQuote?: string } | null;
+  signedOn?: string | null;
+  clerk?: { name: string; evidenceQuote?: string } | null;
 }
 
 export interface ChunkExcerpt {
@@ -260,7 +264,9 @@ export function buildPrompt(args: {
     `  "judge":     { "name": "...", "confidence": "high"|"medium"|"low", "evidenceQuote": "..." } | null,\n` +
     `  "movant":    { "name": "...", "evidenceQuote": "..." } | null,\n` +
     `  "respondent":{ "name": "...", "evidenceQuote": "..." } | null,\n` +
-    `  "reporter":  { "name": "...", "csrNumber": "...", "evidenceQuote": "..." } | null\n` +
+    `  "reporter":  { "name": "...", "csrNumber": "...", "evidenceQuote": "..." } | null,\n` +
+    `  "signedOn":  "YYYY-MM-DD" | null,    // ISO date the judge signed this order/decree/judgment (look for "SIGNED this Nth day of …" or "/s/ Judge … SIGNED <date>"). Null if not an order/decree/judgment or no signature date present.\n` +
+    `  "clerk":     { "name": "...", "evidenceQuote": "..." } | null   // name of the court clerk on the file-stamp (e.g. "Velva L. Price, District Clerk", "Anne Lorentzen", "/s/ Jane Doe, Deputy Clerk"). Null if no clerk signature/stamp.\n` +
     `}\n` +
     `\nRefuse to guess. If two pieces of evidence conflict, prefer the cover/caption.`;
 
@@ -368,6 +374,14 @@ export async function extractFields(
                 evidenceQuote: { type: 'string' },
               },
             },
+            signedOn: { type: ['string', 'null'] },
+            clerk: {
+              type: ['object', 'null'],
+              properties: {
+                name: { type: 'string' },
+                evidenceQuote: { type: 'string' },
+              },
+            },
           },
         },
       });
@@ -444,7 +458,7 @@ export function isLikelyValidName(raw: string | undefined | null): boolean {
   return true;
 }
 
-export type PersonMarker = 'judge' | 'courtReporter' | null;
+export type PersonMarker = 'judge' | 'courtReporter' | 'courtClerk' | null;
 
 export async function resolveOrCreatePerson(
   name: string,
@@ -486,6 +500,7 @@ export async function resolveOrCreatePerson(
   const tags: Record<string, boolean> = { person: true };
   if (marker === 'judge') tags.judge = true;
   if (marker === 'courtReporter') tags.courtReporter = true;
+  if (marker === 'courtClerk') tags.courtClerk = true;
 
   try {
     const created = await (prisma as any).person.create({
@@ -525,6 +540,8 @@ export function readCurrentValue(
     fileRef: ['documentId'],
     filedOn: ['filedOn'],
     receivedOn: [],
+    signedOn: [],   // tags-only — MotionAttachment has no signedOn column
+    clerkRef: [],   // tags-only — MotionAttachment has no clerkId column
   };
 
   const aliases = COLUMN_ALIASES[field] ?? [];
@@ -599,5 +616,186 @@ export function normalizeIsoDate(raw: unknown): string | null {
     const d = us[2].padStart(2, '0');
     return `${us[3]}-${m}-${d}`;
   }
+  return null;
+}
+
+// ─── Month-name lookup for "Nth day of Month YYYY" pattern ───────────────────
+
+const MONTH_NAMES: Record<string, string> = {
+  january: '01', february: '02', march: '03', april: '04',
+  may: '05', june: '06', july: '07', august: '08',
+  september: '09', october: '10', november: '11', december: '12',
+  jan: '01', feb: '02', mar: '03', apr: '04',
+  jun: '06', jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+};
+
+function monthNameToNumber(name: string): string | null {
+  return MONTH_NAMES[name.toLowerCase()] ?? null;
+}
+
+// ─── Public: deterministic signedOn detector ─────────────────────────────────
+
+/**
+ * Scan up to the first 4 chunks for signature-date patterns common in Texas
+ * state-court orders, decrees, and judgments.
+ *
+ * Patterns matched (in priority order):
+ *   "SIGNED this 12th day of March, 2026"
+ *   "SIGNED: 3/12/2026"
+ *   "SIGNED 2026-03-12"
+ *   "IT IS SO ORDERED … SIGNED … 3/12/2026"
+ *   "/s/ Judge Name … 3/12/2026"
+ *
+ * Returns { iso, source, confidence } on success, null if no match.
+ */
+export function detectSignedOnDeterministic(
+  chunks: ChunkExcerpt[],
+): { iso: string; source: string; confidence: 'high' | 'medium' } | null {
+  const scanText = chunks.slice(0, 4).map((c) => c.text).join('\n');
+  if (!scanText.trim()) return null;
+
+  // Pattern 1: "SIGNED this Nth day of Month, YYYY"
+  const nthDay = /SIGNED\s+this\s+(\d{1,2})(?:st|nd|rd|th)?\s+day\s+of\s+(\w+)[,]?\s+(\d{4})/i.exec(scanText);
+  if (nthDay) {
+    const day = nthDay[1].padStart(2, '0');
+    const monthNum = monthNameToNumber(nthDay[2]);
+    const year = nthDay[3];
+    if (monthNum) {
+      const iso = `${year}-${monthNum}-${day}`;
+      const start = Math.max(0, (nthDay.index ?? 0) - 40);
+      const end = Math.min(scanText.length, (nthDay.index ?? 0) + nthDay[0].length + 40);
+      return {
+        iso,
+        source: `SIGNED day-of-month: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+        confidence: 'medium',
+      };
+    }
+  }
+
+  // Pattern 2: "SIGNED: M/D/YYYY" or "SIGNED M/D/YYYY"
+  const signedSlash = /SIGNED:?\s+(\d{1,2}\/\d{1,2}\/\d{4})/i.exec(scanText);
+  if (signedSlash) {
+    const iso = normalizeIsoDate(signedSlash[1]);
+    if (iso) {
+      const start = Math.max(0, (signedSlash.index ?? 0) - 40);
+      const end = Math.min(scanText.length, (signedSlash.index ?? 0) + signedSlash[0].length + 40);
+      return {
+        iso,
+        source: `SIGNED date: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+        confidence: 'medium',
+      };
+    }
+  }
+
+  // Pattern 3: "SIGNED YYYY-MM-DD"
+  const signedIso = /SIGNED\s+(\d{4}-\d{2}-\d{2})/i.exec(scanText);
+  if (signedIso) {
+    const iso = normalizeIsoDate(signedIso[1]);
+    if (iso) {
+      const start = Math.max(0, (signedIso.index ?? 0) - 40);
+      const end = Math.min(scanText.length, (signedIso.index ?? 0) + signedIso[0].length + 40);
+      return {
+        iso,
+        source: `SIGNED ISO: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+        confidence: 'medium',
+      };
+    }
+  }
+
+  // Pattern 4: "IT IS SO ORDERED … SIGNED … M/D/YYYY" (multiline)
+  const soOrdered = /IT\s+IS\s+SO\s+ORDERED[\s\S]*?SIGNED[\s\S]*?(\d{1,2}\/\d{1,2}\/\d{4})/i.exec(scanText);
+  if (soOrdered) {
+    const iso = normalizeIsoDate(soOrdered[1]);
+    if (iso) {
+      const start = Math.max(0, (soOrdered.index ?? 0) - 20);
+      const end = Math.min(scanText.length, (soOrdered.index ?? 0) + soOrdered[0].length + 20);
+      return {
+        iso,
+        source: `SO ORDERED: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+        confidence: 'medium',
+      };
+    }
+  }
+
+  // Pattern 5: "/s/ Judge Name … M/D/YYYY"
+  const slashSJudge = /\/s\/\s+\w[\w\s.]+,?\s+(?:JUDGE|PRESIDING JUDGE)[\s\S]*?(\d{1,2}\/\d{1,2}\/\d{4})/i.exec(scanText);
+  if (slashSJudge) {
+    const iso = normalizeIsoDate(slashSJudge[1]);
+    if (iso) {
+      const start = Math.max(0, (slashSJudge.index ?? 0) - 20);
+      const end = Math.min(scanText.length, (slashSJudge.index ?? 0) + slashSJudge[0].length + 20);
+      return {
+        iso,
+        source: `Judge signature: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+        confidence: 'medium',
+      };
+    }
+  }
+
+  return null;
+}
+
+// ─── Public: deterministic clerkRef detector ─────────────────────────────────
+
+/**
+ * Scan up to the first 4 chunks for court-clerk stamp patterns. Detects:
+ *   - Known TX district clerks by name (Velva L. Price, Anne Lorentzen, etc.)
+ *   - "Firstname Lastname, District Clerk / County Clerk / Deputy Clerk"
+ *   - "/s/ Firstname Lastname, Deputy/District/County Clerk"
+ *
+ * Returns { name, source, confidence } on success, null if no match.
+ * Caller should still call findExistingPersonMatch for the preview.
+ */
+export function detectClerkRefDeterministic(
+  chunks: ChunkExcerpt[],
+): { name: string; source: string; confidence: 'high' | 'medium' } | null {
+  const scanText = chunks.slice(0, 4).map((c) => c.text).join('\n');
+  if (!scanText.trim()) return null;
+
+  // Pattern 1: known named TX district clerks (exact substring match → high confidence)
+  const knownClerks = /\b(Velva\s+L\.?\s+Price|Anne\s+Lorentzen|Stephanie\s+Vetter)\b/i.exec(scanText);
+  if (knownClerks) {
+    const name = knownClerks[1].replace(/\s+/g, ' ').trim();
+    const start = Math.max(0, (knownClerks.index ?? 0) - 40);
+    const end = Math.min(scanText.length, (knownClerks.index ?? 0) + knownClerks[0].length + 60);
+    return {
+      name,
+      source: `Known clerk: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+      confidence: 'high',
+    };
+  }
+
+  // Pattern 2: "Firstname Lastname, District/County/Deputy Clerk"
+  const titled = /([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}),?\s+(?:District\s+Clerk|County\s+Clerk|Deputy\s+Clerk)/
+    .exec(scanText);
+  if (titled) {
+    const name = titled[1].replace(/\s+/g, ' ').trim();
+    if (isLikelyValidName(name)) {
+      const start = Math.max(0, (titled.index ?? 0) - 40);
+      const end = Math.min(scanText.length, (titled.index ?? 0) + titled[0].length + 40);
+      return {
+        name,
+        source: `Clerk title: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+        confidence: 'medium',
+      };
+    }
+  }
+
+  // Pattern 3: "/s/ Firstname Lastname, Deputy/District/County Clerk"
+  const slashSClerk = /\/s\/\s+([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}),?\s+(?:Deputy\s+Clerk|District\s+Clerk|County\s+Clerk)/
+    .exec(scanText);
+  if (slashSClerk) {
+    const name = slashSClerk[1].replace(/\s+/g, ' ').trim();
+    if (isLikelyValidName(name)) {
+      const start = Math.max(0, (slashSClerk.index ?? 0) - 40);
+      const end = Math.min(scanText.length, (slashSClerk.index ?? 0) + slashSClerk[0].length + 40);
+      return {
+        name,
+        source: `Clerk /s/: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+        confidence: 'medium',
+      };
+    }
+  }
+
   return null;
 }
