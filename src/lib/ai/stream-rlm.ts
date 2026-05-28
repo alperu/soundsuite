@@ -12,7 +12,7 @@
  * Discovery mirrors src/lib/search/reranker.ts.
  */
 
-interface ChatMessage {
+export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
   tool_calls?: ToolCall[];
@@ -52,6 +52,95 @@ export interface StreamRlmEvent {
 
 const RLM_PORT = 8100;
 export const RLM_MODEL_ID = 'mit-oasys/rlm-qwen3-8b-v0.1';
+
+// ──────────────────────────────────────────────────────────────────────────
+// Context budgeting — vLLM rejects requests where prompt_tokens +
+// max_tokens > max_model_len. The current RLM (Qwen3-8B) is served with
+// --max-model-len 32768. The tool-use loop accumulates 80+ chunk-sized
+// payloads across rounds, easily crossing the ceiling by round 2 when
+// max_tokens=4096 is requested unconditionally (we crashed at 32769 on a
+// real run — see /Users/alper/.../logs/dashboard.log).
+//
+// We defend in three steps each round:
+//  1. Estimate the input-token cost of `messages` (char/3.2 — matches the
+//     ratio observed on Qwen3-8B for mixed legal text + JSON chunks).
+//  2. Clamp `max_tokens` so input + output + safety margin fits the ctx.
+//  3. If even MIN_OUTPUT_TOKENS doesn't fit, trim the oldest
+//     assistant+tool group(s) (preserving system + user) until it does.
+//
+// The clamp + trim are logged so operators can see what happened, and the
+// retry-stream path uses the same numbers as the main loop.
+// ──────────────────────────────────────────────────────────────────────────
+export const RLM_CONTEXT_TOKENS = 32768;
+export const TOKEN_CHAR_RATIO = 3.2;
+export const SAFETY_MARGIN_TOKENS = 256;
+export const MIN_OUTPUT_TOKENS = 768;
+
+export function estimateInputTokens(messages: ChatMessage[]): number {
+  let chars = 0;
+  for (const m of messages) {
+    chars += m.content?.length ?? 0;
+    // Tool-call JSON is part of the prompt too — include it.
+    const tc = (m as any).tool_calls;
+    if (Array.isArray(tc)) {
+      for (const c of tc) {
+        try {
+          chars += JSON.stringify(c).length;
+        } catch {
+          /* defensive — circular refs shouldn't happen here */
+        }
+      }
+    }
+  }
+  return Math.ceil(chars / TOKEN_CHAR_RATIO);
+}
+
+export function clampOutputTokens(
+  messages: ChatMessage[],
+  requested: number,
+): { maxTokens: number; clamped: boolean; estimatedInput: number } {
+  const estimatedInput = estimateInputTokens(messages);
+  const budget = RLM_CONTEXT_TOKENS - estimatedInput - SAFETY_MARGIN_TOKENS;
+  if (budget < MIN_OUTPUT_TOKENS) {
+    return { maxTokens: MIN_OUTPUT_TOKENS, clamped: true, estimatedInput };
+  }
+  if (budget < requested) {
+    return { maxTokens: budget, clamped: true, estimatedInput };
+  }
+  return { maxTokens: requested, clamped: false, estimatedInput };
+}
+
+/**
+ * When estimatedInput + MIN_OUTPUT_TOKENS doesn't fit even after clamping,
+ * trim the oldest assistant message and its trailing tool messages.
+ * Preserves messages[0] (system) and messages[1] (the initial user turn).
+ * Returns the number of messages removed.
+ */
+export function trimHistoryToFit(messages: ChatMessage[]): number {
+  let removed = 0;
+  while (true) {
+    const estimatedInput = estimateInputTokens(messages);
+    if (estimatedInput + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS <= RLM_CONTEXT_TOKENS) break;
+    let assistantIdx = -1;
+    for (let i = 2; i < messages.length - 1; i++) {
+      if (messages[i].role === 'assistant') {
+        assistantIdx = i;
+        break;
+      }
+    }
+    if (assistantIdx < 0) break; // nothing safe to remove
+    let count = 1;
+    while (
+      assistantIdx + count < messages.length &&
+      messages[assistantIdx + count].role === 'tool'
+    ) {
+      count++;
+    }
+    messages.splice(assistantIdx, count);
+    removed += count;
+  }
+  return removed;
+}
 
 export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> {
   try {
@@ -170,6 +259,13 @@ export async function* streamRlm(opts: {
   const endpoint = resolved.endpoint;
 
   const model = RLM_MODEL_ID;
+  // Same context-budget defense as runRlmWithTools — streamRlm is the
+  // tool-less path (synthesis / draft generation) but still hits the same
+  // 32K ceiling. Clamp without trimming since this path has only system+user.
+  const clamp = clampOutputTokens(opts.messages, opts.maxTokens ?? 2048);
+  if (clamp.clamped) {
+    console.warn(`[RLM] streamRlm clamp max_tokens ${opts.maxTokens ?? 2048} → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput}, ctx=${RLM_CONTEXT_TOKENS})`);
+  }
   let res: Response;
   try {
     res = await fetch(`${endpoint}/v1/chat/completions`, {
@@ -178,7 +274,7 @@ export async function* streamRlm(opts: {
       body: JSON.stringify({
         model,
         messages: opts.messages,
-        max_tokens: opts.maxTokens ?? 2048,
+        max_tokens: clamp.maxTokens,
         temperature: opts.temperature ?? 0.3,
         stream: true,
       }),
@@ -328,10 +424,38 @@ export async function* runRlmWithTools(opts: {
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
 
+  const requestedMaxTokens = opts.maxTokens ?? 2048;
+
   for (let round = 1; round <= maxRounds; round++) {
     const roundT0 = Date.now();
     const promptChars = messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
-    console.log(`[RLM] round ${round}/${maxRounds} POST ${endpoint}/v1/chat/completions promptChars=${promptChars} messages=${messages.length}`);
+
+    // ── Context budget enforcement ────────────────────────────────────────
+    // vLLM rejects prompt_tokens + max_tokens > max_model_len. Clamp first;
+    // if even MIN_OUTPUT_TOKENS doesn't fit, trim oldest history and re-clamp.
+    let clamp = clampOutputTokens(messages, requestedMaxTokens);
+    if (clamp.clamped) {
+      console.warn(`[RLM] round ${round} clamp max_tokens ${requestedMaxTokens} → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput}, ctx=${RLM_CONTEXT_TOKENS})`);
+    }
+    if (
+      clamp.estimatedInput + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS >
+      RLM_CONTEXT_TOKENS
+    ) {
+      const before = messages.length;
+      const removed = trimHistoryToFit(messages);
+      if (removed > 0) {
+        console.warn(`[RLM] round ${round} trim ${removed} oldest message(s) (was=${before}, now=${messages.length}) to fit ctx budget`);
+        clamp = clampOutputTokens(messages, requestedMaxTokens);
+        if (clamp.clamped) {
+          console.warn(`[RLM] round ${round} clamp after trim: max_tokens → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput})`);
+        }
+      } else {
+        console.error(`[RLM] round ${round} cannot trim further; sending request that may 400 (estimatedInput=${clamp.estimatedInput} + maxTokens=${clamp.maxTokens} = ${clamp.estimatedInput + clamp.maxTokens})`);
+      }
+    }
+    const roundMaxTokens = clamp.maxTokens;
+
+    console.log(`[RLM] round ${round}/${maxRounds} POST ${endpoint}/v1/chat/completions promptChars=${promptChars} messages=${messages.length} maxTokens=${roundMaxTokens} estInput=${clamp.estimatedInput}`);
     let res: Response;
     try {
       res = await fetch(`${endpoint}/v1/chat/completions`, {
@@ -342,7 +466,7 @@ export async function* runRlmWithTools(opts: {
           messages,
           tools: opts.tools,
           tool_choice: 'auto',
-          max_tokens: opts.maxTokens ?? 2048,
+          max_tokens: roundMaxTokens,
           temperature: opts.temperature ?? 0.3,
           stream: false,
         }),
@@ -443,7 +567,14 @@ export async function* runRlmWithTools(opts: {
     // request so the user sees tokens flow instead of waiting for the
     // round-trip we just did. We could return msg.content directly, but
     // streaming gives the UI a live feed and matches the other paths.
-    console.log(`[RLM] round ${round} no tool calls — streaming final answer (re-POST with stream=true)`);
+    //
+    // Same clamp logic as the round POST — the streaming retry hits the same
+    // vLLM ceiling and would otherwise re-trigger the 400 we just dodged.
+    const streamClamp = clampOutputTokens(messages, requestedMaxTokens);
+    if (streamClamp.clamped) {
+      console.warn(`[RLM] round ${round} stream-retry clamp max_tokens → ${streamClamp.maxTokens} (estimatedInput=${streamClamp.estimatedInput})`);
+    }
+    console.log(`[RLM] round ${round} no tool calls — streaming final answer (re-POST with stream=true, maxTokens=${streamClamp.maxTokens})`);
     let stream: Response;
     try {
       stream = await fetch(`${endpoint}/v1/chat/completions`, {
@@ -452,7 +583,7 @@ export async function* runRlmWithTools(opts: {
         body: JSON.stringify({
           model,
           messages,
-          max_tokens: opts.maxTokens ?? 2048,
+          max_tokens: streamClamp.maxTokens,
           temperature: opts.temperature ?? 0.3,
           stream: true,
         }),

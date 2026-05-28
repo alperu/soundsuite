@@ -404,6 +404,22 @@ export function buildChipSpecs(query: string): SubQuerySpec[] | null {
     });
   }
 
+  // Observability — when chip dispatch engages, it changes search semantics
+  // dramatically (hard filters vs. plain semantic recall). Surface what was
+  // detected so operators can verify the user's `{{ chip }}` syntax took
+  // effect.
+  const hardFilterCount = specs.reduce(
+    (n, s) => n + (Array.isArray(s.whereClauses) ? s.whereClauses.length : 0),
+    0,
+  );
+  const boostCount = specs.reduce(
+    (n, s) => n + (Array.isArray(s.softBoostRefs) ? s.softBoostRefs.length : 0),
+    0,
+  );
+  console.log(
+    `[chip-specs] ${chipSegments.length} chip(s) detected → ${specs.length} sub-quer${specs.length === 1 ? 'y' : 'ies'} (hardFilters=${hardFilterCount}, softBoosts=${boostCount})`,
+  );
+
   return specs;
 }
 
@@ -1173,7 +1189,19 @@ Strategy:
 1. Read the user's research question and the initial excerpts.
 2. Identify aspects that are under-covered by the initial set.
 3. Call query_case_knowledge with focused sub-queries (under 20 words each). Up to 3 calls.
-4. When done, reply with one short sentence like "Sufficient evidence gathered — N additional aspects retrieved." Do not write Findings, Summary, or any report sections.`;
+4. Keep limit ≤ 8 per call — your 32K context fills fast with chunks. Prefer focused sub-queries over big batches.
+5. When done, reply with one short sentence like "Sufficient evidence gathered — N additional aspects retrieved." Do not write Findings, Summary, or any report sections.`;
+
+// Per-call cap on tool-result chunks. Even if the model asks for more, the
+// executor enforces this — round 2 of the tool loop would otherwise pull
+// 4 × 20 = 80 chunks back into context and blow past 32K.
+const RLM_TOOL_LIMIT_CAP = 8;
+// Each chunk is capped at this many chars in the model-facing tool result.
+// Below the cap the chunk passes through unchanged; above, we truncate and
+// append a marker so the model knows there's more if it re-queries narrowly.
+// The full chunk still flows to the source list (the panel/UI), this only
+// trims the RLM-facing string.
+const RLM_TOOL_CHUNK_CHAR_CAP = 600;
 
 const RLM_TOOLS: RlmToolSpec[] = [
   {
@@ -1181,12 +1209,12 @@ const RLM_TOOLS: RlmToolSpec[] = [
     function: {
       name: 'query_case_knowledge',
       description:
-        'Semantic + keyword search over the case\'s indexed court documents. Returns ranked excerpts with citations. Use a short, focused sub-query (under 20 words).',
+        'Semantic + keyword search over the case\'s indexed court documents. Returns ranked excerpts with citations. Use a short, focused sub-query (under 20 words). Excerpts are capped at ~600 chars each in the tool result.',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Sub-query to search for. Be specific. Under 20 words.' },
-          limit: { type: 'integer', description: 'Max excerpts to return. Default 20.', default: 20 },
+          limit: { type: 'integer', description: 'Max excerpts to return. Default 8, hard cap 8.', default: RLM_TOOL_LIMIT_CAP },
         },
         required: ['query'],
       },
@@ -1268,7 +1296,15 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
     }
     const subQuery = typeof args.query === 'string' ? args.query : '';
     if (!subQuery) return { ok: false, content: 'Missing query argument' };
-    const limit = typeof args.limit === 'number' ? args.limit : 20;
+    // Honor the model's request only up to the hard cap. The cap exists
+    // because tool results accumulate across rounds and saturate the 32K
+    // context window. The full ranked list still hits the source panel —
+    // this only constrains what's fed back to the RLM.
+    const requestedLimit = typeof args.limit === 'number' ? args.limit : RLM_TOOL_LIMIT_CAP;
+    const limit = Math.max(1, Math.min(requestedLimit, RLM_TOOL_LIMIT_CAP));
+    if (requestedLimit > RLM_TOOL_LIMIT_CAP) {
+      console.log(`[RLM tool] query_case_knowledge cap requestedLimit=${requestedLimit} → ${limit} (RLM_TOOL_LIMIT_CAP)`);
+    }
     try {
       const res = await registry.execute(
         'query_case_knowledge',
@@ -1311,10 +1347,24 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
         extraSources.push(src);
       }
       // Build the tool-result content for the model: top excerpts with cites.
+      // Truncate each chunk to RLM_TOOL_CHUNK_CHAR_CAP to keep the per-round
+      // context cost bounded. The full text is still in the source list for
+      // the panel/citations — this only constrains the RLM-facing string.
+      let truncatedCount = 0;
       const content = results.slice(0, limit).map((r: any) => {
         const cite = r.citation || r.citationShort || `${r.document}, p.${r.page}`;
-        return `[${cite}]\n${r.text}`;
+        const rawText: string = typeof r.text === 'string' ? r.text : '';
+        let text = rawText;
+        if (text.length > RLM_TOOL_CHUNK_CHAR_CAP) {
+          text = text.slice(0, RLM_TOOL_CHUNK_CHAR_CAP) + '…[truncated]';
+          truncatedCount++;
+        }
+        return `[${cite}]\n${text}`;
       }).join('\n\n---\n\n') || 'No matches.';
+      if (truncatedCount > 0) {
+        console.log(`[RLM tool] query_case_knowledge truncated ${truncatedCount}/${results.length} chunks to ${RLM_TOOL_CHUNK_CHAR_CAP} chars`);
+      }
+      console.log(`[RLM tool] query_case_knowledge content chars=${content.length} (limit=${limit}, returned=${results.slice(0, limit).length}, truncated=${truncatedCount})`);
       return {
         ok: true,
         content,
