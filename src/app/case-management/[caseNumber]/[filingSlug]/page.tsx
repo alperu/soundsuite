@@ -38,6 +38,9 @@ import { SelectedEntityProvider } from '@/components/case/selected-entity-contex
 import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { ExtractModal } from '@/components/personas/extract-modal';
 import { persistActionLog } from '@/lib/action-log';
+import { TagFillReviewPanel } from '@/components/case/tag-fill-review-panel';
+import { IconButton } from '@/components/icon-button';
+import type { FillTagSuggestion } from '@/app/api/cases/[id]/fill-haystack-tags/route';
 
 // pdfjs is heavy — lazy-load the embedded viewer only when this page renders
 const EmbeddedCourtViewer = dynamic(
@@ -117,6 +120,14 @@ export default function FilingDetailPage() {
 
   // Fill-haystack-tags state (per-filing scope)
   const [fillTagsLoading, setFillTagsLoading] = useState(false);
+  // Filing-scoped TagFillReviewPanel state. Suggestions are pulled from the
+  // case-level persisted batch (same localStorage key the case-overview page
+  // uses) and filtered to this filing — no AI call is issued by the
+  // "Show suggestions" button.
+  const [tagFillSuggestions, setTagFillSuggestions] = useState<FillTagSuggestion[] | null>(null);
+  const [tagFillScanned, setTagFillScanned] = useState<number | undefined>(undefined);
+  const [tagFillSavedAt, setTagFillSavedAt] = useState<string | null>(null);
+  const [tagFillHasSavedForFiling, setTagFillHasSavedForFiling] = useState(false);
 
   // Action-log panel state (bottom-of-page audit list scoped to this filing).
   // Sourced from /api/admin/action-logs with caseId + a title-based search,
@@ -486,7 +497,16 @@ export default function FilingDetailPage() {
         return;
       }
 
-      const accept = suggestions.map(s => ({ filingId: s.filingId, field: s.field }));
+      // Pass the full suggestion payload — server now skips the LLM re-run
+      // and applies directly from accept[]. Send proposedValue + personSeed +
+      // currentValue so person-ref suggestions don't get silently dropped.
+      const accept = (suggestions as FillTagSuggestion[]).map((s) => ({
+        filingId: s.filingId,
+        field: s.field,
+        proposedValue: s.proposedValue,
+        personSeed: s.personSeed,
+        currentValue: s.currentValue,
+      }));
       const applyRes = await fetch(`/api/cases/${caseId}/fill-haystack-tags`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -520,6 +540,91 @@ export default function FilingDetailPage() {
       alert(`Failed to fill haystack tags: ${msg}`);
     } finally {
       setFillTagsLoading(false);
+    }
+  };
+
+  // Storage key matches the case-overview page so both views read/write the
+  // same persisted batch — deletions on one side propagate to the other.
+  const tagFillStorageKey = (cid: string) => `case-management.tagFillSuggestions.${cid}`;
+
+  // Probe the saved batch on mount / caseId change to enable the
+  // "Show suggestions" button when there's at least one row for this filing.
+  useEffect(() => {
+    if (!caseId || !filing) {
+      setTagFillHasSavedForFiling(false);
+      setTagFillSavedAt(null);
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(tagFillStorageKey(caseId));
+      if (!raw) {
+        setTagFillHasSavedForFiling(false);
+        setTagFillSavedAt(null);
+        return;
+      }
+      const parsed = JSON.parse(raw) as { suggestions?: FillTagSuggestion[]; savedAt?: string };
+      const mine = (parsed.suggestions ?? []).filter((s) => s.filingId === filing.id);
+      setTagFillHasSavedForFiling(mine.length > 0);
+      setTagFillSavedAt(parsed.savedAt ?? null);
+    } catch {
+      setTagFillHasSavedForFiling(false);
+      setTagFillSavedAt(null);
+    }
+  }, [caseId, filing]);
+
+  /**
+   * Open the same TagFillReviewPanel the case-overview uses, but with the
+   * suggestions filtered to this filing only. No AI call — purely reads the
+   * persisted batch from localStorage.
+   */
+  const handleShowSavedSuggestions = () => {
+    if (!caseId || !filing) return;
+    try {
+      const raw = localStorage.getItem(tagFillStorageKey(caseId));
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as {
+        suggestions?: FillTagSuggestion[];
+        scanned?: number;
+        savedAt?: string;
+      };
+      const mine = (parsed.suggestions ?? []).filter((s) => s.filingId === filing.id);
+      if (mine.length === 0) return;
+      setTagFillSuggestions(mine);
+      setTagFillScanned(typeof parsed.scanned === 'number' ? parsed.scanned : undefined);
+      setTagFillSavedAt(parsed.savedAt ?? null);
+    } catch {
+      /* localStorage unavailable */
+    }
+  };
+
+  /**
+   * Apply deletions from the panel back to the case-level persisted batch so
+   * the case-overview "Show suggestions" view stays in sync.
+   */
+  const removeFromSavedBatch = (keys: string[]) => {
+    if (!caseId) return;
+    try {
+      const raw = localStorage.getItem(tagFillStorageKey(caseId));
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as { suggestions?: FillTagSuggestion[]; scanned?: number; savedAt?: string };
+      const dropped = new Set(keys);
+      const next = (parsed.suggestions ?? []).filter(
+        (s) => !dropped.has(`${s.filingId}::${s.field}`),
+      );
+      if (next.length === 0) {
+        localStorage.removeItem(tagFillStorageKey(caseId));
+        setTagFillHasSavedForFiling(false);
+      } else {
+        const savedAt = new Date().toISOString();
+        localStorage.setItem(
+          tagFillStorageKey(caseId),
+          JSON.stringify({ ...parsed, suggestions: next, savedAt }),
+        );
+        setTagFillHasSavedForFiling(next.some((s) => filing && s.filingId === filing.id));
+        setTagFillSavedAt(savedAt);
+      }
+    } catch {
+      /* localStorage unavailable */
     }
   };
 
@@ -597,9 +702,9 @@ export default function FilingDetailPage() {
               title="Copy to clipboard · Right-click for actions"
               className="text-lg font-semibold text-gray-900 truncate cursor-pointer hover:text-blue-700"
             >{label}</h2>
-            <button
+            <IconButton
               onClick={handleCopyLabel}
-              title={copied ? 'Copied' : 'Copy to clipboard'}
+              tooltip={copied ? 'Copied to clipboard' : 'Copy filing title to clipboard'}
               className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors flex-shrink-0"
             >
               {copied ? (
@@ -607,37 +712,70 @@ export default function FilingDetailPage() {
               ) : (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
               )}
-            </button>
+            </IconButton>
           </div>
           <div className="flex items-center gap-1 flex-shrink-0 ml-3">
-            <button onClick={() => { setEditType(filing.filingType); setEditTitle(filing.title); setEditDescription(filing.description || ''); setEditVolume(filing.volumeNumber != null ? String(filing.volumeNumber) : ''); setShowEditDialog(true); }}
-              className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors" title="Edit Filing">
+            <IconButton
+              onClick={() => { setEditType(filing.filingType); setEditTitle(filing.title); setEditDescription(filing.description || ''); setEditVolume(filing.volumeNumber != null ? String(filing.volumeNumber) : ''); setShowEditDialog(true); }}
+              tooltip="Edit filing — rename, change type, set volume"
+              className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+            >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-            </button>
-            <button onClick={() => { setAddDocPath(''); setAddDocError(''); setShowAddDocDialog(true); }}
-              className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded transition-colors" title="Add Document">
+            </IconButton>
+            <IconButton
+              onClick={() => { setAddDocPath(''); setAddDocError(''); setShowAddDocDialog(true); }}
+              tooltip="Add document — attach an existing PDF to this filing"
+              className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded transition-colors"
+            >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-            </button>
-            <button onClick={() => setExtractOpen(true)} disabled={filing.documents.length === 0}
-              className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded transition-colors disabled:opacity-30" title="Extract Persona (right-click motion title for menu)">
+            </IconButton>
+            <IconButton
+              onClick={() => setExtractOpen(true)}
+              disabled={filing.documents.length === 0}
+              tooltip="Extract persona — find a person or role in this filing via AI (right-click filing title for menu)"
+              className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded transition-colors disabled:opacity-30"
+            >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
-            </button>
-            <button onClick={handleFillHaystackTags} disabled={fillTagsLoading || filing.documents.length === 0}
-              className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors disabled:opacity-30" title="Fill Haystack Tags (this filing only)">
+            </IconButton>
+            <IconButton
+              onClick={handleFillHaystackTags}
+              disabled={fillTagsLoading || filing.documents.length === 0}
+              tooltip={fillTagsLoading ? 'Filling tags…' : 'Fill Haystack tags — AI-extract judge, parties, dates; auto-applies all suggestions for this filing'}
+              className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors disabled:opacity-30"
+            >
               {fillTagsLoading ? (
                 <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
               ) : (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 L9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.091 3.091Z" /></svg>
               )}
-            </button>
-            <button onClick={handleReparse} disabled={reparseLoading || filing.documents.length === 0}
-              className="p-1.5 text-gray-400 hover:text-orange-600 hover:bg-orange-50 rounded transition-colors disabled:opacity-30" title="Reparse All Documents">
+            </IconButton>
+            <IconButton
+              onClick={handleShowSavedSuggestions}
+              disabled={!tagFillHasSavedForFiling || (tagFillSuggestions != null && tagFillSuggestions.length > 0)}
+              tooltip={tagFillHasSavedForFiling
+                ? `Show saved tag-fill suggestions for this filing${tagFillSavedAt ? ` (saved ${new Date(tagFillSavedAt).toLocaleString()})` : ''} — no new AI call`
+                : 'No saved suggestions for this filing — run "Fill Haystack Tags" first'}
+              className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors disabled:opacity-30"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 4h18M3 8h18M3 12h18M3 16h18M3 20h18" />
+              </svg>
+            </IconButton>
+            <IconButton
+              onClick={handleReparse}
+              disabled={reparseLoading || filing.documents.length === 0}
+              tooltip={reparseLoading ? 'Reparsing…' : 'Reparse — re-extract text and embeddings from all PDFs in this filing'}
+              className="p-1.5 text-gray-400 hover:text-orange-600 hover:bg-orange-50 rounded transition-colors disabled:opacity-30"
+            >
               <svg className={`w-4 h-4 ${reparseLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-            </button>
-            <button onClick={handleDelete}
-              className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete Filing">
+            </IconButton>
+            <IconButton
+              onClick={handleDelete}
+              tooltip="Delete filing — removes the filing record (PDFs stay on disk)"
+              className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+            >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-            </button>
+            </IconButton>
           </div>
         </div>
         {filing.filingDate && (
@@ -884,6 +1022,29 @@ export default function FilingDetailPage() {
         <div className="fixed bottom-6 right-6 z-50 bg-purple-700 text-white text-sm px-4 py-2 rounded-lg shadow-lg">
           {extractToast}
         </div>
+      )}
+      {caseId && tagFillSuggestions && tagFillSuggestions.length > 0 && (
+        <TagFillReviewPanel
+          caseId={caseId}
+          suggestions={tagFillSuggestions}
+          scanned={tagFillScanned}
+          onClose={() => {
+            setTagFillSuggestions(null);
+            setTagFillScanned(undefined);
+          }}
+          onApplied={() => {
+            fetchFiling();
+            fetchActionLogs();
+            window.dispatchEvent(new Event('filings-changed'));
+          }}
+          onDeleteSuggestions={(keys) => {
+            const dropped = new Set(keys);
+            setTagFillSuggestions((prev) =>
+              prev ? prev.filter((s) => !dropped.has(`${s.filingId}::${s.field}`)) : prev,
+            );
+            removeFromSavedBatch(keys);
+          }}
+        />
       )}
     </div>
     </SelectedEntityProvider>

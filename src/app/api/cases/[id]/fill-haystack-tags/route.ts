@@ -57,8 +57,26 @@ export interface FillTagsRequest {
   fields?: HaystackTagField[];
   /** Default true — return suggestions without writing them. */
   dryRun?: boolean;
-  /** Phase 2 — required when dryRun=false. List of (filing, field) tuples to persist. */
-  accept?: Array<{ filingId: string; field: HaystackTagField }>;
+  /**
+   * Required when `dryRun=false`. Each entry carries everything the server
+   * needs to commit a single (filing, field) — the apply path does NOT re-run
+   * the LLM extractor. The client passes back the exact `proposedValue` /
+   * `personSeed` from the dryRun response, so the commit is deterministic and
+   * cheap (no embedding, no extraction).
+   *
+   * For person-ref fields the client typically sends `proposedValue: null` +
+   * a `personSeed { name, marker }`; the server resolves-or-creates the Person
+   * at apply-time.
+   */
+  accept?: Array<{
+    filingId: string;
+    field: HaystackTagField;
+    proposedValue?: unknown;
+    personSeed?: { name: string; marker: 'judge' | 'courtReporter' | null };
+    /** Optional — used only for the ActionLog `beforeValue`. The server
+     * re-reads the DB row for the authoritative current value before writing. */
+    currentValue?: unknown;
+  }>;
   /** When true, response includes per-filing diagnostics (durationMs, primaryDocumentId, error). */
   debug?: boolean;
 }
@@ -147,6 +165,7 @@ export async function POST(
     }
 
     const dryRun = body.dryRun !== false;
+    const debug = body.debug === true;
     // fileRef is managed by the ingestion pipeline (Document.filePath +
     // FK on the entity's documentId column). The "Fix paths" toolbar action
     // handles rebases on rename. AI proposals for fileRef were noisy and
@@ -157,14 +176,11 @@ export async function POST(
       ? body.fields.filter((f) => HAYSTACK_TAG_FIELDS.includes(f as HaystackTagField))
       : defaultFields;
 
-    // ─── Resolve targets ───────────────────────────────────────────────────
-    const targets = await loadFilingTargets(id, body.filingIds);
-
-    // ─── Pick AI model ─────────────────────────────────────────────────────
+    // ─── Pick AI model (only needed for dryRun; apply path uses no LLM) ────
     const config = await getConfig();
     const primary = pickPrimary(config);
     const fallback = pickFallback(config);
-    if (!primary) {
+    if (dryRun && !primary) {
       return NextResponse.json(
         {
           ok: false,
@@ -173,6 +189,167 @@ export async function POST(
         { status: 400 },
       );
     }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // APPLY PATH — skip the LLM entirely. The client already has the
+    // suggestions from a prior dryRun and passes back proposedValue/personSeed
+    // in each accept[] entry. We only need to resolve refs + commit.
+    // ════════════════════════════════════════════════════════════════════════
+    if (!dryRun) {
+      const acceptList = Array.isArray(body.accept) ? body.accept : [];
+      if (acceptList.length === 0) {
+        return NextResponse.json({
+          ok: true,
+          scanned: 0,
+          suggestions: [],
+          applied: [],
+          note: 'dryRun=false but accept[] is empty — no writes performed',
+        });
+      }
+
+      // Limit targets to the filings actually mentioned in accept[].
+      const acceptFilingIds = Array.from(new Set(acceptList.map((a) => a.filingId)));
+      const targets = await loadFilingTargets(id, acceptFilingIds);
+      const targetByFilingId = new Map<string, ResolvedFilingTarget>();
+      for (const t of targets) targetByFilingId.set(t.filingId, t);
+
+      const applied: Array<{ filingId: string; field: HaystackTagField; actionLogId: string }> = [];
+      const modelTag = primary ? `${primary.provider}:${primary.model}` : 'apply-only';
+
+      const writeAttemptLog = async (args: {
+        target: ResolvedFilingTarget;
+        field: string;
+        status: string;
+        beforeValue: unknown;
+        afterValue: unknown;
+        errorMessage?: string;
+      }) => {
+        return (prisma as any).actionLog.create({
+          data: {
+            caseId: id,
+            action: 'Tag fill',
+            target: `${args.target.filingTitle} · ${args.field}`,
+            status: args.status,
+            logType: 'tag-fill',
+            detail: JSON.stringify({
+              filingId: args.target.filingId,
+              filingTitle: args.target.filingTitle,
+              kind: args.target.kind,
+              field: args.field,
+              beforeValue: args.beforeValue,
+              afterValue: args.afterValue,
+              suggestionSource: 'ai',
+              model: modelTag,
+              ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
+            }),
+          },
+        });
+      };
+
+      console.log(`[tag-fill] APPLY case=${id} accepted=${acceptList.length} (no LLM re-run)`);
+
+      for (const entry of acceptList) {
+        const field = entry.field as HaystackTagField;
+        if (!HAYSTACK_TAG_FIELDS.includes(field)) {
+          console.warn(`[tag-fill] APPLY rejected ${entry.filingId}::${field}: unknown field`);
+          continue;
+        }
+        const target = targetByFilingId.get(entry.filingId);
+        if (!target) {
+          console.warn(`[tag-fill] APPLY filing=${entry.filingId} field=${field} → target not found`);
+          continue;
+        }
+
+        // Re-read the authoritative current value from the DB. Don't trust the
+        // client's currentValue — it's only used as a hint.
+        const beforeValue = readCurrentValue(target.row, field) ?? null;
+
+        if (field === 'fileRef' && target.kind === 'motion') {
+          console.warn(`[tag-fill] APPLY skipped filing=${target.filingId} field=fileRef: motion kind has no documentId`);
+          await writeAttemptLog({
+            target, field, status: 'skipped', beforeValue,
+            afterValue: entry.proposedValue ?? null,
+            errorMessage: 'fileRef is not applicable to motion-kind filings',
+          }).catch(() => undefined);
+          continue;
+        }
+
+        if (entry.proposedValue == null && !entry.personSeed) {
+          console.warn(`[tag-fill] APPLY filing=${target.filingId} field=${field} → no proposedValue or personSeed`);
+          await writeAttemptLog({
+            target, field, status: 'failed', beforeValue, afterValue: null,
+            errorMessage: 'No proposedValue or personSeed in accept[] entry',
+          }).catch(() => undefined);
+          continue;
+        }
+
+        let afterValue: unknown = entry.proposedValue;
+        if (afterValue == null && entry.personSeed) {
+          console.log(`[tag-fill] APPLY resolving person name="${entry.personSeed.name}" marker=${entry.personSeed.marker ?? 'none'}`);
+          const person = await resolveOrCreatePerson(
+            entry.personSeed.name,
+            entry.personSeed.marker,
+          );
+          if (!person) {
+            console.warn(`[tag-fill] APPLY personSeed resolve failed filing=${target.filingId} field=${field} name="${entry.personSeed.name}"`);
+            await writeAttemptLog({
+              target, field, status: 'failed', beforeValue, afterValue: null,
+              errorMessage: `Could not resolve or create Person "${entry.personSeed.name}"`,
+            }).catch(() => undefined);
+            continue;
+          }
+          afterValue = { _kind: 'ref', val: person.id };
+          console.log(`[tag-fill] APPLY person resolved id=${person.id}`);
+        }
+
+        const displayAfter = JSON.stringify(afterValue).slice(0, 80);
+        console.log(`[tag-fill] APPLY trying filing="${target.filingTitle}" field=${field} → ${displayAfter}`);
+
+        try {
+          const commitResult = await commitEntity({
+            id: target.filingId,
+            kind: target.kind,
+            patch: { [field]: afterValue },
+          });
+          if (!commitResult.ok) {
+            console.warn(`[tag-fill] APPLY commit failed filing=${target.filingId} field=${field}: ${commitResult.errGridJson}`);
+            await writeAttemptLog({
+              target, field, status: 'failed', beforeValue, afterValue,
+              errorMessage: `commitEntity rejected: ${commitResult.errGridJson ?? 'unknown'}`,
+            }).catch(() => undefined);
+            continue;
+          }
+          const log = await writeAttemptLog({
+            target, field, status: 'committed', beforeValue, afterValue,
+          });
+          console.log(`[tag-fill] APPLY committed filing=${target.filingId} field=${field} actionLogId=${log.id}`);
+          applied.push({ filingId: target.filingId, field, actionLogId: log.id });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[tag-fill] APPLY write path failed filing=${target.filingId} field=${field}: ${msg}`);
+          await writeAttemptLog({
+            target, field, status: 'failed', beforeValue, afterValue,
+            errorMessage: msg,
+          }).catch(() => undefined);
+        }
+      }
+
+      console.log(`[tag-fill] APPLY done case=${id} committed=${applied.length}/${acceptList.length}`);
+
+      return NextResponse.json({
+        ok: true,
+        scanned: targets.length,
+        suggestions: [],
+        applied,
+      });
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // DRY-RUN PATH — full extractor pass.
+    // ════════════════════════════════════════════════════════════════════════
+
+    // ─── Resolve targets ───────────────────────────────────────────────────
+    const targets = await loadFilingTargets(id, body.filingIds);
 
     // ─── VectorStore (lazy) ────────────────────────────────────────────────
     let vectorStore: VectorStore | null = null;
@@ -191,7 +368,6 @@ export async function POST(
 
     // ─── Per-filing extraction ─────────────────────────────────────────────
     const suggestions: FillTagSuggestion[] = [];
-    const debug = body.debug === true;
     const diagnostics: Array<Record<string, unknown>> = [];
     for (const target of targets) {
       const t0 = Date.now();
@@ -202,7 +378,7 @@ export async function POST(
           target,
           vectorStore,
           fields: requestedFields,
-          primary,
+          primary: primary!,
           fallback,
         });
         suggestionCount = perFiling.length;
@@ -225,8 +401,7 @@ export async function POST(
       }
     }
 
-    // ─── DRY RUN: return suggestions only ──────────────────────────────────
-    if (dryRun) {
+    {
       const payload: FillTagsResponse & {
         diagnostics?: unknown;
         vectorStoreInitialized?: boolean;
@@ -236,113 +411,12 @@ export async function POST(
       if (debug) {
         payload.diagnostics = diagnostics;
         payload.vectorStoreInitialized = vectorStore !== null;
-        payload.primary = { provider: primary.provider, model: primary.model };
+        payload.primary = primary ? { provider: primary.provider, model: primary.model } : null;
         payload.fallback = fallback ? { provider: fallback.provider, model: fallback.model } : null;
       }
       return NextResponse.json(payload);
     }
 
-    // ─── APPLY: persist accepted (filing, field) tuples ────────────────────
-    const acceptList = Array.isArray(body.accept) ? body.accept : [];
-    if (acceptList.length === 0) {
-      return NextResponse.json({
-        ok: true,
-        scanned: targets.length,
-        suggestions,
-        applied: [],
-        note: 'dryRun=false but accept[] is empty — no writes performed',
-      });
-    }
-
-    const acceptKey = (filingId: string, field: string) => `${filingId}::${field}`;
-    const acceptSet = new Set(acceptList.map((a) => acceptKey(a.filingId, a.field)));
-    const suggestionByKey = new Map<string, FillTagSuggestion>();
-    for (const s of suggestions) suggestionByKey.set(acceptKey(s.filingId, String(s.field)), s);
-    const targetByFilingId = new Map<string, ResolvedFilingTarget>();
-    for (const t of targets) targetByFilingId.set(t.filingId, t);
-
-    const applied: Array<{ filingId: string; field: HaystackTagField; actionLogId: string }> = [];
-
-    for (const key of acceptSet) {
-      const suggestion = suggestionByKey.get(key);
-      if (!suggestion) continue;
-      const target = targetByFilingId.get(suggestion.filingId);
-      if (!target) continue;
-      const field = suggestion.field as HaystackTagField;
-
-      // Skip fileRef writes for Motion-typed filings — Motion has no documentId
-      // column and the tags-only fileRef is meaningless without it (audit §3).
-      if (field === 'fileRef' && target.kind === 'motion') continue;
-
-      const beforeValue = suggestion.currentValue ?? null;
-      // Resolve the proposedValue at apply time. For person refs the dryRun
-      // pass leaves proposedValue null and stores a personSeed{name, marker} —
-      // resolveOrCreatePerson runs HERE, so no Person rows are written until
-      // the user explicitly accepts.
-      let afterValue: unknown = suggestion.proposedValue;
-      if (afterValue == null && suggestion.personSeed) {
-        const person = await resolveOrCreatePerson(
-          suggestion.personSeed.name,
-          suggestion.personSeed.marker,
-        );
-        if (!person) {
-          console.warn(
-            `[tag-fill] personSeed resolve failed filing=${target.filingId} field=${field} name="${suggestion.personSeed.name}"`,
-          );
-          continue;
-        }
-        afterValue = { _kind: 'ref', val: person.id };
-      }
-
-      try {
-        const commitResult = await commitEntity({
-          id: target.filingId,
-          kind: target.kind,
-          patch: { [field]: afterValue },
-        });
-        if (!commitResult.ok) {
-          console.warn(
-            `[tag-fill] commit failed filing=${target.filingId} field=${field}: ${commitResult.errGridJson}`,
-          );
-          continue;
-        }
-
-        const log = await (prisma as any).actionLog.create({
-          data: {
-            caseId: id,
-            action: 'Tag fill',
-            target: `${target.filingTitle} · ${field}`,
-            status: 'committed',
-            logType: 'tag-fill',
-            detail: JSON.stringify({
-              filingId: target.filingId,
-              filingTitle: target.filingTitle,
-              kind: target.kind,
-              field,
-              beforeValue,
-              afterValue,
-              suggestionSource: 'ai',
-              model: `${primary.provider}:${primary.model}`,
-            }),
-          },
-        });
-
-        applied.push({ filingId: target.filingId, field, actionLogId: log.id });
-      } catch (err) {
-        console.warn(
-          `[tag-fill] write path failed filing=${target.filingId} field=${field}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-    }
-
-    return NextResponse.json({
-      ok: true,
-      scanned: targets.length,
-      suggestions,
-      applied,
-    });
   } catch (err: any) {
     return NextResponse.json(
       { ok: false, error: err?.message || 'fill_haystack_tags_failed' },
@@ -424,7 +498,12 @@ async function suggestForFiling(args: {
       continue;
     }
 
-    if (valuesEqual(proposal.proposedValue, proposal.currentValue)) {
+    // For ref fields with a deferred personSeed, proposedValue is intentionally
+    // null at suggest-time (Person upsert happens at apply-time). Skipping via
+    // valuesEqual(null, null)=true would drop every person-ref proposal — and,
+    // on the apply re-run, would silently filter out accepted rows so they
+    // never reach the commit loop.
+    if (!proposal.personSeed && valuesEqual(proposal.proposedValue, proposal.currentValue)) {
       console.log(`[tag-fill] filing=${target.filingId} field=${field} → skipped (current==proposed: ${JSON.stringify(proposal.currentValue)})`);
       continue;
     }

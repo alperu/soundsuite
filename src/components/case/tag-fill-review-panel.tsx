@@ -44,6 +44,15 @@ export interface TagFillReviewPanelProps {
   onClose(): void;
   /** Called after a successful apply so the parent can refresh state. */
   onApplied?(result: { accepted: number }): void;
+  /**
+   * Called when the user deletes one or more suggestions from the panel.
+   * Each key is `${filingId}::${field}`. Parent owns the suggestions array
+   * and is expected to filter the deleted keys out (which also re-saves the
+   * batch to localStorage via its persistence effect). When omitted, the
+   * delete buttons are hidden — keeps the panel safe to mount without a
+   * parent that supports deletion.
+   */
+  onDeleteSuggestions?(keys: string[]): void;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -157,6 +166,7 @@ export function TagFillReviewPanel({
   scanned,
   onClose,
   onApplied,
+  onDeleteSuggestions,
 }: TagFillReviewPanelProps) {
   // accepted: set of rowKey(s) currently checked.
   const [accepted, setAccepted] = useState<Set<string>>(() => new Set());
@@ -216,6 +226,30 @@ export function TagFillReviewPanel({
     setAccepted(new Set());
   }, []);
 
+  // Bulk-delete every checked row. Parent strips them from `suggestions` (and
+  // re-saves the persisted batch). We also clear the accepted set since those
+  // keys no longer exist.
+  const deleteSelected = useCallback(() => {
+    if (!onDeleteSuggestions || accepted.size === 0) return;
+    onDeleteSuggestions(Array.from(accepted));
+    setAccepted(new Set());
+  }, [accepted, onDeleteSuggestions]);
+
+  // Per-row delete from a SuggestionGroup row.
+  const deleteOne = useCallback(
+    (key: string) => {
+      if (!onDeleteSuggestions) return;
+      onDeleteSuggestions([key]);
+      setAccepted((prev) => {
+        if (!prev.has(key)) return prev;
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    },
+    [onDeleteSuggestions],
+  );
+
   const toggleExpanded = useCallback((key: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -231,9 +265,19 @@ export function TagFillReviewPanel({
     setApplying(true);
     setApplyError(null);
 
+    // Send the full suggestion payload so the server can commit without
+    // re-running the LLM extractor. The dryRun already produced these values;
+    // re-deriving them on apply would be slow, expensive, and non-deterministic
+    // (silent drops when the LLM drifted on the second pass).
     const acceptList = suggestions
       .filter((s) => accepted.has(rowKey(s)))
-      .map((s) => ({ filingId: s.filingId, field: s.field }));
+      .map((s) => ({
+        filingId: s.filingId,
+        field: s.field,
+        proposedValue: s.proposedValue,
+        personSeed: s.personSeed,
+        currentValue: s.currentValue,
+      }));
 
     try {
       const res = await fetch(`/api/cases/${caseId}/fill-haystack-tags`, {
@@ -432,7 +476,7 @@ export function TagFillReviewPanel({
                 title="Select only high-confidence rows"
                 className="h-7 px-2 text-xs text-gray-700 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
               >
-                Accept high
+                Select high
               </button>
               <button
                 type="button"
@@ -440,16 +484,27 @@ export function TagFillReviewPanel({
                 title="Select every row"
                 className="h-7 px-2 text-xs text-gray-700 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
               >
-                Accept all
+                Select all
               </button>
               <button
                 type="button"
                 onClick={clearAcceptance}
-                title="Deselect all"
+                title="Deselect every checked row (does not dismiss the panel)"
                 className="h-7 px-2 text-xs text-gray-700 rounded border border-gray-200 hover:bg-gray-50 transition-colors"
               >
-                Clear
+                Deselect all
               </button>
+              {onDeleteSuggestions && (
+                <button
+                  type="button"
+                  onClick={deleteSelected}
+                  disabled={accepted.size === 0}
+                  title="Remove every checked suggestion from this batch (the panel stays open). The batch is also re-saved so re-opening won't bring them back."
+                  className="h-7 px-2 text-xs text-red-700 rounded border border-red-200 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  Delete {accepted.size > 0 ? `${accepted.size} ` : ''}selected
+                </button>
+              )}
             </>
           )}
         </div>
@@ -484,6 +539,7 @@ export function TagFillReviewPanel({
                   expanded={expanded}
                   onToggleRow={toggleRow}
                   onToggleExpanded={toggleExpanded}
+                  onDeleteRow={onDeleteSuggestions ? deleteOne : undefined}
                 />
               ))}
             </div>
@@ -547,6 +603,7 @@ interface SuggestionGroupProps {
   expanded: Set<string>;
   onToggleRow(key: string): void;
   onToggleExpanded(key: string): void;
+  onDeleteRow?(key: string): void;
 }
 
 function SuggestionGroup({
@@ -556,6 +613,7 @@ function SuggestionGroup({
   expanded,
   onToggleRow,
   onToggleExpanded,
+  onDeleteRow,
 }: SuggestionGroupProps) {
   return (
     <div className="px-3 py-2">
@@ -593,6 +651,19 @@ function SuggestionGroup({
                 >
                   {row.confidence}
                 </span>
+                {onDeleteRow && (
+                  <button
+                    type="button"
+                    onClick={() => onDeleteRow(key)}
+                    title="Remove this suggestion from the batch"
+                    aria-label={`Delete ${row.field} suggestion for ${title}`}
+                    className="p-0.5 text-gray-300 hover:text-red-600 transition-colors"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
               </div>
               <div className="mt-1 flex items-center gap-1 text-[12px]">
                 <span className="text-gray-500 line-clamp-1" title={String(formatValue(row.currentValue))}>
@@ -709,10 +780,21 @@ function RecentView({ entries, loading, error, revertingId, onRevert }: RecentVi
                 className={`ml-auto px-1.5 py-0.5 rounded border text-[10px] uppercase tracking-wider ${
                   entry.reverted
                     ? 'bg-gray-100 text-gray-500 border-gray-200'
-                    : 'bg-green-50 text-green-700 border-green-200'
+                    : entry.status === 'failed'
+                      ? 'bg-red-50 text-red-700 border-red-200'
+                      : entry.status === 'skipped'
+                        ? 'bg-amber-50 text-amber-700 border-amber-200'
+                        : 'bg-green-50 text-green-700 border-green-200'
                 }`}
+                title={entry.status}
               >
-                {entry.reverted ? 'reverted' : 'applied'}
+                {entry.reverted
+                  ? 'reverted'
+                  : entry.status === 'failed'
+                    ? 'failed'
+                    : entry.status === 'skipped'
+                      ? 'skipped'
+                      : 'applied'}
               </span>
             </div>
             <div className="mt-1 text-gray-800 truncate" title={entry.filingTitle}>
@@ -730,15 +812,27 @@ function RecentView({ entries, loading, error, revertingId, onRevert }: RecentVi
               <span className="text-gray-900 truncate" title={String(formatValue(entry.afterValue))}>
                 {formatValue(entry.afterValue)}
               </span>
-              <button
-                type="button"
-                onClick={() => onRevert(entry)}
-                disabled={entry.reverted || isReverting}
-                className="ml-auto h-6 px-2 text-[11px] text-gray-700 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                title={entry.reverted ? 'Already reverted' : 'Restore the previous value'}
-              >
-                {isReverting ? 'Reverting…' : entry.reverted ? 'Reverted' : 'Revert'}
-              </button>
+              {(() => {
+                const notCommitted =
+                  entry.status === 'failed' || entry.status === 'skipped';
+                const disabled = entry.reverted || isReverting || notCommitted;
+                const title = notCommitted
+                  ? 'No change was committed — nothing to revert'
+                  : entry.reverted
+                    ? 'Already reverted'
+                    : 'Restore the previous value';
+                return (
+                  <button
+                    type="button"
+                    onClick={() => onRevert(entry)}
+                    disabled={disabled}
+                    className="ml-auto h-6 px-2 text-[11px] text-gray-700 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    title={title}
+                  >
+                    {isReverting ? 'Reverting…' : entry.reverted ? 'Reverted' : 'Revert'}
+                  </button>
+                );
+              })()}
             </div>
             {entry.status?.startsWith('error:') && (
               <div className="mt-1 text-[11px] text-red-600">{entry.status}</div>

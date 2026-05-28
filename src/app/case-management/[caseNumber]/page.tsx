@@ -2234,6 +2234,28 @@ export default function CaseDetailPage() {
             updateLog(logId, 'success');
             window.dispatchEvent(new Event('filings-changed'));
           }}
+          onDeleteSuggestions={(keys) => {
+            const dropped = new Set(keys);
+            setTagFillSuggestions((prev) => {
+              if (!prev) return prev;
+              const next = prev.filter(
+                (s) => !dropped.has(`${s.filingId}::${s.field}`),
+              );
+              // If the user deletes every row, clear the persisted batch so
+              // re-opening via "Show Haystack Suggestions" doesn't resurrect
+              // them. The auto-persist effect only writes when length > 0.
+              if (next.length === 0) {
+                try {
+                  localStorage.removeItem(tagFillStorageKey(caseRecord.id));
+                  setTagFillHasSaved(false);
+                  setTagFillSavedAt(null);
+                } catch {
+                  /* localStorage disabled */
+                }
+              }
+              return next;
+            });
+          }}
         />
       )}
     </SelectedEntityProvider>
