@@ -464,6 +464,73 @@ export async function POST(
  * Run the extractor for ONE filing. Returns a list of suggestions (one per
  * field that the model returned and that differs from current value).
  */
+/**
+ * Deterministic `filedOn` detection — runs before the LLM. Two sources:
+ *   1. Parent Filing.filingDate (Prisma column) — authoritative when set.
+ *   2. File-stamp regex against the first few chunks (clerk's office filing
+ *      stamps follow a small set of formats: "FILED <date>", "Filed for
+ *      Record on <date>", Texas District-Clerk stamps, etc.).
+ *
+ * Returns null when no source produces a date. The chunk-regex path returns
+ * a `medium` confidence; the DB path returns `high` since it's already
+ * authoritative on the Filing record.
+ */
+async function detectFiledOnDeterministic(
+  target: ResolvedFilingTarget,
+  chunks: ChunkExcerpt[],
+): Promise<{ iso: string; source: string; confidence: 'high' | 'medium' } | null> {
+  // 1. DB fallback — Filing.filingDate is the canonical value if set.
+  try {
+    const filing = await (prisma as any).filing.findUnique({
+      where: { id: target.filingId },
+      select: { filingDate: true },
+    });
+    if (filing?.filingDate) {
+      const iso =
+        filing.filingDate instanceof Date
+          ? filing.filingDate.toISOString().slice(0, 10)
+          : String(filing.filingDate).slice(0, 10);
+      return { iso, source: `Filing.filingDate=${iso}`, confidence: 'high' };
+    }
+  } catch {
+    /* best-effort — fall through to regex */
+  }
+
+  // 2. Regex over first chunks. Match the most common clerk-stamp shapes.
+  //    Order matters: try the most specific patterns first.
+  const stampPatterns: Array<{ re: RegExp; label: string }> = [
+    { re: /\bFiled\s+for\s+Record\s+(?:on\s+)?(\d{1,2}\/\d{1,2}\/\d{4})/i, label: 'Filed for Record' },
+    { re: /\bFiled\s+for\s+Record\s+(?:on\s+)?(\d{4}-\d{2}-\d{2})/i, label: 'Filed for Record' },
+    { re: /\bFILED\s+(?:on\s+)?(\d{1,2}\/\d{1,2}\/\d{4})/i, label: 'FILED' },
+    { re: /\bFILED\s+(?:on\s+)?(\d{4}-\d{2}-\d{2})/i, label: 'FILED' },
+    { re: /\bFILED:\s+(\d{1,2}\/\d{1,2}\/\d{4})/i, label: 'FILED:' },
+    { re: /\bFILED\s+IN\s+THE\s+\w[\w\s]*?\s+(\d{1,2}\/\d{1,2}\/\d{4})/i, label: 'FILED IN' },
+    { re: /\bCourt\s+Filing\s+Date:?\s+(\d{1,2}\/\d{1,2}\/\d{4})/i, label: 'Court Filing Date' },
+    { re: /\bCourt\s+Filing\s+Date:?\s+(\d{4}-\d{2}-\d{2})/i, label: 'Court Filing Date' },
+    // Texas DC stamp: usually three-line — capture date alongside the
+    // "DISTRICT CLERK" or "Velva L. Price" / "Anne Lorentzen" name nearby.
+    { re: /(\d{1,2}\/\d{1,2}\/\d{4})\s+\d{1,2}:\d{2}\s+[AP]M\s+(?:DISTRICT\s+CLERK|VELVA|ANNE\s+LORENTZEN)/i, label: 'DC stamp' },
+  ];
+
+  const scanText = chunks.slice(0, 4).map((c) => c.text).join('\n');
+  if (!scanText.trim()) return null;
+
+  for (const { re, label } of stampPatterns) {
+    const m = re.exec(scanText);
+    if (!m) continue;
+    const raw = m[1];
+    const iso = normalizeIsoDate(raw);
+    if (!iso) continue;
+    // Pull the surrounding ±60 chars as the source excerpt.
+    const start = Math.max(0, (m.index ?? 0) - 60);
+    const end = Math.min(scanText.length, (m.index ?? 0) + m[0].length + 60);
+    const source = `${label}: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`;
+    return { iso, source, confidence: 'medium' };
+  }
+
+  return null;
+}
+
 async function suggestForFiling(args: {
   target: ResolvedFilingTarget;
   vectorStore: VectorStore | null;
@@ -494,7 +561,7 @@ async function suggestForFiling(args: {
   }
 
   // If no AI-extractable fields requested, return now.
-  const aiFields = fields.filter((f) => f !== 'fileRef');
+  let aiFields = fields.filter((f) => f !== 'fileRef');
   if (aiFields.length === 0) return out;
 
   // ─── Load chunks ──────────────────────────────────────────────────────────
@@ -502,9 +569,37 @@ async function suggestForFiling(args: {
   if (target.primaryDocumentId) {
     chunks = await loadChunks(vectorStore, target.primaryDocumentId);
   }
-  if (chunks.length === 0) {
+
+  // ─── Deterministic `filedOn` ─────────────────────────────────────────────
+  // The LLM is unreliable for date stamps — they're tiny, often in headers,
+  // and the model loses them under longer chunks. Run a regex pass against
+  // the first few chunks AND check the parent Filing.filingDate column. If
+  // we get a date, emit the suggestion now and drop filedOn from the AI
+  // list so the LLM doesn't waste tokens on it.
+  if (aiFields.includes('filedOn')) {
+    const detected = await detectFiledOnDeterministic(target, chunks);
+    if (detected) {
+      const current = readCurrentValue(target.row, 'filedOn');
+      const iso = normalizeIsoDate(detected.iso) ?? detected.iso;
+      if (!valuesEqual(current, iso)) {
+        out.push({
+          filingId: target.filingId,
+          filingTitle: target.filingTitle,
+          field: 'filedOn',
+          currentValue: current ?? null,
+          proposedValue: iso,
+          proposedDisplay: iso,
+          sourceExcerpt: detected.source,
+          confidence: detected.confidence,
+        });
+        aiFields = aiFields.filter((f) => f !== 'filedOn');
+      }
+    }
+  }
+
+  if (chunks.length === 0 || aiFields.length === 0) {
     // Without indexed text we can't reliably extract anything else — return
-    // whatever (if anything) the fileRef path produced.
+    // whatever (if anything) the deterministic paths produced.
     return out;
   }
 
