@@ -3546,6 +3546,51 @@ function SearchDocsPanel({ mode, embeddingInfo, directMode }: { mode: SearchMode
         </div>
 
         <div>
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Chip scoping (multi-search)</h4>
+          <p className="text-[11px] text-gray-600 leading-relaxed">
+            Filter chips ({'{{ … }}'}) don&apos;t just colour the prompt — each chip
+            <strong> scopes its own sub-search</strong>. The phrase you type next to a chip is the
+            semantic intent for that slice; the chip itself becomes a hard
+            Lance filter on the chunks retrieved for that intent. Results
+            from every slice are merged before synthesis.
+          </p>
+          <p className="text-[11px] text-gray-600 leading-relaxed mt-2">
+            Pattern matters: chips bind to the text <em>following</em> them. Text
+            before the first chip becomes a framing slice with a soft boost
+            over your chip refs (no hard filter). &quot;Questions lead where the
+            data is.&quot;
+          </p>
+
+          <p className="text-[10px] text-gray-400 font-medium mt-3 mb-1">Sample</p>
+          <pre className="text-[10px] bg-gray-50 border border-gray-200 rounded p-2 text-gray-700 whitespace-pre-wrap leading-relaxed">{
+`{{ filingRef==@<vol2-uuid> }}  In this document we have Torrez's changing statement
+{{ (case==@A or case==@B or case==@C or case==@D) }}  how trust evolved over time`
+          }</pre>
+
+          <p className="text-[10px] text-gray-500 mt-2 leading-relaxed">
+            Produces <strong>two</strong> scoped sub-searches:
+          </p>
+          <ul className="mt-1 space-y-1">
+            <li className="text-[10px] text-gray-600 flex gap-1.5 leading-relaxed">
+              <span className="text-gray-400 shrink-0">1.</span>
+              <span><em>&quot;Torrez&apos;s changing statement&quot;</em> retrieved
+              only from the named filing (Lance: <code className="font-mono text-[9px] bg-gray-100 px-0.5 rounded">filing_id = &apos;…&apos;</code>).</span>
+            </li>
+            <li className="text-[10px] text-gray-600 flex gap-1.5 leading-relaxed">
+              <span className="text-gray-400 shrink-0">2.</span>
+              <span><em>&quot;how trust evolved&quot;</em> retrieved only from
+              the four named cases (Lance: <code className="font-mono text-[9px] bg-gray-100 px-0.5 rounded">case_id IN (&apos;A&apos;,&apos;B&apos;,&apos;C&apos;,&apos;D&apos;)</code>).</span>
+            </li>
+          </ul>
+
+          <p className="text-[10px] text-gray-500 mt-2 leading-relaxed">
+            Scoping applies to every retrieval channel — vector+FTS hybrid,
+            the regex backstop, and RLM&apos;s follow-up tool calls — so
+            evidence stays inside your stated scope on every pass.
+          </p>
+        </div>
+
+        <div>
           <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Tool Chain</h4>
           <p className="text-[11px] text-gray-500 mb-2 leading-relaxed">
             Each step runs on a sidecar role. Assign on{' '}

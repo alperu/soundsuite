@@ -22,6 +22,21 @@ export interface QueryCaseKnowledgeParams {
   searchMode?: 'vector' | 'hybrid' | 'keyword';
   /** 'boolean' parses the query as a full boolean expression with AND/OR/NOT, phrases, and `-`. */
   mode?: 'legacy' | 'boolean';
+  /**
+   * Pre-extracted Lance/SQL where-clauses to merge into the retrieval filter
+   * as hard constraints. Each string is already SQL-escaped at the call site
+   * (typically by `extractFieldFilters()` in src/lib/search/boolean-to-fts.ts).
+   * Used by deep-search's per-chip dispatch so chip filters survive
+   * sub-query text re-parsing.
+   */
+  whereClauses?: string[];
+  /**
+   * Soft boost set — for each {field, values} entry, results whose metadata
+   * field matches any value get their post-rerank score multiplied by a
+   * small constant (~1.2). Used by deep-search's framing-segment path so the
+   * user's chip refs nudge ranking without hard-filtering out other docs.
+   */
+  softBoostRefs?: Array<{ field: 'documentId' | 'caseId' | 'filingId'; values: string[] }>;
 }
 
 export interface QueryCaseKnowledgeResult {
@@ -96,7 +111,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     context: ToolExecutionContext,
     _config: ToolConfigEntry,
   ): Promise<QueryCaseKnowledgeResult> {
-    const { query, caseId, chatId, limit = 10, searchMode = 'hybrid', mode = 'legacy' } = params;
+    const { query, caseId, chatId, limit = 10, searchMode = 'hybrid', mode = 'legacy', whereClauses, softBoostRefs } = params;
     const chatHitChunkIds = new Set<string>();
 
     // Over-fetch candidates so the cross-encoder reranker has a larger pool to judge.
@@ -236,6 +251,16 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       searchQuery.filter._rawWhere = fieldWhereClauses;
     }
 
+    // Caller-supplied where-clauses (e.g. deep-search's per-chip dispatch
+    // shipping pre-extracted filters so we don't have to round-trip them
+    // through query text re-parsing). Merge alongside whatever the
+    // boolean-mode extractor pulled out of `query` itself.
+    if (whereClauses && whereClauses.length > 0) {
+      if (!searchQuery.filter) searchQuery.filter = {};
+      const existing = Array.isArray(searchQuery.filter._rawWhere) ? searchQuery.filter._rawWhere : [];
+      searchQuery.filter._rawWhere = [...existing, ...whereClauses];
+    }
+
     // Perform primary search
     let searchResults = await context.vectorStore.search(searchQuery);
 
@@ -327,6 +352,30 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
         const ft = r.metadata.filingType;
         if (ft && TRANSCRIPT_FILING_RE.test(ft)) {
           r.score *= TRANSCRIPT_BOOST;
+        }
+      }
+      searchResults.sort((a, b) => b.score - a.score);
+    }
+
+    // Caller-supplied soft boost — used by deep-search's framing-segment path
+    // so the user's chip refs nudge ranking on the "questions lead where the
+    // data is" overview pass, without hard-filtering out other docs the model
+    // might want to reach for. Smaller multiplier than the transcript boost
+    // because this is a hint about user attention, not a strong relevance
+    // signal.
+    if (softBoostRefs && softBoostRefs.length > 0) {
+      const SOFT_BOOST = 1.2;
+      const refSets = softBoostRefs.map(b => ({ field: b.field, set: new Set(b.values) }));
+      for (const r of searchResults) {
+        for (const { field, set } of refSets) {
+          const v = field === 'documentId' ? r.metadata.documentId
+            : field === 'caseId' ? r.metadata.caseId
+            : field === 'filingId' ? r.metadata.filingId
+            : undefined;
+          if (v && set.has(v)) {
+            r.score *= SOFT_BOOST;
+            break;
+          }
         }
       }
       searchResults.sort((a, b) => b.score - a.score);

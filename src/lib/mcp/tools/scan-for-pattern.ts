@@ -12,6 +12,15 @@ export interface ScanForPatternParams {
   pattern: string;
   caseId?: string;
   limit?: number;
+  /**
+   * Pre-extracted Lance/SQL where-clauses to merge into the retrieval
+   * filter as hard constraints. Each string is already SQL-escaped at the
+   * call site (typically by `extractFieldFilters()` in
+   * src/lib/search/boolean-to-fts.ts). Used by deep-search's per-chip
+   * pattern dispatch so the regex backstop respects the same scope as
+   * the main vector+FTS retrieval.
+   */
+  whereClauses?: string[];
 }
 
 export interface ScanForPatternResult {
@@ -101,7 +110,7 @@ export class ScanForPatternTool extends BaseMCPTool<
     context: ToolExecutionContext,
     _config: ToolConfigEntry,
   ): Promise<ScanForPatternResult> {
-    const { pattern, caseId, limit = 10 } = params;
+    const { pattern, caseId, limit = 10, whereClauses } = params;
 
     context.logger.info('Handling scan_for_pattern', { pattern, caseId, limit });
 
@@ -158,6 +167,15 @@ export class ScanForPatternTool extends BaseMCPTool<
     // Apply case filter if provided
     if (caseId) {
       searchQuery.filter = { caseId };
+    }
+
+    // Caller-supplied hard where-clauses (e.g. deep-search's per-chip
+    // pattern dispatch shipping the chip's extracted filters so the regex
+    // backstop stays inside the user's named scope).
+    if (whereClauses && whereClauses.length > 0) {
+      if (!searchQuery.filter) searchQuery.filter = {};
+      const existing = Array.isArray((searchQuery.filter as any)._rawWhere) ? (searchQuery.filter as any)._rawWhere : [];
+      (searchQuery.filter as any)._rawWhere = [...existing, ...whereClauses];
     }
 
     // Perform initial recall search

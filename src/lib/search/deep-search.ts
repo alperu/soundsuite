@@ -14,6 +14,8 @@ import { rerank, RerankableResult } from './reranker';
 import type { ToolRegistry } from '../mcp/tool-registry';
 import { parseBooleanQuery, astSerialize } from './boolean-query';
 import { runRlmWithTools, type RlmToolSpec, RLM_MODEL_ID } from '../ai/stream-rlm';
+import { segmentChipsAndIntents, type Segment as ChipQuerySegment } from './chip-segments';
+import { extractFieldFilters } from './boolean-to-fts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -282,19 +284,147 @@ interface SubQueryResult {
   sources: DeepSearchSource[];
 }
 
+/**
+ * SubQuerySpec — structured input for a single sub-search dispatch.
+ *
+ * Carries optional `whereClauses` (hard Lance filter — e.g. `filing_id = '<uuid>'`
+ * lifted from a chip's boolean AST via extractFieldFilters) and `softBoostRefs`
+ * (score multiplier in the post-rerank stage for results matching the named
+ * refs). The plain-string form (no chip filters, no boost) is preserved via
+ * the overload at the call site.
+ */
+export interface SubQuerySpec {
+  query: string;
+  whereClauses?: string[];
+  softBoostRefs?: Array<{ field: 'documentId' | 'caseId' | 'filingId'; values: string[] }>;
+  /** Human-readable tag for telemetry / matchedSubQueries attribution. */
+  label?: string;
+}
+
+/**
+ * Build per-chip sub-query specs from the composer query string.
+ *
+ * Returns `null` when the query contains no `{{ … }}` chip segments — the
+ * caller then falls back to today's LLM-decomposition path (decomposeQuery →
+ * subQueries: string[]).
+ *
+ * When chips are present, returns one SubQuerySpec per (chip, intent) pair
+ * with the chip translated into a hard Lance where-clause, plus an optional
+ * "framing" spec for any free-text before the first chip — that one carries
+ * no hard filter but a soft boost over the union of chip refs, implementing
+ * the "questions lead where the data is" semantics.
+ */
+export function buildChipSpecs(query: string): SubQuerySpec[] | null {
+  const segments = segmentChipsAndIntents(query);
+  const chipSegments = segments.filter((s): s is Extract<ChipQuerySegment, { kind: 'chip' }> => s.kind === 'chip');
+  if (chipSegments.length === 0) return null;
+
+  // Convert each chip's AST into a Lance where-clause set + collect any ref
+  // values that AND'd at the top level — those drive the framing soft boost.
+  type ChipPair = { spec: SubQuerySpec; refValuesByField: Map<'documentId' | 'caseId' | 'filingId', Set<string>> };
+  const chipPairs: ChipPair[] = [];
+  for (const chip of chipSegments) {
+    if (!chip.ast) {
+      // Malformed chip — best we can do is treat the raw text as a sub-query
+      // intent so the model still sees the user's named scope.
+      chipPairs.push({
+        spec: { query: chip.nextIntent || chip.raw, label: `chip:${chip.raw.slice(0, 40)}` },
+        refValuesByField: new Map(),
+      });
+      continue;
+    }
+    const { whereClauses } = extractFieldFilters(chip.ast);
+
+    // Collect ref UUID values (per field) by walking the AST so the framing
+    // soft boost can re-use them. We only need values for the columns the
+    // tool already exposes as boost fields: document_id, case_id, filing_id.
+    const refValuesByField = new Map<'documentId' | 'caseId' | 'filingId', Set<string>>();
+    const FIELD_TO_BOOST: Record<string, 'documentId' | 'caseId' | 'filingId'> = {
+      documentId: 'documentId', documentRef: 'documentId',
+      caseId: 'caseId', case: 'caseId', caseRef: 'caseId',
+      filingId: 'filingId', filing: 'filingId', filingRef: 'filingId',
+    };
+    const walk = (node: typeof chip.ast | null) => {
+      if (!node) return;
+      if (node.op === 'TERM') {
+        if (node.isRef && node.path && node.path.length === 1) {
+          const boostField = FIELD_TO_BOOST[node.path[0]];
+          if (boostField) {
+            const set = refValuesByField.get(boostField) ?? new Set<string>();
+            set.add(node.value);
+            refValuesByField.set(boostField, set);
+          }
+        }
+        return;
+      }
+      if (node.op === 'NOT') { walk(node.child); return; }
+      for (const c of node.children) walk(c);
+    };
+    walk(chip.ast);
+
+    chipPairs.push({
+      spec: {
+        // Use the paired intent text as the semantic body. If the chip has
+        // no following free-text, fall back to a generic "discuss" phrasing
+        // so the FTS still gets something to score against; the hard filter
+        // does the real scoping work either way.
+        query: chip.nextIntent && chip.nextIntent.length > 0
+          ? chip.nextIntent
+          : 'all available evidence',
+        whereClauses,
+        label: `chip:${chip.raw.slice(0, 60)}`,
+      },
+      refValuesByField,
+    });
+  }
+
+  const specs: SubQuerySpec[] = chipPairs.map(p => p.spec);
+
+  // Framing segment: text before the first chip (if any). Soft boost the
+  // union of every chip's ref values, but do not hard-filter — the framing
+  // is the user's overall question; chips are scope hints.
+  const framing = segments.find((s): s is Extract<typeof s, { kind: 'framing' }> => s.kind === 'framing');
+  if (framing && framing.text.length > 0) {
+    const unioned: Record<'documentId' | 'caseId' | 'filingId', Set<string>> = {
+      documentId: new Set(), caseId: new Set(), filingId: new Set(),
+    };
+    for (const p of chipPairs) {
+      for (const [field, set] of p.refValuesByField) {
+        for (const v of set) unioned[field].add(v);
+      }
+    }
+    const softBoostRefs: SubQuerySpec['softBoostRefs'] = [];
+    for (const field of ['documentId', 'caseId', 'filingId'] as const) {
+      if (unioned[field].size > 0) softBoostRefs.push({ field, values: Array.from(unioned[field]) });
+    }
+    specs.unshift({
+      query: framing.text,
+      ...(softBoostRefs.length > 0 ? { softBoostRefs } : {}),
+      label: 'framing',
+    });
+  }
+
+  return specs;
+}
+
 export async function executeParallelSearches(
-  subQueries: string[],
+  subQueries: ReadonlyArray<string | SubQuerySpec>,
   caseId: string | undefined,
   registry: ToolRegistry,
   pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
   chatId?: string,
 ): Promise<SubQueryResult[]> {
-  const promises = subQueries.map(async (subQuery): Promise<SubQueryResult> => {
+  // Normalize: plain strings become bare specs so the dispatch body has one shape.
+  const specs: SubQuerySpec[] = subQueries.map(s => (typeof s === 'string' ? { query: s } : s));
+  const promises = specs.map(async (spec): Promise<SubQueryResult> => {
+    const subQuery = spec.query;
     try {
       const searchResult = await registry.execute('query_case_knowledge', {
         query: subQuery,
         ...(caseId ? { caseId } : {}),
         ...(chatId ? { chatId } : {}),
+        ...(spec.whereClauses && spec.whereClauses.length > 0 ? { whereClauses: spec.whereClauses } : {}),
+        ...(spec.softBoostRefs && spec.softBoostRefs.length > 0 ? { softBoostRefs: spec.softBoostRefs } : {}),
         limit: 50,
         searchMode: 'hybrid',
       }, pushWarning ? { pushWarning } : undefined);
@@ -430,6 +560,64 @@ export async function executePatternSearch(
   } catch {
     return { subQuery: '[pattern search]', sources: [] };
   }
+}
+
+/**
+ * Per-chip pattern search — runs one regex backstop per chip spec, each
+ * scoped by that chip's whereClauses. Mirrors the main vector+FTS per-chip
+ * dispatch so the regex backstop respects the user's chip scope instead of
+ * leaking across the whole corpus. Framing-segment specs run unscoped
+ * (today's behaviour) since framing is intentionally broad.
+ *
+ * For chip specs without a paired intent (`spec.query` is the placeholder
+ * "all available evidence"), we skip the pattern search — there are no
+ * distinctive keywords to extract.
+ */
+export async function executePerChipPatternSearches(
+  specs: ReadonlyArray<SubQuerySpec>,
+  caseId: string | undefined,
+  registry: ToolRegistry,
+  pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
+): Promise<SubQueryResult[]> {
+  const promises = specs.map(async (spec): Promise<SubQueryResult> => {
+    const keywords = extractPatternKeywords(spec.query);
+    if (keywords.length === 0) return { subQuery: `[pattern search:${spec.label ?? ''}]`, sources: [] };
+
+    const pattern = keywords.map((kw) => `\\b${kw}\\b`).join('|');
+
+    try {
+      const result = await registry.execute('scan_for_pattern', {
+        pattern,
+        ...(caseId ? { caseId } : {}),
+        ...(spec.whereClauses && spec.whereClauses.length > 0 ? { whereClauses: spec.whereClauses } : {}),
+        limit: 50,
+      }, pushWarning ? { pushWarning } : undefined);
+
+      if (!result.success || !result.data?.results) {
+        return { subQuery: `[pattern:${spec.label ?? ''}]`, sources: [] };
+      }
+
+      const sources: DeepSearchSource[] = result.data.results.map((r: any) => ({
+        text: r.text,
+        document: r.document,
+        page: r.page,
+        score: 0.65,
+        citation: r.citation,
+        citationShort: r.citationShort,
+        filingType: r.filingType,
+        volumeNumber: r.volumeNumber,
+        caseNumber: r.caseNumber,
+        filingSlug: r.filingSlug,
+        matchedSubQueries: [`[pattern${spec.label ? ` ${spec.label}` : ''}: ${keywords.join(', ')}]`],
+      }));
+
+      return { subQuery: `[pattern:${spec.label ?? ''}]`, sources };
+    } catch {
+      return { subQuery: `[pattern:${spec.label ?? ''}]`, sources: [] };
+    }
+  });
+
+  return Promise.all(promises);
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,6 +1210,15 @@ export async function generateReportWithRlm(
     onProgress?: (p: DeepSearchProgress) => void;
     pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void;
     maxRounds?: number;
+    /**
+     * Inherited retrieval scope from the composer's filter chips. Every
+     * query_case_knowledge tool call the RLM agent makes during this run
+     * inherits these where-clauses so follow-up evidence-fetches stay
+     * inside the user's named chip refs (e.g. just that filing / just those
+     * four cases) rather than reaching corpus-wide. Single string per entry;
+     * already SQL-escaped at the call site by extractFieldFilters.
+     */
+    inheritedWhereClauses?: string[];
   } = {},
 ): Promise<{ report: string; extraSources: DeepSearchSource[]; host: string | null; model: string }> {
   const emit = options.onProgress || (() => {});
@@ -1079,6 +1276,9 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
           query: subQuery,
           ...(options.caseId ? { caseId: options.caseId } : {}),
           ...(options.chatId ? { chatId: options.chatId } : {}),
+          ...(options.inheritedWhereClauses && options.inheritedWhereClauses.length > 0
+            ? { whereClauses: options.inheritedWhereClauses }
+            : {}),
           limit,
           searchMode: 'hybrid',
         },
@@ -1215,11 +1415,44 @@ export async function deepSearch(
   console.log(`[Deep Search] Starting for query: "${query.slice(0, 100)}"`);
   const t0 = Date.now();
 
-  // Step 1: Decompose
+  // Step 1: Decompose.
+  //
+  // Priority path: if the composer query contains `{{ … }}` chip segments,
+  // honor "questions lead where the data is" semantics — each chip pairs
+  // with the natural-language phrase next to it, each pair drives its own
+  // sub-search with the chip as a hard Lance filter, and any free-text
+  // before the first chip becomes a framing sub-search with a soft boost
+  // over the chip refs. This bypasses LLM decomposition entirely; the user
+  // already told us the scope.
+  //
+  // Fallback path: no chips → today's behavior, LLM decomposes the prose.
   checkAbort();
   emit({ step: 'decomposing', message: history?.length ? 'Analyzing follow-up in context...' : 'Breaking question into targeted sub-queries...' });
-  const decomposition = await decomposeQuery(query, { provider, model, history, thinking, effort, signal });
-  console.log(`[Deep Search] Decomposed into ${decomposition.subQueries.length} sub-queries:`, decomposition.subQueries);
+
+  const chipSpecs = buildChipSpecs(query);
+  let dispatchSpecs: ReadonlyArray<string | SubQuerySpec>;
+  let decomposition: DecompositionResult;
+  if (chipSpecs && chipSpecs.length > 0) {
+    dispatchSpecs = chipSpecs;
+    // Synthesize a decomposition shape for the existing UI emit() / RLM API
+    // contract. Each spec's query string surfaces as a sub-query label so
+    // the operator sees "framing", "Vol 2 filing scope", etc. The intent
+    // text is the framing if present, else the union of chip intents.
+    const framingSpec = chipSpecs.find(s => s.label === 'framing');
+    const intentText = framingSpec?.query
+      ?? chipSpecs.filter(s => s.label !== 'framing').map(s => s.query).filter(Boolean).join(' · ')
+      ?? query;
+    decomposition = {
+      subQueries: chipSpecs.map(s => s.query),
+      intent: intentText,
+    };
+    console.log(`[Deep Search] Chip-driven dispatch: ${chipSpecs.length} pair(s)`,
+      chipSpecs.map(s => ({ label: s.label, hasWhere: !!s.whereClauses?.length, hasBoost: !!s.softBoostRefs?.length })));
+  } else {
+    decomposition = await decomposeQuery(query, { provider, model, history, thinking, effort, signal });
+    dispatchSpecs = decomposition.subQueries;
+    console.log(`[Deep Search] Decomposed into ${decomposition.subQueries.length} sub-queries:`, decomposition.subQueries);
+  }
 
   // Step 2: Parallel searches
   checkAbort();
@@ -1253,14 +1486,18 @@ export async function deepSearch(
   };
 
   const subQueryResults = await executeParallelSearches(
-    decomposition.subQueries,
+    dispatchSpecs,
     caseId,
     registry,
     pushWarning,
     chatId,
   );
 
-  // Step 2b: Supplementary pattern search (regex fallback for vocabulary mismatch)
+  // Step 2b: Supplementary pattern search (regex fallback for vocabulary
+  // mismatch). When chips are present, dispatch one regex search per chip
+  // spec scoped by that chip's whereClauses — same per-chip discipline as
+  // the main vector+FTS retrieval. Otherwise fall back to today's single
+  // corpus-wide regex over the whole query.
   checkAbort();
   emit({
     step: 'pattern_searching',
@@ -1268,12 +1505,29 @@ export async function deepSearch(
     subQueries: decomposition.subQueries,
     intent: decomposition.intent,
   });
-  const patternResult = await executePatternSearch(query, caseId, registry, pushWarning);
-  if (patternResult.sources.length > 0) {
-    subQueryResults.push(patternResult);
-    console.log(`[Deep Search] Pattern search found ${patternResult.sources.length} additional chunks`);
+  if (chipSpecs && chipSpecs.length > 0) {
+    const perChipPatternResults = await executePerChipPatternSearches(
+      chipSpecs,
+      caseId,
+      registry,
+      pushWarning,
+    );
+    let perChipPatternTotal = 0;
+    for (const r of perChipPatternResults) {
+      if (r.sources.length > 0) {
+        subQueryResults.push(r);
+        perChipPatternTotal += r.sources.length;
+      }
+    }
+    console.log(`[Deep Search] Per-chip pattern search found ${perChipPatternTotal} additional chunks across ${perChipPatternResults.length} chip slice(s)`);
   } else {
-    console.log('[Deep Search] Pattern search found no additional chunks');
+    const patternResult = await executePatternSearch(query, caseId, registry, pushWarning);
+    if (patternResult.sources.length > 0) {
+      subQueryResults.push(patternResult);
+      console.log(`[Deep Search] Pattern search found ${patternResult.sources.length} additional chunks`);
+    } else {
+      console.log('[Deep Search] Pattern search found no additional chunks');
+    }
   }
 
   const totalRetrieved = subQueryResults.reduce((sum, r) => sum + r.sources.length, 0);
@@ -1316,6 +1570,24 @@ export async function deepSearch(
     // Stage 1: RLM drives the evidence-gathering loop. It does NOT write the
     // final report — its job is just to call query_case_knowledge a few times
     // to fill gaps in the initial reranked set.
+    // If the user's query has chip segments, every RLM follow-up tool call
+    // inherits the OR-union of chip filters so retrieval stays inside the
+    // user's named scope (e.g. just that filing OR within those four
+    // cases). Each chip's own whereClauses are AND-internal, so we OR
+    // across chips by wrapping each chip's AND-block in parens and joining
+    // with " OR ", then ship as a single composite where-clause. The
+    // vector-store ANDs entries of `_rawWhere`, so a single composite
+    // string preserves the intended union semantics.
+    let inheritedWhereClauses: string[] | undefined;
+    if (chipSpecs && chipSpecs.length > 0) {
+      const perChipBlocks = chipSpecs
+        .filter(s => s.whereClauses && s.whereClauses.length > 0)
+        .map(s => `(${s.whereClauses!.join(' AND ')})`);
+      if (perChipBlocks.length > 0) {
+        inheritedWhereClauses = [perChipBlocks.length === 1 ? perChipBlocks[0] : `(${perChipBlocks.join(' OR ')})`];
+      }
+    }
+
     const rlmOut = await generateReportWithRlm(query, decomposition, sources, registry, {
       caseId,
       chatId,
@@ -1332,6 +1604,7 @@ export async function deepSearch(
       onProgress: emit,
       pushWarning,
       maxRounds: rlmMaxRounds,
+      ...(inheritedWhereClauses ? { inheritedWhereClauses } : {}),
     });
 
     rlmAssisted = true;
