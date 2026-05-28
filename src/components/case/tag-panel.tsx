@@ -899,19 +899,6 @@ function RefRow({
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap gap-1 items-center">
-            <TagRowActions
-              spec={spec}
-              value={value}
-              editMode={editMode}
-              onPaste={(v) => {
-                // For list-valued ref slots, paste appends a single ref UUID
-                // to the existing list (keeps prior picks intact). The
-                // parsed value is a single `{_kind:'ref',val:<uuid>}` from
-                // parseClipboardForSpec.
-                const next = Array.isArray(value) ? [...(value as unknown[]), v] : [v];
-                onChange(next);
-              }}
-            />
             {rawList.length === 0 && (
               <span className="text-gray-400">—</span>
             )}
@@ -932,27 +919,46 @@ function RefRow({
                 </span>
               );
             })}
-            {editMode && hasTypedRefTarget && rawList.length > 0 && (
-              <button
-                type="button"
-                title="Clear all references"
-                onClick={() => onChange(null)}
-                className="px-1.5 py-0.5 text-[10px] rounded border border-gray-300 text-gray-500 bg-white hover:bg-gray-100 transition-colors flex-shrink-0"
-              >
-                ×
-              </button>
-            )}
-            {editMode && hasTypedRefTarget && (
-              <button
-                ref={btnRef}
-                type="button"
-                title={`Pick ${spec.refTarget}`}
-                onClick={() => onOpenPicker(btnRef.current?.getBoundingClientRect() ?? null)}
-                className="px-1.5 py-0.5 text-[10px] rounded border border-blue-300 text-blue-700 bg-blue-50 hover:bg-blue-100 transition-colors flex-shrink-0"
-              >
-                {rawList.length === 0 ? 'Pick…' : 'Edit…'}
-              </button>
-            )}
+            {/* Trailing controls — always right-aligned so Pick/Edit lines up
+               across all ref rows regardless of how many chips precede it.
+               `ml-auto` pushes the group to the right edge of the flex row;
+               `flex-shrink-0` keeps the buttons from wrapping mid-group. */}
+            <span className="ml-auto inline-flex items-center gap-1 flex-shrink-0">
+              <TagRowActions
+                spec={spec}
+                value={value}
+                editMode={editMode}
+                onPaste={(v) => {
+                  // For list-valued ref slots, paste appends a single ref UUID
+                  // to the existing list (keeps prior picks intact). The
+                  // parsed value is a single `{_kind:'ref',val:<uuid>}` from
+                  // parseClipboardForSpec.
+                  const next = Array.isArray(value) ? [...(value as unknown[]), v] : [v];
+                  onChange(next);
+                }}
+              />
+              {editMode && hasTypedRefTarget && rawList.length > 0 && (
+                <button
+                  type="button"
+                  title="Clear all references"
+                  onClick={() => onChange(null)}
+                  className="px-1.5 py-0.5 text-[10px] rounded border border-gray-300 text-gray-500 bg-white hover:bg-gray-100 transition-colors flex-shrink-0"
+                >
+                  ×
+                </button>
+              )}
+              {editMode && hasTypedRefTarget && (
+                <button
+                  ref={btnRef}
+                  type="button"
+                  title={`Pick ${spec.refTarget}`}
+                  onClick={() => onOpenPicker(btnRef.current?.getBoundingClientRect() ?? null)}
+                  className="px-1.5 py-0.5 text-[10px] rounded border border-blue-300 text-blue-700 bg-blue-50 hover:bg-blue-100 transition-colors flex-shrink-0"
+                >
+                  {rawList.length === 0 ? 'Pick…' : 'Edit…'}
+                </button>
+              )}
+            </span>
           </div>
         </div>
       </div>
