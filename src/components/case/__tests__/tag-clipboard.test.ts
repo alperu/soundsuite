@@ -12,6 +12,13 @@ const refSpec: TagSpec = {
   valueType: 'ref',
   refTarget: 'person',
 };
+const fileRefSpec: TagSpec = {
+  name: 'fileRef',
+  tier: 'ref',
+  doc: '',
+  valueType: 'ref',
+  refTarget: 'doc',
+};
 const dateSpec: TagSpec = {
   name: 'filedAt',
   tier: 'value',
@@ -50,6 +57,23 @@ const computedSpec: TagSpec = {
 const UUID = '550e8400-e29b-41d4-a716-446655440000';
 
 describe('canonicalizeTagValue', () => {
+  test('Document ref + label → copies the full filePath (not the UUID)', () => {
+    const value = { _kind: 'ref', val: UUID };
+    const fullPath = '/Users/alper/Court/03-25-00905-CV/Motion/X.pdf';
+    expect(canonicalizeTagValue(fileRefSpec, value, fullPath)).toBe(fullPath);
+  });
+
+  test('Document ref without label → falls back to UUID', () => {
+    const value = { _kind: 'ref', val: UUID };
+    expect(canonicalizeTagValue(fileRefSpec, value)).toBe(UUID);
+    expect(canonicalizeTagValue(fileRefSpec, value, '')).toBe(UUID);
+  });
+
+  test('Non-Document ref ignores label (UUID is the canonical copy)', () => {
+    const value = { _kind: 'ref', val: UUID };
+    expect(canonicalizeTagValue(refSpec, value, 'Hon. Smith')).toBe(UUID);
+  });
+
   test('ref Hayson → bare UUID (not display name)', () => {
     const value = { _kind: 'ref', val: UUID, dis: 'Hon. Jane Smith' };
     expect(canonicalizeTagValue(refSpec, value)).toBe(UUID);

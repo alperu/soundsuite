@@ -41,20 +41,37 @@ function unwrapHayson(v: unknown): { kind?: string; val?: string } | null {
 /**
  * Produce a clipboard-bound string for a tag value. Returns '' when there
  * is nothing copy-worthy (null/undefined/empty).
+ *
+ * `label` is the server-resolved display string (`<refName>Label` field).
+ * For Document refs (refTarget = 'doc') the label is the full filePath, and
+ * THAT is what the user wants to paste elsewhere — not the UUID. Other ref
+ * targets keep the historical UUID-on-copy behavior so users can wire refs
+ * by id when pasting into another ref slot.
  */
-export function canonicalizeTagValue(spec: TagSpec, value: unknown): string {
+export function canonicalizeTagValue(
+  spec: TagSpec,
+  value: unknown,
+  label?: unknown,
+): string {
   if (value == null) return '';
   if (Array.isArray(value)) {
+    const labelArr = Array.isArray(label) ? (label as unknown[]) : [];
     return value
-      .map(v => canonicalizeTagValue(spec, v))
+      .map((v, i) => canonicalizeTagValue(spec, v, labelArr[i]))
       .filter(Boolean)
       .join(', ');
   }
 
   const hayson = unwrapHayson(value);
   if (hayson) {
-    // Ref Hayson: copy the UUID, never the display name.
-    if (hayson.kind === 'ref') return hayson.val ?? '';
+    // Ref Hayson — Document refs copy the full filePath (the label).
+    // Everything else copies the UUID, matching the historical contract.
+    if (hayson.kind === 'ref') {
+      if (spec.refTarget === 'doc' && typeof label === 'string' && label) {
+        return label;
+      }
+      return hayson.val ?? '';
+    }
     // Date/dateTime: copy the ISO string verbatim.
     if (hayson.kind === 'date' || hayson.kind === 'dateTime') return hayson.val ?? '';
     // Number/Bool Hayson (rare) — fall through to JSON.stringify of val.
@@ -62,8 +79,13 @@ export function canonicalizeTagValue(spec: TagSpec, value: unknown): string {
   }
 
   if (spec.valueType === 'ref') {
-    // Raw string ref (no Hayson wrapper) — strip leading "@" if present.
-    if (typeof value === 'string') return value.replace(/^@/, '');
+    // Raw string ref (no Hayson wrapper) — same Document-special-case as above.
+    if (typeof value === 'string') {
+      if (spec.refTarget === 'doc' && typeof label === 'string' && label) {
+        return label;
+      }
+      return value.replace(/^@/, '');
+    }
   }
 
   if (typeof value === 'string') return value;

@@ -340,7 +340,7 @@ export function buildChipSpecs(query: string): SubQuerySpec[] | null {
     // tool already exposes as boost fields: document_id, case_id, filing_id.
     const refValuesByField = new Map<'documentId' | 'caseId' | 'filingId', Set<string>>();
     const FIELD_TO_BOOST: Record<string, 'documentId' | 'caseId' | 'filingId'> = {
-      documentId: 'documentId', documentRef: 'documentId',
+      documentId: 'documentId', fileRef: 'documentId', document: 'documentId',
       caseId: 'caseId', case: 'caseId', caseRef: 'caseId',
       filingId: 'filingId', filing: 'filingId', filingRef: 'filingId',
     };

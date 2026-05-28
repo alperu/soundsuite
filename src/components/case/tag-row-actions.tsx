@@ -25,11 +25,19 @@ import {
 export function TagRowActions({
   spec,
   value,
+  label,
   onPaste,
   editMode,
 }: {
   spec: TagSpec;
   value: unknown;
+  /**
+   * Server-resolved display label (`<refName>Label`). For Document refs this
+   * is the full filePath — and that's what we copy to the clipboard so the
+   * user can paste an actual path into another field. Other ref kinds copy
+   * the UUID as before.
+   */
+  label?: unknown;
   onPaste: (next: unknown) => void;
   /** When false, paste icon is hidden (read-mode and not editable). */
   editMode: boolean;
@@ -38,7 +46,7 @@ export function TagRowActions({
   const [copied, setCopied] = useState(false);
   const [pasteError, setPasteError] = useState<string | null>(null);
 
-  const canonical = canonicalizeTagValue(spec, value);
+  const canonical = canonicalizeTagValue(spec, value, label);
 
   const handleCopy = useCallback(() => {
     if (!canonical) return;

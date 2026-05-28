@@ -867,6 +867,17 @@ function formatLabelValue(v: unknown): string {
   return String(v);
 }
 
+/**
+ * Extract the trailing path segment from a forward- or back-slash path. Used
+ * for Document refs (fileRef) where the label is the full filePath but the
+ * panel renders just the filename for visual brevity.
+ */
+function basename(p: string): string {
+  if (!p) return p;
+  const m = p.match(/[^/\\]+$/);
+  return m ? m[0] : p;
+}
+
 function RefRow({
   spec, value, label, editMode, onChange, onOpenPicker, onInfoOpen,
 }: {
@@ -971,10 +982,23 @@ function RefRow({
   // Read-mode preference: server-resolved label, with raw ref as tooltip.
   // Falls back to the raw ref string when no label is available (e.g.
   // free-text ref slots without a refTarget table).
-  const display = labelDisplay || rawDisplay;
+  // Document refs (fileRef) carry the full filePath as their label so AI
+  // consumers and copy/paste can resolve the disk location. For visual
+  // display we want just the filename — keep the full path on hover/title
+  // and pass the full label down to TagRowActions for clipboard use.
+  const isDocRef = spec.refTarget === 'doc';
+  const labelForDisplay = isDocRef && typeof labelDisplay === 'string' && labelDisplay
+    ? basename(labelDisplay)
+    : labelDisplay;
+  const display = labelForDisplay || rawDisplay;
   if (!editMode && !display) return null;
   const hasTypedRefTarget = Boolean(spec.refTarget);
-  const rawTooltip = rawDisplay && labelDisplay && rawDisplay !== labelDisplay ? rawDisplay : '';
+  // For Document refs, the tooltip should be the full filePath (more
+  // informative than the UUID). For other refs we keep the historical
+  // "show the UUID when label differs" behavior so users can still see the id.
+  const rawTooltip = isDocRef
+    ? (typeof labelDisplay === 'string' ? labelDisplay : rawDisplay)
+    : (rawDisplay && labelDisplay && rawDisplay !== labelDisplay ? rawDisplay : '');
   return (
     <div className="group flex items-start gap-2 text-[11px]">
       <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
@@ -994,6 +1018,7 @@ function RefRow({
               <TagRowActions
                 spec={spec}
                 value={value}
+                label={labelDisplay}
                 editMode={editMode}
                 onPaste={(v) => onChange(v)}
               />
@@ -1036,7 +1061,7 @@ function RefRow({
                 </span>
               )}
             </span>
-            <TagRowActions spec={spec} value={value} editMode={false} onPaste={() => { /* read-only */ }} />
+            <TagRowActions spec={spec} value={value} label={labelDisplay} editMode={false} onPaste={() => { /* read-only */ }} />
           </span>
         )}
       </div>

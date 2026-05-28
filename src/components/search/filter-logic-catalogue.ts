@@ -121,7 +121,7 @@ export const CATALOGUE: CatalogueSection[] = [
     path: 'document',
     fields: [
       { name: 'documentId',   type: 'string', example: 'documentId=="abc123"' },
-      { name: 'documentRef',  type: 'ref',    example: 'documentRef==@<doc-uuid>' },
+      { name: 'fileRef',      type: 'ref',    example: 'fileRef==@<doc-uuid>' },
       { name: 'documentType', type: 'string', example: 'documentType=="order denying"' },
       { name: 'pageNumber',   type: 'number', example: 'pageNumber >= 1' },
       { name: 'chunkIndex',   type: 'number', example: 'chunkIndex >= 0' },

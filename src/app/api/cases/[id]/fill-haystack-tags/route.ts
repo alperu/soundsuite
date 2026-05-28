@@ -280,15 +280,12 @@ export async function POST(
         // client's currentValue — it's only used as a hint.
         const beforeValue = readCurrentValue(target.row, field) ?? null;
 
-        if (field === 'fileRef' && target.kind === 'motion') {
-          console.warn(`[tag-fill] APPLY skipped filing=${target.filingId} field=fileRef: motion kind has no documentId`);
-          await writeAttemptLog({
-            target, field, status: 'skipped', beforeValue,
-            afterValue: entry.proposedValue ?? null,
-            errorMessage: 'fileRef is not applicable to motion-kind filings',
-          }).catch(() => undefined);
-          continue;
-        }
+        // Motion-kind filings carry `fileRef` as a tag-only ref (no
+        // `documentId` column on the Motion table). The haystack `commitEntity`
+        // helper handles the tag-only write because `enforceFileRefSync` is a
+        // no-op for models not in `FILEREF_MODELS`, so the tag passes through
+        // unchanged. No special skip needed here anymore (was a workaround
+        // before the read path was taught to hoist `tags.fileRef`).
 
         if (entry.proposedValue == null && !entry.personSeed) {
           console.warn(`[tag-fill] APPLY filing=${target.filingId} field=${field} → no proposedValue or personSeed`);

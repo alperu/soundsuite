@@ -284,6 +284,11 @@ function synthesizeRefsFromColumns(table: string, row: any): Record<string, unkn
       out.judgeRef = ref(row.judgeId)
       out.movantRef = ref(row.movantId)
       out.respondentRef = ref(row.respondentId)
+      // Motion has no `documentId` column — fileRef lives in tags only. The
+      // tag-merge below (line ~360+) hoists `tags.fileRef` to the top-level
+      // `fileRef` key automatically, so we don't need to synthesize anything
+      // here. Calling this out explicitly so future maintainers don't add a
+      // `ref(row.documentId)` line by analogy with MotionAttachment/RR/CR.
       break
     case 'MotionEvent':
       out.motionRef = ref(row.motionId)
@@ -333,17 +338,12 @@ function synthesizeRefsFromColumns(table: string, row: any): Record<string, unkn
       break
     case 'ClerksRecord':
       out.caseRef = ref(row.caseId)
-      // Emit both `fileRef` (universal filing ref) and `documentRef` (legacy
-      // alias on this kind) so the tag panel and any consumer still reading
-      // `documentRef` both resolve to the same Document row.
       out.fileRef = ref(row.documentId)
-      out.documentRef = ref(row.documentId)
       break
     case 'ReportersRecord':
       out.caseRef = ref(row.caseId)
       out.reporterRef = ref(row.reporterId)
       out.fileRef = ref(row.documentId)
-      out.documentRef = ref(row.documentId)
       break
     default:
       break
@@ -403,7 +403,6 @@ const REF_TARGET_TABLE: Record<string, 'Case' | 'Motion' | 'Person' | 'Court' | 
   courtRef: 'Court',
   hearingRef: 'Hearing',
   fileRef: 'Document',
-  documentRef: 'Document',
   transcriptRef: 'Document',
 }
 
@@ -632,7 +631,11 @@ function computeDis(table: string, row: any): string | null {
     case 'Jurisdiction':
       return merged.displayName || merged.name || merged.code || merged.id || null
     case 'Document':
-      return merged.fileName || merged.id || null
+      // Full filePath is the canonical "tag value" for fileRef — preserves the
+      // disk location so consumers (copy/paste, MCP exports, audit logs) can
+      // round-trip it. The panel renders the basename for visual brevity and
+      // exposes the full path on hover; see tag-panel.tsx fileRef rendering.
+      return merged.filePath || merged.fileName || merged.id || null
     case 'ClerksRecord':
       return merged.volume != null ? `Clerk's Record vol ${merged.volume}` : (merged.id || null)
     case 'ReportersRecord':

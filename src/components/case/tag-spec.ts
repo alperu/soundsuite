@@ -175,14 +175,18 @@ const ORIGIN_MARKERS: TagSpec[] = [
 const FILING_FILE_REF_SPEC: TagSpec = {
   name: 'fileRef',
   tier: 'ref',
-  doc: 'Reference to the document (PDF).',
+  doc: 'Reference to the PDF file on disk for this filing.',
   refTarget: 'doc',
   info: {
-    whatItIs: 'Pointer to the underlying PDF Document this filing was extracted from.',
-    howItWorks: 'Synthesized server-side from the row\'s `documentId` foreign key on read; the Document row carries the actual file path, sha256, and OCR text. Manually overriding `fileRef` in tags JSON wins over the column when both are present.',
-    mapsTo: 'Prisma.<Model>.documentId (column) — emitted as Haystack ref @<doc-id>',
-    xetoSpec: 'cc.courtlens.legal::MotionAttachment.fileRef (inherited by every filing subtype)',
-    example: '@doc-stamped-petition-a31',
+    whatItIs:
+      'The single canonical pointer to the underlying PDF Document for this filing. The tag value resolves to the full file path on disk, so AI consumers and the haystack can locate and read the file without a second lookup.',
+    howItWorks:
+      'On entities that expose a `documentId` foreign-key column (MotionAttachment, MotionEvent, ClerksRecord, ReportersRecord) the column and the `tags.fileRef` ref are kept in sync — write either and `commitEntity` mirrors the other via `enforceFileRefSync`. Motion has no `documentId` column, so the tag IS the source of truth (set deterministically from the Filing’s primary Document during backfill, or manually via the picker). On read, the server resolves the ref to `Document.filePath` (the full path on disk); the panel displays just the filename with the full path on hover and on copy.',
+    mapsTo:
+      "Prisma.<Model>.documentId (FK column on MotionAttachment / MotionEvent / ClerksRecord / ReportersRecord) ⇔ tags.fileRef (Hayson ref). Motion is tag-only — no column. The resolved label `fileRefLabel` returns Document.filePath.",
+    xetoSpec: 'cc.courtlens.legal::Filing.fileRef (inherited by every filing subtype, including Motion)',
+    example:
+      '@doc-stamped-petition-a31  → /Users/alper/Court/03-25-00905-CV/Motion/Stamped Petition.pdf',
     relatedTags: ['caseRef', 'motionRef', 'authoredBy'],
   },
 }
@@ -1093,10 +1097,6 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // refs
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
     FILING_FILE_REF_SPEC,
-    // `documentRef` is the legacy alias for this kind; kept for back-compat
-    // with consumers that still read it. Both names resolve to the same
-    // Document row server-side (see synthesizeRefsFromColumns).
-    { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document (alias of fileRef).', refTarget: 'doc' },
     { name: 'preparedBy', tier: 'ref', doc: 'Court clerk who prepared this volume.', refTarget: 'person' },
     // Single ref slots filled by the haystack extractor (from /s/ Deputy Clerk
     // signatures, party context, certifying reporter). preparedBy stays for
@@ -1203,10 +1203,6 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     { name: 'courtReporterRefs', tier: 'refs', doc: 'Court reporters attributed on this volume.', refTarget: 'person' },
     { name: 'courtClerkRefs', tier: 'refs', doc: 'Court clerks attributed on this volume.', refTarget: 'person' },
     FILING_FILE_REF_SPEC,
-    // `documentRef` is the legacy alias for this kind; kept for back-compat
-    // with consumers that still read it. Both names resolve to the same
-    // Document row server-side (see synthesizeRefsFromColumns).
-    { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document (alias of fileRef).', refTarget: 'doc' },
     // values
     { name: 'volume', tier: 'value', doc: 'Volume number of the reporter’s record.', valueType: 'number' },
     { name: 'supplementalOrder', tier: 'value', doc: 'Order of this supplemental reporter’s record (1 = first supplemental, 2 = second, etc.). Only meaningful when the `supplemental` marker is set.', valueType: 'number' },

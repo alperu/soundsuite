@@ -392,6 +392,75 @@ export interface FetchOutcome {
   unauthorized: boolean;
 }
 
+/**
+ * Specialized fetcher for `refTarget === 'doc'` (fileRef pickers).
+ *
+ * The Document table isn't reachable via the Haystack /read filter compiler
+ * (`tableFromFilter` returns 'Document' for the `fileref` / `document` token,
+ * but `opRead`'s switch has no Document case → "entity Document not implemented
+ * in v1"). Rather than retrofit Haystack, we hit the dedicated case-scoped
+ * `/api/cases/[id]/documents` endpoint here whenever a fileRef picker is
+ * opened with a known case context. Returns the full Document set for the case
+ * so the user can manually attach a PDF to a Filing/Motion where ingestion
+ * didn't auto-link one.
+ */
+async function fetchDocResults(
+  scopeCaseId: string,
+  q: string,
+): Promise<FetchOutcome> {
+  try {
+    // scopeCaseId arrives as canonical '@<uuid>'. Strip the sigil for the URL.
+    const caseId = scopeCaseId.startsWith('@') ? scopeCaseId.slice(1) : scopeCaseId;
+    const r = await fetch(`/api/cases/${encodeURIComponent(caseId)}/documents`);
+    if (r.status === 401 || r.status === 403) {
+      return { results: [], unauthorized: true };
+    }
+    if (!r.ok) return { results: [], unauthorized: false };
+    const j = (await r.json()) as {
+      documents?: Array<{
+        id: string;
+        fileName: string;
+        filePath: string;
+        status: string;
+        pageCount: number | null;
+        documentType: string | null;
+        filingId: string | null;
+        filingTitle: string | null;
+        filingType: string | null;
+      }>;
+    };
+    const docs = Array.isArray(j.documents) ? j.documents : [];
+    const mapped: RefResult[] = docs.map((d) => {
+      // Primary: human-friendly file name. Fallback to basename of filePath.
+      const base = d.fileName || (d.filePath ? d.filePath.split('/').pop() : '') || d.id;
+      // Secondary: filing context — the "linked to <filing>" hint. Show the
+      // filing's title (and type) when available so the user can tell which
+      // filing each Document already belongs to even when picking from a
+      // different filing/motion.
+      const filingLabel = d.filingTitle
+        ? `linked to: ${d.filingTitle}${d.filingType ? ` (${d.filingType})` : ''}`
+        : 'unlinked';
+      // Tertiary: page count + status, plus a tail of the path for disambiguation
+      // when filenames collide (common with multi-volume RR scans).
+      const pageBit = d.pageCount != null ? `${d.pageCount}p` : null;
+      const statusBit = d.status && d.status !== 'INDEXED' ? d.status : null;
+      const pathTail = d.filePath ? `…${d.filePath.slice(-40)}` : null;
+      const tertiary = [pageBit, statusBit, pathTail].filter(Boolean).join(' · ') || undefined;
+      return {
+        id: `@${d.id}`,
+        primary: base,
+        secondary: filingLabel,
+        tertiary,
+        raw: d as unknown as Record<string, unknown>,
+      };
+    });
+    const narrowed = q ? mapped.filter((m) => clientSideQueryMatch(m, q)) : mapped;
+    return { results: narrowed.slice(0, 50), unauthorized: false };
+  } catch {
+    return { results: [], unauthorized: false };
+  }
+}
+
 async function fetchResults(
   refTarget: RefTarget,
   personMarkers: PersonMarker[],
@@ -400,6 +469,13 @@ async function fetchResults(
   q: string,
   signal?: AbortSignal,
 ): Promise<FetchOutcome> {
+  // fileRef picker: route to the case-scoped Document endpoint instead of
+  // Haystack /read. Requires a known case context — without scopeCaseId we
+  // fall through to the legacy haystack path (which will produce an empty
+  // grid for refTarget==='doc', but at least won't 500).
+  if (refTarget === 'doc' && scopeCaseId) {
+    return fetchDocResults(scopeCaseId, q);
+  }
   const filter = composeFilter(refTarget, personMarkers, scopeFilter);
   try {
     // Route through the same-origin proxy via the typed client. The proxy
@@ -805,7 +881,9 @@ export function RefPicker({
 
   const placeholderHint = unauthorized
     ? `@${refTarget}-…  (type and press Enter)`
-    : `Search ${refTarget}…`;
+    : refTarget === 'doc'
+      ? 'Search files by name or filing…'
+      : `Search ${refTarget}…`;
 
   const popStyle: React.CSSProperties = pos.centered
     ? {
@@ -949,21 +1027,36 @@ export function RefPicker({
           <div className="p-3 text-[11px] text-gray-400">Searching…</div>
         ) : results.length === 0 ? (
           <div className="p-3 text-[11px] text-gray-400">
-            {debounced ? 'No matches.' : 'Start typing to search.'}
+            {debounced
+              ? 'No matches.'
+              : refTarget === 'doc'
+                ? 'No documents in this case.'
+                : 'Start typing to search.'}
           </div>
         ) : (
           <ul className="py-1">
-            {results.map((r, i) => (
+            {results.map((r, i) => {
+              const isSelected = chips.includes(r.id);
+              return (
               <li key={r.id + i}>
                 <button
                   type="button"
                   onMouseEnter={() => setHighlight(i)}
                   onClick={() => select(r.id)}
                   className={`w-full text-left px-2 py-1 flex flex-col gap-0.5 ${
-                    i === highlight ? 'bg-blue-50' : 'hover:bg-gray-50'
+                    i === highlight ? 'bg-blue-50' : isSelected ? 'bg-emerald-50' : 'hover:bg-gray-50'
                   }`}
                 >
                   <span className="flex items-center gap-1 min-w-0">
+                    {isSelected && (
+                      <span
+                        className="text-[10px] text-emerald-700 shrink-0"
+                        aria-label="currently selected"
+                        title="Currently selected"
+                      >
+                        ✓
+                      </span>
+                    )}
                     <span className="text-[12px] text-gray-900 truncate">{r.primary}</span>
                     {r.badges && r.badges.length > 0 && (
                       <span className="flex flex-wrap gap-1 shrink-0">
@@ -987,7 +1080,8 @@ export function RefPicker({
                   <span className="text-[10px] text-gray-300 truncate">{r.id}</span>
                 </button>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </div>

@@ -28,6 +28,58 @@ export const FILEREF_MODELS: ReadonlySet<string> = new Set([
   'reportersRecord',
 ]);
 
+/**
+ * Pick the "primary" Document for a Filing from a candidate list.
+ *
+ * Used by the fileRef backfill (pass 2) to choose which Document to mirror
+ * into an entity row's `documentId` column when the row is still unlinked.
+ *
+ * Ordering: highest `pageCount` first (null treated as -1), then most-recent
+ * `updatedAt`, then most-recent `createdAt`. Returns `null` if the list is
+ * empty.
+ *
+ * Pure function — no DB access. The caller supplies the candidate set
+ * (typically `Document.findMany({where:{filingId: <id>}})`).
+ */
+export interface PrimaryDocCandidate {
+  id: string;
+  pageCount: number | null;
+  updatedAt: Date;
+  createdAt: Date;
+}
+
+export function pickPrimaryDocument(
+  candidates: readonly PrimaryDocCandidate[],
+): PrimaryDocCandidate | null {
+  if (!candidates.length) return null;
+  const sorted = [...candidates].sort((a, b) => {
+    const pcA = a.pageCount ?? -1;
+    const pcB = b.pageCount ?? -1;
+    if (pcB !== pcA) return pcB - pcA;
+    const uA = a.updatedAt.getTime();
+    const uB = b.updatedAt.getTime();
+    if (uB !== uA) return uB - uA;
+    return b.createdAt.getTime() - a.createdAt.getTime();
+  });
+  return sorted[0];
+}
+
+/**
+ * Build the commitEntity patch that links an unlinked entity row to its
+ * primary Document. Returns `null` when there's no Document to link to
+ * (caller should skip).
+ *
+ * The patch only sets `fileRef`; `enforceFileRefSync` (invoked inside
+ * `commitEntity`) mirrors that into the `documentId` column automatically.
+ */
+export function buildFileRefLinkPatch(
+  candidates: readonly PrimaryDocCandidate[],
+): { fileRef: { _kind: 'ref'; val: string } } | null {
+  const primary = pickPrimaryDocument(candidates);
+  if (!primary) return null;
+  return { fileRef: { _kind: 'ref', val: primary.id } };
+}
+
 /** Extract a ref id from a Hayson `@ref` payload or a bare string. */
 function refId(v: unknown): string | null {
   if (v == null) return null;

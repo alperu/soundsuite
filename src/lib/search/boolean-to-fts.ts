@@ -47,7 +47,7 @@ export class BooleanFtsConversionError extends Error {}
 //   - `lance-scalar-ref`: ref-typed scalar column. Value is a bare uuid
 //     (the `@` has already been stripped by the parser when `isRef: true`).
 //     Used for fields whose ref column IS denormalized onto chunks:
-//     caseRef, filingRef, documentRef.
+//     caseRef, filingRef, fileRef.
 //   - `prisma-traverse`: multi-hop traversal. Resolves to a caseId set via
 //     the legal schema, pre-filtered onto chunks as `case_id IN (...)`.
 //     Used for Person-typed refs (judgeRef/lawyerRef/etc. — these live on
@@ -95,7 +95,11 @@ export const FIELD_RESOLVERS: Record<string, FieldResolver> = {
   // The parser strips the leading `@` and sets isRef:true; we lift to `=`.
   caseRef: { kind: 'lance-scalar-ref', column: 'case_id' },
   filingRef: { kind: 'lance-scalar-ref', column: 'filing_id' },
-  documentRef: { kind: 'lance-scalar-ref', column: 'document_id' },
+  // fileRef is the canonical PDF reference on every filing kind (formerly
+  // also known as documentRef on RR/CR). The field maps to the chunk row's
+  // `document_id` column on Lance, so a query like `fileRef==@<docId>`
+  // resolves to a hard filter on chunks belonging to that Document.
+  fileRef: { kind: 'lance-scalar-ref', column: 'document_id' },
 
   // — prisma-traverse: Person-typed refs (live on Motion, not on chunks) —
   // judge/movant/respondent: have dedicated columns on Motion.
@@ -277,7 +281,7 @@ export function extractFieldFilters(input: Node): {
       // → their *Ref siblings.
       const REF_ALIAS: Record<string, string> = {
         case: 'caseRef',
-        document: 'documentRef',
+        document: 'fileRef',
         filing: 'filingRef',
         judge: 'judgeRef',
         lawyer: 'lawyerRef',
@@ -397,7 +401,7 @@ export function extractFieldFilters(input: Node): {
         const groups = new Map<string, string[]>();
         let allEligible = true;
         const REF_ALIAS: Record<string, string> = {
-          case: 'caseRef', document: 'documentRef', filing: 'filingRef',
+          case: 'caseRef', document: 'fileRef', filing: 'filingRef',
           judge: 'judgeRef', lawyer: 'lawyerRef', movant: 'movantRef',
           respondent: 'respondentRef', clerk: 'clerkRef', reporter: 'reporterRef',
         };
