@@ -287,6 +287,31 @@ export function TagFillReviewPanel({
     if (accepted.size === 0 || applying) return;
     setApplying(true);
     setApplyError(null);
+    // Visibility: write a pending entry to the action log before the network
+    // call so the user can see the click was registered even if the request
+    // takes a while or the per-field server logs fail their filter check.
+    void fetch('/api/admin/action-logs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        caseId,
+        action: 'fill-haystack-tags',
+        target: `Apply (${accepted.size} selected)`,
+        status: 'pending',
+        detail: JSON.stringify({
+          step: 'apply-start',
+          accepted: accepted.size,
+          // Embed each accepted row's filingId so the filing-detail page's
+          // log-filter ('"filingId":"<id>"' substring) picks it up.
+          filingIds: Array.from(
+            new Set(
+              suggestions.filter((s) => accepted.has(rowKey(s))).map((s) => s.filingId),
+            ),
+          ),
+        }),
+        logType: 'tag-fill',
+      }),
+    }).catch(() => undefined);
 
     // Send the full suggestion payload so the server can commit without
     // re-running the LLM extractor. The dryRun already produced these values;

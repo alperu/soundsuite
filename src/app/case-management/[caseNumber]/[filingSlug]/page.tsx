@@ -1056,7 +1056,23 @@ export default function FilingDetailPage() {
             setTagFillSuggestions(null);
             setTagFillScanned(undefined);
           }}
-          onApplied={() => {
+          onApplied={(result) => {
+            // Visible client-side confirmation so the user sees the apply
+            // result even if the server's per-field log rows get filtered
+            // out by the action-log panel's filing-scope check.
+            const accepted = result?.accepted ?? 0;
+            if (caseId) {
+              persistActionLog({
+                caseId,
+                action: 'fill-haystack-tags',
+                target: filing?.title || filing?.slug || filing?.id || '',
+                status: accepted > 0 ? 'committed' : 'partial',
+                detail: accepted > 0
+                  ? `Applied ${accepted} tag${accepted === 1 ? '' : 's'} to this filing`
+                  : `Apply ran but server reported 0 writes — see per-field rows for the reason`,
+                logType: 'tag-fill',
+              });
+            }
             fetchFiling();
             fetchActionLogs();
             window.dispatchEvent(new Event('filings-changed'));
