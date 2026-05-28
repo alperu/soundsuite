@@ -84,7 +84,11 @@ function shortRefId(val: string): string {
 function formatValue(
   v: unknown,
   fallbackDisplay?: string,
-  personSeed?: { name?: string; marker?: string | null } | null,
+  personSeed?: {
+    name?: string;
+    marker?: string | null;
+    existingMatch?: { id?: string; displayName?: string; score?: number } | null;
+  } | null,
 ): string {
   // Person-ref suggestions arrive as `personSeed` (a name + optional role
   // marker) while `proposedValue` stays null until apply runs and creates the
@@ -93,6 +97,12 @@ function formatValue(
   // on apply by resolveOrCreatePerson().
   if ((v == null || v === '') && personSeed?.name?.trim()) {
     const marker = personSeed.marker ? ` (${personSeed.marker})` : '';
+    // Preview the dedup outcome: if we already have a matching Person row,
+    // tell the user we're going to MATCH (not create).
+    const match = personSeed.existingMatch;
+    if (match?.displayName) {
+      return `${personSeed.name.trim()}${marker} → match existing: ${match.displayName}`;
+    }
     return `${personSeed.name.trim()}${marker} · pending Person create`;
   }
   if (v == null || v === '') return '—';

@@ -108,8 +108,18 @@ export interface FillTagSuggestion {
   /** When set, accepting the suggestion will resolve-or-create a Person with
    * this name + intrinsic marker, and the resulting id becomes the ref value.
    * Keeps dryRun writes-free: no Person rows are upserted until the user
-   * explicitly accepts. */
-  personSeed?: { name: string; marker: 'judge' | 'courtReporter' | null };
+   * explicitly accepts.
+   *
+   * `existingMatch` is a non-mutating preview computed at dryRun time: if a
+   * Person row already matches the seed name (case-insensitive substring +
+   * intrinsic marker boost, same scoring as `resolveOrCreatePerson`), the UI
+   * renders "match: <displayName>" instead of "pending create" so the user
+   * sees the existing record rather than thinking a new one will be made. */
+  personSeed?: {
+    name: string;
+    marker: 'judge' | 'courtReporter' | null;
+    existingMatch?: { id: string; displayName: string; score: number } | null;
+  };
 }
 
 /**
@@ -531,6 +541,47 @@ async function detectFiledOnDeterministic(
   return null;
 }
 
+/**
+ * Read-only dedup: same scoring as `resolveOrCreatePerson` in
+ * `src/lib/tag-fill/extractor.ts`, but without the upsert side-effect. Used
+ * at dryRun time so the suggestions panel can preview "this will match
+ * existing Person <displayName>" rather than "pending Person create".
+ */
+async function findExistingPersonMatch(
+  name: string,
+  marker: 'judge' | 'courtReporter' | null,
+): Promise<{ id: string; displayName: string; score: number } | null> {
+  const cleanName = name.trim();
+  if (!cleanName) return null;
+  const firstToken = cleanName.split(/\s+/)[0];
+  if (!firstToken) return null;
+  let candidates: Array<{ id: string; displayName: string; tags: any }> = [];
+  try {
+    candidates = await (prisma as any).person.findMany({
+      where: { displayName: { contains: firstToken } },
+      take: 25,
+    });
+  } catch {
+    return null;
+  }
+  const lowerName = cleanName.toLowerCase();
+  const ranked = candidates
+    .map((p) => {
+      const tags = (p.tags ?? {}) as Record<string, unknown>;
+      const dn = (p.displayName ?? '').toLowerCase();
+      let score = 0;
+      if (dn === lowerName) score += 100;
+      else if (dn.includes(lowerName) || lowerName.includes(dn)) score += 40;
+      if (marker && tags[marker] === true) score += 20;
+      return { p, score };
+    })
+    .filter((r) => r.score >= 40)
+    .sort((a, b) => b.score - a.score);
+  const top = ranked[0];
+  if (!top) return null;
+  return { id: top.p.id, displayName: top.p.displayName, score: top.score };
+}
+
 async function suggestForFiling(args: {
   target: ResolvedFilingTarget;
   vectorStore: VectorStore | null;
@@ -690,6 +741,7 @@ async function mapFieldFromExtraction(args: {
     case 'judgeRef': {
       const name = data.judge?.name;
       if (!isLikelyValidName(name)) return null;
+      const existingMatch = await findExistingPersonMatch(name!, 'judge');
       // Defer Person upsert to apply-time so dryRun stays write-free.
       return {
         filingId: target.filingId,
@@ -698,7 +750,7 @@ async function mapFieldFromExtraction(args: {
         currentValue: current,
         proposedValue: null,
         proposedDisplay: name!,
-        personSeed: { name: name!, marker: 'judge' },
+        personSeed: { name: name!, marker: 'judge', existingMatch },
         sourceExcerpt:
           data.judge?.evidenceQuote ?? pickExcerpt(chunks, name),
         confidence: (data.judge?.confidence as 'high' | 'medium' | 'low') ?? 'medium',
@@ -707,6 +759,7 @@ async function mapFieldFromExtraction(args: {
     case 'movantRef': {
       const name = data.movant?.name;
       if (!isLikelyValidName(name)) return null;
+      const existingMatch = await findExistingPersonMatch(name!, null);
       // Movant role is contextual (not intrinsic) — no intrinsic marker.
       return {
         filingId: target.filingId,
@@ -715,7 +768,7 @@ async function mapFieldFromExtraction(args: {
         currentValue: current,
         proposedValue: null,
         proposedDisplay: name!,
-        personSeed: { name: name!, marker: null },
+        personSeed: { name: name!, marker: null, existingMatch },
         sourceExcerpt: data.movant?.evidenceQuote ?? pickExcerpt(chunks, name),
         confidence: 'medium',
       };
@@ -723,6 +776,7 @@ async function mapFieldFromExtraction(args: {
     case 'respondentRef': {
       const name = data.respondent?.name;
       if (!isLikelyValidName(name)) return null;
+      const existingMatch = await findExistingPersonMatch(name!, null);
       return {
         filingId: target.filingId,
         filingTitle: target.filingTitle,
@@ -730,7 +784,7 @@ async function mapFieldFromExtraction(args: {
         currentValue: current,
         proposedValue: null,
         proposedDisplay: name!,
-        personSeed: { name: name!, marker: null },
+        personSeed: { name: name!, marker: null, existingMatch },
         sourceExcerpt: data.respondent?.evidenceQuote ?? pickExcerpt(chunks, name),
         confidence: 'medium',
       };
@@ -741,6 +795,7 @@ async function mapFieldFromExtraction(args: {
       const display = data.reporter?.csrNumber
         ? `${name} (CSR ${data.reporter.csrNumber})`
         : name!;
+      const existingMatch = await findExistingPersonMatch(name!, 'courtReporter');
       return {
         filingId: target.filingId,
         filingTitle: target.filingTitle,
@@ -748,7 +803,7 @@ async function mapFieldFromExtraction(args: {
         currentValue: current,
         proposedValue: null,
         proposedDisplay: display,
-        personSeed: { name: name!, marker: 'courtReporter' },
+        personSeed: { name: name!, marker: 'courtReporter', existingMatch },
         sourceExcerpt: data.reporter?.evidenceQuote ?? pickExcerpt(chunks, name),
         confidence: 'high',
       };
