@@ -254,6 +254,39 @@ function attachmentBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
     { name: 'motionRef', tier: 'ref', doc: 'Reference to the parent motion.', refTarget: 'motion' },
     FILING_FILE_REF_SPEC,
     { name: 'authoredBy', tier: 'ref', doc: 'Person who authored this filing.', refTarget: 'person' },
+    // Party refs — present on every filing-type because Petition/Brief/Reply
+    // /Response/Notice/etc. all carry party context too, not just Motion.
+    // Storage: MotionAttachment.tags.movantRef / .respondentRef (JSON). The
+    // panel needs the spec rows to render the values that are already being
+    // written by the Fill Haystack apply path.
+    {
+      name: 'movantRef',
+      tier: 'ref',
+      doc: 'Party requesting relief in this filing (a.k.a. petitioner / appellant).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'Reference to the Person who is the movant on this filing.',
+        howItWorks: 'Set per-filing because the party requesting relief can differ between motions, briefs, and replies within the same case (e.g. cross-motions).',
+        mapsTo: "tags JSON: '$.movantRef'",
+        xetoSpec: 'cc.courtlens.legal::Filing.movantRef',
+        example: '@person-jane-doe',
+        relatedTags: ['respondentRef', 'authoredBy'],
+      },
+    },
+    {
+      name: 'respondentRef',
+      tier: 'ref',
+      doc: 'Party responding to / opposing this filing.',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'Reference to the Person who is the respondent on this filing.',
+        howItWorks: 'Set per-filing because the responding party can shift across motions and stages.',
+        mapsTo: "tags JSON: '$.respondentRef'",
+        xetoSpec: 'cc.courtlens.legal::Filing.respondentRef',
+        example: '@person-john-roe',
+        relatedTags: ['movantRef', 'authoredBy'],
+      },
+    },
     // Court personnel attached to THIS filing. Different filings on the same
     // case can have different clerks/reporters (trial-court clerk vs.
     // appellate-court clerk; record-of-trial reporter vs. appellate reporter).
