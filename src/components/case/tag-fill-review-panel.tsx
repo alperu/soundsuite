@@ -81,7 +81,20 @@ function shortRefId(val: string): string {
   return `${val.slice(0, 8)}…`;
 }
 
-function formatValue(v: unknown, fallbackDisplay?: string): string {
+function formatValue(
+  v: unknown,
+  fallbackDisplay?: string,
+  personSeed?: { name?: string; marker?: string | null } | null,
+): string {
+  // Person-ref suggestions arrive as `personSeed` (a name + optional role
+  // marker) while `proposedValue` stays null until apply runs and creates the
+  // Person row. Show the seed name in place of the bare dash so the user can
+  // see who the AI proposed; the will-create vs. will-merge decision is made
+  // on apply by resolveOrCreatePerson().
+  if ((v == null || v === '') && personSeed?.name?.trim()) {
+    const marker = personSeed.marker ? ` (${personSeed.marker})` : '';
+    return `${personSeed.name.trim()}${marker} · pending Person create`;
+  }
   if (v == null || v === '') return '—';
   if (isRef(v)) {
     const dis = fallbackDisplay ?? v.dis;
@@ -672,8 +685,8 @@ function SuggestionGroup({
                 <svg className="w-3 h-3 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
                 </svg>
-                <span className="text-gray-900 font-medium truncate" title={String(formatValue(row.proposedValue, row.proposedDisplay))}>
-                  {formatValue(row.proposedValue, row.proposedDisplay)}
+                <span className="text-gray-900 font-medium truncate" title={String(formatValue(row.proposedValue, row.proposedDisplay, row.personSeed))}>
+                  {formatValue(row.proposedValue, row.proposedDisplay, row.personSeed)}
                 </span>
                 {isRef(row.proposedValue) && (
                   <span className="font-mono text-[10px] text-gray-400 truncate" title={row.proposedValue.val}>
