@@ -749,10 +749,84 @@ export function detectSignedOnDeterministic(
 export function detectClerkRefDeterministic(
   chunks: ChunkExcerpt[],
 ): { name: string; source: string; confidence: 'high' | 'medium' } | null {
-  const scanText = chunks.slice(0, 4).map((c) => c.text).join('\n');
+  // Scan all chunks — clerk file-stamps and eService certificates often live
+  // on the last page, not the first.
+  const scanText = chunks.map((c) => c.text).join('\n');
   if (!scanText.trim()) return null;
 
-  // Pattern 1: known named TX district clerks (exact substring match → high confidence)
+  // Priority order (highest first):
+  //   1. /s/ <Name>, Deputy Clerk — explicit signature line (high)
+  //   2. <Name>, Deputy Clerk — same without /s/ (high)
+  //   3. Known named TX district clerks (Velva, Anne, Stephanie) — medium,
+  //      placed BEFORE the generic titled pattern so they win when both
+  //      appear (the named clerk is the office head; generic titled regex
+  //      can grab nearby capitalized fragments).
+  //   4. Generic "Firstname Lastname, District/County Clerk" — medium
+  //   5. /s/ <Name>, District/County Clerk — medium
+  //
+  // User feedback: the deputy clerk (actual file-stamper) wins over the
+  // named District Clerk (office head). Example stamp:
+  //   "Velva L. Price, District Clerk
+  //    Cassandra Mendieta, Deputy Clerk"
+  // → returns Cassandra, not Velva.
+  //
+  // Name-capture regex uses a negative lookahead to refuse role-noun first
+  // tokens (Clerk, District, County, Deputy, Travis, etc.) so e.g.
+  // "Travis County District Clerk" doesn't capture "Travis County" as a
+  // person name.
+
+  // Reject any first-token that's a role/place noun (these often precede
+  // the actual person name in court stamps).
+  const FIRST_TOKEN_REJECT =
+    /^(?:Clerk|District|County|Deputy|The|Hon|Honorable|Court|Texas|Travis|Harris|Dallas|Filed|Order|By|Judge|Chief)$/;
+
+  // Helper: validate that the captured name isn't a swept-up role/place phrase.
+  const nameLooksReal = (name: string): boolean => {
+    if (!isLikelyValidName(name)) return false;
+    const first = name.split(/\s+/)[0];
+    if (FIRST_TOKEN_REJECT.test(first)) return false;
+    return true;
+  };
+
+  // Pattern 1: "/s/ Firstname Lastname, Deputy Clerk" — actual signer
+  const deputySigned = /\/s\/\s+([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}),?\s+Deputy\s+Clerk/
+    .exec(scanText);
+  if (deputySigned) {
+    const name = deputySigned[1].replace(/\s+/g, ' ').trim();
+    if (nameLooksReal(name)) {
+      const start = Math.max(0, (deputySigned.index ?? 0) - 40);
+      const end = Math.min(scanText.length, (deputySigned.index ?? 0) + deputySigned[0].length + 40);
+      return {
+        name,
+        source: `Deputy clerk signature: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+        confidence: 'high',
+      };
+    }
+  }
+
+  // Pattern 2: "Firstname Lastname, Deputy Clerk" — scan all occurrences and
+  // keep the FIRST one whose name isn't a role/place phrase.
+  const deputyAllRe = /([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){0,3}),?\s+Deputy\s+Clerk/g;
+  let dm: RegExpExecArray | null;
+  while ((dm = deputyAllRe.exec(scanText)) !== null) {
+    const rawName = dm[1].replace(/\s+/g, ' ').trim();
+    // Strip any leading role-noun tokens that the regex may have included
+    // because they sit immediately before the real name.
+    const tokens = rawName.split(/\s+/);
+    while (tokens.length > 1 && FIRST_TOKEN_REJECT.test(tokens[0])) tokens.shift();
+    const name = tokens.join(' ');
+    if (nameLooksReal(name)) {
+      const start = Math.max(0, (dm.index ?? 0) - 40);
+      const end = Math.min(scanText.length, (dm.index ?? 0) + dm[0].length + 40);
+      return {
+        name,
+        source: `Deputy clerk: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+        confidence: 'high',
+      };
+    }
+  }
+
+  // Pattern 3: known named TX district clerks (office heads).
   const knownClerks = /\b(Velva\s+L\.?\s+Price|Anne\s+Lorentzen|Stephanie\s+Vetter)\b/i.exec(scanText);
   if (knownClerks) {
     const name = knownClerks[1].replace(/\s+/g, ' ').trim();
@@ -760,33 +834,36 @@ export function detectClerkRefDeterministic(
     const end = Math.min(scanText.length, (knownClerks.index ?? 0) + knownClerks[0].length + 60);
     return {
       name,
-      source: `Known clerk: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+      source: `Named office-head clerk: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
       confidence: 'high',
     };
   }
 
-  // Pattern 2: "Firstname Lastname, District/County/Deputy Clerk"
-  const titled = /([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}),?\s+(?:District\s+Clerk|County\s+Clerk|Deputy\s+Clerk)/
-    .exec(scanText);
-  if (titled) {
-    const name = titled[1].replace(/\s+/g, ' ').trim();
-    if (isLikelyValidName(name)) {
-      const start = Math.max(0, (titled.index ?? 0) - 40);
-      const end = Math.min(scanText.length, (titled.index ?? 0) + titled[0].length + 40);
+  // Pattern 4: generic "Firstname Lastname, District/County Clerk"
+  const titledAllRe = /([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){0,3}),?\s+(?:District\s+Clerk|County\s+Clerk)/g;
+  let tm: RegExpExecArray | null;
+  while ((tm = titledAllRe.exec(scanText)) !== null) {
+    const rawName = tm[1].replace(/\s+/g, ' ').trim();
+    const tokens = rawName.split(/\s+/);
+    while (tokens.length > 1 && FIRST_TOKEN_REJECT.test(tokens[0])) tokens.shift();
+    const name = tokens.join(' ');
+    if (nameLooksReal(name)) {
+      const start = Math.max(0, (tm.index ?? 0) - 40);
+      const end = Math.min(scanText.length, (tm.index ?? 0) + tm[0].length + 40);
       return {
         name,
-        source: `Clerk title: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
+        source: `District/County clerk: …${scanText.slice(start, end).trim().replace(/\s+/g, ' ')}…`,
         confidence: 'medium',
       };
     }
   }
 
-  // Pattern 3: "/s/ Firstname Lastname, Deputy/District/County Clerk"
-  const slashSClerk = /\/s\/\s+([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}),?\s+(?:Deputy\s+Clerk|District\s+Clerk|County\s+Clerk)/
+  // Pattern 5: "/s/ <Name>, District/County Clerk"
+  const slashSClerk = /\/s\/\s+([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}),?\s+(?:District\s+Clerk|County\s+Clerk)/
     .exec(scanText);
   if (slashSClerk) {
     const name = slashSClerk[1].replace(/\s+/g, ' ').trim();
-    if (isLikelyValidName(name)) {
+    if (nameLooksReal(name)) {
       const start = Math.max(0, (slashSClerk.index ?? 0) - 40);
       const end = Math.min(scanText.length, (slashSClerk.index ?? 0) + slashSClerk[0].length + 40);
       return {

@@ -512,7 +512,11 @@ async function detectFiledOnDeterministic(
     /* best-effort — fall through to regex */
   }
 
-  // 2. Regex over first chunks. Match the most common clerk-stamp shapes.
+  // 2. Regex over the FULL document. e-Filing systems often put the actual
+  //    file-stamp / submission timestamp on the last page in the eService
+  //    certificate (not the first page), so scanning only the first few
+  //    chunks misses real e-filed motions. Cost is small: the regex scan is
+  //    O(text-length) and bails on first match.
   //    Order matters: try the most specific patterns first.
   const stampPatterns: Array<{ re: RegExp; label: string }> = [
     { re: /\bFiled\s+for\s+Record\s+(?:on\s+)?(\d{1,2}\/\d{1,2}\/\d{4})/i, label: 'Filed for Record' },
@@ -523,12 +527,20 @@ async function detectFiledOnDeterministic(
     { re: /\bFILED\s+IN\s+THE\s+\w[\w\s]*?\s+(\d{1,2}\/\d{1,2}\/\d{4})/i, label: 'FILED IN' },
     { re: /\bCourt\s+Filing\s+Date:?\s+(\d{1,2}\/\d{1,2}\/\d{4})/i, label: 'Court Filing Date' },
     { re: /\bCourt\s+Filing\s+Date:?\s+(\d{4}-\d{2}-\d{2})/i, label: 'Court Filing Date' },
+    // Texas e-filing eService certificate (last-page footer):
+    //   "Timestamp Submitted 5/13/2026 8:48:48 AM ... Status SENT"
+    //   "Status as of 5/13/2026 8:54 AM CST"
+    // The "Timestamp Submitted" form is the actual filer-side submission;
+    // the "Status as of" is the eService roll-up. Prefer Submitted.
+    { re: /Timestamp\s*Submitted\s*(\d{1,2}\/\d{1,2}\/\d{4})/i, label: 'eService Timestamp Submitted' },
+    { re: /Status\s*as\s*of\s*(\d{1,2}\/\d{1,2}\/\d{4})/i, label: 'eService Status as of' },
     // Texas DC stamp: usually three-line — capture date alongside the
     // "DISTRICT CLERK" or "Velva L. Price" / "Anne Lorentzen" name nearby.
     { re: /(\d{1,2}\/\d{1,2}\/\d{4})\s+\d{1,2}:\d{2}\s+[AP]M\s+(?:DISTRICT\s+CLERK|VELVA|ANNE\s+LORENTZEN)/i, label: 'DC stamp' },
   ];
 
-  const scanText = chunks.slice(0, 4).map((c) => c.text).join('\n');
+  // Scan all chunks (most documents are <30 chunks; few microseconds).
+  const scanText = chunks.map((c) => c.text).join('\n');
   if (!scanText.trim()) return null;
 
   for (const { re, label } of stampPatterns) {

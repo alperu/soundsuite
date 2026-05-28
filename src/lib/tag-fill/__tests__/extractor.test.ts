@@ -96,13 +96,30 @@ describe('detectClerkRefDeterministic', () => {
     expect(result!.confidence).toBe('medium');
   });
 
-  it('detects "/s/ Jane Smith, Deputy Clerk"', () => {
+  it('detects "/s/ Jane Smith, Deputy Clerk" (high — actual signer)', () => {
+    // Deputy clerk signatures are HIGH confidence because the deputy is the
+    // person who actually file-stamped the document, vs. the district clerk
+    // whose name appears on every stamp as the office head.
     const result = detectClerkRefDeterministic(
       chunks('/s/ Jane Smith, Deputy Clerk'),
     );
     expect(result).not.toBeNull();
     expect(result!.name).toBe('Jane Smith');
-    expect(result!.confidence).toBe('medium');
+    expect(result!.confidence).toBe('high');
+  });
+
+  it('prefers deputy clerk over named district clerk on same stamp', () => {
+    // Texas e-filed stamps usually carry BOTH names: "Velva L. Price,
+    // District Clerk" (office head) and a deputy who actually stamped.
+    // We want the deputy.
+    const result = detectClerkRefDeterministic(
+      chunks(
+        'Velva L. Price, District Clerk\nCassandra Mendieta, Deputy Clerk',
+      ),
+    );
+    expect(result).not.toBeNull();
+    expect(result!.name).toBe('Cassandra Mendieta');
+    expect(result!.confidence).toBe('high');
   });
 
   it('returns null when no clerk pattern present', () => {

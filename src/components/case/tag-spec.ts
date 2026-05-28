@@ -722,6 +722,56 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
         relatedTags: ['amends', 'supersedes', 'motionRef'],
       },
     },
+    // Court personnel on this motion (per-motion because trial vs appellate
+    // clerks/reporters can differ). Mirror the additions on
+    // `attachmentBaseSpec` so Motion exposes the same surface as other
+    // filing kinds.
+    {
+      name: 'clerkRef',
+      tier: 'ref',
+      doc: 'Court clerk who handled / certified this motion (trial vs. appellate may differ).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'Reference to the court clerk attached to this motion.',
+        howItWorks: 'Constrained to Person rows with the `courtClerk` marker. Auto-extracted from clerk file-stamps in the document (Velva L. Price, Anne Lorentzen, /s/ Deputy Clerk patterns).',
+        mapsTo: "tags JSON: '$.clerkRef'",
+        xetoSpec: 'cc.courtlens.legal::Motion.clerkRef',
+        example: '@person-jane-doe',
+        relatedTags: ['reporterRef', 'caseRef'],
+      },
+    },
+    {
+      name: 'reporterRef',
+      tier: 'ref',
+      doc: 'Court reporter associated with this motion (typically tied to a hearing).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'Reference to the court reporter for a hearing on this motion.',
+        howItWorks: 'Constrained to Person rows with the `courtReporter` marker. Pulled from reporter signature blocks / CSR-number lines when present.',
+        mapsTo: "tags JSON: '$.reporterRef'",
+        xetoSpec: 'cc.courtlens.legal::Motion.reporterRef',
+        example: '@person-jeffrey-kyle',
+        relatedTags: ['clerkRef', 'caseRef'],
+      },
+    },
+    // signedOn applies when the motion itself was signed (rare — usually
+    // the order on a motion is signed, not the motion). Kept here for the
+    // edge case where a motion carries a judge signature (orders embedded
+    // inside motion PDFs, agreed motions, etc.).
+    {
+      name: 'signedOn',
+      tier: 'value',
+      doc: 'Date the motion (or attached order) was signed by the judge.',
+      valueType: 'date',
+      info: {
+        whatItIs: 'ISO date of the judge\'s signature on this motion / its embedded order.',
+        howItWorks: 'Auto-extracted from "SIGNED this Nth day of <Month>, <YYYY>" and similar patterns. Stored only when a signature is actually present; do not set just because a hearing occurred.',
+        mapsTo: "tags JSON: '$.signedOn'",
+        xetoSpec: 'cc.courtlens.legal::Motion.signedOn',
+        example: '2026-05-14',
+        relatedTags: ['judgeRef', 'filedOn'],
+      },
+    },
     // Universal filing tags — every filing kind carries these (see FILING_*_SPEC).
     // NOTE: Motion has no `documentId` column in Prisma; `fileRef` is tags-only
     // until a schema migration links Motion → Document. Phase-2 work.
