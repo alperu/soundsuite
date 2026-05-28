@@ -474,58 +474,81 @@ export default function FilingDetailPage() {
     if (!caseId || !filing || fillTagsLoading) return;
     setFillTagsLoading(true);
     const target = filing.title || filing.slug || filing.id;
+    // Phase 1: announce start so the action log shows activity immediately.
+    persistActionLog({
+      caseId,
+      action: 'fill-haystack-tags',
+      target,
+      status: 'pending',
+      detail: `Scanning filing for tag candidates…`,
+      logType: 'tag-fill',
+    });
+    // Pull the new entry in right away so the user sees it before the
+    // request resolves. A 2s interval below keeps the panel current while
+    // the server emits per-field detection rows.
+    fetchActionLogs();
+    const pollHandle = window.setInterval(() => { fetchActionLogs(); }, 2000);
     try {
       const dryRes = await fetch(`/api/cases/${caseId}/fill-haystack-tags`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filingIds: [filing.id], dryRun: true }),
       });
-      if (!dryRes.ok) throw new Error(`suggest HTTP ${dryRes.status}`);
+      if (!dryRes.ok) {
+        const body = await dryRes.text().catch(() => '');
+        throw new Error(`suggest HTTP ${dryRes.status}: ${body.slice(0, 400)}`);
+      }
       const dryData = await dryRes.json();
-      const suggestions: Array<{ filingId: string; field: string }> = Array.isArray(dryData?.suggestions) ? dryData.suggestions : [];
+      const suggestions: FillTagSuggestion[] = Array.isArray(dryData?.suggestions) ? dryData.suggestions : [];
+      const scanned: number | undefined = typeof dryData?.scanned === 'number' ? dryData.scanned : undefined;
 
       if (suggestions.length === 0) {
         persistActionLog({
           caseId,
           action: 'fill-haystack-tags',
           target,
-          status: 'success',
-          detail: 'No suggestions returned for this filing',
+          status: 'partial',
+          detail: scanned !== undefined
+            ? `No candidates detected after scanning ${scanned} chunk(s). Try re-indexing or run AI re-extraction.`
+            : `No candidates detected for this filing.`,
           logType: 'tag-fill',
         });
-        alert('No haystack tag suggestions found for this filing.');
         return;
       }
 
-      // Pass the full suggestion payload — server now skips the LLM re-run
-      // and applies directly from accept[]. Send proposedValue + personSeed +
-      // currentValue so person-ref suggestions don't get silently dropped.
-      const accept = (suggestions as FillTagSuggestion[]).map((s) => ({
-        filingId: s.filingId,
-        field: s.field,
-        proposedValue: s.proposedValue,
-        personSeed: s.personSeed,
-        currentValue: s.currentValue,
-      }));
-      const applyRes = await fetch(`/api/cases/${caseId}/fill-haystack-tags`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filingIds: [filing.id], dryRun: false, accept }),
-      });
-      if (!applyRes.ok) throw new Error(`apply HTTP ${applyRes.status}`);
-      const applyData = await applyRes.json();
-      const appliedCount = Array.isArray(applyData?.applied) ? applyData.applied.length : 0;
+      // No more auto-apply — surface proposals in the existing
+      // TagFillReviewPanel so the user can review + accept selectively.
+      // Persist to the same localStorage key the case-overview uses so both
+      // views stay in sync.
+      const savedAt = new Date().toISOString();
+      try {
+        // Merge with anything already saved for this case (other filings'
+        // proposals shouldn't be clobbered).
+        const raw = localStorage.getItem(tagFillStorageKey(caseId));
+        const prior = raw ? (JSON.parse(raw) as { suggestions?: FillTagSuggestion[] }).suggestions ?? [] : [];
+        const others = prior.filter((s) => s.filingId !== filing.id);
+        const merged = [...others, ...suggestions];
+        localStorage.setItem(
+          tagFillStorageKey(caseId),
+          JSON.stringify({ suggestions: merged, scanned, savedAt }),
+        );
+      } catch {
+        /* localStorage unavailable — still show panel below */
+      }
+      setTagFillSuggestions(suggestions);
+      setTagFillScanned(scanned);
+      setTagFillSavedAt(savedAt);
+      setTagFillHasSavedForFiling(true);
 
+      const fieldList = suggestions.map((s) => s.field).join(', ');
       persistActionLog({
         caseId,
         action: 'fill-haystack-tags',
         target,
-        status: appliedCount > 0 ? 'success' : 'partial',
-        detail: `Applied ${appliedCount} of ${suggestions.length} suggestion(s)`,
+        status: 'success',
+        detail: `Found ${suggestions.length} candidate${suggestions.length === 1 ? '' : 's'} (${fieldList}). Review in the Tag-fill suggestions panel below to accept.`,
         logType: 'tag-fill',
       });
-      alert(`Filled ${appliedCount} haystack tag${appliedCount === 1 ? '' : 's'} on this filing.`);
-      fetchFiling();
       fetchActionLogs();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -537,9 +560,10 @@ export default function FilingDetailPage() {
         detail: msg,
         logType: 'tag-fill',
       });
-      alert(`Failed to fill haystack tags: ${msg}`);
     } finally {
+      window.clearInterval(pollHandle);
       setFillTagsLoading(false);
+      fetchActionLogs();
     }
   };
 

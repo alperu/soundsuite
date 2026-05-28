@@ -254,6 +254,37 @@ function attachmentBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
     { name: 'motionRef', tier: 'ref', doc: 'Reference to the parent motion.', refTarget: 'motion' },
     FILING_FILE_REF_SPEC,
     { name: 'authoredBy', tier: 'ref', doc: 'Person who authored this filing.', refTarget: 'person' },
+    // Court personnel attached to THIS filing. Different filings on the same
+    // case can have different clerks/reporters (trial-court clerk vs.
+    // appellate-court clerk; record-of-trial reporter vs. appellate reporter).
+    {
+      name: 'clerkRef',
+      tier: 'ref',
+      doc: 'Court clerk responsible for this filing (trial vs. appellate court can differ).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'Reference to the court clerk who certified, filed, or otherwise attests this filing.',
+        howItWorks: 'Constrained to Person rows with the `courtClerk` marker. Set per-filing because trial and appellate courts have different clerks; a single case can carry filings from both venues.',
+        mapsTo: "tags JSON: '$.clerkRef'",
+        xetoSpec: 'cc.courtlens.legal::MotionAttachment.clerkRef',
+        example: '@person-jane-doe',
+        relatedTags: ['reporterRef', 'caseRef'],
+      },
+    },
+    {
+      name: 'reporterRef',
+      tier: 'ref',
+      doc: 'Court reporter responsible for this filing (typically transcripts and reporter’s records).',
+      refTarget: 'person',
+      info: {
+        whatItIs: 'Reference to the court reporter who produced or certified the transcript / reporter’s-record associated with this filing.',
+        howItWorks: 'Constrained to Person rows with the `courtReporter` marker. Set per-filing because volumes within a case can be produced by different reporters (e.g. one per hearing date or per appellate volume).',
+        mapsTo: "tags JSON: '$.reporterRef'",
+        xetoSpec: 'cc.courtlens.legal::ReportersRecord.reporterRef',
+        example: '@person-jeffrey-kyle',
+        relatedTags: ['clerkRef', 'caseRef'],
+      },
+    },
     { name: 'amends', tier: 'ref', doc: 'Attachment this one amends.', refTarget: 'motionAttachment' },
     { name: 'supersedes', tier: 'ref', doc: 'Attachment this one supersedes.', refTarget: 'motionAttachment' },
     // values

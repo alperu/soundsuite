@@ -351,6 +351,30 @@ export async function POST(
     // ─── Resolve targets ───────────────────────────────────────────────────
     const targets = await loadFilingTargets(id, body.filingIds);
 
+    // Diagnostic log helper — writes to the same ActionLog table the
+    // client polls. Always best-effort; never throws back to caller.
+    const writeDiagLog = (target: ResolvedFilingTarget | null, status: string, step: string, detail: Record<string, unknown>) => {
+      void (prisma as any).actionLog.create({
+        data: {
+          caseId: id,
+          action: 'Tag fill',
+          target: target ? `${target.filingTitle} · ${step}` : `(case) · ${step}`,
+          status,
+          logType: 'tag-fill',
+          detail: JSON.stringify({
+            step,
+            ...(target ? { filingId: target.filingId, filingTitle: target.filingTitle, kind: target.kind } : {}),
+            ...detail,
+          }),
+        },
+      }).catch(() => undefined);
+    };
+
+    writeDiagLog(null, 'pending', 'dryRun-start', {
+      filings: targets.length,
+      filingIds: targets.map((t) => t.filingId),
+    });
+
     // ─── VectorStore (lazy) ────────────────────────────────────────────────
     let vectorStore: VectorStore | null = null;
     try {
@@ -360,9 +384,9 @@ export async function POST(
       });
       await vectorStore.initialize();
     } catch (err) {
-      console.warn(
-        `[tag-fill] LanceDB init failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[tag-fill] LanceDB init failed: ${msg}`);
+      writeDiagLog(null, 'partial', 'vectorstore-unavailable', { errorMessage: msg });
       vectorStore = null;
     }
 
@@ -387,6 +411,17 @@ export async function POST(
         lastError = err instanceof Error ? err.message : String(err);
         console.warn(`[tag-fill] filing ${target.filingId} failed: ${lastError}`);
       }
+      writeDiagLog(
+        target,
+        lastError ? 'error' : suggestionCount > 0 ? 'success' : 'partial',
+        'detect',
+        {
+          candidates: suggestionCount,
+          fields: suggestions.filter((s) => s.filingId === target.filingId).map((s) => s.field),
+          durationMs: Date.now() - t0,
+          ...(lastError ? { errorMessage: lastError } : {}),
+        },
+      );
       if (debug) {
         diagnostics.push({
           filingId: target.filingId,

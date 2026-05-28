@@ -202,15 +202,38 @@ export function ExtractModal({
   const handleManualSubmit = async (rows: ManualPersonaRow[]) => {
     setSubmitting(true);
     try {
+      // Pre-flight: a missing/falsy documentId is the most common cause of
+      // the server returning 404 ('document_not_found'). Catch it here so the
+      // user sees the actual problem instead of a generic HTTP code.
+      if (!selectedDoc?.id) {
+        throw new Error(
+          'Manual define failed: no document is selected. Pick a file in the dropdown above before defining personas.',
+        );
+      }
       const r = await fetch('/api/personas/admin/manual-define', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          documentId: selectedDoc?.id,
+          documentId: selectedDoc.id,
           candidates: rows,
         }),
       });
-      if (!r.ok) throw new Error(`Manual define failed (HTTP ${r.status})`);
+      if (!r.ok) {
+        // Surface the server's actual error body so e.g. 'document_not_found'
+        // or a 400 'candidates array required' is visible to the user.
+        let bodyText = '';
+        try {
+          const errJson = await r.json();
+          bodyText = errJson?.message
+            ? `${errJson.error ?? 'error'}: ${errJson.message}`
+            : JSON.stringify(errJson);
+        } catch {
+          bodyText = await r.text().catch(() => '');
+        }
+        throw new Error(
+          `Manual define failed (HTTP ${r.status})${bodyText ? ` — ${bodyText.slice(0, 400)}` : ''}`,
+        );
+      }
       const data = (await r.json()) as ExtractResult;
       setSuccessResult({
         created: data.created ?? rows.length,
