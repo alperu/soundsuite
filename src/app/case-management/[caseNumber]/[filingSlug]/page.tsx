@@ -908,10 +908,55 @@ export default function FilingDetailPage() {
           <h3 className="text-sm font-medium text-gray-700">Action Log</h3>
           <div className="flex items-center gap-3">
             <button
-              onClick={() => setActionLogs([])}
+              onClick={async (e) => {
+                // Shift+click = soft clear (UI only). Plain click = delete
+                // matching DB rows for this filing, then refresh.
+                if (e.shiftKey) {
+                  setActionLogs([]);
+                  return;
+                }
+                if (!caseId || !filing) {
+                  setActionLogs([]);
+                  return;
+                }
+                const params = new URLSearchParams({
+                  caseId,
+                  filingId: filing.id,
+                  filingTitle: filing.title || '',
+                });
+                try {
+                  const r = await fetch(`/api/admin/action-logs?${params}`, { method: 'DELETE' });
+                  if (!r.ok) {
+                    const body = await r.text().catch(() => '');
+                    persistActionLog({
+                      caseId, action: 'action-log-clear', target: filing.title || filing.id,
+                      status: 'error', logType: 'general',
+                      detail: `Clear failed HTTP ${r.status}: ${body.slice(0, 300)}`,
+                    });
+                    fetchActionLogs();
+                    return;
+                  }
+                  const j = (await r.json()) as { deleted?: number };
+                  // The clear-confirmation row will be written AFTER the delete
+                  // so it survives the wipe; user sees what just happened.
+                  persistActionLog({
+                    caseId, action: 'action-log-clear', target: filing.title || filing.id,
+                    status: 'success', logType: 'general',
+                    detail: `Deleted ${j.deleted ?? 0} row(s) from the action log`,
+                  });
+                  setActionLogs([]);
+                  setTimeout(() => fetchActionLogs(), 200);
+                } catch (err) {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  persistActionLog({
+                    caseId, action: 'action-log-clear', target: filing.title || filing.id,
+                    status: 'error', logType: 'general', detail: msg,
+                  });
+                }
+              }}
               disabled={actionLogs.length === 0}
               className="text-xs text-gray-400 hover:text-red-600 disabled:opacity-30 disabled:cursor-not-allowed"
-              title="Clear visible log entries (soft — Refresh to reload from DB)"
+              title="Delete log rows for this filing from the database (Shift+Click clears UI only)"
             >
               Clear
             </button>
