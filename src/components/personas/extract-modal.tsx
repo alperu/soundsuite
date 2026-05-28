@@ -210,11 +210,28 @@ export function ExtractModal({
           'Manual define failed: no document is selected. Pick a file in the dropdown above before defining personas.',
         );
       }
+
+      // When the modal was opened against a MOTION (defaultMotionId), the
+      // selectedDoc.id is the synthetic 'motion:<motionId>' marker — that
+      // value is NOT a real Document row, so the server returns 404
+      // 'document_not_found' when manual-define hits prisma.document.findUnique.
+      // Split the synthetic id and let the server resolve it (it has the
+      // Prisma connection; we don't have a /api/motions/[id]/documents route).
+      let documentId: string | undefined;
+      let motionId: string | undefined;
+      if (selectedDoc.id.startsWith('motion:')) {
+        motionId = selectedDoc.id.slice('motion:'.length);
+      } else {
+        documentId = selectedDoc.id;
+      }
+
       const r = await fetch('/api/personas/admin/manual-define', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          documentId: selectedDoc.id,
+          // Either documentId or motionId — the server's POST accepts either.
+          ...(documentId ? { documentId } : {}),
+          ...(motionId ? { motionId } : {}),
           candidates: rows,
         }),
       });

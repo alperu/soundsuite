@@ -38,11 +38,38 @@ const ALLOWED_CONTEXTUAL = [
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const documentId = body?.documentId
+    let documentId: string | undefined = body?.documentId
+    const motionId: string | undefined = body?.motionId
     const candidates = Array.isArray(body?.candidates) ? body.candidates : []
+
+    // Accept motionId as an alternative to documentId. When the modal is
+    // opened against a motion (no specific document chosen yet), we resolve
+    // here to the motion's primary attached Document. Without this, the
+    // dialog 404'd because the synthetic 'motion:<id>' marker isn't a real
+    // Document row.
+    if (!documentId && typeof motionId === 'string' && motionId) {
+      const docs = await (prisma as any).document.findMany({
+        where: {
+          motionAttachments: { some: { motionId } },
+        },
+        orderBy: { createdAt: 'asc' },
+        take: 1,
+      })
+      if (docs.length === 0) {
+        return NextResponse.json(
+          {
+            error: 'motion_has_no_document',
+            message: `Motion ${motionId} has no attached Document — upload or attach a file first.`,
+          },
+          { status: 404 },
+        )
+      }
+      documentId = docs[0].id
+    }
+
     if (typeof documentId !== 'string' || !documentId) {
       return NextResponse.json(
-        { error: 'invalid_request', message: 'documentId required' },
+        { error: 'invalid_request', message: 'documentId or motionId required' },
         { status: 400 },
       )
     }

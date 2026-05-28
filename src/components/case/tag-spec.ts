@@ -1098,6 +1098,40 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // Document row server-side (see synthesizeRefsFromColumns).
     { name: 'documentRef', tier: 'ref', doc: 'Reference to the underlying PDF document (alias of fileRef).', refTarget: 'doc' },
     { name: 'preparedBy', tier: 'ref', doc: 'Court clerk who prepared this volume.', refTarget: 'person' },
+    // Single ref slots filled by the haystack extractor (from /s/ Deputy Clerk
+    // signatures, party context, certifying reporter). preparedBy stays for
+    // the volume preparer (often a senior clerk), distinct from clerkRef
+    // which is the deputy who file-stamped.
+    {
+      name: 'clerkRef',
+      tier: 'ref',
+      doc: "Deputy clerk who certified or stamped this clerk's-record volume.",
+      refTarget: 'person',
+    },
+    {
+      name: 'reporterRef',
+      tier: 'ref',
+      doc: 'Court reporter associated with the record (if a transcript volume is included).',
+      refTarget: 'person',
+    },
+    {
+      name: 'movantRef',
+      tier: 'ref',
+      doc: 'Movant party from the underlying case (carried onto the record).',
+      refTarget: 'person',
+    },
+    {
+      name: 'respondentRef',
+      tier: 'ref',
+      doc: 'Respondent party from the underlying case (carried onto the record).',
+      refTarget: 'person',
+    },
+    {
+      name: 'authoredBy',
+      tier: 'ref',
+      doc: 'Person who authored / submitted this volume.',
+      refTarget: 'person',
+    },
     // Multi-person attributions for the volume — courts often list several
     // clerks/reporters on an appellate Clerk's Record cover sheet. Constrained
     // to Person rows with the matching intrinsic marker.
@@ -1123,6 +1157,35 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // refs
     { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
     { name: 'reporterRef', tier: 'ref', doc: 'Court reporter who produced this volume.', refTarget: 'person' },
+    // Single clerk attribution — courts often list a specific deputy clerk
+    // on the cover sheet who certified the volume. Distinct from
+    // courtClerkRefs which is the multi-person list. The extractor fills this
+    // from "/s/ <Name>, Deputy Clerk" patterns; the existing courtClerkRefs
+    // stays for the multi-line cover-sheet list.
+    {
+      name: 'clerkRef',
+      tier: 'ref',
+      doc: "Court clerk who certified or stamped this reporter's-record volume.",
+      refTarget: 'person',
+    },
+    {
+      name: 'movantRef',
+      tier: 'ref',
+      doc: 'Movant party from the underlying case (carried onto the record).',
+      refTarget: 'person',
+    },
+    {
+      name: 'respondentRef',
+      tier: 'ref',
+      doc: 'Respondent party from the underlying case (carried onto the record).',
+      refTarget: 'person',
+    },
+    {
+      name: 'authoredBy',
+      tier: 'ref',
+      doc: 'Person who authored / submitted this volume (typically the reporter).',
+      refTarget: 'person',
+    },
     // Multi-person attributions — hearings can list multiple reporters or
     // clerks on the cover sheet.
     { name: 'courtReporterRefs', tier: 'refs', doc: 'Court reporters attributed on this volume.', refTarget: 'person' },
