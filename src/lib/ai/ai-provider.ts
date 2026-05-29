@@ -308,12 +308,14 @@ function anthropicThinkingParam(model: string, thinking: boolean | undefined, ef
   // ("Thinking may not be enabled when tool_choice forces tool use."), so
   // we drop thinking entirely for jsonMode requests — the structured-output
   // call gets the caller's original temperature (e.g. 0.1 for auto-suggest).
-  // Opus 4.7 deprecates the `temperature` parameter — any value other than 1
-  // (including omitted/default) returns HTTP 400 "temperature is deprecated
-  // for this model". Force temperatureOverride=1 for every 4.7 request,
-  // regardless of thinking/jsonMode.
-  const isOpus47 = model.startsWith('claude-opus-4-7');
-  if (thinking === true && !jsonMode && isOpus47) {
+  // Opus 4.7 / 4.8 deprecate the `temperature` parameter — any value other
+  // than 1 (including omitted/default) returns HTTP 400 "temperature is
+  // deprecated for this model". Force temperatureOverride=1 for every
+  // 4.7/4.8 request, regardless of thinking/jsonMode. Both models support
+  // adaptive thinking only; manual `thinking:{type:'enabled'}` is rejected.
+  const isAdaptiveOpus =
+    model.startsWith('claude-opus-4-7') || model.startsWith('claude-opus-4-8');
+  if (thinking === true && !jsonMode && isAdaptiveOpus) {
     // Cast effort to the SDK's narrower union — 'xhigh' is accepted by the
     // API but not yet in the SDK 0.74.0 type. Runtime-safe.
     const effortValue = (effort ?? 'medium') as 'low' | 'medium' | 'high' | 'max';
@@ -325,7 +327,7 @@ function anthropicThinkingParam(model: string, thinking: boolean | undefined, ef
       temperatureOverride: 1,
     };
   }
-  if (isOpus47) {
+  if (isAdaptiveOpus) {
     return { thinkingExtras: {}, temperatureOverride: 1 };
   }
   return { thinkingExtras: {}, temperatureOverride: null };

@@ -2048,7 +2048,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                       <option value={32768}>32k</option>
                     </select>
                   </div>
-                  {aiProvider === 'anthropic' && aiModel === 'claude-opus-4-7' && thinkingMode && (
+                  {aiProvider === 'anthropic' && (aiModel === 'claude-opus-4-7' || aiModel === 'claude-opus-4-8') && thinkingMode && (
                     <div className="flex items-center gap-2" title="Adaptive-thinking effort. Lower = more visible response, higher = deeper reasoning.">
                       <label className="text-xs font-medium text-gray-500">Effort</label>
                       <select
