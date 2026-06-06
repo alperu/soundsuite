@@ -1458,7 +1458,26 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
 
   const handleAISearch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!aiQuery.trim()) { setAiError('Please enter a question'); return; }
+
+    // Build the submitted query from the ChipEditor's DOC, not the
+    // chip-stripped `aiQuery` mirror. serializeDoc splits the editor into text
+    // + chips as two separate streams, so once a `{{ ... }}` mustache
+    // materializes into a FilterChipNode it disappears from `aiQuery` — and the
+    // backend (segmentChipsAndIntents) only sees filters that are inline
+    // `{{ raw }}` markers. Reading the composer string here keeps chips in the
+    // query (in source order) regardless of materialization timing, and fixes
+    // the "returns results once, then 0 matches" intermittency.
+    const composer = (useHaystackFilters && chipEditorRef.current)
+      ? chipEditorRef.current.getComposerString()
+      : aiQuery;
+    const currentQuery = composer.trim();
+    if (!currentQuery) { setAiError('Please enter a question'); return; }
+
+    // Snapshot the editor content so we can restore it verbatim on error.
+    // getText() is the chip-stripped text; haystackChips carries the chips —
+    // setContents(text, chips) round-trips them back exactly.
+    const prevChipText = chipEditorRef.current?.getText() ?? aiQuery;
+    const prevChips = haystackChips;
 
     // Determine if this is a new conversation or follow-up
     const isFollowUp = aiTurns.length > 0 || deepTurns.length > 0;
@@ -1499,8 +1518,11 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
       setAiSearchTime(null);
     }
 
-    const currentQuery = aiQuery.trim();
+    // Clear the mirror AND the editor doc so chips don't silently re-submit on
+    // the next query. Restored from the snapshot above if the search errors.
     setAiQuery('');
+    setHaystackChips([]);
+    chipEditorRef.current?.setContents('', []);
 
     const t0 = performance.now();
     try {
@@ -1572,8 +1594,13 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
       } else {
         setAiError(err instanceof Error ? err.message : 'An error occurred');
       }
-      // Restore query on error so user can retry
-      if (!aiStoppedRef.current) setAiQuery(currentQuery);
+      // Restore query (text + chips) on error so the user can retry. Round-trip
+      // through setContents so materialized chips reappear in the editor too.
+      if (!aiStoppedRef.current) {
+        setAiQuery(prevChipText);
+        setHaystackChips(prevChips);
+        chipEditorRef.current?.setContents(prevChipText, prevChips);
+      }
       setDeepProgress(null);
       setStreamingAnswer(null);
     } finally {

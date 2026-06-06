@@ -554,6 +554,37 @@ function serializeDoc(editor: Editor): { text: string; chips: FilterChip[] } {
   return { text: parts.join('').replace(/^\n+|\n+$/g, ''), chips };
 }
 
+/**
+ * Serialize the doc into the single composer string the BACKEND expects:
+ * chips rendered inline as `{{ raw }}` interleaved with free text, in source
+ * order. `segmentChipsAndIntents` (src/lib/search/chip-segments.ts) splits on
+ * exactly this shape and pairs each chip with the prose next to it, so the
+ * ORDER here is load-bearing — do not hoist chips ahead of text.
+ *
+ * This differs from `serializeDoc`, which returns text and chips as two
+ * separate streams (losing interleaving). The submit path must use THIS so a
+ * materialized chip still reaches the backend; the chip-stripped `text` does
+ * not contain the `{{ }}` markers.
+ */
+function serializeComposer(editor: Editor): string {
+  const parts: string[] = [];
+  editor.state.doc.descendants((node) => {
+    if (node.type.name === 'filterChip') {
+      const raw = ((node.attrs as ChipNodeAttrs).expression ?? '').trim();
+      if (raw) parts.push(`{{ ${raw} }}`);
+      return false;
+    }
+    if (node.isText) {
+      parts.push(node.text ?? '');
+    }
+    if (node.type.name === 'paragraph') {
+      if (parts.length > 0) parts.push('\n');
+    }
+    return true;
+  });
+  return parts.join('').replace(/^\n+|\n+$/g, '').trim();
+}
+
 /** Build a chip node payload from an arbitrary FilterChip — used when
  *  hydrating `initialChips` (which may be legacy field-shaped chips from URL
  *  state) into the editor doc. */
@@ -661,8 +692,15 @@ export interface ChipEditorHandle {
   setContents(text: string, chips: FilterChip[]): void;
   /** Return current absolute cursor offset in the serialized text. */
   getCursorOffset(): number;
-  /** Return current serialized text. */
+  /** Return current serialized text (chips stripped out — free text only). */
   getText(): string;
+  /**
+   * Return the full composer string with chips inline as `{{ raw }}` in source
+   * order, interleaved with free text — the exact shape the backend
+   * (segmentChipsAndIntents) parses. Use this, NOT getText(), when submitting
+   * a search, or materialized chips silently drop out of the query.
+   */
+  getComposerString(): string;
   /**
    * Insert raw text at the current caret position. Used by the "+" button in
    * the strip editor to plant a `{{  }}` placeholder that the user can fill in.
@@ -1018,6 +1056,10 @@ export const ChipEditor = React.forwardRef<ChipEditorHandle, ChipEditorProps>(fu
     getText() {
       if (!editor) return '';
       return serializeDoc(editor).text;
+    },
+    getComposerString() {
+      if (!editor) return '';
+      return serializeComposer(editor);
     },
     insertText(text: string, cursorOffsetFromEnd = 0) {
       if (!editor) return;
