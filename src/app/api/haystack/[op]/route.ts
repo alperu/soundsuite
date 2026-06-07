@@ -554,6 +554,25 @@ function opClose(): string {
 // ---------- dispatch --------------------------------------------------------
 
 /**
+ * Op → handler registry. Each handler returns a Hayson grid string;
+ * `dispatchHaystack` wraps it in `jsonResponse`. Typing this as
+ * `Record<Op, …>` makes the op set exhaustive at compile time — adding an op
+ * to `SUPPORTED_OPS` without a handler here is now a type error (the old
+ * `switch` would have silently fallen through).
+ */
+const HANDLERS: Record<Op, (params: URLSearchParams, body: any) => string | Promise<string>> = {
+  about: () => opAbout(),
+  ops: () => opOps(),
+  libs: () => opLibs(),
+  defs: () => opDefs(),
+  filetypes: () => opFiletypes(),
+  nav: (params, body) => opNav(params, body),
+  read: (params, body) => opRead(params, body),
+  close: () => opClose(),
+  commit: (params, body) => opCommit(params, body),
+}
+
+/**
  * Shared dispatcher. The public route enforces bearer auth; the same-origin
  * proxy at `/api/haystack-proxy/[op]` passes `skipAuth: true` so the browser
  * tag panel can read without shipping a token. The proxy is the only legitimate
@@ -595,23 +614,11 @@ export async function dispatchHaystack(
   }
 
   try {
-    switch (op as Op) {
-      case 'about': return jsonResponse(await opAbout())
-      case 'ops': return jsonResponse(opOps())
-      case 'libs': return jsonResponse(await opLibs())
-      case 'defs': return jsonResponse(await opDefs())
-      case 'filetypes': return jsonResponse(opFiletypes())
-      case 'nav': return jsonResponse(await opNav(url.searchParams, body))
-      case 'read': return jsonResponse(await opRead(url.searchParams, body))
-      case 'close': return jsonResponse(opClose())
-      case 'commit': return jsonResponse(await opCommit(url.searchParams, body))
-    }
+    // `op` is validated against SUPPORTED_OPS above, so the lookup is total.
+    return jsonResponse(await HANDLERS[op as Op](url.searchParams, body))
   } catch (e: any) {
     return jsonResponse(errGrid(`op ${op} failed: ${e?.message ?? e}`))
   }
-
-  // unreachable
-  return jsonResponse(errGrid('dispatch fell through'))
 }
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ op: string }> | { op: string } }) {
