@@ -1,256 +1,137 @@
 /**
- * Unit tests for MCP API routes
- * 
- * Tests:
- * - Execute MCP tools via API
- * - List available MCP tools
- * - Handle authentication
- * - Handle errors
- * - Proxy requests to MCP server
- * 
- * Requirements: 16.2, 16.3, 16.4, 16.5
+ * Unit tests for the MCP API routes (execute + tools).
+ *
+ * The routes execute tools IN-PROCESS via the ToolRegistry
+ * (`@/lib/mcp/get-tool-registry`) — they are no longer thin proxies that
+ * `fetch` an external MCP server. So we mock the registry and assert the
+ * route's request handling: validation, provider/model context pass-through,
+ * error-code → HTTP-status mapping, and tool listing.
  *
  * @jest-environment node
  */
+import { NextRequest } from 'next/server'
 
-import { describe, it, expect, beforeEach, jest } from '@jest/globals';
+// Stable mock registry; the route calls getToolRegistry() → refreshDependencies()
+// → execute()/listTools(). Methods are configured per test.
+const mockRegistry = {
+  refreshDependencies: jest.fn(async () => {}),
+  execute: jest.fn(),
+  listTools: jest.fn(),
+}
+jest.mock('@/lib/mcp/get-tool-registry', () => ({
+  getToolRegistry: jest.fn(async () => mockRegistry),
+}))
 
-// Mock fetch globally
-global.fetch = jest.fn() as jest.MockedFunction<typeof fetch>;
+function postReq(body: unknown) {
+  return new NextRequest('http://localhost:3000/api/mcp/execute', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
 
-describe('MCP API Routes', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    // Reset environment variables
-    delete process.env.MCP_SERVER_URL;
-    delete process.env.MCP_API_KEY;
-  });
+beforeEach(() => {
+  mockRegistry.refreshDependencies.mockReset().mockResolvedValue(undefined)
+  mockRegistry.execute.mockReset()
+  mockRegistry.listTools.mockReset()
+})
 
-  describe('POST /api/mcp/execute', () => {
-    it('should execute MCP tool and return results', async () => {
-      const mockResponse = {
-        results: [
-          {
-            text: 'Sample result',
-            document: 'test.pdf',
-            page: 1,
-            score: 0.9,
-          },
-        ],
-      };
+describe('POST /api/mcp/execute', () => {
+  it('executes a tool and returns its data', async () => {
+    mockRegistry.execute.mockResolvedValueOnce({
+      success: true,
+      data: { results: [{ text: 'Sample result', document: 'test.pdf', page: 1, score: 0.9 }] },
+    })
+    const { POST } = await import('../execute/route')
+    const res = await POST(postReq({ tool: 'query_case_knowledge', params: { query: 'test' } }))
+    const data = await res.json()
 
-      (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockResponse,
-      } as Response);
+    expect(res.status).toBe(200)
+    expect(data.results).toHaveLength(1)
+    expect(data.results[0].text).toBe('Sample result')
+  })
 
-      const { POST } = await import('../execute/route');
-      const request = new Request('http://localhost:3000/api/mcp/execute', {
-        method: 'POST',
-        body: JSON.stringify({
-          tool: 'query_case_knowledge',
-          params: { query: 'test query' },
-        }),
-      });
+  it('returns 400 for a missing tool name', async () => {
+    const { POST } = await import('../execute/route')
+    const res = await POST(postReq({ params: { query: 'test' } }))
+    const data = await res.json()
 
-      const response = await POST(request);
-      const data = await response.json();
+    expect(res.status).toBe(400)
+    expect(data.error.code).toBe('INVALID_REQUEST')
+    expect(data.error.message).toContain('tool name')
+  })
 
-      expect(response.status).toBe(200);
-      expect(data.results).toHaveLength(1);
-      expect(data.results[0].text).toBe('Sample result');
-    });
+  it('passes provider/model through as a context override', async () => {
+    mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
+    const { POST } = await import('../execute/route')
+    await POST(postReq({ tool: 'query_case_knowledge', params: { query: 'test' }, provider: 'openai', model: 'gpt-4' }))
 
-    it('should return error for missing tool name', async () => {
-      const { POST } = await import('../execute/route');
-      const request = new Request('http://localhost:3000/api/mcp/execute', {
-        method: 'POST',
-        body: JSON.stringify({
-          params: { query: 'test' },
-        }),
-      });
+    expect(mockRegistry.execute).toHaveBeenCalledWith(
+      'query_case_knowledge',
+      { query: 'test' },
+      { aiProvider: 'openai', aiModel: 'gpt-4' },
+    )
+  })
 
-      const response = await POST(request);
-      const data = await response.json();
+  it('passes undefined context when no provider/model override', async () => {
+    mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
+    const { POST } = await import('../execute/route')
+    await POST(postReq({ tool: 'query_case_knowledge', params: { query: 'test' } }))
 
-      expect(response.status).toBe(400);
-      expect(data.error.code).toBe('INVALID_REQUEST');
-      expect(data.error.message).toContain('tool name');
-    });
+    expect(mockRegistry.execute).toHaveBeenCalledWith('query_case_knowledge', { query: 'test' }, undefined)
+  })
 
-    it('should forward API key to MCP server', async () => {
-      process.env.MCP_API_KEY = 'test-api-key';
+  it('maps a tool error code to the right HTTP status', async () => {
+    mockRegistry.execute.mockResolvedValueOnce({ success: false, errorCode: 'INVALID_REGEX', error: 'Invalid regex pattern' })
+    const { POST } = await import('../execute/route')
+    const res = await POST(postReq({ tool: 'scan_for_pattern', params: { pattern: '[invalid' } }))
+    const data = await res.json()
 
-      (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ results: [] }),
-      } as Response);
+    expect(res.status).toBe(400)
+    expect(data.error.code).toBe('INVALID_REGEX')
+  })
 
-      const { POST } = await import('../execute/route');
-      const request = new Request('http://localhost:3000/api/mcp/execute', {
-        method: 'POST',
-        body: JSON.stringify({
-          tool: 'query_case_knowledge',
-          params: { query: 'test' },
-        }),
-      });
+  it('maps TOOL_NOT_FOUND to 404', async () => {
+    mockRegistry.execute.mockResolvedValueOnce({ success: false, errorCode: 'TOOL_NOT_FOUND', error: 'nope' })
+    const { POST } = await import('../execute/route')
+    const res = await POST(postReq({ tool: 'bogus', params: {} }))
+    expect(res.status).toBe(404)
+  })
 
-      await POST(request);
+  it('returns 500 EXECUTION_FAILED when execute throws', async () => {
+    mockRegistry.execute.mockRejectedValueOnce(new Error('Boom'))
+    const { POST } = await import('../execute/route')
+    const res = await POST(postReq({ tool: 'query_case_knowledge', params: { query: 'test' } }))
+    const data = await res.json()
 
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            'X-API-Key': 'test-api-key',
-          }),
-        })
-      );
-    });
+    expect(res.status).toBe(500)
+    expect(data.error.code).toBe('EXECUTION_FAILED')
+    expect(data.error.message).toContain('Boom')
+  })
+})
 
-    it('should use default MCP server URL if not configured', async () => {
-      (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ results: [] }),
-      } as Response);
+describe('GET /api/mcp/tools', () => {
+  it('lists available tools from the registry', async () => {
+    mockRegistry.listTools.mockReturnValueOnce([
+      { name: 'query_case_knowledge', description: 'Semantic search' },
+      { name: 'scan_for_pattern', description: 'Pattern search' },
+    ])
+    const { GET } = await import('../tools/route')
+    const res = await GET()
+    const data = await res.json()
 
-      const { POST } = await import('../execute/route');
-      const request = new Request('http://localhost:3000/api/mcp/execute', {
-        method: 'POST',
-        body: JSON.stringify({
-          tool: 'query_case_knowledge',
-          params: { query: 'test' },
-        }),
-      });
+    expect(res.status).toBe(200)
+    expect(data.tools).toHaveLength(2)
+    expect(data.tools[0].name).toBe('query_case_knowledge')
+    expect(data.tools[1].name).toBe('scan_for_pattern')
+  })
 
-      await POST(request);
+  it('returns 500 FETCH_FAILED when the registry is unavailable', async () => {
+    mockRegistry.refreshDependencies.mockRejectedValueOnce(new Error('registry down'))
+    const { GET } = await import('../tools/route')
+    const res = await GET()
+    const data = await res.json()
 
-      expect(global.fetch).toHaveBeenCalledWith(
-        'http://localhost:3001',
-        expect.any(Object)
-      );
-    });
-
-    it('should handle MCP server errors', async () => {
-      const mockError = {
-        error: {
-          code: 'INVALID_REGEX',
-          message: 'Invalid regex pattern',
-        },
-      };
-
-      (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
-        ok: false,
-        status: 400,
-        json: async () => mockError,
-      } as Response);
-
-      const { POST } = await import('../execute/route');
-      const request = new Request('http://localhost:3000/api/mcp/execute', {
-        method: 'POST',
-        body: JSON.stringify({
-          tool: 'scan_for_pattern',
-          params: { pattern: '[invalid' },
-        }),
-      });
-
-      const response = await POST(request);
-      const data = await response.json();
-
-      expect(response.status).toBe(400);
-      expect(data.error.code).toBe('INVALID_REGEX');
-    });
-
-    it('should handle network errors', async () => {
-      (global.fetch as jest.MockedFunction<typeof fetch>).mockRejectedValueOnce(
-        new Error('Network error')
-      );
-
-      const { POST } = await import('../execute/route');
-      const request = new Request('http://localhost:3000/api/mcp/execute', {
-        method: 'POST',
-        body: JSON.stringify({
-          tool: 'query_case_knowledge',
-          params: { query: 'test' },
-        }),
-      });
-
-      const response = await POST(request);
-      const data = await response.json();
-
-      expect(response.status).toBe(500);
-      expect(data.error.code).toBe('EXECUTION_FAILED');
-      expect(data.error.message).toContain('Network error');
-    });
-  });
-
-  describe('GET /api/mcp/tools', () => {
-    it('should list available MCP tools', async () => {
-      const mockTools = {
-        tools: [
-          {
-            name: 'query_case_knowledge',
-            description: 'Semantic search',
-            inputSchema: {
-              type: 'object',
-              properties: { query: { type: 'string' } },
-              required: ['query'],
-            },
-          },
-          {
-            name: 'scan_for_pattern',
-            description: 'Pattern search',
-            inputSchema: {
-              type: 'object',
-              properties: { pattern: { type: 'string' } },
-              required: ['pattern'],
-            },
-          },
-        ],
-      };
-
-      (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockTools,
-      } as Response);
-
-      const { GET } = await import('../tools/route');
-      const response = await GET();
-      const data = await response.json();
-
-      expect(response.status).toBe(200);
-      expect(data.tools).toHaveLength(2);
-      expect(data.tools[0].name).toBe('query_case_knowledge');
-      expect(data.tools[1].name).toBe('scan_for_pattern');
-    });
-
-    it('should handle MCP server unavailable', async () => {
-      (global.fetch as jest.MockedFunction<typeof fetch>).mockRejectedValueOnce(
-        new Error('Connection refused')
-      );
-
-      const { GET } = await import('../tools/route');
-      const response = await GET();
-      const data = await response.json();
-
-      expect(response.status).toBe(500);
-      expect(data.error.code).toBe('FETCH_FAILED');
-    });
-
-    it('should use configured MCP server URL', async () => {
-      process.env.MCP_SERVER_URL = 'http://custom-server:4000';
-
-      (global.fetch as jest.MockedFunction<typeof fetch>).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ tools: [] }),
-      } as Response);
-
-      const { GET } = await import('../tools/route');
-      await GET();
-
-      expect(global.fetch).toHaveBeenCalledWith(
-        'http://custom-server:4000',
-        expect.any(Object)
-      );
-    });
-  });
-});
+    expect(res.status).toBe(500)
+    expect(data.error.code).toBe('FETCH_FAILED')
+  })
+})
