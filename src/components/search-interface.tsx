@@ -798,31 +798,31 @@ export default function SearchInterface({
     if (orderedOpts.length > 0) handlePickManyActiveToken(orderedOpts);
   }, [pickerSelectedValues, pickerOptions, handlePickManyActiveToken]);
 
-  // Run the haystack-aware search whenever the user submits while in
-  // structured mode. Sends both the compiled filter and any residual freetext
-  // to /api/search/haystack — the endpoint routes the filter to the Haystack
-  // server and the freetext to the existing semantic pipeline.
+  // Run the haystack-aware search (filter preview) when submitting in the
+  // structured haystack composer. Sends the compiled filter + residual freetext
+  // as a single query to /api/search/unified (the canonical retrieval pipeline).
   const runHaystackSearch = useCallback(async () => {
     const { filter, freetext } = buildHaystackFilter(haystackChips, aiQuery);
     if (!filter && !freetext) return;
+    // The deprecated /api/search/haystack forwarder was deleted — call its
+    // canonical replacement /api/search/unified directly (same {query} shape:
+    // filter + freetext joined). Returns { chunks, total } or { error }.
+    const query = [filter, freetext].filter(Boolean).join(' ').trim();
     setHaystackBusy(true);
     try {
-      const res = await fetch('/api/search/haystack', {
+      const res = await fetch('/api/search/unified', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          filter,
-          freetext,
+          query,
           ...(aiCaseId ? { caseId: aiCaseId } : {}),
         }),
       });
       const data = await res.json();
       setHaystackPreview({
         filter,
-        haystackCount: Array.isArray(data?.haystack?.results)
-          ? data.haystack.results.length
-          : undefined,
-        note: data?.haystack?.note,
+        haystackCount: Array.isArray(data?.chunks) ? data.chunks.length : undefined,
+        note: data?.error?.message,
       });
     } catch (err) {
       setHaystackPreview({

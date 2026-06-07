@@ -51,20 +51,36 @@ export async function POST(request: NextRequest) {
   const limit = body.limit ?? 20;
   const searchMode = body.searchMode ?? 'hybrid';
 
+  // Bound the request so a slow embed/retrieve (e.g. a very long free-text
+  // query against a degraded inference fleet) returns a fast, readable 504
+  // instead of leaving the client on a multi-minute pending request. Note: the
+  // underlying query_case_knowledge call is not cancellable, so it may keep
+  // running in the background after we respond — this only caps the response.
+  const TIMEOUT_MS = Number(process.env.SS_SEARCH_TIMEOUT_MS ?? 90_000);
+
   try {
     // The unified pipeline lives inside query_case_knowledge — it owns the
     // AST → field-filter extraction → prisma-traverse resolution → LanceDB
     // pre-filter flow. We always run it in `boolean` mode now; the legacy
     // keyword-only path is removed.
     const registry = await getToolRegistry();
-    const result = await registry.execute('query_case_knowledge', {
-      query,
-      ...(body.caseId ? { caseId: body.caseId } : {}),
-      ...(body.chatId ? { chatId: body.chatId } : {}),
-      limit,
-      searchMode,
-      mode: 'boolean',
-    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      registry.execute('query_case_knowledge', {
+        query,
+        ...(body.caseId ? { caseId: body.caseId } : {}),
+        ...(body.chatId ? { chatId: body.chatId } : {}),
+        limit,
+        searchMode,
+        mode: 'boolean',
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`SEARCH_TIMEOUT:${TIMEOUT_MS}`)),
+          TIMEOUT_MS,
+        );
+      }),
+    ]).finally(() => clearTimeout(timer));
 
     if (!result.success) {
       const msg = result.error ?? 'Search failed';
@@ -91,9 +107,21 @@ export async function POST(request: NextRequest) {
       total: chunks.length,
     });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unified search failed';
+    if (msg.startsWith('SEARCH_TIMEOUT:')) {
+      const secs = Math.round(Number(msg.split(':')[1] || '0') / 1000);
+      return NextResponse.json(
+        {
+          error: {
+            message: `Search timed out after ${secs}s. Try a shorter, more focused query — e.g. the case filter chip plus a few keywords. Very long free-text queries are slow to embed and retrieve, especially while the inference fleet is degraded.`,
+          },
+        },
+        { status: 504 },
+      );
+    }
     console.error('[unified search] error', err);
     return NextResponse.json(
-      { error: { message: err instanceof Error ? err.message : 'Unified search failed' } },
+      { error: { message: msg } },
       { status: 500 },
     );
   }
