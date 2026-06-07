@@ -18,7 +18,6 @@ import {
   errGrid,
   okGrid,
   singletonGrid,
-  toHayson,
 } from '@/lib/legal/hayson'
 import { tableFromFilter, navHierarchy } from '@/lib/legal/repo'
 import { db } from '@/lib/legal/kysely'
@@ -224,12 +223,6 @@ async function opNav(params: URLSearchParams, body: any): Promise<string> {
 function normalizeFilter(filter: string): string {
   return filter.trim()
 }
-
-// ref/label/origin domain helpers moved to @/lib/haystack/refs (imported above):
-//   refValueToId, stripSelfRefs, synthesizeRefsFromColumns, REF_TARGET_TABLE,
-//   invalidateLabelCache, collectRefIdsFromPatch, tableForKind, refToId, asYmd,
-//   computeDis, formatLabelFor, Origin/ORIGIN_*, getSelfPersonId, deriveOrigin,
-//   applyOrigin, scopeRefTarget, inlineRefLabels, recoverTagObject.
 
 /**
  * Sniff an attachmentKind out of a Haystack filter string. The tag panel sends
@@ -508,16 +501,6 @@ function inlineCourt(c: any): any {
   return out
 }
 
-// Filing → entity auto-materializers (ensureMotionForFiling,
-// ensureMotionAttachmentForFiling, ensureReportersRecordForFiling,
-// ensureClerksRecordForFiling) + KIND_TO_ATTACHMENT_KIND moved to
-// @/lib/haystack/ensure-filing (imported above).
-
-// commit write path (commitEntity, splitPatch, applyCaseSideEffects,
-// prismaErrToGrid, validateCasePath, inlineRow + the KIND_MODEL_MAP /
-// DATE_COLUMNS / REQUIRED_ON_CREATE / NON_TAG_COLUMNS config maps) moved to
-// @/lib/haystack/commit. commitEntity is imported + re-exported below.
-
 
 
 async function opCommit(_params: URLSearchParams, body: any): Promise<string> {
@@ -541,10 +524,6 @@ async function opCommit(_params: URLSearchParams, body: any): Promise<string> {
   if (!result.ok) return result.errGridJson
   return encodeGrid([result.row], { table: kind as any })
 }
-
-// recoverTagObject moved to @/lib/haystack/refs (imported above).
-
-// NON_TAG_COLUMNS + filterToTagFields moved to @/lib/haystack/commit.
 
 function opClose(): string {
   // No session state in v1.
@@ -633,6 +612,3 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ op: string 
   const params = await (ctx.params as any)
   return dispatchHaystack(req, params.op)
 }
-
-// silence unused-import warning if toHayson tree-shakes out
-void toHayson
