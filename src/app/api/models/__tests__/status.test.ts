@@ -2,6 +2,8 @@
  * Tests for Model Status API Route
  * 
  * Requirements: 18.12
+ *
+ * @jest-environment node
  */
 
 import { GET } from '../status/route';

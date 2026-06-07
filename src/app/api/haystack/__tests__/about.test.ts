@@ -3,6 +3,8 @@
  *
  * Hits the route handler directly with a NextRequest, validates bearer auth
  * and the grid shape.
+ *
+ * @jest-environment node
  */
 import { NextRequest } from 'next/server'
 

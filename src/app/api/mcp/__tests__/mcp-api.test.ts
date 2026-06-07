@@ -9,6 +9,8 @@
  * - Proxy requests to MCP server
  * 
  * Requirements: 16.2, 16.3, 16.4, 16.5
+ *
+ * @jest-environment node
  */
 
 import { describe, it, expect, beforeEach, jest } from '@jest/globals';

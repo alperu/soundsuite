@@ -2,6 +2,8 @@
  * Tests for Model Delete API Route
  * 
  * Requirements: 18.16
+ *
+ * @jest-environment node
  */
 
 import { POST } from '../delete/route';

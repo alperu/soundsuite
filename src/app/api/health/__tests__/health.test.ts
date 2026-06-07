@@ -5,6 +5,8 @@
  * of all system services (FileWatcher, JobQueue, MCP Server, Database).
  * 
  * Requirements: 19.5
+ *
+ * @jest-environment node
  */
 
 import { GET } from '../route'

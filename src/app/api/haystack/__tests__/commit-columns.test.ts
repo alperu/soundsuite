@@ -13,6 +13,8 @@
  *     -d '{"id":"<case-id>","kind":"case","patch":{"name":"Test","jurisdiction":"Texas","case":true,"jurisdictionTx":true}}'
  *   sqlite3 prisma/data/sound-suite.db \
  *     "SELECT name, jurisdiction, tags FROM Case WHERE id='<case-id>';"
+ *
+ * @jest-environment node
  */
 import { NextRequest } from 'next/server'
 

@@ -4,6 +4,8 @@
  * Tests the complete flow: download → status check → delete
  * 
  * Requirements: 18.13, 18.14, 18.15, 18.16
+ *
+ * @jest-environment node
  */
 
 import { POST as downloadPost } from '../download/route';

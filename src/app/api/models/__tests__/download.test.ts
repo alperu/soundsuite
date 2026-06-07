@@ -2,6 +2,8 @@
  * Tests for Model Download API Route
  * 
  * Requirements: 18.13, 18.14, 18.15
+ *
+ * @jest-environment node
  */
 
 import { POST } from '../download/route';
