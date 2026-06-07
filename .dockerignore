@@ -1,0 +1,55 @@
+# Build artifacts & deps (reinstalled/rebuilt inside the image)
+node_modules
+**/node_modules
+.next
+**/.next
+out
+dist
+
+# Mutable runtime state — never bake into the image
+data
+data-local
+prisma/data
+public/exhibits
+public/sideCar/builds
+logs
+.pids
+*.log
+
+# VCS / tooling
+.git
+.gitignore
+.github
+.claude
+.vscode
+.idea
+*.tsbuildinfo
+
+# The GPU sidecar is a separate image (sideCar/Dockerfile); not part of this build
+sideCar
+
+# Marketing site is a separate Statamic project with its own repo
+marketing
+
+# Docs are not needed at build time (kept small)
+docs
+
+# Tests & coverage
+coverage
+**/__tests__
+**/*.test.ts
+**/*.test.tsx
+
+# Local env files — never bake secrets into the image
+.env
+.env.local
+.env.*.local
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Docker meta (not needed inside the build context tree)
+docker-compose.yml
+Dockerfile
+.dockerignore

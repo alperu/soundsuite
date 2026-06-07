@@ -1,0 +1,66 @@
+# Sound Suite — Phase 1 compose topology (roadmap §4).
+#
+#   docker compose up            # build locally and run
+#   SOUNDSUITE_TAG=1.4.2 docker compose up   # pin a published image
+#
+# Persistent state lives in the named volume `soundsuite-data` (mounted at
+# /data → /data/v1/...). Drop PDFs into the host directory bound to
+# /watch/cases (set SOUNDSUITE_WATCH_DIR, defaults to ./watch).
+
+services:
+  app:
+    # Pull a published image when SOUNDSUITE_TAG is set; otherwise build locally.
+    image: ${SOUNDSUITE_IMAGE:-ghcr.io/alper/soundsuite}:${SOUNDSUITE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "3000:3000"   # UI / API
+      - "3001:3001"   # MCP server (HTTP)
+    environment:
+      SOUND_SUITE_DATA_DIR: /data
+      DATABASE_URL: file:/data/v1/db/sound-suite.db
+      REDIS_URL: redis://redis:6379
+      WATCH_PATHS: /watch/cases
+      EMBEDDING_PROVIDER: transformers
+      MCP_AUTH_MODE: none
+      LAYOUT_VERSION: "1"
+      NODE_ENV: production
+    volumes:
+      - soundsuite-data:/data
+      # Host watch directory → container watch path. Read-only: the app only
+      # reads PDFs from here; all derived state goes to the named volume.
+      - ${SOUNDSUITE_WATCH_DIR:-./watch}:/watch/cases:ro
+    healthcheck:
+      # node:bookworm-slim has no curl/wget — use a node fetch one-liner.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF persistence so the folder-index / filing-metadata cache survives
+    # restarts.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - soundsuite-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  soundsuite-data:
+  soundsuite-redis:

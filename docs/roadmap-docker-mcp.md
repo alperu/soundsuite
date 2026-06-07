@@ -1,6 +1,20 @@
 # Roadmap: Dockerized Sound Suite & Safe Upgrade Strategy
 
-**Status:** Draft · **Owner:** TBD · **Scope:** packaging & upgrade, not features
+**Status:** Phase 1 & Phase 2 implemented · **Owner:** TBD · **Scope:** packaging & upgrade, not features
+
+> **Implementation status (2026-06):**
+> - **Phase 1 (§4 — Dockerfile + compose):** ✅ implemented — `Dockerfile`,
+>   `docker-compose.yml`, `.dockerignore`, `docker/entrypoint.sh`, and
+>   `output: 'standalone'` in `next.config.ts`. The entrypoint does the
+>   dir-ensure + `prisma migrate deploy` + start only; the §6 upgrade handshake
+>   is a marked TODO.
+> - **Phase 2 (§5 — release pipeline):** ✅ implemented (partial) —
+>   `.github/workflows/docker-publish.yml` (GHCR, semver tags, amd64) and
+>   `.github/workflows/release-zip.yml` (GitHub Release + buildable zip).
+>   The `:stable` channel and the §9 upgrade-test matrix are **deferred**.
+> - **Deferred:** §3 app-source path-unification, §6 safe-upgrade handshake,
+>   §7 slim MCP image / catalog, §9 test matrix, multi-arch (arm64).
+> See [`ci-cd.md`](./ci-cd.md) for usage.
 
 This roadmap turns Sound Suite from a "clone the repo and run `npm run dev`" app into a container users can pull, run, and upgrade without losing data. It also prepares the MCP server half of the app for distribution through the Docker MCP Catalog, building on Docker Desktop 4.62 → 4.67's MCP Toolkit / Gateway features.
 
@@ -85,9 +99,17 @@ Dev mode keeps the current paths working via a compatibility shim so `npm run de
 
 ---
 
-## 4. Phase 1 — Containerize the main app
+## 4. Phase 1 — Containerize the main app  ✅ IMPLEMENTED
 
 **Deliverable:** a working `docker compose up` that runs the full app with data persistence. No MCP catalog work yet, no slim image.
+
+> **Done:** `Dockerfile` (multi-stage, `node:22-bookworm-slim`, standalone),
+> `docker-compose.yml` (app + redis, healthchecks, `soundsuite-data` /
+> `soundsuite-redis` volumes, `/watch/cases` bind mount), `.dockerignore`,
+> `docker/entrypoint.sh`, and `output: 'standalone'` in `next.config.ts`.
+> **Entrypoint scope:** dir-ensure + `prisma migrate deploy` (deploy-only
+> enforced) + start. The §6 backup/handshake/layout-gate steps are a
+> clearly-marked TODO in the entrypoint (need app-source support).
 
 ### Topology
 
@@ -154,7 +176,16 @@ Four services:
 
 ---
 
-## 5. Phase 2 — Image versioning & release pipeline
+## 5. Phase 2 — Image versioning & release pipeline  ✅ IMPLEMENTED (partial)
+
+> **Done:** `.github/workflows/docker-publish.yml` builds `linux/amd64` and
+> pushes to GHCR (`ghcr.io/<owner>/soundsuite`) via `GITHUB_TOKEN` with semver
+> tags `1.4.2` / `1.4` / `1` / `latest` (`docker/metadata-action`); PRs build
+> without pushing. `.github/workflows/release-zip.yml` cuts a GitHub Release and
+> attaches a buildable source zip. `APP_VERSION` is read from `package.json` at
+> build time.
+> **Deferred:** the `:stable` channel and its promotion gate (depends on the §9
+> test matrix), and `CHANGELOG.md` automation. See [`ci-cd.md`](./ci-cd.md).
 
 Semver synced to `package.json`. Every release produces these tags:
 
