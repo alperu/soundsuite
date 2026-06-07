@@ -536,15 +536,15 @@ export default function SearchInterface({
   // Outside any mustache, both clear.
   useEffect(() => {
     if (!useHaystackFilters) {
-      if (activeToken !== null) setActiveToken(null);
-      if (tokenSuggestions.length > 0) setTokenSuggestions([]);
+      setActiveToken(null);
+      setTokenSuggestions((prev) => (prev.length > 0 ? [] : prev));
       setAlreadyInExpression(new Set());
       return;
     }
     const m = detectMustacheActive(aiQuery, aiQueryCursor);
     if (!m) {
-      if (activeToken !== null) setActiveToken(null);
-      if (tokenSuggestions.length > 0) setTokenSuggestions([]);
+      setActiveToken(null);
+      setTokenSuggestions((prev) => (prev.length > 0 ? [] : prev));
       setAlreadyInExpression(new Set());
       return;
     }
@@ -565,17 +565,20 @@ export default function SearchInterface({
           startIndex: trimmedStart + tok.startIndex,
           endIndex: trimmedStart + tok.endIndex,
         };
-        if (
-          !activeToken ||
-          activeToken.prefix !== absToken.prefix ||
-          activeToken.partial !== absToken.partial ||
-          activeToken.op !== absToken.op ||
-          activeToken.startIndex !== absToken.startIndex ||
-          activeToken.endIndex !== absToken.endIndex
-        ) {
-          setActiveToken(absToken);
-        }
-        if (tokenSuggestions.length > 0) setTokenSuggestions([]);
+        // Functional update reads the LIVE previous token (not a stale
+        // closure) and bails when nothing changed — so the picker can't be
+        // left closed by a guard comparing against an out-of-date activeToken.
+        setActiveToken((prev) =>
+          prev &&
+          prev.prefix === absToken.prefix &&
+          prev.partial === absToken.partial &&
+          prev.op === absToken.op &&
+          prev.startIndex === absToken.startIndex &&
+          prev.endIndex === absToken.endIndex
+            ? prev
+            : absToken,
+        );
+        setTokenSuggestions((prev) => (prev.length > 0 ? [] : prev));
         // Phase B post-process: parse mustache content for atoms matching the
         // active token's prefix so the picker can mark already-picked rows.
         const prefix = absToken.path[0];
@@ -593,14 +596,13 @@ export default function SearchInterface({
 
     // Phase A — token-name partial. Filter TOKEN_KEYS by case-insensitive
     // substring against `fieldPartial`.
-    if (activeToken !== null) setActiveToken(null);
+    setActiveToken(null);
     setAlreadyInExpression(new Set());
     const q = m.fieldPartial.trim().toLowerCase();
     const filtered = TOKEN_KEYS.filter((k) => !q || k.toLowerCase().includes(q)).slice(0, 12);
     // Only update state if it actually changed (cheap deep equality on joined).
     const nextJoined = filtered.join('|');
-    const prevJoined = tokenSuggestions.join('|');
-    if (nextJoined !== prevJoined) setTokenSuggestions(filtered);
+    setTokenSuggestions((prev) => (prev.join('|') === nextJoined ? prev : filtered));
   }, [aiQuery, aiQueryCursor, useHaystackFilters]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------------------------------------------------------------------
