@@ -2440,15 +2440,15 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                     along side it". */}
                 <div className={(filterLogicCollapsed || !booleanMode) ? 'max-w-5xl mx-auto' : 'max-w-3xl mx-auto'}>
                   <form onSubmit={e => {
-                    // When Filter mode is on AND the user actually built
-                    // chips via {{ ... }}, route the search through the
-                    // haystack pipeline so the chips become structured
-                    // filters. Otherwise: standard AI search.
-                    if (useHaystackFilters && haystackChips.length > 0) {
-                      e.preventDefault();
-                      void runHaystackSearch();
-                      return;
-                    }
+                    // Always run the actual AI / Deep / Compare search. Filter
+                    // chips are folded into the query inline as `{{ raw }}`
+                    // (ChipEditor.getComposerString → handleAISearch), so the
+                    // backend's segmentChipsAndIntents turns them into structured
+                    // filters. The previous short-circuit routed EVERY submit
+                    // (including Deep Search) to runHaystackSearch() whenever a
+                    // chip was present — but that only runs a slow record-count
+                    // PREVIEW and never reached deep search, so deep search was
+                    // unreachable with any filter chip applied.
                     handleAISearch(e);
                   }} className="block">
                     {haystackMode ? (
