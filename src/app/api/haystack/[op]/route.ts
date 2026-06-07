@@ -450,7 +450,7 @@ async function opReadCourt(
 ): Promise<string> {
   try {
     if (idValue) {
-      const row = await prisma.court.findUnique({ where: { id: idValue } })
+      const row = await (prisma as any).court.findUnique({ where: { id: idValue } })
       if (!row) return encodeGrid([], { table: 'Court' as any })
       const withLabels = await inlineRefLabels(inlineCourt(row), 'Court')
       return encodeGrid([withLabels], { table: 'Court' as any })
@@ -470,7 +470,7 @@ async function opReadCourt(
     const where: any = {}
     if (q) where.name = { contains: q }
     if (courtType) where.courtType = courtType
-    const rows = await prisma.court.findMany({
+    const rows = await (prisma as any).court.findMany({
       where,
       orderBy: { name: 'asc' },
       take: typeof limit === 'number' && Number.isFinite(limit) ? Math.min(limit, 500) : 100,
