@@ -56,6 +56,18 @@ if [ "${MIGRATION_MODE:-deploy}" != "deploy" ]; then
   exit 1
 fi
 
+# The image ships NO database — only prisma/schema.prisma + prisma/migrations
+# (the migration "recipe"). On first run the DB file does not exist yet, so
+# `migrate deploy` creates a fresh, EMPTY SQLite database at DATABASE_URL on the
+# mounted volume and applies every migration. On later runs it only applies
+# pending migrations. The database is therefore never baked into the image.
+DB_FILE="${DATABASE_URL#file:}"
+if [ -f "${DB_FILE}" ]; then
+  log "Existing database at ${DB_FILE} — applying any pending migrations."
+else
+  log "No database at ${DB_FILE} — creating a fresh, empty database and applying all migrations."
+fi
+
 log "Applying migrations: prisma migrate deploy"
 # prisma.config.ts supplies the datasource URL from DATABASE_URL.
 npx prisma migrate deploy
