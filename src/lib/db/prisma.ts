@@ -28,8 +28,12 @@ const globalForPrisma = globalThis as unknown as {
 function resolveSqlitePath(url: string): string {
   const stripped = url.startsWith('file:') ? url.slice('file:'.length) : url
   if (path.isAbsolute(stripped)) return stripped
-  // Mirror Prisma 5 behaviour: relative paths are anchored at the prisma/ dir
-  return path.resolve(process.cwd(), 'prisma', stripped)
+  // Mirror Prisma 5 behaviour: relative paths are anchored at the prisma/ dir.
+  // `turbopackIgnore` stops Turbopack's build tracer from treating this dynamic
+  // path as a static dependency — without it the tracer copies the ENTIRE
+  // prisma/ dir (the dev DB + every sound-suite.db.bak.*, ~26 GB) into
+  // .next/standalone. The database is opened at runtime, never bundled.
+  return path.resolve(/* turbopackIgnore: true */ process.cwd(), 'prisma', stripped)
 }
 
 /**

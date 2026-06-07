@@ -69,9 +69,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ attachment: existing, duplicate: true });
     }
 
+    // turbopackIgnore: runtime path under the data volume; without it the build
+    // tracer infers a glob matching ~117k files and traces the whole project.
     const chatDir = chatAttachmentDir(chatId);
     await fs.mkdir(chatDir, { recursive: true });
-    const filePath = path.join(chatDir, `${hash}.${ext}`);
+    const filePath = path.join(/* turbopackIgnore: true */ chatDir, `${hash}.${ext}`);
     await fs.writeFile(filePath, buffer);
 
     const row = await prisma.chatAttachment.create({

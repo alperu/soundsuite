@@ -67,8 +67,10 @@ export async function GET(
       );
     }
 
-    const stat = fs.statSync(resolvedPath);
-    const fileBuffer = fs.readFileSync(resolvedPath);
+    // turbopackIgnore: these read user files by a fully-dynamic runtime path;
+    // without it Turbopack's tracer matches ~25k files and over-bundles.
+    const stat = fs.statSync(/* turbopackIgnore: true */ resolvedPath);
+    const fileBuffer = fs.readFileSync(/* turbopackIgnore: true */ resolvedPath);
 
     return new NextResponse(new Uint8Array(fileBuffer), {
       status: 200,
