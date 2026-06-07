@@ -17,6 +17,33 @@ const nextConfig: NextConfig = {
   // TODO: clear the remaining 63 and drop these two flags.
   typescript: { ignoreBuildErrors: true },
   eslint: { ignoreDuringBuilds: true },
+  // Keep `output: "standalone"` lean. Several routes read RUNTIME files by a
+  // fully-dynamic path (e.g. documents/[id]/pdf does fs.readFileSync(doc.filePath),
+  // and src/lib/db/prisma.ts resolves the SQLite file under
+  // path.resolve(process.cwd(), 'prisma', …)). @vercel/nft can't statically
+  // resolve those, so it conservatively traced the ENTIRE tree into
+  // .next/standalone (prisma/ alone was ~26 GB — the dev DB; plus screenshots/,
+  // public/exhibits/, data/, etc.). None of that is a build/runtime dependency:
+  // the real DB + exhibits live on the mounted volume at runtime. Exclude these
+  // data/non-code paths from the trace so the standalone bundle (and the Docker
+  // image) stays small. Globs are relative to the project root.
+  outputFileTracingExcludes: {
+    '*': [
+      'prisma/data/**',
+      'public/exhibits/**',
+      'public/sideCar/**',
+      'screenshots/**',
+      'data/**',
+      'data-local/**',
+      'marketing/**',
+      'sideCar/**',
+      'docs/**',
+      'logs/**',
+      '.claude/**',
+      '.git/**',
+      '**/*.map',
+    ],
+  },
   images: {
     remotePatterns: [
       {

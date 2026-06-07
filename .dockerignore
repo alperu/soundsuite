@@ -12,6 +12,7 @@ data-local
 prisma/data
 public/exhibits
 public/sideCar/builds
+screenshots
 logs
 .pids
 *.log
