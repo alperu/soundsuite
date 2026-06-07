@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { CourtFilterRail } from '@/components/courts/court-filter-rail';
 import { CourtTable } from '@/components/courts/court-table';
@@ -22,6 +22,17 @@ function parseType(v: string | null): CourtType | '' {
 }
 
 export default function CourtsPage() {
+  // useSearchParams() must sit under a Suspense boundary or `next build`
+  // bails out of static prerendering for this route (Next 15+/16). Wrap the
+  // real page so the shell can prerender.
+  return (
+    <Suspense fallback={null}>
+      <CourtsPageInner />
+    </Suspense>
+  );
+}
+
+function CourtsPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
 

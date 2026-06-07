@@ -6,14 +6,15 @@ const nextConfig: NextConfig = {
   // Docker runner stage can ship a slim image without the full node_modules.
   // Harmless for `npm run dev` (only affects `next build`).
   output: "standalone",
-  // The repo currently has a pre-existing, environment-independent `next build`
-  // type-check failure: ~390 errors of the form "Property X does not exist on
-  // type '{}'" stem from `src/lib/db/prisma.ts`, where
-  // `export const prisma = globalForPrisma.prisma ?? baseClient.$extends(...)`
-  // — `globalForPrisma.prisma` is typed `unknown`, and `unknown ?? x` widens to
-  // `{} | x`, so every `prisma.<model>` access errors on the `{}` branch.
-  // Image packaging should not be the type/lint gate (CI + dev are), so we let
-  // the production build proceed. REMOVE these once that export is annotated.
+  // The original ~390-error root cause (`prisma` widening to `{}` in
+  // src/lib/db/prisma.ts) has been FIXED (the export is now typed via
+  // ReturnType<typeof createPrismaClient>). ~63 type errors remain — mostly
+  // test files (jest mock typings + a missing `@testing-library/dom` dev dep)
+  // plus a handful of app spots (case-management ActionLog union, extended-vs-
+  // base PrismaClient params in worker-init/get-tool-registry, boolean-to-fts
+  // Node typings). None block the production build or runtime. Image packaging
+  // should not be the type/lint gate (CI + dev are), so the build proceeds.
+  // TODO: clear the remaining 63 and drop these two flags.
   typescript: { ignoreBuildErrors: true },
   eslint: { ignoreDuringBuilds: true },
   images: {

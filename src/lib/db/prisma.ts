@@ -58,9 +58,21 @@ function makeClient(): PrismaClient {
  * builds on `prisma` (the extended client) — see
  * `docs/xeto-haystack-research.md §12.2` for the layering rationale.
  */
-const baseClient = withCacheInvalidation(makeClient())
-export const prisma =
-  globalForPrisma.prisma ?? baseClient.$extends(xetoValidate)
+function createPrismaClient() {
+  return withCacheInvalidation(makeClient()).$extends(xetoValidate)
+}
+
+/**
+ * The fully-extended client type. `$extends` returns a structurally-distinct
+ * type, so we derive it from the factory rather than naming it by hand. The
+ * global cache is `unknown` (set above), so we cast it back to this type at the
+ * export site — otherwise `unknown ?? client` widens `prisma` to `{}` and every
+ * `prisma.<model>` access fails to type-check.
+ */
+export type ExtendedPrismaClient = ReturnType<typeof createPrismaClient>
+
+export const prisma: ExtendedPrismaClient =
+  (globalForPrisma.prisma as ExtendedPrismaClient | undefined) ?? createPrismaClient()
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
 

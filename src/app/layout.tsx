@@ -7,6 +7,13 @@ export const metadata: Metadata = {
   description: 'Document intelligence platform for legal case management',
 }
 
+// Sound Suite is a live single-user dashboard backed by SQLite/LanceDB — every
+// page reflects current DB state, so nothing should be statically baked at
+// build time. Forcing dynamic rendering app-wide stops `next build` from trying
+// to prerender DB-backed pages (which fails against the empty build-time DB)
+// and makes runtime always read the real database.
+export const dynamic = 'force-dynamic'
+
 export default function RootLayout({
   children,
 }: {
