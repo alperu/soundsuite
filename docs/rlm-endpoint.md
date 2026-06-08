@@ -27,7 +27,12 @@ fix tool-call parsing, and pin the image.
    (motion/person relationships).
 3. The RLM is an **evidence-gatherer**: each round it may call a tool to fetch
    *additional* excerpts beyond the seed, up to **`maxRounds = 4`**. When it has
-   enough, it answers briefly ("done") and the next stage writes the report.
+   enough it answers briefly ("done"). **On the final round the master sends
+   `tool_choice:'none'`** so the model *must* emit a text answer instead of
+   another tool call — the RLM tends to keep gathering and never self-terminate,
+   which previously bailed at maxRounds and discarded all evidence.
+   It does **not** write the report; the gathered sources flow to a separate
+   cloud-LLM (Claude) synthesis stage that produces the final answer.
 4. Each round the master:
    - estimates input tokens (`chars / 3.2`),
    - **clamps** `max_tokens` so `input + output + safety ≤ RLM_CONTEXT_TOKENS`,
@@ -142,10 +147,22 @@ host (confirmed via `/version`), so the recreate finds the layers cached (no
 multi-GB re-pull) while still applying the new args. Bumping to a newer release
 later **will** trigger a full image pull.
 
+### 6. Force a final answer on the last round — `stream-rlm.ts`
+
+End-to-end verification (Deep Search via `/api/search/deep` `useRlm`) showed
+fixes 1–4 work — the RLM now issues **distinct, progressive** tool queries
+("grounds" → "relief" → …) instead of the old identical-query amnesia loop. But
+it still hit `maxRounds`: this evidence-gatherer never self-terminates — it emits
+a fresh tool call every round and never a final "done", so the loop errored out
+and discarded all gathered evidence before the synthesis stage. Fix: on the
+**final round** send `tool_choice:'none'` so the model must produce a text answer
+(and skip the regex fallback on that round so its text isn't re-read as a tool
+call). The loop ends cleanly and synthesis proceeds with all gathered sources.
+
 ### Files touched
 
 - `src/lib/search/deep-search.ts` — seed cap (fix 1) + comment.
-- `src/lib/ai/stream-rlm.ts` — `RLM_CONTEXT_TOKENS = 40960` + comment.
+- `src/lib/ai/stream-rlm.ts` — `RLM_CONTEXT_TOKENS = 40960` (fix 2) + last-round `tool_choice:'none'` (fix 6).
 - `src/lib/ai/__tests__/stream-rlm-budget.test.ts` — derive test input from the constant.
 - `sideCar/src/lib/mode-templates.ts` — `RLM_VLLM_ARGS`, `VLLM_IMAGE` use.
 - `sideCar/src/lib/state.ts` — `vllmArgs`, `VLLM_IMAGE` constant.
