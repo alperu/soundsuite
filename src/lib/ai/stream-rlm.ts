@@ -467,7 +467,13 @@ export async function* runRlmWithTools(opts: {
           model,
           messages,
           tools: opts.tools,
-          tool_choice: 'auto',
+          // Last round: forbid further tool calls so the model MUST emit a final
+          // text answer instead of gathering forever. The RLM (an evidence-
+          // gatherer) otherwise issues a fresh tool call every round and never
+          // self-terminates — it would hit maxRounds and bail with no answer,
+          // discarding all the evidence gathered. `tool_choice:'none'` forces a
+          // clean termination on the final round.
+          tool_choice: round === maxRounds ? 'none' : 'auto',
           max_tokens: roundMaxTokens,
           temperature: opts.temperature ?? 0.3,
           stream: false,
@@ -505,7 +511,10 @@ export async function* runRlmWithTools(opts: {
 
     const choice = j.choices?.[0];
     const msg = choice?.message;
-    let toolCalls: ToolCall[] | undefined = msg?.tool_calls;
+    // On the final round we sent tool_choice:'none', so never interpret the
+    // response as a tool call (even tool-call-shaped text) — whatever the model
+    // produced is the final answer, which ends the loop cleanly.
+    let toolCalls: ToolCall[] | undefined = round === maxRounds ? undefined : msg?.tool_calls;
 
     // Defensive fallback: when vLLM's tool-call parser misses the shape the
     // model emitted, scan the assistant content for known tool-call forms
@@ -513,7 +522,7 @@ export async function* runRlmWithTools(opts: {
     // any of the tools the caller declared. See docs/search-unification — RLM
     // was emitting `query_case_knowledge("...")` plain-text under hermes
     // parser config and the loop terminated early.
-    if ((!toolCalls || toolCalls.length === 0) && typeof msg?.content === 'string' && msg.content.length > 0) {
+    if (round !== maxRounds && (!toolCalls || toolCalls.length === 0) && typeof msg?.content === 'string' && msg.content.length > 0) {
       const fallback = extractFallbackToolCalls(msg.content, opts.tools, round);
       if (fallback.length > 0) {
         console.warn(
