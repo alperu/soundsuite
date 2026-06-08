@@ -1296,10 +1296,21 @@ export async function generateReportWithRlm(
   // for recursive fetches).
   const contextParts: string[] = [];
   let totalChars = 0;
-  const maxChars = 60000;
+  // The RLM is an evidence GATHERER — it fetches more excerpts via tools, so
+  // the seed must leave room inside the model's context window for those tool
+  // results plus the final answer. A 60K-char seed (~18K tokens) nearly filled
+  // the 32K window, so every tool result got trimmed and the model looped on
+  // the same query without ever synthesizing (see logs/dashboard.log, 2026-06-08).
+  // Cap both the seed total and each individual excerpt so the recursive fetches
+  // have room.
+  const maxChars = 30000;
+  const RLM_SEED_CHUNK_CHAR_CAP = 1500;
   for (const s of initialSources) {
     const cite = s.citation || s.citationShort || `${s.document}, p.${s.page}`;
-    const block = `[${cite}]\n${s.text}\n`;
+    const text = s.text.length > RLM_SEED_CHUNK_CHAR_CAP
+      ? s.text.slice(0, RLM_SEED_CHUNK_CHAR_CAP) + '…[truncated]'
+      : s.text;
+    const block = `[${cite}]\n${text}\n`;
     if (totalChars + block.length > maxChars) break;
     contextParts.push(block);
     totalChars += block.length;
@@ -1461,7 +1472,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
     { role: 'user' as const, content: userContent },
   ];
 
-  // RLM context window is 32K (Qwen3-8B with --max-model-len 32768).
+  // RLM context window is 64K (Qwen3-8B with --max-model-len 65536, fp8 KV cache).
   // vLLM enforces prompt_tokens + max_tokens <= max_model_len; if we pass
   // through a large user-facing maxTokens (e.g. 32768 from the UI for cloud
   // models) the prompt has zero room and vLLM 400s. Cap output at 4096 —

@@ -62,16 +62,16 @@ describe('clampOutputTokens', () => {
   });
 
   it('clamps to the remaining budget when input is large', () => {
-    // Want estimated input ≈ 28673 (the value we crashed on in prod).
-    // chars = 28673 * 3.2 ≈ 91754
-    const msgs: ChatMessage[] = [{ role: 'system', content: lorem(91754) }];
+    // Size input (relative to the ctx window) so the remaining budget
+    // (ctx - input - safety ≈ 3840) is below the requested 4096 but above the
+    // MIN floor — forcing a partial clamp. Derived from RLM_CONTEXT_TOKENS so
+    // this survives context-window changes.
+    const estInput = RLM_CONTEXT_TOKENS - SAFETY_MARGIN_TOKENS - 3840;
+    const msgs: ChatMessage[] = [{ role: 'system', content: lorem(Math.round(estInput * TOKEN_CHAR_RATIO)) }];
     const r = clampOutputTokens(msgs, 4096);
-    // Budget: 32768 - 28673 - 256 (safety) = 3839 → clamp from 4096
     expect(r.clamped).toBe(true);
     expect(r.maxTokens).toBeLessThan(4096);
     expect(r.maxTokens).toBeGreaterThanOrEqual(MIN_OUTPUT_TOKENS);
-    // 91754 chars / 3.2 = 28673.125 → Math.ceil → 28674
-    expect(r.estimatedInput).toBe(28674);
   });
 
   it('floors at MIN_OUTPUT_TOKENS even when the budget says less', () => {

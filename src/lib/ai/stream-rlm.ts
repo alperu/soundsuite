@@ -56,7 +56,8 @@ export const RLM_MODEL_ID = 'mit-oasys/rlm-qwen3-8b-v0.1';
 // ──────────────────────────────────────────────────────────────────────────
 // Context budgeting — vLLM rejects requests where prompt_tokens +
 // max_tokens > max_model_len. The current RLM (Qwen3-8B) is served with
-// --max-model-len 32768. The tool-use loop accumulates 80+ chunk-sized
+// --max-model-len 65536 (raised from 32768; fp8 KV cache keeps VRAM flat —
+// see sideCar mode-templates.ts / state.ts). The tool-use loop accumulates 80+ chunk-sized
 // payloads across rounds, easily crossing the ceiling by round 2 when
 // max_tokens=4096 is requested unconditionally (we crashed at 32769 on a
 // real run — see /Users/alper/.../logs/dashboard.log).
@@ -71,7 +72,7 @@ export const RLM_MODEL_ID = 'mit-oasys/rlm-qwen3-8b-v0.1';
 // The clamp + trim are logged so operators can see what happened, and the
 // retry-stream path uses the same numbers as the main loop.
 // ──────────────────────────────────────────────────────────────────────────
-export const RLM_CONTEXT_TOKENS = 32768;
+export const RLM_CONTEXT_TOKENS = 65536;
 export const TOKEN_CHAR_RATIO = 3.2;
 export const SAFETY_MARGIN_TOKENS = 256;
 export const MIN_OUTPUT_TOKENS = 768;

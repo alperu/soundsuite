@@ -40,8 +40,12 @@ export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-m
  * running container actually inherits at runtime.
  *
  * --gpu-memory-utilization 0.7 caps vLLM at ~34 GB of a 48 GB A6000 so
- * embedding+ocr don't get evicted. --max-model-len 32768 bounds the KV
- * cache pre-allocation. --dtype bfloat16 matches the published weights.
+ * embedding+ocr don't get evicted — that cap is the hard VRAM ceiling at ANY
+ * context length. --max-model-len 65536 widens the window (the old 32K was too
+ * small: a single Deep Search seed nearly filled it, starving the recursive
+ * tool results and looping the model). --kv-cache-dtype fp8 halves per-token KV
+ * so a full 64K sequence fits in the SAME pool a 32K bf16 one did — bigger
+ * context at no extra VRAM. --dtype bfloat16 matches the published weights.
  *
  * --enable-auto-tool-choice + --tool-call-parser pythonic opt vLLM
  * into OpenAI tool-calling so master's runRlmWithTools can drive
@@ -55,7 +59,8 @@ export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-m
  */
 const RLM_VLLM_ARGS: string[] = [
   '--gpu-memory-utilization', '0.7',
-  '--max-model-len', '32768',
+  '--max-model-len', '65536',
+  '--kv-cache-dtype', 'fp8',
   '--dtype', 'bfloat16',
   '--enable-auto-tool-choice',
   '--tool-call-parser', 'pythonic',

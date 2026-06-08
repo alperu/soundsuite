@@ -104,7 +104,10 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     priority: 'high',
     // Cap vLLM at 70% of the host GPU (34/48 ≈ 0.71). Without this, vLLM's
     // default --gpu-memory-utilization=0.9 fills ~43 GB on a 48 GB card,
-    // evicting embedding + ocr. --max-model-len bounds KV-cache pre-allocation.
+    // evicting embedding + ocr. That 0.7 cap is the hard VRAM ceiling at any
+    // context length. --max-model-len 65536 widens the window; --kv-cache-dtype
+    // fp8 halves per-token KV so a 64K sequence fits the same pool a 32K bf16
+    // one did — more context, no extra VRAM.
     //
     // Tool-calling: master's runRlmWithTools (src/lib/ai/stream-rlm.ts) drives
     // Phase B recursive RAG via OpenAI tool_choice='auto'. vLLM disables this
@@ -113,7 +116,8 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     // uses ChatML + Hermes-style <tool_call>...</tool_call> blocks.
     vllmArgs: [
       '--gpu-memory-utilization', '0.7',
-      '--max-model-len', '32768',
+      '--max-model-len', '65536',
+      '--kv-cache-dtype', 'fp8',
       '--dtype', 'bfloat16',
       '--enable-auto-tool-choice',
       '--tool-call-parser', 'pythonic',
