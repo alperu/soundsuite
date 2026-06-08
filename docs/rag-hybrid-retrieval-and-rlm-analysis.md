@@ -187,7 +187,29 @@ sensitive *legal* corpus.
 | **Long-context "stuff it all in"** | Gemini 2.5 Pro 1M, Claude Sonnet 4.6 1M (Mar 2026), GPT-5 400K | Ruled out for whole-corpus prompts: privacy, cost, and "lost in the middle" (still real on 1M-token models in 2026). Useful only as the final-answer synthesizer over retrieved evidence. |
 | **Reasoning models w/ self-retrieval** | DeepSeek R2/V4, o-series, Gemini Deep Think | Validate the paradigm but can't be handed a private corpus; a *local* small RLM is the privacy-preserving equivalent. |
 | **Late interaction (ColPali / ColQwen3)** | Per-token/patch embeddings + MaxSim; layout-aware | A better *recall layer*, not a competitor — would **feed** RLM. Strong for scanned/exhibit-heavy legal PDFs. |
-| **GraphRAG / KG-RAG** | Build a knowledge graph; answer global/multi-hop questions | Complementary: great for "what connects party X across the corpus"; heavy to index. |
+| **GraphRAG / KG-RAG** | Build a knowledge graph; answer global/multi-hop questions | **We already own the graph** (see §7.1) — the curated Haystack/Xeto + Prisma entity model. Gap is *graph-aware retrieval*, not building one. |
+
+### 7.1 "Aren't we already doing GraphRAG with Haystack?" — almost
+
+**Short answer: we own the expensive half of GraphRAG already, but we don't yet *retrieve* with it.**
+
+- **"Haystack" here = Project Haystack / Xeto** (`src/lib/haystack/`, `docs/xeto-haystack-research.md`) —
+  a typed tagging *ontology* adapted to courts. It is **not** deepset's RAG framework and **not**
+  Microsoft GraphRAG.
+- **We have a curated, authoritative, typed legal knowledge graph** in `prisma/schema.prisma`:
+  Case → Filing → Document / Motion → Exhibit; Person in roles judge/movant/respondent/clerk/reporter;
+  MotionEvent, Hearing, Court, Jurisdiction; motion amendment/supersession chains. It's built at
+  ingestion from parsed filings (`src/lib/haystack/commit.ts`, `ensure-filing.ts`) — so unlike GraphRAG
+  there is **no LLM entity extraction and nothing to hallucinate**. This is the hard, expensive part of
+  GraphRAG, and we already have it (and better, because it's authoritative).
+- **But today the graph is traversed only to compute FILTERS.** `src/lib/search/boolean-to-fts.ts`
+  walks `judgeRef` / `lawyerRef` / `case->judge->displayName` (1–3 hops via `prisma-traverse`) and
+  returns `case_id IN (...)` predicates AND'd into the LanceDB pre-filter. That **narrows** what we
+  search — it never *expands* retrieval along edges or answers "what connects X to Y across the corpus."
+
+**So the GraphRAG opportunity for us is small, not a from-scratch build:** reuse the same
+`prisma-traverse` machinery to *expand* the candidate pool along relationships and to answer multi-hop
+relationship questions. See [`docs/tasks/02-graph-aware-retrieval-haystack.md`](./tasks/02-graph-aware-retrieval-haystack.md).
 
 ---
 
@@ -199,13 +221,20 @@ reasoning model; and it beats plain ReAct at scale. Our budget caps (32K, ~4 rou
 are exactly the engineering hardening the RLM authors flag as needed (they note latency can run
 seconds→minutes and there are no built-in cost guarantees).
 
-Ideas to evaluate later (each is a separate task, **not** done by this document):
+Each idea below has a concrete, code-grounded proposal under **[`docs/tasks/`](./tasks/)** (see
+[`docs/tasks/README.md`](./tasks/README.md)). These are proposals — **not** done by this document.
 
-1. **Adaptive-RAG-style router** so simple lookups skip RLM's cost.
-2. **ColPali / ColQwen3** for scanned, exhibit-heavy PDFs where text-only chunking loses layout.
-3. **GraphRAG** for cross-document relationship questions (parties / clauses / precedents).
-4. Our one real gap vs. the blog's ideal: **fixed RRF k and an arbitrary 1.2 soft-boost** — no
-   learned/query-dependent fusion weighting yet.
+1. **Adaptive-RAG-style router** so simple lookups skip RLM's cost/latency —
+   [`tasks/01-adaptive-rag-router.md`](./tasks/01-adaptive-rag-router.md).
+2. **Graph-aware retrieval over our existing Haystack/Xeto graph** (not a from-scratch GraphRAG; see
+   §7.1) for cross-document relationship questions (parties / motions / filings / precedents) —
+   [`tasks/02-graph-aware-retrieval-haystack.md`](./tasks/02-graph-aware-retrieval-haystack.md).
+3. **ColPali / ColQwen3** for scanned, exhibit-heavy PDFs where text-only chunking loses layout —
+   [`tasks/03-colpali-visual-retrieval.md`](./tasks/03-colpali-visual-retrieval.md).
+4. **Learned / query-dependent fusion** to replace the **fixed RRF k=60 and arbitrary 1.2 soft-boost** —
+   [`tasks/04-learned-fusion-weighting.md`](./tasks/04-learned-fusion-weighting.md).
+5. **Reranker resilience + chunk-overlap tuning** (90 s timeout under a degraded fleet; chunk overlap) —
+   [`tasks/05-reranker-resilience-and-chunk-overlap.md`](./tasks/05-reranker-resilience-and-chunk-overlap.md).
 
 ---
 
