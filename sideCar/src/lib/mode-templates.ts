@@ -25,7 +25,7 @@
  * state.minOnline, state.perRole, containerName, etc. The `ss-` prefix is
  * the wire/API identifier; `modeToRole()` strips it.
  */
-import { CONTAINER_PREFIX, dockerSupportsGpu, state, type ContainerDef } from './state';
+import { CONTAINER_PREFIX, VLLM_IMAGE, dockerSupportsGpu, state, type ContainerDef } from './state';
 
 export type ModeName = 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker' | 'ss-rlm';
 export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker', 'ss-rlm'];
@@ -221,7 +221,7 @@ export function resolveMode(
       // already covered by isLinux above).
       if (!isLinux) return null;
       return {
-        image: 'vllm/vllm-openai',
+        image: VLLM_IMAGE,
         model: 'Qwen/Qwen3-Reranker-8B',
         port: 8099,
         vram: 7000,
@@ -239,7 +239,7 @@ export function resolveMode(
       // Use a Linux or Windows+NVIDIA sidecar for RLM.
       if (!isLinux) return null;
       return {
-        image: 'vllm/vllm-openai',
+        image: VLLM_IMAGE,
         model: 'mit-oasys/rlm-qwen3-8b-v0.1',
         port: 8100,
         vram: 10000,
@@ -386,7 +386,7 @@ function resolveModeForRuntime(
     if (!dockerSupportsGpu()) return null;
     if (mode === 'ss-reranker') {
       return {
-        image: 'vllm/vllm-openai',
+        image: VLLM_IMAGE,
         model: 'Qwen/Qwen3-Reranker-8B',
         port: 8099,
         vram: 7000,
@@ -399,7 +399,7 @@ function resolveModeForRuntime(
     }
     if (mode === 'ss-rlm') {
       return {
-        image: 'vllm/vllm-openai',
+        image: VLLM_IMAGE,
         model: 'mit-oasys/rlm-qwen3-8b-v0.1',
         port: 8100,
         vram: 10000,

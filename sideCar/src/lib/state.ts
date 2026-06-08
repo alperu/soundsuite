@@ -2,6 +2,13 @@ import type { WebSocket } from 'ws';
 
 export const CONTAINER_PREFIX = 'ss-';
 
+// Pinned vLLM image for all vLLM-served roles (ss-rlm, ss-reranker). Pinned to
+// a specific release rather than the floating `:latest` so the tool-call parser
+// (qwen3_xml), fp8 KV cache, and Qwen3 support are reproducible across hosts —
+// `:latest` could silently pull a version that drops or changes these. Bump
+// deliberately after testing a new vLLM release.
+export const VLLM_IMAGE = 'vllm/vllm-openai:v0.22.1';
+
 export type RolePriority = 'critical' | 'high' | 'normal';
 
 export type RoleRuntime = 'docker' | 'host' | 'docker-model-runner';
@@ -79,7 +86,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     priority: 'critical',
   },
   reranker: {
-    image: 'vllm/vllm-openai',
+    image: VLLM_IMAGE,
     model: 'Qwen/Qwen3-Reranker-8B',
     port: 8099,
     vram: 7000,
@@ -89,7 +96,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     priority: 'normal',
   },
   rlm: {
-    image: 'vllm/vllm-openai',
+    image: VLLM_IMAGE,
     model: 'mit-oasys/rlm-qwen3-8b-v0.1',
     port: 8100,
     // Operator-assigned 34 GB on a 48 GB A6000. BF16 weights (~16 GB) +
