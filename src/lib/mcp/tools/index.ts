@@ -1,5 +1,6 @@
 import { BaseMCPTool } from './base-tool';
 import { QueryCaseKnowledgeTool } from './query-case-knowledge';
+import { QueryCaseGraphTool } from './query-case-graph';
 import { ScanForPatternTool } from './scan-for-pattern';
 import { RetrieveExhibitTool } from './retrieve-exhibit';
 import { DetectContradictionsTool } from './detect-contradictions';
@@ -17,6 +18,7 @@ import { SearchWorkflowsTool } from './search-workflows';
 export function getAllTools(): BaseMCPTool[] {
   return [
     new QueryCaseKnowledgeTool(),
+    new QueryCaseGraphTool(),
     new ScanForPatternTool(),
     new RetrieveExhibitTool(),
     new DetectContradictionsTool(),
@@ -35,6 +37,7 @@ export function getAllTools(): BaseMCPTool[] {
 
 export { BaseMCPTool } from './base-tool';
 export { QueryCaseKnowledgeTool } from './query-case-knowledge';
+export { QueryCaseGraphTool } from './query-case-graph';
 export { ScanForPatternTool } from './scan-for-pattern';
 export { RetrieveExhibitTool } from './retrieve-exhibit';
 export { DetectContradictionsTool } from './detect-contradictions';
