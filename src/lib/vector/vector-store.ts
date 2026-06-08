@@ -51,6 +51,10 @@ export interface SearchQuery {
   hybridQuery?: string;
   /** Structured FTS query — string for MatchQuery, or a pre-built FullTextQuery */
   ftsQuery?: string | FullTextQuery;
+  /** RRF fusion constant for hybrid search (Σ 1/(k+rank)). Defaults to 60 when
+   *  omitted, preserving prior behavior. Threaded from Config by the caller so
+   *  the constant is tunable without importing Config into this low-level lib. */
+  rrfK?: number;
 }
 
 /**
@@ -129,6 +133,8 @@ export class VectorStore {
   private storedVectorDim: number | null = null;
   private _hasFtsIndex = false;
   private rrfReranker: rerankers.RRFReranker | null = null;
+  /** k the cached rrfReranker was built with — recreate if the caller's k differs. */
+  private rrfRerankerK: number | null = null;
 
   constructor(config: VectorStoreConfig) {
     this.config = config;
@@ -309,11 +315,11 @@ export class VectorStore {
       // Handle hybrid search (vector + text matching)
       if (query.vector && ftsInput) {
         if (this._hasFtsIndex) {
-          return await this.hybridSearch(query.vector, ftsInput, query.filter, limit);
+          return await this.hybridSearch(query.vector, ftsInput, query.filter, limit, query.rrfK);
         }
         // Fallback to legacy hybrid if no FTS index
         const textQuery = typeof ftsInput === 'string' ? ftsInput : query.hybridQuery || '';
-        return await this.legacyHybridSearch(query.vector, textQuery, query.filter, limit);
+        return await this.legacyHybridSearch(query.vector, textQuery, query.filter, limit, query.rrfK);
       }
 
       // Handle pure vector search
@@ -435,7 +441,8 @@ export class VectorStore {
     vector: number[],
     ftsQuery: string | FullTextQuery,
     filter?: Record<string, any>,
-    limit: number = 10
+    limit: number = 10,
+    rrfK: number = 60
   ): Promise<SearchResult[]> {
     if (!this.table) {
       throw new Error('Table not initialized');
@@ -456,9 +463,10 @@ export class VectorStore {
       ? new MatchQuery(ftsQuery, 'text', { operator: Operator.Or })
       : ftsQuery;
 
-    // Get or create the RRF reranker (cached)
-    if (!this.rrfReranker) {
-      this.rrfReranker = await rerankers.RRFReranker.create(60);
+    // Get or create the RRF reranker (cached; rebuilt only if k changes).
+    if (!this.rrfReranker || this.rrfRerankerK !== rrfK) {
+      this.rrfReranker = await rerankers.RRFReranker.create(rrfK);
+      this.rrfRerankerK = rrfK;
     }
 
     let queryBuilder = this.table
@@ -525,7 +533,8 @@ export class VectorStore {
     vector: number[],
     textQuery: string,
     filter?: Record<string, any>,
-    limit: number = 10
+    limit: number = 10,
+    rrfK: number = 60
   ): Promise<SearchResult[]> {
     const expandedLimit = limit * 3;
 
@@ -535,8 +544,8 @@ export class VectorStore {
       this.legacyTextSearch(textQuery, filter, expandedLimit),
     ]);
 
-    // RRF constant (commonly 60)
-    const k = 60;
+    // RRF constant (commonly 60) — caller-supplied, defaults to 60.
+    const k = rrfK;
 
     // Build score map: chunkId -> { result, rrfScore }
     const scoreMap = new Map<string, { result: SearchResult; rrfScore: number }>();

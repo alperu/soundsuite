@@ -13,6 +13,7 @@ import { rerank } from '../../search/reranker';
 import { getChatVectorStore } from '../../chat/chat-vector-store';
 import { parseBooleanQuery } from '../../search/boolean-query';
 import { astToLanceQuery, BooleanFtsConversionError, extractFieldFilters, resolvePrismaFilters } from '../../search/boolean-to-fts';
+import { getConfig } from '../../db/config';
 
 export interface QueryCaseKnowledgeParams {
   query: string;
@@ -113,6 +114,10 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
   ): Promise<QueryCaseKnowledgeResult> {
     const { query, caseId, chatId, limit = 10, searchMode = 'hybrid', mode = 'legacy', whereClauses, softBoostRefs } = params;
     const chatHitChunkIds = new Set<string>();
+
+    // Tunable hybrid-fusion constants (Config-backed; defaults 60 / 1.2 preserve
+    // prior behavior). See docs/tasks/04-learned-fusion-weighting.md.
+    const appConfig = await getConfig();
 
     // Over-fetch candidates so the cross-encoder reranker has a larger pool to judge.
     // The reranker is far better at relevance scoring than embedding similarity,
@@ -227,6 +232,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     // Build search query with expanded candidate pool
     const searchQuery: SearchQuery = {
       limit: retrievalLimit,
+      rrfK: appConfig.fusionRrfK,
     };
 
     if (queryEmbedding) {
@@ -364,7 +370,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     // because this is a hint about user attention, not a strong relevance
     // signal.
     if (softBoostRefs && softBoostRefs.length > 0) {
-      const SOFT_BOOST = 1.2;
+      const SOFT_BOOST = appConfig.fusionSoftBoost;
       const refSets = softBoostRefs.map(b => ({ field: b.field, set: new Set(b.values) }));
       for (const r of searchResults) {
         for (const { field, set } of refSets) {

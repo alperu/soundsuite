@@ -69,6 +69,15 @@ export interface AppConfig {
    *  to fit the model's context window. Default 30000 (~7500 tokens) for
    *  8K-context models like Qwen3-Reranker-8B. */
   rerankMaxDocChars: number;
+  /** Hybrid-fusion RRF constant. Reciprocal Rank Fusion score is
+   *  Σ 1/(k + rank). Default 60 (Cormack et al. 2009 / the production norm).
+   *  Externalized so it can be tuned without a deploy; weighted/query-typed
+   *  fusion is a separate opt-in. */
+  fusionRrfK: number;
+  /** Soft-boost multiplier applied to results whose metadata matches the
+   *  caller's softBoostRefs (deep-search framing path). Default 1.2. A hint,
+   *  not a hard filter — externalized for tuning. */
+  fusionSoftBoost: number;
   // Per-model GPU idle timeouts (minutes, 0 = never stop)
   gpuIdleEmbeddingMin: number;
   gpuIdleCompletionMin: number;
@@ -222,6 +231,8 @@ export async function getConfig(): Promise<AppConfig> {
     rerankTimeoutMs: parseInt(configMap.get('rerank.timeoutMs') || '90000', 10),
     rerankInteractiveTimeoutMs: parseInt(configMap.get('rerank.interactiveTimeoutMs') || '15000', 10),
     rerankMaxDocChars: parseInt(configMap.get('rerank.maxDocChars') || '18000', 10),
+    fusionRrfK: parseInt(configMap.get('fusion.rrfK') || '60', 10),
+    fusionSoftBoost: parseFloat(configMap.get('fusion.softBoost') || '1.2'),
     // Per-model GPU idle timeouts
     gpuIdleEmbeddingMin: parseInt(configMap.get('gpu.idle.embedding') || '0', 10),
     gpuIdleCompletionMin: parseInt(configMap.get('gpu.idle.completion') || '10', 10),
@@ -487,6 +498,12 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.rerankMaxDocChars !== undefined) {
     updates.push({ key: 'rerank.maxDocChars', value: String(config.rerankMaxDocChars) });
+  }
+  if (config.fusionRrfK !== undefined) {
+    updates.push({ key: 'fusion.rrfK', value: String(config.fusionRrfK) });
+  }
+  if (config.fusionSoftBoost !== undefined) {
+    updates.push({ key: 'fusion.softBoost', value: String(config.fusionSoftBoost) });
   }
 
   // Per-model GPU idle timeouts
