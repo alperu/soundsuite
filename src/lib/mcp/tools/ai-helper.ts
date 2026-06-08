@@ -334,7 +334,7 @@ export async function getTopicCaseChunks(
   }
 
   // Cross-encoder reranking trims from the over-fetched pool back to limit
-  results = await rerank(topic, results, limit);
+  results = await rerank(topic, results, limit, undefined, { interactive: true });
 
   // Safety trim if reranking was disabled
   if (results.length > limit) {

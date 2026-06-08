@@ -693,7 +693,7 @@ export async function deduplicateAndMerge(
       host: w.host,
       reason: w.reason,
       message: w.message,
-    }) : undefined);
+    }) : undefined, { interactive: true });
   }
 
   // Filing-type-aware boost when the user's question is clearly about

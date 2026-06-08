@@ -129,7 +129,7 @@ async function getRerankConfig(): Promise<AppConfig> {
 export interface RerankWarning {
   source: 'reranker';
   host?: string;
-  reason: 'preflight' | 'lifecycle' | 'fetch' | 'score-validation' | 'fallback-model';
+  reason: 'preflight' | 'lifecycle' | 'fetch' | 'score-validation' | 'fallback-model' | 'degraded';
   message: string;
 }
 
@@ -138,6 +138,7 @@ export async function rerank<T extends RerankableResult>(
   results: T[],
   topN?: number,
   onWarning?: (w: RerankWarning) => void,
+  opts?: { interactive?: boolean },
 ): Promise<T[]> {
   const warn = (reason: RerankWarning['reason'], host: string | undefined, message: string) => {
     if (onWarning) onWarning({ source: 'reranker', host, reason, message });
@@ -163,7 +164,16 @@ export async function rerank<T extends RerankableResult>(
   }
 
   const effectiveTopN = topN ?? config.rerankTopN ?? 10;
-  const timeoutMs = config.rerankTimeoutMs ?? 90_000;
+  // Interactive (user-facing) callers use a shorter timeout so a cold/degraded
+  // fleet can't block a live search for the full cold-start budget; on timeout
+  // the all-hosts-failed path below falls back to first-stage order. Batch
+  // callers (default) keep the long timeout for cold-start tolerance.
+  const timeoutMs = opts?.interactive
+    ? (config.rerankInteractiveTimeoutMs ?? 15_000)
+    : (config.rerankTimeoutMs ?? 90_000);
+  if (opts?.interactive) {
+    logger.info('Reranking (interactive)', { timeoutMs });
+  }
   // Model context budget. Qwen3-Reranker-8B is started with --max-model-len 8192;
   // any single (query, doc) pair over that is rejected with HTTP 400 and aborts
   // the whole batch. Keep in sync with sideCar/src/lib/docker.ts buildVllmCmd.
@@ -307,7 +317,16 @@ export async function rerank<T extends RerankableResult>(
     }
 
     if (!reranked) {
-      // All hosts failed — return original order (graceful degrade)
+      // All hosts failed — return original order (graceful degrade). Emit one
+      // clear, user-facing signal so the UI can show a "results not reranked"
+      // badge instead of silently serving first-stage order.
+      warn(
+        'degraded',
+        config.rerankHost,
+        opts?.interactive
+          ? 'Results not reranked — reranker unavailable within the interactive timeout; showing first-stage (hybrid) order.'
+          : 'Results not reranked — reranker unavailable; showing first-stage (hybrid) order.',
+      );
       return results.slice(0, effectiveTopN);
     }
 

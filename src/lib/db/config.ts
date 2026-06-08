@@ -60,6 +60,11 @@ export interface AppConfig {
   /** Fetch timeout for vLLM /v1/rerank in ms. Default 90000.
    *  Cold-start of large rerankers (Qwen3-Reranker-8B) can take 30-60s. */
   rerankTimeoutMs: number;
+  /** Shorter timeout (ms) for INTERACTIVE (user-facing) rerank calls. A live
+   *  search should not block for the full cold-start budget — on timeout it
+   *  falls back to first-stage order. Batch/background callers keep
+   *  rerankTimeoutMs. Default 15000. */
+  rerankInteractiveTimeoutMs: number;
   /** Per-document character cap before sending to /v1/rerank. Trims the tail
    *  to fit the model's context window. Default 30000 (~7500 tokens) for
    *  8K-context models like Qwen3-Reranker-8B. */
@@ -215,6 +220,7 @@ export async function getConfig(): Promise<AppConfig> {
     rerankScoreValidation: configMap.get('rerank.scoreValidation') !== 'false', // default: true
     rerankFallbackModel: configMap.get('rerank.fallbackModel') || '',
     rerankTimeoutMs: parseInt(configMap.get('rerank.timeoutMs') || '90000', 10),
+    rerankInteractiveTimeoutMs: parseInt(configMap.get('rerank.interactiveTimeoutMs') || '15000', 10),
     rerankMaxDocChars: parseInt(configMap.get('rerank.maxDocChars') || '18000', 10),
     // Per-model GPU idle timeouts
     gpuIdleEmbeddingMin: parseInt(configMap.get('gpu.idle.embedding') || '0', 10),
@@ -475,6 +481,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.rerankTimeoutMs !== undefined) {
     updates.push({ key: 'rerank.timeoutMs', value: String(config.rerankTimeoutMs) });
+  }
+  if (config.rerankInteractiveTimeoutMs !== undefined) {
+    updates.push({ key: 'rerank.interactiveTimeoutMs', value: String(config.rerankInteractiveTimeoutMs) });
   }
   if (config.rerankMaxDocChars !== undefined) {
     updates.push({ key: 'rerank.maxDocChars', value: String(config.rerankMaxDocChars) });

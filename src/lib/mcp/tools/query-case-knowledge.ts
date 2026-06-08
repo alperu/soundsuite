@@ -338,7 +338,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     // to `limit` after that boost runs.
     searchResults = await rerank(query, searchResults, retrievalLimit, context.pushWarning ? (w) => {
       context.pushWarning!({ source: w.source, host: w.host, reason: w.reason, message: w.message });
-    } : undefined);
+    } : undefined, { interactive: true });
 
     // Transcript-intent boost — mirrors the same heuristic in
     // src/lib/search/deep-search.ts so /api/search/semantic doesn't punish
