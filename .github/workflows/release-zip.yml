@@ -56,12 +56,18 @@ jobs:
           unzip -l "$ZIP" | grep -q "${NAME}/sideCar/" && { echo "sideCar/ leaked into zip"; exit 1; } || true
           echo "Zip contents validated."
 
-      - name: Create GitHub Release and upload zip
+      - name: Attach zip to the release (release-please owns the notes)
+        # The Release + changelog notes are created by release-please when the
+        # release PR merges; this run is triggered by the tag it created. We
+        # attach the zip asset and APPEND install instructions below those notes
+        # (append_body) rather than regenerating/overwriting them. action-gh-release
+        # upserts, so if the tag was pushed manually (no release-please) it still
+        # creates the release.
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: Sound Suite ${{ steps.ver.outputs.version }}
-          generate_release_notes: true
+          append_body: true
           files: ${{ steps.zip.outputs.file }}
           body: |
             ## Sound Suite ${{ steps.ver.outputs.version }}

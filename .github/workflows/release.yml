@@ -1,0 +1,46 @@
+name: Release
+
+# Automated versioning with release-please (Conventional Commits).
+#
+# On every push to main, release-please keeps a "release PR" open that bumps
+# package.json + CHANGELOG.md. MERGING that PR tags vX.Y.Z and publishes a
+# GitHub Release. That tag (created with RELEASE_PLEASE_TOKEN — see below) then
+# triggers the existing tag-on-push workflows that build + attach the artifacts:
+#   - docker-publish.yml → builds & pushes the GHCR image
+#   - release-zip.yml     → attaches the buildable source zip to the Release
+#
+# IMPORTANT — token: a Personal Access Token is used for TWO reasons:
+#   1. Many orgs/enterprises block the default GITHUB_TOKEN from creating PRs,
+#      which release-please needs.
+#   2. A tag created by the default GITHUB_TOKEN does NOT trigger other
+#      workflows. Using a PAT means the vX.Y.Z tag DOES trigger docker-publish
+#      and release-zip, so the image + zip get built automatically.
+# Store a fine-grained PAT (Contents: RW, Pull requests: RW) as the repo secret
+# RELEASE_PLEASE_TOKEN. The `|| GITHUB_TOKEN` fallback keeps the version/PR step
+# working if the policy is ever relaxed (artifacts would then need a manual tag
+# or workflow_dispatch). See docs/cicd/README.md.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      version: ${{ steps.rp.outputs.version }}
