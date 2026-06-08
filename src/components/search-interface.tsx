@@ -2,6 +2,8 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { deepSearchRunner } from '@/lib/search/deep-search-runner';
+import { classifyQueryComplexity } from '@/lib/search/query-router';
+import { segmentChipsAndIntents } from '@/lib/search/chip-segments';
 import { aiSearchRunner } from '@/lib/search/ai-search-runner';
 import { useRouter } from 'next/navigation';
 import { AI_PROVIDERS, AI_PROVIDER_KEYS, AIProviderKey, AIModelDef } from '@/lib/ai/models';
@@ -445,6 +447,11 @@ export default function SearchInterface({
   // from ~5s to 30s–3min; reserve for deep multi-document questions where
   // standard RAG silently under-recalls. Default off; persisted across reloads.
   const [useRlm, setUseRlm] = usePersistedState<boolean>('search.useRlm', false);
+  // Adaptive-RAG router (docs/tasks/01). When ON, a cheap heuristic picks the
+  // tier (single-shot / deep / rlm) per query; the manual Deep/RLM toggles are
+  // honored only when Auto is OFF (default), so existing behavior is unchanged.
+  const [searchAuto, setSearchAuto] = usePersistedState<boolean>('search.auto', false);
+  const [routeNotice, setRouteNotice] = useState<string | null>(null);
   const [thinkingMode, setThinkingMode] = usePersistedState<boolean>('search.thinkingMode', true);
   const [maxTokens, setMaxTokens] = usePersistedState<number>('search.maxTokens', 2048);
   const [effort, setEffort] = usePersistedState<'low' | 'medium' | 'high' | 'xhigh' | 'max'>('search.effort', 'medium');
@@ -1322,6 +1329,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
     model: string,
     query?: string,
     history?: Array<{ role: 'user' | 'assistant'; content: string }>,
+    rlmOverride?: boolean,
   ): Promise<DeepSearchResult> => {
     const q = (query || aiQuery).trim();
     const result = await deepSearchRunner.start({
@@ -1334,7 +1342,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
       maxTokens,
       effort,
       multiPass,
-      useRlm,
+      useRlm: rlmOverride ?? useRlm,
       ...(history && history.length > 0 ? { history } : {}),
       ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
     });
@@ -1475,6 +1483,21 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
     const currentQuery = composer.trim();
     if (!currentQuery) { setAiError('Please enter a question'); return; }
 
+    // Adaptive-RAG routing (docs/tasks/01) — OPT-IN. In Auto mode a cheap,
+    // zero-latency heuristic picks the tier; otherwise the manual Deep/RLM
+    // toggles stay authoritative (default), so behavior is unchanged unless the
+    // user turns Auto on. Compare mode is never auto-routed.
+    let effectiveDeep = deepSearchMode;
+    let effectiveRlm = useRlm;
+    if (searchAuto && !compareMode) {
+      const decision = classifyQueryComplexity(currentQuery, segmentChipsAndIntents(currentQuery));
+      effectiveDeep = decision.route === 'deep' || decision.route === 'rlm';
+      effectiveRlm = decision.route === 'rlm';
+      setRouteNotice(`Auto → ${decision.route}: ${decision.reason}`);
+    } else {
+      setRouteNotice(null);
+    }
+
     // Snapshot the editor content so we can restore it verbatim on error.
     // getText() is the chip-stripped text; haystackChips carries the chips —
     // setContents(text, chips) round-trips them back exactly.
@@ -1528,7 +1551,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
 
     const t0 = performance.now();
     try {
-      if (deepSearchMode && !compareMode) {
+      if (effectiveDeep && !compareMode) {
         if (!aiProvider) { setAiError('Select a provider'); setAiLoading(false); return; }
         if (!aiModel) { setAiError('Select a model'); setAiLoading(false); return; }
 
@@ -1542,8 +1565,9 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
         // Runner owns the in-flight + completed state for deep search. The
         // mirror effect copies runner.turns into local deepTurns, so we don't
         // append the turn here. The await resolves once the runner records
-        // the completed turn.
-        await doDeepSearch(aiProvider, aiModel, currentQuery, history.length > 0 ? history : undefined);
+        // the completed turn. effectiveRlm reflects the Auto router (or the
+        // manual RLM toggle when Auto is off).
+        await doDeepSearch(aiProvider, aiModel, currentQuery, history.length > 0 ? history : undefined, effectiveRlm);
         setDeepProgress(null);
         scrollChatToBottom();
       } else if (compareMode) {
@@ -2010,7 +2034,15 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                       New Chat
                     </button>
                   )}
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2" title="Adaptive routing (Auto): the system picks single-shot / deep / RLM per query from a cheap heuristic. When off, the manual Deep/RLM toggles apply.">
+                    <label className="text-xs font-medium text-gray-500">Auto</label>
+                    <button type="button" onClick={() => setSearchAuto(!searchAuto)}
+                      className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${searchAuto ? 'bg-purple-600' : 'bg-gray-200'}`}
+                    >
+                      <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${searchAuto ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                    </button>
+                  </div>
+                  <div className={`flex items-center gap-2 ${searchAuto ? 'opacity-40' : ''}`} title={searchAuto ? 'Auto routing is on — manual Deep is ignored until Auto is off.' : undefined}>
                     <label className="text-xs font-medium text-gray-500">Deep</label>
                     <button type="button" onClick={() => {
                       const newDeep = !deepSearchMode;
@@ -2023,7 +2055,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                       <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${deepSearchMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
                     </button>
                   </div>
-                  <div className="flex items-center gap-2" title="Route the answer through ss-rlm (Recursive Language Model). Higher latency (30s–3min), much higher recall for deep multi-document questions.">
+                  <div className={`flex items-center gap-2 ${searchAuto ? 'opacity-40' : ''}`} title={searchAuto ? 'Auto routing is on — manual RLM is ignored until Auto is off.' : 'Route the answer through ss-rlm (Recursive Language Model). Higher latency (30s–3min), much higher recall for deep multi-document questions.'}>
                     <label className="text-xs font-medium text-gray-500">RLM</label>
                     <button type="button" onClick={() => setUseRlm(!useRlm)}
                       className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${useRlm ? 'bg-emerald-600' : 'bg-gray-200'}`}
@@ -2332,6 +2364,11 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                   {aiLoading && !aiStopping && deepSearchMode && deepProgress && (
                     <div className="sticky top-0 z-10 -mx-6 px-6 py-1 bg-gray-50/95 backdrop-blur-sm">
                       <DeepSearchProgressCard progress={deepProgress} startTime={searchStartTime || Date.now()} tokenCount={streamTokenCount} />
+                    </div>
+                  )}
+                  {!aiStopping && routeNotice && (
+                    <div className="bg-purple-50 border border-purple-200 rounded-lg px-3 py-1.5">
+                      <p className="text-[11px] text-purple-800"><span className="font-medium">Routing:</span> {routeNotice}</p>
                     </div>
                   )}
                   {!aiStopping && searchWarnings.length > 0 && (
