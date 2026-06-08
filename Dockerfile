@@ -35,7 +35,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV NPM_CONFIG_PRODUCTION=false
 
 # Install dependencies first for better layer caching.
-COPY package.json package-lock.json ./
+# .npmrc carries legacy-peer-deps=true (apache-arrow vs @lancedb/lancedb peer
+# range) so this npm ci resolves the same way CI and local installs do.
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci
 
 # Copy the rest of the source needed to generate the client and build.
