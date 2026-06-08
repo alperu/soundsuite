@@ -1190,7 +1190,8 @@ Strategy:
 2. Identify aspects that are under-covered by the initial set.
 3. Call query_case_knowledge with focused sub-queries (under 20 words each). Up to 3 calls.
 4. Keep limit ≤ 8 per call — your 32K context fills fast with chunks. Prefer focused sub-queries over big batches.
-5. When done, reply with one short sentence like "Sufficient evidence gathered — N additional aspects retrieved." Do not write Findings, Summary, or any report sections.`;
+5. For RELATIONSHIP or LINEAGE questions ("what connects X and Y", "amendment history of this motion", "every motion this judge handled"), use query_case_graph instead of/before query_case_knowledge — it walks the case's structural graph. It needs a motion id or person id (take one from a citation or a query chip; never invent ids), and returns motion ids + titles, which you can then read with query_case_knowledge.
+6. When done, reply with one short sentence like "Sufficient evidence gathered — N additional aspects retrieved." Do not write Findings, Summary, or any report sections.`;
 
 // Per-call cap on tool-result chunks. Even if the model asks for more, the
 // executor enforces this — round 2 of the tool loop would otherwise pull
@@ -1220,7 +1221,45 @@ const RLM_TOOLS: RlmToolSpec[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'query_case_graph',
+      description:
+        'Structural lookups over the case knowledge graph (relationships, NOT document text). Use for lineage/connection questions semantic search misses. operation="amendment-lineage" (needs motionId) returns a motion\'s amendment history; "related-motions" (needs motionId) returns same-case motions sharing its judge/movant; "motions-by-person" (needs personId, optional role) lists motions a person appears in. Returns motion ids + titles — then call query_case_knowledge to read the text of any motion you want excerpts from. A motionId/personId must come from a citation or a query chip; do not invent ids.',
+      parameters: {
+        type: 'object',
+        properties: {
+          operation: { type: 'string', enum: ['amendment-lineage', 'related-motions', 'motions-by-person'], description: 'Which structural traversal to run.' },
+          motionId: { type: 'string', description: 'Motion id (amendment-lineage / related-motions).' },
+          personId: { type: 'string', description: 'Person id (motions-by-person).' },
+          role: { type: 'string', enum: ['judge', 'movant', 'respondent'], description: 'Optional role filter for motions-by-person.' },
+        },
+        required: ['operation'],
+      },
+    },
+  },
 ];
+
+/**
+ * Best-effort extraction of case-id values from the inherited chip where-clauses
+ * (SQL like `case_id IN ('a','b')` / `case_id = 'a'`) so graph lookups can be
+ * scoped to the user's named cases. Returns [] when no case predicate is present
+ * (e.g. filing-ref-only chips) — the graph tool is still fan-out-bounded.
+ */
+function caseIdsFromWhereClauses(whereClauses?: string[]): string[] {
+  if (!whereClauses || whereClauses.length === 0) return [];
+  const ids = new Set<string>();
+  const joined = whereClauses.join(' ');
+  const clauseRe = /case_id\s*(?:=|IN)\s*(\([^)]*\)|'[^']*')/gi;
+  let m: RegExpExecArray | null;
+  while ((m = clauseRe.exec(joined)) !== null) {
+    const idRe = /'([^']+)'/g;
+    let im: RegExpExecArray | null;
+    while ((im = idRe.exec(m[1])) !== null) ids.add(im[1]);
+  }
+  return [...ids];
+}
 
 export async function generateReportWithRlm(
   query: string,
@@ -1291,6 +1330,44 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<{ ok: boolean; content: string; preview?: string; chunkCount?: number }> => {
+    // Structural graph lookups (relationships/lineage). Returns motion metadata,
+    // not document text, so it's small and skips the chunk-char cap. Scoped to
+    // the user's chip cases when those are case refs.
+    if (toolName === 'query_case_graph') {
+      const caseScope = caseIdsFromWhereClauses(options.inheritedWhereClauses);
+      const gArgs: Record<string, unknown> = {
+        operation: args.operation,
+        ...(typeof args.motionId === 'string' ? { motionId: args.motionId } : {}),
+        ...(typeof args.personId === 'string' ? { personId: args.personId } : {}),
+        ...(typeof args.role === 'string' ? { role: args.role } : {}),
+        ...(caseScope.length > 0 ? { caseScope } : {}),
+        limit: RLM_TOOL_LIMIT_CAP,
+      };
+      try {
+        const gres = await registry.execute('query_case_graph', gArgs);
+        if (!gres.success || !gres.data) {
+          return { ok: false, content: `Graph lookup failed: ${gres.error || 'empty'}`, chunkCount: 0 };
+        }
+        const nodes = ((gres.data as { nodes?: Array<{ id: string; title: string; revisionSeq: number | null; relation: string }> }).nodes) ?? [];
+        const op = (gres.data as { operation?: string }).operation ?? args.operation;
+        if (nodes.length === 0) {
+          return { ok: true, content: `No structurally-related motions found for ${op}.`, preview: `graph:${op} 0`, chunkCount: 0 };
+        }
+        const lines = nodes.slice(0, RLM_TOOL_LIMIT_CAP).map((n) =>
+          `- motion ${n.id}${n.revisionSeq != null ? ` (rev ${n.revisionSeq})` : ''}: ${n.title} — ${n.relation}`,
+        ).join('\n');
+        console.log(`[RLM tool] query_case_graph op=${op} nodes=${nodes.length}`);
+        return {
+          ok: true,
+          content: `Structural results (${op}) — call query_case_knowledge to read any of these:\n${lines}`,
+          preview: `graph:${op} ${nodes.length}`,
+          chunkCount: nodes.length,
+        };
+      } catch (err) {
+        return { ok: false, content: `Graph tool error: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    }
+
     if (toolName !== 'query_case_knowledge') {
       return { ok: false, content: `Unknown tool: ${toolName}` };
     }
