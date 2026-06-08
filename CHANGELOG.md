@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.2 (2026-06-08)
+
+### Bug Fixes
+
+- **RLM Deep Search synthesis no longer loops.** The recursive evidence-gathering loop could
+  exhaust its rounds without producing a report ("RLM synthesis failed: tool-use loop exceeded
+  maxRounds"). Fixed by capping the seed context fed to the RLM and forcing a final answer on
+  the last round, so the gathered evidence always reaches the synthesis stage.
+- **RLM tool calls now parse correctly.** Switched the vLLM tool-call parser to `qwen3_xml`
+  (the format the model actually emits) so tool calls are structured instead of relying on a
+  regex fallback.
+- **RLM context window corrected** to the model's native 40960 tokens (was an invalid 65536
+  that prevented vLLM from starting), with `fp8` KV cache and dedicated-GPU utilization.
+- Deep Search synthesis follows the model you select — no hardcoded default.
+
+### Internal
+
+- Pinned the vLLM image (`v0.21.0`) for reproducible RLM/reranker serving (sidecar v2.3.69).
+- Decomposed the 1,968-line Haystack `[op]` route into focused `lib/haystack/*` modules
+  (cache, refs, entities, ensure-filing, commit) with a typed op-handler registry.
+- Recovered ~22 API route tests that silently never ran (jsdom → node test env) and rewrote
+  the stale `mcp-api` / `exhibits` suites.
+- RLM serving reference added: `docs/rlm-endpoint.md`.
+
 ## 1.0.1 (2026-06-08)
 
 ### Features
