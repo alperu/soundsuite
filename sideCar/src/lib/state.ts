@@ -3,11 +3,14 @@ import type { WebSocket } from 'ws';
 export const CONTAINER_PREFIX = 'ss-';
 
 // Pinned vLLM image for all vLLM-served roles (ss-rlm, ss-reranker). Pinned to
-// a specific release rather than the floating `:latest` so the tool-call parser
-// (qwen3_xml), fp8 KV cache, and Qwen3 support are reproducible across hosts —
-// `:latest` could silently pull a version that drops or changes these. Bump
-// deliberately after testing a new vLLM release.
-export const VLLM_IMAGE = 'vllm/vllm-openai:v0.22.1';
+// v0.21.0 — the version ALREADY running on the GPU host (confirmed via the RLM
+// endpoint's /version, 2026-06-08). The container recreate therefore finds the
+// image layers already cached (no multi-GB re-pull) while still applying the
+// new vllmArgs. 0.21.0 supports --tool-call-parser qwen3_xml (per its own docs)
+// + fp8 KV + Qwen3. Pinning beats floating `:latest`, which could silently jump
+// versions and drop/alter the parser. Bump deliberately after testing a newer
+// release (e.g. v0.22.1) — that bump WILL trigger a full image pull.
+export const VLLM_IMAGE = 'vllm/vllm-openai:v0.21.0';
 
 export type RolePriority = 'critical' | 'high' | 'normal';
 
