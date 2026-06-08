@@ -431,8 +431,12 @@ export default function SearchInterface({
     });
   }, []);
   const [aiCaseId, setAiCaseId] = usePersistedState<string>('search.aiCaseId', '');
-  const [aiProvider, setAiProvider] = usePersistedState<string>('search.aiProvider', '');
-  const [aiModel, setAiModel] = usePersistedState<string>('search.aiModel', '');
+  // Default Deep Search to Claude Opus 4.8 (cloud). RLM still gathers evidence
+  // on the local GPU; only the final report synthesis goes to Claude — fast and
+  // high-quality vs the slow local completion host. Existing users keep their
+  // persisted choice; this only seeds fresh sessions.
+  const [aiProvider, setAiProvider] = usePersistedState<string>('search.aiProvider', 'anthropic');
+  const [aiModel, setAiModel] = usePersistedState<string>('search.aiModel', 'claude-opus-4-8');
   const [aiResults, setAiResults] = useState<AISearchResult[]>([]);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiStopping, setAiStopping] = useState(false);
