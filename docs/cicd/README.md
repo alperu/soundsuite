@@ -159,6 +159,17 @@ on, normal Conventional-Commit bumps apply).
   to build their own image (`unzip … && docker build -t soundsuite .` or `docker compose up`).
   Built by `release-zip.yml`. Details: [`../ci-cd.md`](../ci-cd.md).
 
+### Building artifacts manually (no PAT needed)
+
+Both artifact workflows also accept a **`workflow_dispatch`** with a `tag` input, so you can
+(re)build for an existing tag from the **Actions** tab — useful if a release was tagged with
+the default `GITHUB_TOKEN` (which doesn't trigger tag workflows), or to re-run a failed build:
+
+- *Actions → **Docker Publish** → Run workflow* → `tag = vX.Y.Z` → builds & pushes the image.
+- *Actions → **Release Zip** → Run workflow* → `tag = vX.Y.Z` → rebuilds & attaches the zip.
+
+The tag must already exist. (PRs still build the Docker image without pushing, to validate it.)
+
 ---
 
 ## Verifying a release (no `gh` needed)

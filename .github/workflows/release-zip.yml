@@ -8,6 +8,12 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to package (e.g. v0.1.0). Must already exist."
+        required: true
+        type: string
 
 permissions:
   contents: write   # create releases + upload assets
@@ -20,11 +26,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # On a tag push this is the tag; on manual dispatch use the input tag.
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Derive version
         id: ver
         run: |
-          TAG="${GITHUB_REF_NAME}"           # e.g. v1.4.2
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"   # e.g. v1.4.2
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
@@ -36,7 +44,7 @@ jobs:
           # git archive ships only tracked files (gitignored data/, .next,
           # node_modules, public/exhibits, marketing/ are already absent).
           # Strip directories that aren't part of the main-app build context.
-          git archive --format=zip --prefix="${NAME}/" -o "${NAME}.zip" "${GITHUB_REF_NAME}"
+          git archive --format=zip --prefix="${NAME}/" -o "${NAME}.zip" "${{ steps.ver.outputs.tag }}"
           # Remove sideCar/ (separate image) and bulky docs/marketing if present.
           zip -q -d "${NAME}.zip" "${NAME}/sideCar/*" || true
           zip -q -d "${NAME}.zip" "${NAME}/marketing/*" || true
