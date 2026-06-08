@@ -39,31 +39,34 @@ export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-m
  * entry built by `defaultRegistry`, so this template version is what the
  * running container actually inherits at runtime.
  *
- * --gpu-memory-utilization 0.7 caps vLLM at ~34 GB of a 48 GB A6000 so
- * embedding+ocr don't get evicted — that cap is the hard VRAM ceiling at ANY
- * context length. --max-model-len 65536 widens the window (the old 32K was too
- * small: a single Deep Search seed nearly filled it, starving the recursive
- * tool results and looping the model). --kv-cache-dtype fp8 halves per-token KV
- * so a full 64K sequence fits in the SAME pool a 32K bf16 one did — bigger
- * context at no extra VRAM. --dtype bfloat16 matches the published weights.
+ * --gpu-memory-utilization 0.90 — ss-rlm runs on a DEDICATED 48 GB A6000 here
+ * (it already evicts ss-completion; embedding/ocr are Ollama). Lower to ~0.7 if
+ * you co-locate ss-rlm with other GPU roles on one card. --max-model-len 40960
+ * is the model's native ceiling: mit-oasys/rlm-qwen3-8b-v0.1 has
+ * max_position_embeddings=40960 and NO rope_scaling, so vLLM refuses to start
+ * above it (going higher needs YaRN — see notes). --kv-cache-dtype fp8 halves
+ * per-token KV (one 40960-token seq ≈ 3 GB vs 5.6 GB bf16); the seed cap in
+ * deep-search.ts is what actually broke the maxRounds loop. --dtype bfloat16
+ * matches the published weights.
  *
- * --enable-auto-tool-choice + --tool-call-parser pythonic opt vLLM
- * into OpenAI tool-calling so master's runRlmWithTools can drive
- * Phase B recursive RAG; without these flags vLLM 400s on
- * tool_choice='auto'. The 'pythonic' parser extracts Python-style
- * function calls — mit-oasys/rlm-qwen3-8b-v0.1 emits
- *   query_case_knowledge("...")
- * not the Hermes <tool_call> XML blocks Qwen3-base uses, so 'hermes'
- * misses every call. Confirmed by inspecting the model's raw output
- * during a Deep Search test on 2026-05-26.
+ * --enable-auto-tool-choice + --tool-call-parser qwen3_xml opt vLLM into
+ * OpenAI tool-calling so master's runRlmWithTools can drive Phase B recursive
+ * RAG; without --enable-auto-tool-choice vLLM 400s on tool_choice='auto'.
+ * The model emits Qwen3-Coder-style XML:
+ *   <tool_call><function=query_case_knowledge><parameter=query>…</parameter></function></tool_call>
+ * which is the `qwen3_xml` parser's format (vLLM docs) — NOT pythonic
+ * `name("…")` nor Hermes JSON; both miss every call (confirmed in
+ * logs/dashboard.log 2026-06-08, where vllm_tool_calls=0 and a regex fallback
+ * rescued each round). stream-rlm.ts keeps that fallback as a safety net in
+ * case the served vLLM predates qwen3_xml.
  */
 const RLM_VLLM_ARGS: string[] = [
-  '--gpu-memory-utilization', '0.7',
-  '--max-model-len', '65536',
+  '--gpu-memory-utilization', '0.90',
+  '--max-model-len', '40960',
   '--kv-cache-dtype', 'fp8',
   '--dtype', 'bfloat16',
   '--enable-auto-tool-choice',
-  '--tool-call-parser', 'pythonic',
+  '--tool-call-parser', 'qwen3_xml',
 ];
 
 /** Strip "ss-" prefix → registry/state key. */

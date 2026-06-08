@@ -102,25 +102,27 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     // Evicts ss-completion (normal) on a constrained GPU; both roles answer the
     // user's question and are mutually exclusive on a 24 GB card by design.
     priority: 'high',
-    // Cap vLLM at 70% of the host GPU (34/48 ≈ 0.71). Without this, vLLM's
-    // default --gpu-memory-utilization=0.9 fills ~43 GB on a 48 GB card,
-    // evicting embedding + ocr. That 0.7 cap is the hard VRAM ceiling at any
-    // context length. --max-model-len 65536 widens the window; --kv-cache-dtype
-    // fp8 halves per-token KV so a 64K sequence fits the same pool a 32K bf16
-    // one did — more context, no extra VRAM.
+    // ss-rlm runs on a DEDICATED 48 GB A6000 (it already evicts ss-completion;
+    // embedding/ocr are Ollama). --gpu-memory-utilization 0.90 lets vLLM take
+    // ~43 GB; lower to ~0.7 if you co-locate ss-rlm with other GPU roles.
+    // --max-model-len 40960 is the model's native ceiling
+    // (max_position_embeddings=40960, no rope_scaling) — vLLM refuses to start
+    // above it without YaRN. --kv-cache-dtype fp8 halves per-token KV (one
+    // 40960-token seq ≈ 3 GB). The deep-search.ts seed cap is what actually
+    // fixed the maxRounds loop.
     //
     // Tool-calling: master's runRlmWithTools (src/lib/ai/stream-rlm.ts) drives
-    // Phase B recursive RAG via OpenAI tool_choice='auto'. vLLM disables this
-    // path by default and returns HTTP 400 unless explicitly enabled. The
-    // 'hermes' parser handles Qwen-family tool tokens correctly — Qwen3
-    // uses ChatML + Hermes-style <tool_call>...</tool_call> blocks.
+    // Phase B recursive RAG via OpenAI tool_choice='auto' (vLLM 400s without
+    // --enable-auto-tool-choice). The model emits Qwen3-Coder-style XML
+    // (<tool_call><function=…><parameter=…>…) → the `qwen3_xml` parser. Neither
+    // 'pythonic' nor 'hermes' matches it; stream-rlm.ts keeps a regex fallback.
     vllmArgs: [
-      '--gpu-memory-utilization', '0.7',
-      '--max-model-len', '65536',
+      '--gpu-memory-utilization', '0.90',
+      '--max-model-len', '40960',
       '--kv-cache-dtype', 'fp8',
       '--dtype', 'bfloat16',
       '--enable-auto-tool-choice',
-      '--tool-call-parser', 'pythonic',
+      '--tool-call-parser', 'qwen3_xml',
     ],
   },
   cuda: {

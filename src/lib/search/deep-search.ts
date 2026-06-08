@@ -1472,7 +1472,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
     { role: 'user' as const, content: userContent },
   ];
 
-  // RLM context window is 64K (Qwen3-8B with --max-model-len 65536, fp8 KV cache).
+  // RLM context window is 40K (Qwen3-8B native max_position_embeddings=40960, fp8 KV cache).
   // vLLM enforces prompt_tokens + max_tokens <= max_model_len; if we pass
   // through a large user-facing maxTokens (e.g. 32768 from the UI for cloud
   // models) the prompt has zero room and vLLM 400s. Cap output at 4096 —
