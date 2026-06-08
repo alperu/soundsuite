@@ -62,10 +62,78 @@ The database is automatically created on first startup.
 
 ### Docker
 
+Sound Suite ships a production image (`Dockerfile`) and a Compose topology
+(`docker-compose.yml`) that runs the app alongside Redis. **Docker Compose is the
+recommended way to run the container** — it wires up the persistent volume, the
+watch directory, and Redis for you. No Node.js install is required, only Docker
+with the Compose plugin.
+
+```bash
+# 1. Point the watch directory at your PDFs (read-only mount, default ./watch).
+mkdir -p watch
+cp /path/to/your/case-pdfs/*.pdf watch/
+
+# 2. Build the image and start the app (:3000) + MCP server (:3001) + Redis.
+docker compose up -d
+
+# 3. Follow the logs — first boot applies DB migrations and downloads the
+#    local embedding model, so give it a minute before the dashboard is ready.
+docker compose logs -f app
+```
+
+Open [http://localhost:3000](http://localhost:3000) for the dashboard; the MCP
+server is at [http://localhost:3001](http://localhost:3001). Drop new PDFs into
+the watch directory at any time and they're picked up automatically.
+
+**Configuration** (Compose reads these from your shell / `.env`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SOUNDSUITE_WATCH_DIR` | `./watch` | Host folder mounted read-only at `/watch/cases`. Put PDFs here. |
+| `SOUNDSUITE_IMAGE` | `ghcr.io/alper/soundsuite` | Image to pull instead of building locally. |
+| `SOUNDSUITE_TAG` | `latest` | Pin a published image, e.g. `SOUNDSUITE_TAG=1.4.2 docker compose up -d`. |
+
+App settings (embedding provider, MCP auth, etc.) are set under the `app`
+service's `environment:` in `docker-compose.yml`. To use a cloud embedding
+provider, add the key and switch the provider, e.g.:
+
+```yaml
+environment:
+  EMBEDDING_PROVIDER: openai
+  OPENAI_API_KEY: sk-...
+```
+
+**Data & persistence** — all mutable state (SQLite DB, LanceDB vectors,
+extracted exhibits, backups) lives in the named volume `soundsuite-data`,
+mounted at `/data` (versioned layout under `/data/v1/`). It survives
+`docker compose down` and image upgrades. Redis uses its own `soundsuite-redis`
+volume with AOF persistence. On every boot the entrypoint ensures the data
+layout exists and runs `prisma migrate deploy` (never `dev`/`reset`, so your
+data is never wiped); the image ships **no** database — it's created on first run.
+
+**Common operations:**
+
+```bash
+docker compose ps                 # service status + health
+docker compose logs -f app        # app logs
+docker compose restart app        # restart just the app
+docker compose pull && docker compose up -d   # upgrade to a newer published image
+docker compose down               # stop (named volumes are preserved)
+```
+
+**Without Compose** (no Redis cache, single container):
+
 ```bash
 docker build -t sound-suite .
-docker run -d -p 3000:3000 -p 3001:3001 -v /path/to/cases:/data/cases sound-suite
+docker run -d --name sound-suite \
+  -p 3000:3000 -p 3001:3001 \
+  -v sound-suite-data:/data \
+  -v /path/to/your/case-pdfs:/watch/cases:ro \
+  sound-suite
 ```
+
+Redis is optional (it only accelerates folder indexing and filing-metadata
+caching), so the standalone container runs fine without it.
 
 ## Project Structure
 
