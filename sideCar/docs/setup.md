@@ -230,6 +230,45 @@ Both port 3000 (HTTP) and 3002 (WebSocket) must be accessible.
 - **Windows:** Ensure Docker Desktop is running
 - **Linux:** Check socket permissions: `ls -la /var/run/docker.sock`
 
+### Port 8098 won't bind / `localhost:8098` unreachable (Windows)
+**Symptom** — one of:
+- Starting the container errors with
+  `(HTTP code 500) ... ports are not available: exposing port TCP 0.0.0.0:8098 ... bind: An attempt was made to access a socket in a way forbidden by its access permissions` (Windows error `WSAEACCES`/`10013`).
+- The container shows as `Up` in `docker ps`, but its **PORTS** column reads a bare `8098/tcp` instead of `0.0.0.0:8098->8098/tcp` — i.e. it's running **unpublished**, so `http://localhost:8098/` connects to nothing.
+
+**Cause** — Windows reserves dynamic TCP port ranges for Hyper-V / WSL2 NAT (`winnat`). If `8098` falls inside one of those ranges, Docker can't publish it to the host. After the failed bind the container may end up running without the port mapping (and `docker start` cannot add one back — the container must be **recreated** once the port is free).
+
+**Check whether 8098 is reserved** (Administrator cmd/PowerShell):
+```cmd
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
+If a listed start–end range contains `8098`, that's the cause.
+
+**Fix** (Administrator cmd/PowerShell):
+```cmd
+:: 1. Free 8098 and pin it out of the dynamic pool (survives reboots)
+net stop winnat
+netsh int ipv4 add excludedportrange protocol=tcp startport=8098 numberofports=1
+net start winnat
+
+:: 2. Recreate the sidecar WITH the publish (docker start can't re-add a mapping)
+docker rm -f ss-sidecar
+::    then re-run your original `docker run … -p 8098:8098 …` (or: docker compose up -d --force-recreate)
+
+:: 3. Verify — PORTS must now read 0.0.0.0:8098->8098/tcp
+docker ps
+curl.exe http://localhost:8098/api/masters
+```
+
+**If it keeps getting grabbed after a reboot**, move the whole dynamic range above 8098, then do a true restart (not shutdown+power-on — Windows *Fast Startup* re-reserves the ports):
+```cmd
+netsh int ipv4 set dynamic tcp start=49152 num=16384
+netsh int ipv4 set dynamicport tcp start=49152 num=16384
+shutdown /r /t 0
+```
+
+If `docker ps -a` shows **no** `ss-sidecar` container at all, it was never created on this host — run the original `docker run …` command from setup rather than `docker start`.
+
 ### GPU not detected
 - Run `nvidia-smi` to verify drivers are installed
 - Ensure NVIDIA Container Toolkit is installed for Docker GPU access
