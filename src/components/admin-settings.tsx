@@ -47,7 +47,9 @@ const PROVIDER_MODELS: Record<string, Array<{ name: string; label: string; size:
 // Code-aware embedding models for the ss-code-embedding role. Separate from
 // the text embedding models above — used for agent/code search. Ollama only.
 const CODE_EMBEDDING_MODELS: Array<{ name: string; label: string; size: number }> = [
-  { name: 'jina-code-embeddings-1.5B', label: 'Jina Code Embeddings 1.5B (code-aware, agent search)', size: 1500 * 1024 * 1024 },
+  { name: 'hf.co/jinaai/jina-code-embeddings-1.5b-GGUF:Q8_0', label: 'Jina Code Embeddings 1.5B — Q8_0 (1536 dims, code-aware)', size: 1650 * 1024 * 1024 },
+  { name: 'hf.co/jinaai/jina-code-embeddings-1.5b-GGUF:F16', label: 'Jina Code Embeddings 1.5B — F16 (1536 dims, highest precision)', size: 3090 * 1024 * 1024 },
+  { name: 'hf.co/jinaai/jina-code-embeddings-0.5b-GGUF:Q8_0', label: 'Jina Code Embeddings 0.5B — Q8_0 (lighter)', size: 600 * 1024 * 1024 },
 ];
 
 export default function AdminSettings({ initialConfig, initialModelDownloads }: AdminSettingsProps) {
@@ -412,26 +414,20 @@ export default function AdminSettings({ initialConfig, initialModelDownloads }: 
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                   <div>
-                    <h4 className="text-sm font-semibold text-blue-800">Code model must be built on your Ollama server</h4>
+                    <h4 className="text-sm font-semibold text-blue-800">Code model is pulled from Hugging Face</h4>
                     <p className="text-xs text-blue-700 mt-1">
-                      <code>{config.codeOllamaModel}</code> is not an official Ollama
-                      pull — build it once from the official Jina GGUF. On the machine
-                      running Ollama:
+                      This is an <code>hf.co/…</code> reference, so the sidecar pulls it
+                      automatically when the role is enabled. To pre-pull it manually on
+                      the machine running Ollama:
                     </p>
-                    <pre className="mt-2 px-3 py-2 bg-gray-900 text-green-400 text-xs rounded font-mono select-all whitespace-pre-wrap">
-{`# 1. download a GGUF from jinaai/jina-code-embeddings-1.5b-GGUF
-#    (e.g. jina-code-embeddings-1.5b-Q8_0.gguf)
-# 2. create a Modelfile next to it:
-printf 'FROM ./jina-code-embeddings-1.5b-Q8_0.gguf\\n' > Modelfile
-# 3. register it under the name this app expects:
-ollama create ${config.codeOllamaModel} -f Modelfile`}
+                    <pre className="mt-2 px-3 py-2 bg-gray-900 text-green-400 text-sm rounded font-mono select-all whitespace-pre-wrap">
+                      ollama pull {config.codeOllamaModel}
                     </pre>
                     <p className="text-xs text-blue-600 mt-2">
-                      Code-aware embeddings (Qwen2.5-Coder-1.5B base, last-token pooling;
-                      ~{formatBytes(CODE_EMBEDDING_MODELS.find(m => m.name === config.codeOllamaModel)?.size || 0)} at F16).
-                      Note: the GGUF returns 896-dim vectors under Ollama. Then assign the{' '}
-                      <code>ss-code-embedding</code> role to a sidecar on the{' '}
-                      <strong>Role Assignments</strong> page to serve it.
+                      Code-aware embeddings (Qwen2.5-Coder-1.5B base, last-token pooling,
+                      1536 dims; ~{formatBytes(CODE_EMBEDDING_MODELS.find(m => m.name === config.codeOllamaModel)?.size || 0)}).
+                      Then assign the <code>ss-code-embedding</code> role to a sidecar on
+                      the <strong>Role Assignments</strong> page to serve it.
                     </p>
                   </div>
                 </div>

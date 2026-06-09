@@ -30,15 +30,14 @@ import { CONTAINER_PREFIX, VLLM_IMAGE, dockerSupportsGpu, state, type ContainerD
 export type ModeName = 'ss-embedding' | 'ss-code-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker' | 'ss-rlm';
 export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-code-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker', 'ss-rlm'];
 
-// Code-aware embedding (ss-code-embedding). NOTE: jina-code-embeddings-1.5b is
-// NOT an official Ollama library pull — the operator builds it from the
-// official GGUF (jinaai/jina-code-embeddings-1.5b-GGUF) via a Modelfile
-// (`FROM ./jina-code-embeddings-1.5b-Q8_0.gguf`) + `ollama create
-// jina-code-embeddings-1.5B`. Last-token (EOS) pooling is required; under
-// llama.cpp/Ollama the GGUF emits 896-dim vectors. The boot-time model string
-// below is a fallback only — the master pushes the operator's choice
-// (embedding.codeOllamaModel) via modelOverrides.
-const CODE_EMBED_MODEL = 'jina-code-embeddings-1.5B';
+// Code-aware embedding (ss-code-embedding). Ollama pulls the GGUF directly from
+// HuggingFace via the hf.co/{repo}:{quant} reference — the bare name
+// "jina-code-embeddings-1.5b" is NOT a registry model and 404s on pull
+// ("file does not exist"). Q8_0 ≈ 1.6 GB. Last-token (EOS) pooling; the
+// official Jina GGUF emits the full 1536-dim vectors under Ollama (verified
+// live against /api/embeddings). Boot-time fallback only — the master pushes
+// the operator's choice (embedding.codeOllamaModel).
+const CODE_EMBED_MODEL = 'hf.co/jinaai/jina-code-embeddings-1.5b-GGUF:Q8_0';
 export type HostOs = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | 'unknown';
 export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner';
 

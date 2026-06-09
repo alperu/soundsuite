@@ -121,7 +121,10 @@ export const MODE_METADATA: ModeMetadata[] = [
  */
 const STATIC_FALLBACK_MODEL: Record<ModeName, string> = {
   'ss-embedding': 'qwen3-embedding:0.6b',
-  'ss-code-embedding': 'jina-code-embeddings-1.5B',
+  // Ollama pulls GGUFs directly from HF via the hf.co/{repo}:{quant} ref.
+  // The bare name "jina-code-embeddings-1.5B" is NOT a registry model and
+  // 404s on pull ("file does not exist") — must be the hf.co reference.
+  'ss-code-embedding': 'hf.co/jinaai/jina-code-embeddings-1.5b-GGUF:Q8_0',
   'ss-completion': 'qwen3.5:9b',
   'ss-ocr': 'minicpm-v:latest',
   'ss-reranker': 'Qwen/Qwen3-Reranker-8B',
