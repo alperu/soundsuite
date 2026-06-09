@@ -708,6 +708,7 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
   // Per-host DB values win.
   const idleTimeouts: Record<string, number> = {
     embedding: timeouts.embedding * 60_000,
+    'code-embedding': (cfg.gpuIdleCodeEmbeddingMin ?? 5) * 60_000,
     completion: timeouts.completion * 60_000,
     ocr: timeouts.ocr * 60_000,
     reranker: timeouts.reranker * 60_000,
@@ -715,6 +716,7 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
   };
   const minOnline: Record<string, number> = {
     embedding: cfg.gpuMinEmbedding ?? 1,
+    'code-embedding': cfg.gpuMinCodeEmbedding ?? 0,
     completion: cfg.gpuMinCompletion ?? 0,
     ocr: cfg.gpuMinOcr ?? 1,
     reranker: cfg.gpuMinReranker ?? 1,
@@ -1160,6 +1162,7 @@ async function enforceMinOnline(): Promise<void> {
   const config = await getConfig();
   const globalMins: Record<string, number> = {
     embedding: config.gpuMinEmbedding ?? 0,
+    'code-embedding': config.gpuMinCodeEmbedding ?? 0,
     completion: config.gpuMinCompletion ?? 0,
     ocr: config.gpuMinOcr ?? 0,
     reranker: config.gpuMinReranker ?? 0,
@@ -1170,6 +1173,7 @@ async function enforceMinOnline(): Promise<void> {
     completion: 10000,
     reranker: 7000,
     embedding: 1200,
+    'code-embedding': 2000,
     ocr: 8000,
   };
 
@@ -1188,7 +1192,7 @@ async function enforceMinOnline(): Promise<void> {
 
   for (const assignment of enabled) {
     const role = assignment.mode.replace(/^ss-/, '');
-    if (!['embedding', 'completion', 'ocr', 'reranker'].includes(role)) continue;
+    if (!['embedding', 'code-embedding', 'completion', 'ocr', 'reranker'].includes(role)) continue;
 
     // Operator opt-out wins: if per-host minOnline=0, the sidecar's HARD
     // disabled-policy will reject /acquire anyway — don't generate noise.

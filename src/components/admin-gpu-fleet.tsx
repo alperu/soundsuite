@@ -142,9 +142,9 @@ interface FleetData {
   sidecars: FleetSidecar[];
   wsRelayPort: number;
   connectedViaWs: number;
-  idleTimeouts: { embedding: number; completion: number; ocr: number; reranker: number; rlm?: number };
-  minOnline: { embedding: number; completion: number; ocr: number; reranker: number; rlm?: number };
-  peakDemand: { embedding: number; completion: number; ocr: number; reranker: number; rlm?: number };
+  idleTimeouts: { embedding: number; 'code-embedding'?: number; completion: number; ocr: number; reranker: number; rlm?: number };
+  minOnline: { embedding: number; 'code-embedding'?: number; completion: number; ocr: number; reranker: number; rlm?: number };
+  peakDemand: { embedding: number; 'code-embedding'?: number; completion: number; ocr: number; reranker: number; rlm?: number };
   sidecarTimeoutOverrides?: Record<string, Record<string, number>>;
   gpuMode: string;
   gpuAutoManage: boolean;
@@ -152,7 +152,7 @@ interface FleetData {
   latestBuildVersion: string | null;
 }
 
-const ROLES = ['embedding', 'completion', 'ocr', 'reranker', 'rlm'] as const;
+const ROLES = ['embedding', 'code-embedding', 'completion', 'ocr', 'reranker', 'rlm'] as const;
 
 type LoadedModel = NonNullable<ContainerState['loadedModels']>[number];
 
@@ -376,6 +376,7 @@ export default function GpuFleetPanel() {
 
   // Idle timeouts
   const [idleEmbedding, setIdleEmbedding] = useState(0);
+  const [idleCodeEmbedding, setIdleCodeEmbedding] = useState(5);
   const [idleCompletion, setIdleCompletion] = useState(10);
   const [idleOcr, setIdleOcr] = useState(5);
   const [idleReranker, setIdleReranker] = useState(5);
@@ -383,6 +384,7 @@ export default function GpuFleetPanel() {
 
   // Minimum online instances
   const [minEmbedding, setMinEmbedding] = useState(0);
+  const [minCodeEmbedding, setMinCodeEmbedding] = useState(0);
   const [minCompletion, setMinCompletion] = useState(0);
   const [minOcr, setMinOcr] = useState(0);
   const [minReranker, setMinReranker] = useState(0);
@@ -416,12 +418,14 @@ export default function GpuFleetPanel() {
       const data: FleetData = await res.json();
       setFleet(data);
       setIdleEmbedding(data.idleTimeouts.embedding);
+      if (typeof data.idleTimeouts['code-embedding'] === 'number') setIdleCodeEmbedding(data.idleTimeouts['code-embedding']);
       setIdleCompletion(data.idleTimeouts.completion);
       setIdleOcr(data.idleTimeouts.ocr);
       setIdleReranker(data.idleTimeouts.reranker);
       if (typeof data.idleTimeouts.rlm === 'number') setIdleRlm(data.idleTimeouts.rlm);
       if (data.minOnline) {
         setMinEmbedding(data.minOnline.embedding);
+        if (typeof data.minOnline['code-embedding'] === 'number') setMinCodeEmbedding(data.minOnline['code-embedding']);
         setMinCompletion(data.minOnline.completion);
         setMinOcr(data.minOnline.ocr);
         setMinReranker(data.minOnline.reranker);
@@ -585,6 +589,7 @@ export default function GpuFleetPanel() {
   const handleSaveTimeouts = async () => {
     const saved = await doAction('saveTimeouts', {
       gpuIdleEmbeddingMin: idleEmbedding,
+      gpuIdleCodeEmbeddingMin: idleCodeEmbedding,
       gpuIdleCompletionMin: idleCompletion,
       gpuIdleOcrMin: idleOcr,
       gpuIdleRerankerMin: idleReranker,
@@ -596,7 +601,7 @@ export default function GpuFleetPanel() {
     for (const s of connected) {
       const r = await doAction('config', {
         url: s.url,
-        idleTimeouts: { embedding: idleEmbedding, completion: idleCompletion, ocr: idleOcr, reranker: idleReranker, rlm: idleRlm },
+        idleTimeouts: { embedding: idleEmbedding, 'code-embedding': idleCodeEmbedding, completion: idleCompletion, ocr: idleOcr, reranker: idleReranker, rlm: idleRlm },
       });
       if (r) pushed++;
     }
@@ -606,6 +611,7 @@ export default function GpuFleetPanel() {
   const handleSaveMinOnline = async () => {
     const saved = await doAction('saveMinOnline', {
       gpuMinEmbedding: minEmbedding,
+      gpuMinCodeEmbedding: minCodeEmbedding,
       gpuMinCompletion: minCompletion,
       gpuMinOcr: minOcr,
       gpuMinReranker: minReranker,
@@ -1231,8 +1237,9 @@ export default function GpuFleetPanel() {
       <div className="bg-white shadow rounded-lg p-6">
         <h2 className="text-xl font-semibold text-gray-900 mb-2">Per-Model Idle Timeouts</h2>
         <p className="text-sm text-gray-600 mb-4">Auto-stop containers after idle to free GPU VRAM. Set 0 to never auto-stop.</p>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-4">
           <TimeoutInput label="Embedding" value={idleEmbedding} onChange={setIdleEmbedding} hint="0 = never" />
+          <TimeoutInput label="Code Embedding" value={idleCodeEmbedding} onChange={setIdleCodeEmbedding} />
           <TimeoutInput label="Completion" value={idleCompletion} onChange={setIdleCompletion} />
           <TimeoutInput label="OCR" value={idleOcr} onChange={setIdleOcr} />
           <TimeoutInput label="Reranker" value={idleReranker} onChange={setIdleReranker} />
@@ -1248,8 +1255,9 @@ export default function GpuFleetPanel() {
       <div className="bg-white shadow rounded-lg p-6">
         <h2 className="text-xl font-semibold text-gray-900 mb-2">Minimum Online Instances</h2>
         <p className="text-sm text-gray-600 mb-4">Ensure N sidecar(s) keep each role&apos;s container running. Enforcement runs every 30s.</p>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-4">
           <NumberInput label="Embedding" value={minEmbedding} onChange={setMinEmbedding} />
+          <NumberInput label="Code Embedding" value={minCodeEmbedding} onChange={setMinCodeEmbedding} />
           <NumberInput label="Completion" value={minCompletion} onChange={setMinCompletion} />
           <NumberInput label="OCR" value={minOcr} onChange={setMinOcr} />
           <NumberInput label="Reranker" value={minReranker} onChange={setMinReranker} />

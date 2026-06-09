@@ -115,6 +115,8 @@ export async function POST(request: NextRequest) {
       claudeApiKey: body.claudeApiKey,
       ollamaHost: body.ollamaHost,
       ollamaModel,
+      // Code embedding model (ss-code-embedding) — independent of text embedding.
+      codeOllamaModel: body.codeOllamaModel,
       ollamaCompletionHost: body.ollamaCompletionHost,
       ollamaCompletionModel: body.ollamaCompletionModel,
       // AI Services — primary/fallback selection

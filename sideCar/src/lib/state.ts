@@ -67,6 +67,22 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     containerName: `${CONTAINER_PREFIX}embedding`,
     priority: 'high', // used in both modes; small footprint; cheap to keep loaded
   },
+  // Code-aware embedding (ss-code-embedding). jina-code-embeddings-1.5b is NOT
+  // an official Ollama pull — the operator builds it from the official GGUF
+  // (jinaai/jina-code-embeddings-1.5b-GGUF) via `ollama create
+  // jina-code-embeddings-1.5B`. This model string is a boot-time fallback; the
+  // master pushes the operator's choice (embedding.codeOllamaModel) via
+  // modelOverrides. Registry key is the role name (modeToRole('ss-code-embedding')).
+  'code-embedding': {
+    image: 'ollama/ollama',
+    model: 'jina-code-embeddings-1.5B',
+    port: 11437,
+    vram: 2000,
+    type: 'ollama',
+    modes: ['searching'],
+    containerName: `${CONTAINER_PREFIX}code-embedding`,
+    priority: 'normal',
+  },
   completion: {
     image: 'ollama/ollama',
     model: 'qwen3.5:9b',

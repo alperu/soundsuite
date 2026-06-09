@@ -27,8 +27,18 @@
  */
 import { CONTAINER_PREFIX, VLLM_IMAGE, dockerSupportsGpu, state, type ContainerDef } from './state';
 
-export type ModeName = 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker' | 'ss-rlm';
-export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker', 'ss-rlm'];
+export type ModeName = 'ss-embedding' | 'ss-code-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker' | 'ss-rlm';
+export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-code-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker', 'ss-rlm'];
+
+// Code-aware embedding (ss-code-embedding). NOTE: jina-code-embeddings-1.5b is
+// NOT an official Ollama library pull — the operator builds it from the
+// official GGUF (jinaai/jina-code-embeddings-1.5b-GGUF) via a Modelfile
+// (`FROM ./jina-code-embeddings-1.5b-Q8_0.gguf`) + `ollama create
+// jina-code-embeddings-1.5B`. Last-token (EOS) pooling is required; under
+// llama.cpp/Ollama the GGUF emits 896-dim vectors. The boot-time model string
+// below is a fallback only — the master pushes the operator's choice
+// (embedding.codeOllamaModel) via modelOverrides.
+const CODE_EMBED_MODEL = 'jina-code-embeddings-1.5B';
 export type HostOs = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | 'unknown';
 export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner';
 
@@ -159,6 +169,31 @@ export function resolveMode(
             modes: ['indexing', 'searching'],
             containerName,
             priority: 'high',
+            runtime: 'host',
+          };
+
+    case 'ss-code-embedding':
+      return isLinux
+        ? {
+            image: 'ollama/ollama',
+            model: CODE_EMBED_MODEL,
+            port: 11437,
+            vram: 2000,
+            type: 'ollama',
+            modes: ['searching'],
+            containerName,
+            priority: 'normal',
+            runtime: 'docker',
+          }
+        : {
+            image: 'host-ollama',
+            model: CODE_EMBED_MODEL,
+            port: 11434, // shared native Ollama port
+            vram: 2000,
+            type: 'ollama',
+            modes: ['searching'],
+            containerName,
+            priority: 'normal',
             runtime: 'host',
           };
 
@@ -296,6 +331,18 @@ function resolveModeForRuntime(
           priority: 'high',
           runtime: 'host',
         };
+      case 'ss-code-embedding':
+        return {
+          image: 'host-ollama',
+          model: CODE_EMBED_MODEL,
+          port: 11434,
+          vram: 2000,
+          type: 'ollama',
+          modes: ['searching'],
+          containerName,
+          priority: 'normal',
+          runtime: 'host',
+        };
       case 'ss-completion':
         return {
           image: 'host-ollama',
@@ -346,6 +393,18 @@ function resolveModeForRuntime(
           modes: ['indexing', 'searching'],
           containerName,
           priority: 'high',
+          runtime: 'docker',
+        };
+      case 'ss-code-embedding':
+        return {
+          image: 'ollama/ollama',
+          model: CODE_EMBED_MODEL,
+          port: 11437,
+          vram: 2000,
+          type: 'ollama',
+          modes: ['searching'],
+          containerName,
+          priority: 'normal',
           runtime: 'docker',
         };
       case 'ss-completion':
@@ -434,6 +493,9 @@ function resolveModeForRuntime(
   // time (see fleet-router pushModelRegistry).
   if (runtime === 'docker-model-runner') {
     if (mode === 'ss-rlm') return null;
+    // jina-code-embeddings has no MLX/vllm-metal build — Mac serves it via
+    // host-Ollama (the operator's `ollama create` from the GGUF), not DMR.
+    if (mode === 'ss-code-embedding') return null;
     if (mode === 'ss-reranker' && hostOs === 'mac-docker-ollama') return null;
     switch (mode) {
       case 'ss-embedding':

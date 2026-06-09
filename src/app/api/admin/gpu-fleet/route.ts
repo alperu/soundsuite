@@ -46,6 +46,7 @@ export async function GET() {
       ...fleet,
       idleTimeouts: {
         embedding: config.gpuIdleEmbeddingMin,
+        'code-embedding': config.gpuIdleCodeEmbeddingMin,
         completion: config.gpuIdleCompletionMin,
         ocr: config.gpuIdleOcrMin,
         reranker: config.gpuIdleRerankerMin,
@@ -54,6 +55,7 @@ export async function GET() {
       sidecarTimeoutOverrides,
       minOnline: {
         embedding: config.gpuMinEmbedding,
+        'code-embedding': config.gpuMinCodeEmbedding,
         completion: config.gpuMinCompletion,
         ocr: config.gpuMinOcr,
         reranker: config.gpuMinReranker,
@@ -171,6 +173,7 @@ export async function POST(request: NextRequest) {
       case 'saveTimeouts': {
         const {
           gpuIdleEmbeddingMin,
+          gpuIdleCodeEmbeddingMin,
           gpuIdleCompletionMin,
           gpuIdleOcrMin,
           gpuIdleRerankerMin,
@@ -178,6 +181,7 @@ export async function POST(request: NextRequest) {
         } = body;
         await Promise.all([
           setConfigValue('gpu.idle.embedding', String(gpuIdleEmbeddingMin ?? 0)),
+          setConfigValue('gpu.idle.code-embedding', String(gpuIdleCodeEmbeddingMin ?? 5)),
           setConfigValue('gpu.idle.completion', String(gpuIdleCompletionMin ?? 10)),
           setConfigValue('gpu.idle.ocr', String(gpuIdleOcrMin ?? 5)),
           setConfigValue('gpu.idle.reranker', String(gpuIdleRerankerMin ?? 5)),
@@ -217,6 +221,7 @@ export async function POST(request: NextRequest) {
       case 'saveMinOnline': {
         await Promise.all([
           setConfigValue('gpu.min.embedding', String(body.gpuMinEmbedding ?? 0)),
+          setConfigValue('gpu.min.code-embedding', String(body.gpuMinCodeEmbedding ?? 0)),
           setConfigValue('gpu.min.completion', String(body.gpuMinCompletion ?? 0)),
           setConfigValue('gpu.min.ocr', String(body.gpuMinOcr ?? 0)),
           setConfigValue('gpu.min.reranker', String(body.gpuMinReranker ?? 0)),

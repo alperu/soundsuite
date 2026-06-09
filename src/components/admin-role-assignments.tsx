@@ -62,6 +62,7 @@ const RUNTIME_COLUMNS: Array<{ key: RuntimeChoice; short: string; label: string 
  */
 const MODE_PORTS: Record<string, number> = {
   'ss-embedding': 11434,
+  'ss-code-embedding': 11437,
   'ss-completion': 11435,
   'ss-ocr': 11436,
   'ss-reranker': 8099,
@@ -155,7 +156,8 @@ type Toast = { type: 'success' | 'error' | 'warning'; text: string } | null;
 // the settings pages, so the "inherit (<model>)" hint would lie. When
 // offline we show "inherit" with no model + a "backend offline" badge.
 const FALLBACK_MODES: ModeCatalogEntry[] = [
-  { name: 'ss-embedding', label: 'Embedding', availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'], defaultModel: {} },
+  { name: 'ss-embedding', label: 'Text embedding', availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'], defaultModel: {} },
+  { name: 'ss-code-embedding', label: 'Code Embedding', availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'], defaultModel: {} },
   { name: 'ss-completion', label: 'Completion', availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'], defaultModel: {} },
   { name: 'ss-ocr', label: 'OCR', availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'], defaultModel: {} },
   { name: 'ss-reranker', label: 'Reranker', availableOn: ['linux', 'windows-docker-wsl2'], defaultModel: {} },
@@ -164,6 +166,7 @@ const FALLBACK_MODES: ModeCatalogEntry[] = [
 
 const RESET_DEFAULTS: Record<string, { minOnline: number; idleTimeoutMin: number }> = {
   'ss-embedding': { minOnline: 1, idleTimeoutMin: 0 },
+  'ss-code-embedding': { minOnline: 0, idleTimeoutMin: 5 },
   'ss-completion': { minOnline: 1, idleTimeoutMin: 10 },
   'ss-ocr': { minOnline: 1, idleTimeoutMin: 5 },
   'ss-reranker': { minOnline: 0, idleTimeoutMin: 5 },
@@ -892,8 +895,8 @@ export default function AdminRoleAssignments() {
           title={`Reset mode assignments on ${confirmReset.hostname}?`}
           message={`This will overwrite current assignments for ${confirmReset.hostname} with defaults appropriate for ${confirmReset.os}.\n\n${
             confirmReset.os === 'linux'
-              ? 'All 4 modes will be enabled.'
-              : 'ss-embedding, ss-completion and ss-ocr will be enabled; ss-reranker will be left disabled (not supported).'
+              ? 'All available modes will be enabled.'
+              : 'ss-embedding, ss-code-embedding, ss-completion and ss-ocr will be enabled; ss-reranker and ss-rlm will be left disabled (not supported).'
           }`}
           confirmLabel="Reset"
           danger

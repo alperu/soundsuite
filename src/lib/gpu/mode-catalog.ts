@@ -6,7 +6,8 @@
  * it is read from the Config DB at request time, populated by the existing
  * admin settings pages:
  *
- *   ss-embedding  ← embedding.ollamaModel       (/admin/embedding)
+ *   ss-embedding      ← embedding.ollamaModel       (/admin/embedding)
+ *   ss-code-embedding ← embedding.codeOllamaModel   (/admin/embedding)
  *   ss-completion ← ai.ollamaCompletionModel    (/admin/localai)
  *   ss-ocr        ← pipeline.ocrOllamaModel     (/admin/ocr)
  *   ss-reranker   ← rerank.model                (/admin/reranking)
@@ -30,11 +31,18 @@
  *   three modes work on linux/mac-docker-ollama/windows-docker-wsl2 via Ollama (host or container).
  */
 
-export type ModeName = 'ss-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker' | 'ss-rlm';
+export type ModeName =
+  | 'ss-embedding'
+  | 'ss-code-embedding'
+  | 'ss-completion'
+  | 'ss-ocr'
+  | 'ss-reranker'
+  | 'ss-rlm';
 export type HostOs = 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2';
 
 export const ALL_MODES: readonly ModeName[] = [
   'ss-embedding',
+  'ss-code-embedding',
   'ss-completion',
   'ss-ocr',
   'ss-reranker',
@@ -59,10 +67,17 @@ interface ModeMetadata {
 export const MODE_METADATA: ModeMetadata[] = [
   {
     name: 'ss-embedding',
-    label: 'Embedding',
+    label: 'Text embedding',
     availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
     description:
       'Document and query embedding via Ollama. Lightweight (~1.2 GB VRAM); used in both indexing and search.',
+  },
+  {
+    name: 'ss-code-embedding',
+    label: 'Code Embedding',
+    availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
+    description:
+      'Code-aware embedding via Ollama for agent/code search. Separate from text embedding — used when searching with agents over source/code-like content. ~2 GB VRAM.',
   },
   {
     name: 'ss-completion',
@@ -106,6 +121,7 @@ export const MODE_METADATA: ModeMetadata[] = [
  */
 const STATIC_FALLBACK_MODEL: Record<ModeName, string> = {
   'ss-embedding': 'qwen3-embedding:0.6b',
+  'ss-code-embedding': 'jina-code-embeddings-1.5B',
   'ss-completion': 'qwen3.5:9b',
   'ss-ocr': 'minicpm-v:latest',
   'ss-reranker': 'Qwen/Qwen3-Reranker-8B',
@@ -154,6 +170,8 @@ export function settingsPageForMode(
   switch (mode) {
     case 'ss-embedding':
       return { label: 'Embedding settings', href: '/admin/embedding', configKey: 'embedding.ollamaModel' };
+    case 'ss-code-embedding':
+      return { label: 'Embedding settings', href: '/admin/embedding', configKey: 'embedding.codeOllamaModel' };
     case 'ss-completion':
       return { label: 'AI settings', href: '/admin/localai', configKey: 'ai.ollamaCompletionModel' };
     case 'ss-ocr':
@@ -197,6 +215,9 @@ export function resolveModelFromConfig(
   switch (mode) {
     case 'ss-embedding':
       v = cfg?.ollamaModel;
+      break;
+    case 'ss-code-embedding':
+      v = cfg?.codeOllamaModel;
       break;
     case 'ss-completion':
       v = cfg?.ollamaCompletionModel;

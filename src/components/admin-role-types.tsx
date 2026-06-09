@@ -54,10 +54,17 @@ export interface RoleType {
 const FALLBACK_CATALOG_NO_DEFAULTS: ModeCatalogEntry[] = [
   {
     name: 'ss-embedding',
-    label: 'Embedding',
+    label: 'Text embedding',
     availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
     defaultModel: {},
     description: 'Document and query embedding via Ollama. Lightweight; used in both indexing and search.',
+  },
+  {
+    name: 'ss-code-embedding',
+    label: 'Code Embedding',
+    availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
+    defaultModel: {},
+    description: 'Code-aware embedding via Ollama for agent/code search. Separate from text embedding.',
   },
   {
     name: 'ss-completion',

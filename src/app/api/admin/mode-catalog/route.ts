@@ -22,8 +22,8 @@ import { getModeCatalog } from '@/lib/gpu/mode-catalog-server';
  *   docker-vllm  → reranker only (CUDA only)
  */
 const RUNTIME_AVAILABILITY: Record<string, string[]> = {
-  host: ['ss-embedding', 'ss-completion', 'ss-ocr'],
-  'docker-ollama': ['ss-embedding', 'ss-completion', 'ss-ocr'],
+  host: ['ss-embedding', 'ss-code-embedding', 'ss-completion', 'ss-ocr'],
+  'docker-ollama': ['ss-embedding', 'ss-code-embedding', 'ss-completion', 'ss-ocr'],
   'docker-vllm': ['ss-reranker'],
 };
 

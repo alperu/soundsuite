@@ -44,6 +44,12 @@ const PROVIDER_MODELS: Record<string, Array<{ name: string; label: string; size:
   ],
 };
 
+// Code-aware embedding models for the ss-code-embedding role. Separate from
+// the text embedding models above — used for agent/code search. Ollama only.
+const CODE_EMBEDDING_MODELS: Array<{ name: string; label: string; size: number }> = [
+  { name: 'jina-code-embeddings-1.5B', label: 'Jina Code Embeddings 1.5B (code-aware, agent search)', size: 1500 * 1024 * 1024 },
+];
+
 export default function AdminSettings({ initialConfig, initialModelDownloads }: AdminSettingsProps) {
   const [config, setConfig] = useState<AppConfig>(initialConfig);
   const [modelDownloads, setModelDownloads] = useState<ModelDownloadInfo[]>(initialModelDownloads);
@@ -332,6 +338,7 @@ export default function AdminSettings({ initialConfig, initialModelDownloads }: 
           Choose the specific model to use for {config.embeddingProvider} embeddings.
         </p>
 
+        <h3 className="text-base font-semibold text-gray-900 mb-2">Text embedding</h3>
         <select
           value={config.embeddingModel}
           onChange={(e) => handleModelChange(e.target.value)}
@@ -370,6 +377,66 @@ export default function AdminSettings({ initialConfig, initialModelDownloads }: 
                 </p>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Code Embedding — separate role (ss-code-embedding), Ollama only.
+            Does not affect the Text embedding model above. */}
+        {config.embeddingProvider === 'ollama' && (
+          <div className="mt-8 pt-6 border-t border-gray-200">
+            <h3 className="text-base font-semibold text-gray-900 mb-2">Code Embedding</h3>
+            <p className="text-sm text-gray-600 mb-3">
+              Optional code-aware embedding model for searching with agents over
+              source/code-like content. Runs as the separate{' '}
+              <code className="text-xs">ss-code-embedding</code> role — independent
+              of the text embedding model above.
+            </p>
+
+            <select
+              value={config.codeOllamaModel || ''}
+              onChange={(e) => setConfig({ ...config, codeOllamaModel: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">Not set — role uses its built-in default</option>
+              {CODE_EMBEDDING_MODELS.map((model) => (
+                <option key={model.name} value={model.name}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+
+            {config.codeOllamaModel && (
+              <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                <div className="flex gap-2 mb-2">
+                  <svg className="h-5 w-5 text-blue-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <div>
+                    <h4 className="text-sm font-semibold text-blue-800">Code model must be built on your Ollama server</h4>
+                    <p className="text-xs text-blue-700 mt-1">
+                      <code>{config.codeOllamaModel}</code> is not an official Ollama
+                      pull — build it once from the official Jina GGUF. On the machine
+                      running Ollama:
+                    </p>
+                    <pre className="mt-2 px-3 py-2 bg-gray-900 text-green-400 text-xs rounded font-mono select-all whitespace-pre-wrap">
+{`# 1. download a GGUF from jinaai/jina-code-embeddings-1.5b-GGUF
+#    (e.g. jina-code-embeddings-1.5b-Q8_0.gguf)
+# 2. create a Modelfile next to it:
+printf 'FROM ./jina-code-embeddings-1.5b-Q8_0.gguf\\n' > Modelfile
+# 3. register it under the name this app expects:
+ollama create ${config.codeOllamaModel} -f Modelfile`}
+                    </pre>
+                    <p className="text-xs text-blue-600 mt-2">
+                      Code-aware embeddings (Qwen2.5-Coder-1.5B base, last-token pooling;
+                      ~{formatBytes(CODE_EMBEDDING_MODELS.find(m => m.name === config.codeOllamaModel)?.size || 0)} at F16).
+                      Note: the GGUF returns 896-dim vectors under Ollama. Then assign the{' '}
+                      <code>ss-code-embedding</code> role to a sidecar on the{' '}
+                      <strong>Role Assignments</strong> page to serve it.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

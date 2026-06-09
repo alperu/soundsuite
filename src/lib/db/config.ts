@@ -18,6 +18,10 @@ export interface AppConfig {
   grokApiKey?: string;
   ollamaHost?: string;
   ollamaModel?: string;
+  // Code-aware embedding model (ss-code-embedding mode). Separate from the
+  // text embedding model (ollamaModel) — used for agent/code search. Set on
+  // /admin/embedding; does not affect how text embedding works.
+  codeOllamaModel?: string;
   ollamaCompletionHost?: string;
   ollamaCompletionModel?: string;
   // RLM (Recursive Language Model) — long-context recursive reasoning role
@@ -80,12 +84,14 @@ export interface AppConfig {
   fusionSoftBoost: number;
   // Per-model GPU idle timeouts (minutes, 0 = never stop)
   gpuIdleEmbeddingMin: number;
+  gpuIdleCodeEmbeddingMin: number;
   gpuIdleCompletionMin: number;
   gpuIdleOcrMin: number;
   gpuIdleRerankerMin: number;
   gpuIdleRlmMin: number;
   // Per-model minimum online instances (0 = no minimum)
   gpuMinEmbedding: number;
+  gpuMinCodeEmbedding: number;
   gpuMinCompletion: number;
   gpuMinOcr: number;
   gpuMinReranker: number;
@@ -161,6 +167,7 @@ export async function getConfig(): Promise<AppConfig> {
     grokApiKey: configMap.get('ai.grokApiKey'),
     ollamaHost: configMap.get('embedding.ollamaHost'),
     ollamaModel: configMap.get('embedding.ollamaModel'),
+    codeOllamaModel: configMap.get('embedding.codeOllamaModel'),
     ollamaCompletionHost: configMap.get('ai.ollamaCompletionHost'),
     ollamaCompletionModel: configMap.get('ai.ollamaCompletionModel'),
     rlmModel: configMap.get('rlm.model'),
@@ -235,12 +242,14 @@ export async function getConfig(): Promise<AppConfig> {
     fusionSoftBoost: parseFloat(configMap.get('fusion.softBoost') || '1.2'),
     // Per-model GPU idle timeouts
     gpuIdleEmbeddingMin: parseInt(configMap.get('gpu.idle.embedding') || '0', 10),
+    gpuIdleCodeEmbeddingMin: parseInt(configMap.get('gpu.idle.code-embedding') || '5', 10),
     gpuIdleCompletionMin: parseInt(configMap.get('gpu.idle.completion') || '10', 10),
     gpuIdleOcrMin: parseInt(configMap.get('gpu.idle.ocr') || '5', 10),
     gpuIdleRerankerMin: parseInt(configMap.get('gpu.idle.reranker') || '5', 10),
     gpuIdleRlmMin: parseInt(configMap.get('gpu.idle.rlm') || '10', 10),
     // Per-model minimum online instances
     gpuMinEmbedding: parseInt(configMap.get('gpu.min.embedding') || '0', 10),
+    gpuMinCodeEmbedding: parseInt(configMap.get('gpu.min.code-embedding') || '0', 10),
     gpuMinCompletion: parseInt(configMap.get('gpu.min.completion') || '0', 10),
     gpuMinOcr: parseInt(configMap.get('gpu.min.ocr') || '0', 10),
     gpuMinReranker: parseInt(configMap.get('gpu.min.reranker') || '0', 10),
@@ -381,6 +390,10 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
 
   if (config.ollamaModel !== undefined) {
     updates.push({ key: 'embedding.ollamaModel', value: config.ollamaModel });
+  }
+
+  if (config.codeOllamaModel !== undefined) {
+    updates.push({ key: 'embedding.codeOllamaModel', value: config.codeOllamaModel });
   }
 
   if (config.ollamaCompletionHost !== undefined) {
