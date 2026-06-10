@@ -800,6 +800,38 @@ const REPORT_SYSTEM_PROMPT = `You are an expert legal research analyst. Generate
 - Be thorough but concise — quality over quantity
 - Use markdown formatting for readability`;
 
+/**
+ * Anthropic models that run adaptive thinking with the thinking stream
+ * *omitted* by default (Fable 5 / Opus 4.7 / 4.8). At high effort these can
+ * spend the entire `max_tokens` budget on invisible reasoning and emit no
+ * visible answer — a blank report. Only these models need the scaled budget
+ * floor and empty-completion retry below; every other model (older Anthropic,
+ * OpenAI, Ollama, Groq) is left on its caller-supplied budget so its behavior
+ * and output caps are unchanged.
+ */
+function isAdaptiveThinkingModel(model: string | undefined): boolean {
+  if (!model) return false;
+  return model.startsWith('claude-fable-5')
+    || model.startsWith('claude-opus-4-7')
+    || model.startsWith('claude-opus-4-8');
+}
+
+/** Token budget for synthesis. Adaptive-thinking models get a floor scaled by
+ *  effort so thinking can't starve the written answer; others pass through. */
+function thinkingBudget(
+  maxTokens: number | undefined,
+  thinking: boolean | undefined,
+  effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined,
+  model: string | undefined,
+): number {
+  const base = maxTokens ?? 16384;
+  if (!thinking || !isAdaptiveThinkingModel(model)) return base;
+  const floor = (effort === 'max' || effort === 'xhigh') ? 48000
+    : effort === 'high' ? 32000
+    : 24000;
+  return Math.max(base, floor);
+}
+
 export async function generateReport(
   query: string,
   decomposition: DecompositionResult,
@@ -874,42 +906,77 @@ ${contextBlock}`;
       const resolved = (options?.provider && options?.model)
         ? { provider: options.provider as AIProviderKey, model: options.model }
         : await getAvailableProvider();
-      let fullContent = '';
-      for await (const event of streamAI({
-        provider: resolved.provider,
-        model: resolved.model,
-        messages: [
-          { role: 'system', content: REPORT_SYSTEM_PROMPT },
-          { role: 'user', content: userContent },
-        ],
-        maxTokens: options?.maxTokens ?? 16384,
-        temperature: 0.3,
-        thinking: options?.thinking,
-        effort: options?.effort,
-        signal: options?.signal,
-      })) {
-        if (event.type === 'token' && options.onToken) {
-          options.onToken(event.text);
-          fullContent += event.text;
-        } else if (event.type === 'thinking' && options.onThinking) {
-          options.onThinking(event.text);
-        } else if (event.type === 'done') {
-          // streamAI's done event carries the full content as a fallback for
-          // providers that don't yield per-token (e.g. error fallback).
-          if (!fullContent && event.content) fullContent = event.content;
+      const runStream = async (over: { thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; maxTokens?: number }): Promise<string> => {
+        let content = '';
+        for await (const event of streamAI({
+          provider: resolved.provider,
+          model: resolved.model,
+          messages: [
+            { role: 'system', content: REPORT_SYSTEM_PROMPT },
+            { role: 'user', content: userContent },
+          ],
+          maxTokens: over.maxTokens ?? options?.maxTokens ?? 16384,
+          temperature: 0.3,
+          thinking: over.thinking,
+          effort: over.effort ?? options?.effort,
+          signal: options?.signal,
+        })) {
+          if (event.type === 'token' && options.onToken) {
+            options.onToken(event.text);
+            content += event.text;
+          } else if (event.type === 'thinking' && options.onThinking) {
+            options.onThinking(event.text);
+          } else if (event.type === 'done') {
+            // streamAI's done event carries the full content as a fallback for
+            // providers that don't yield per-token (e.g. error fallback).
+            if (!content && event.content) content = event.content;
+          }
         }
+        return content;
+      };
+
+      // Adaptive thinking (Fable 5 / Opus 4.7+) spends max_tokens on *omitted*
+      // reasoning before writing. Deeper effort needs more headroom or the
+      // visible answer is starved to nothing (a blank report — what happens at
+      // effort=xhigh with the default 16k budget). Give the model room to think
+      // at the chosen effort *and* write the report. (Streaming, so a large
+      // ceiling is safe.)
+      const effMax = thinkingBudget(options?.maxTokens, options?.thinking, options?.effort, resolved.model);
+
+      let fullContent = await runStream({ thinking: options?.thinking, maxTokens: effMax });
+      // Safety net: if it still emits zero visible text, retry once with even
+      // more headroom — keeping thinking and the user's effort on (we don't
+      // silently downgrade the requested reasoning depth).
+      if (!fullContent.trim() && options?.thinking && isAdaptiveThinkingModel(resolved.model)) {
+        console.warn('[Deep Search] synthesis returned empty content — retrying with more headroom (thinking kept on)', {
+          provider: resolved.provider,
+          model: resolved.model,
+          effort: options?.effort,
+        });
+        fullContent = await runStream({ thinking: options?.thinking, maxTokens: Math.max(effMax, 64000) });
       }
       return fullContent;
     }
-    return await callLLM(REPORT_SYSTEM_PROMPT, userContent, {
-      maxTokens: options?.maxTokens ?? 16384,
+    const effMaxBuf = thinkingBudget(options?.maxTokens, options?.thinking, options?.effort, options?.model);
+    const bufferedOpts = {
       temperature: 0.3,
       provider: options?.provider,
       model: options?.model,
-      thinking: options?.thinking,
       effort: options?.effort,
       signal: options?.signal,
-    });
+    };
+    let result = await callLLM(REPORT_SYSTEM_PROMPT, userContent, { ...bufferedOpts, maxTokens: effMaxBuf, thinking: options?.thinking });
+    // Same empty-completion safety net as the streaming branch (adaptive
+    // models only): keep thinking on, retry once with more headroom.
+    if (!result.trim() && options?.thinking && isAdaptiveThinkingModel(options?.model)) {
+      console.warn('[Deep Search] synthesis (buffered) returned empty content — retrying with more headroom (thinking kept on)', {
+        provider: options?.provider,
+        model: options?.model,
+        effort: options?.effort,
+      });
+      result = await callLLM(REPORT_SYSTEM_PROMPT, userContent, { ...bufferedOpts, maxTokens: Math.max(effMaxBuf, 64000), thinking: options?.thinking });
+    }
+    return result;
   } catch (err) {
     // Surface the real error — the old bare catch hid it and only returned
     // the "Report generation failed" fallback, making every such failure
