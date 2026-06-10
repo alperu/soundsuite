@@ -50,12 +50,12 @@ export default function Navigation() {
       {/* Logo */}
       <div className="h-14 flex items-center border-b border-gray-200 overflow-hidden">
         {collapsed ? (
-          <Link href="/" className="w-full flex items-center justify-center text-sm font-bold text-gray-900" title="Sound Suite">
-            SS
+          <Link href="/" className="w-full flex items-center justify-center" title="Sound Suite">
+            <img src="/brand/soundsuite-mark.svg" alt="Sound Suite" className="h-7 w-7" />
           </Link>
         ) : (
-          <Link href="/" className="text-lg font-bold text-gray-900 px-4 whitespace-nowrap">
-            Sound Suite
+          <Link href="/" className="flex items-center px-3 w-full" title="Sound Suite">
+            <img src="/brand/soundsuite-logo.svg" alt="Sound Suite" className="h-7 w-auto" />
           </Link>
         )}
       </div>
