@@ -5,7 +5,8 @@
 # the sidecar host's IP subnet.
 #
 #   - Sidecars on 192.168.88.0/24 → http://192.168.88.254:3000, :3848
-#   - Sidecars on 10.10.20.0/24    → http://172.16.16.9:3000,   :3848
+#   - Sidecars on 10.10.20.0/24    → http://192.168.88.254:3000, :3848
+#     (VPN now routes both ways, so 10.10.20 hosts reach 192.168.88.254 too)
 #
 # WebSocket-port mapping (derived from the URL port, not hard-coded per URL):
 #   URL port 3000 → wsPort 3002
@@ -39,8 +40,8 @@ MASTERS_88=(
   "http://192.168.88.254:3848"
 )
 MASTERS_10=(
-  "http://172.16.16.9:3000"
-  "http://172.16.16.9:3848"
+  "http://192.168.88.254:3000"
+  "http://192.168.88.254:3848"
 )
 
 # Map URL port → expected wsPort. Add to this table if more pairs come up.
