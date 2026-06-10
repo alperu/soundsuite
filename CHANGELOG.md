@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.1.0](https://github.com/alperu/soundsuite/compare/v1.0.2...v1.1.0) (2026-06-10)
+
+
+### Features
+
+* **ai:** add Claude Fable 5 to model picker ([435903d](https://github.com/alperu/soundsuite/commit/435903dda54b8940e8ad8faa8480d36b0dd2f757))
+* **gpu:** add ss-code-embedding role (jina-code-embeddings-1.5B) across admin + sidecar ([31e3927](https://github.com/alperu/soundsuite/commit/31e3927fb43f91a5ea2951d000382a7213af3d3d))
+* **ui:** add SoundSuite brand logo to sidebar + app favicon ([c3fb40e](https://github.com/alperu/soundsuite/commit/c3fb40ed5467993667caff2927dff9a97c2f86df))
+
+
+### Bug Fixes
+
+* **code-embedding:** pull jina model via hf.co GGUF ref (was unpullable bare name) ([fbd6ba8](https://github.com/alperu/soundsuite/commit/fbd6ba89bd259fdb2b748f0bb1982271dc0503f9))
+* **deep-search:** only honor and/or operators inside {{ }} chips ([9b15196](https://github.com/alperu/soundsuite/commit/9b151960f462b494218f5643b84c39431a786849))
+* **deep-search:** prevent blank Fable 5 synthesis at high effort ([6c9428d](https://github.com/alperu/soundsuite/commit/6c9428dc78f0bc62acd26f5a79f77155540660aa))
+* **search:** only run Axon boolean validation inside {{ }} chips ([1decabd](https://github.com/alperu/soundsuite/commit/1decabdd56f28e230ae227624aa0799fcb17e95b))
+* **search:** persist per-turn deletion in chat history ([03e4725](https://github.com/alperu/soundsuite/commit/03e4725ca1cfd86ed448d8e3de5d4c5d4204a145))
+
 ## 1.0.2 (2026-06-08)
 
 ### Bug Fixes
