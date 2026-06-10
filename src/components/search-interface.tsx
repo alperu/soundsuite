@@ -1084,7 +1084,11 @@ export default function SearchInterface({
   // syntax indicator and (when Advanced is off) the one-time hint toast.
   useEffect(() => {
     const trimmed = aiQuery.trim();
-    if (!trimmed) {
+    // Boolean operators (and/or/not, fields) are only honored inside `{{ }}`
+    // chip syntax, so only validate — and surface the "use lowercase and/or/not"
+    // error — when the query actually contains chips. Plain prose is free text
+    // and must never trip the Axon validator.
+    if (!trimmed || !/\{\{[\s\S]*?\}\}/.test(trimmed)) {
       setBoolParseResult(null);
       return;
     }
