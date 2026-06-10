@@ -173,25 +173,20 @@ export async function decomposeQuery(
   query: string,
   options?: { provider?: string; model?: string; history?: ConversationTurn[]; thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal },
 ): Promise<DecompositionResult> {
-  // Boolean-syntax bypass — when the user wrote a structured query, split
-  // top-level OR branches into parallel sub-queries.
+  // Boolean-syntax bypass — split top-level OR branches into parallel
+  // sub-queries when the user wrote a structured boolean query.
   //
-  // CRITICAL: parseBooleanQuery flags `hasOperators=true` for lowercase
-  // English words "and"/"or"/"not" as bare tokens. That makes natural-
-  // language pastes (e.g. "Now, she may have used... in no way, ignored")
-  // get treated as structured queries — each English word then becomes a
-  // bare AND term, astSerialize joins them with " and ", and the user
-  // sees their paragraph mangled with " and " between every word.
-  //
-  // Gate the bypass on STRUCTURED signals only: parentheses, quoted
-  // phrases, field operators (==/!=/>=/<=/>/<), or unary dash negation.
-  // Bare lowercase operator words by themselves are NOT enough.
-  const hasStructuredSyntax = (
-    /[()"]/.test(query)            // parens or quoted phrases
-    || /\b\w+\s*(==|!=|>=|<=|>|<)/.test(query)   // field operator
-    || /(?:^|\s)-[\w"]/.test(query)              // unary negation: "-term" or "-\"phrase\""
-  );
-  if (hasStructuredSyntax) {
+  // Product rule: boolean operators are honored ONLY inside `{{ … }}` chip
+  // syntax. Plain free-text prose must NOT be boolean-parsed — parseBooleanQuery
+  // flags bare English "and"/"or"/"not" as operators, so a paragraph (even one
+  // with incidental parens like "(via Mr. Woodby)" or brackets) would have every
+  // token turned into a bare AND term and astSerialize would mangle it into
+  // " and "-joined words. Without `{{ }}` chips we fall through to LLM
+  // decomposition / whole-DB semantic search scoped by the dropdown. (Chip
+  // queries are unchanged — they previously entered here via their field
+  // operators/parens too.)
+  const hasChipSyntax = /\{\{[\s\S]*?\}\}/.test(query);
+  if (hasChipSyntax) {
     const parsedBool = parseBooleanQuery(query);
     if (parsedBool.ok && parsedBool.hasOperators) {
       const branches = parsedBool.ast.op === 'OR' ? parsedBool.ast.children : [parsedBool.ast];
