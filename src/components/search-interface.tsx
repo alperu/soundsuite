@@ -1466,6 +1466,28 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
     }).catch(() => {});
   }, [deepSearchMode, compareMode, aiCaseId, aiProvider, aiModel, cases]);
 
+  // Delete a single turn from the active conversation and PERSIST the edit, so
+  // the removed turn doesn't reappear on refresh. If no turns remain in the
+  // active mode, remove the saved session entirely (persistSession no-ops on an
+  // empty turn list and would otherwise leave the stale file on disk).
+  const deleteTurn = useCallback((mode: 'ai' | 'deep', index: number) => {
+    let nextAi = aiTurns;
+    let nextDeep = deepTurns;
+    if (mode === 'ai') {
+      nextAi = aiTurns.filter((_, idx) => idx !== index);
+      setAiTurns(nextAi);
+    } else {
+      nextDeep = deepTurns.filter((_, idx) => idx !== index);
+      setDeepTurns(nextDeep);
+    }
+    const remaining = deepSearchMode ? nextDeep.length : nextAi.length;
+    if (remaining > 0) {
+      persistSession(nextAi, nextDeep, currentSessionId);
+    } else {
+      fetch(`/api/chat/history/${currentSessionId}`, { method: 'DELETE' }).catch(() => {});
+    }
+  }, [aiTurns, deepTurns, deepSearchMode, currentSessionId, persistSession]);
+
   const handleAISearch = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -2282,7 +2304,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                           <p className="text-sm text-gray-800">{turn.query}</p>
                         </div>
                         <button
-                          onClick={() => setAiTurns(prev => prev.filter((_, idx) => idx !== i))}
+                          onClick={() => deleteTurn('ai', i)}
                           className="opacity-0 group-hover/turn:opacity-100 transition-opacity p-1 rounded hover:bg-red-100 shrink-0 mt-0.5"
                           title="Delete this turn"
                         >
@@ -2310,7 +2332,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                           <p className="text-sm text-gray-800">{turn.query}</p>
                         </div>
                         <button
-                          onClick={() => setDeepTurns(prev => prev.filter((_, idx) => idx !== i))}
+                          onClick={() => deleteTurn('deep', i)}
                           className="opacity-0 group-hover/turn:opacity-100 transition-opacity p-1 rounded hover:bg-red-100 shrink-0 mt-0.5"
                           title="Delete this turn"
                         >
