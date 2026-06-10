@@ -1131,7 +1131,7 @@ export default function DraftChatPanel({
                   <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${vectorSearch ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
                 </button>
                 {/* Opus 4.7/4.8 adaptive-thinking effort — shown whenever an adaptive Opus is selected. */}
-                {provider === 'anthropic' && (effectiveModel.startsWith('claude-opus-4-7') || effectiveModel.startsWith('claude-opus-4-8')) && (
+                {provider === 'anthropic' && (effectiveModel.startsWith('claude-fable-5') || effectiveModel.startsWith('claude-opus-4-7') || effectiveModel.startsWith('claude-opus-4-8')) && (
                   <div className="flex items-center gap-1 ml-1" title="Claude Opus adaptive-thinking effort. Lower = more visible response, higher = deeper reasoning.">
                     <label className="text-[10px] font-medium text-gray-500">Adaptive</label>
                     <select

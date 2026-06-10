@@ -313,8 +313,14 @@ function anthropicThinkingParam(model: string, thinking: boolean | undefined, ef
   // deprecated for this model". Force temperatureOverride=1 for every
   // 4.7/4.8 request, regardless of thinking/jsonMode. Both models support
   // adaptive thinking only; manual `thinking:{type:'enabled'}` is rejected.
+  // Fable 5 shares the 4.7/4.8 request surface: `temperature` removed (any
+  // value 400s — force 1), adaptive thinking only, effort supported. Its one
+  // extra quirk — an explicit `thinking:{type:'disabled'}` 400s — is moot here
+  // because the non-thinking branch omits `thinking` entirely.
   const isAdaptiveOpus =
-    model.startsWith('claude-opus-4-7') || model.startsWith('claude-opus-4-8');
+    model.startsWith('claude-opus-4-7') ||
+    model.startsWith('claude-opus-4-8') ||
+    model.startsWith('claude-fable-5');
   if (thinking === true && !jsonMode && isAdaptiveOpus) {
     // Cast effort to the SDK's narrower union — 'xhigh' is accepted by the
     // API but not yet in the SDK 0.74.0 type. Runtime-safe.
