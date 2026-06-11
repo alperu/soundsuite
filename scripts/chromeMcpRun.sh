@@ -17,10 +17,13 @@
 
 set -euo pipefail
 
-URL_PATH="${1:-/}"
-PORT="${PORT:-3000}"
-TARGET_URL="http://localhost:${PORT}${URL_PATH}"
 DEBUG_PORT="${DEBUG_PORT:-9222}"
+# By default open the CDP info page of the debug Chrome itself, so you can SEE
+# that this is the MCP-enabled Chrome. Override to debug an app instead, e.g.
+#   PORT=3000 ./scripts/chromeMcpRun.sh /search
+PORT="${PORT:-${DEBUG_PORT}}"
+URL_PATH="${1:-/json/version}"
+TARGET_URL="http://localhost:${PORT}${URL_PATH}"
 USER_DATA_DIR="${HOME}/.cache/claude-debug-chrome"
 
 echo "==> debug-ui.sh"
