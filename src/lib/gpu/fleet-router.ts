@@ -608,6 +608,22 @@ function buildEffectiveModelMap(
 }
 
 /**
+ * Per-role vLLM --gpu-memory-utilization map pushed to the sidecar. Only
+ * vLLM-served roles have this lever; the sidecar splices it into the role's
+ * vllmArgs after resolveMode(). Operator-tuned on /admin/* and stored as
+ * global config keys (gpu.memUtil.*).
+ */
+function buildGpuMemUtils(cfg: Awaited<ReturnType<typeof getConfig>>): Record<string, number> {
+  // Only include roles the operator explicitly set. Omitting a role leaves the
+  // sidecar template default intact (reranker 0.6, rlm 0.9) — critically, a
+  // reranker-only change must NOT silently re-tune rlm down from its 0.9.
+  const out: Record<string, number> = {};
+  if (typeof cfg.gpuMemUtilReranker === 'number') out.reranker = cfg.gpuMemUtilReranker;
+  if (typeof cfg.gpuMemUtilRlm === 'number') out.rlm = cfg.gpuMemUtilRlm;
+  return out;
+}
+
+/**
  * Push the per-host effective registry to a sidecar.
  *
  * Driven by the DB-backed HostRoleAssignment table. The sidecar uses this
@@ -672,6 +688,7 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
     registry,
     minOnline: dbMin,
     idleTimeouts: dbIdle,
+    gpuMemUtils: buildGpuMemUtils(cfg),
     hostOsOverride,
   });
   markSelfConfigPush(agentUrl);
@@ -734,6 +751,7 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
     modelOverrides: effectiveModels,
     runtimes,
     registry,
+    gpuMemUtils: buildGpuMemUtils(cfg),
     hostOsOverride,
   });
   markSelfConfigPush(agentUrl);

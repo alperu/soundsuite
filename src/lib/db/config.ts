@@ -96,6 +96,14 @@ export interface AppConfig {
   gpuMinOcr: number;
   gpuMinReranker: number;
   gpuMinRlm: number;
+  // Per-model vLLM --gpu-memory-utilization (fraction 0-1). Only meaningful for
+  // vLLM-served roles (reranker, rlm). Lower frees VRAM headroom; the value is
+  // pushed to sidecars and flows into the container's vllmArgs. UNSET (undefined)
+  // means "operator never chose" — the sidecar template default stands (reranker
+  // 0.6, rlm 0.9). Only an explicitly-set value is pushed, so a reranker change
+  // never silently re-tunes rlm.
+  gpuMemUtilReranker?: number;
+  gpuMemUtilRlm?: number;
   // Registered GPU sidecars (JSON string)
   gpuSidecars: string;
   /** URL each sidecar uses to connect back to this master. Pushed via /config
@@ -254,6 +262,9 @@ export async function getConfig(): Promise<AppConfig> {
     gpuMinOcr: parseInt(configMap.get('gpu.min.ocr') || '0', 10),
     gpuMinReranker: parseInt(configMap.get('gpu.min.reranker') || '0', 10),
     gpuMinRlm: parseInt(configMap.get('gpu.min.rlm') || '0', 10),
+    // Per-model vLLM gpu-memory-utilization (undefined when unset → template default)
+    gpuMemUtilReranker: configMap.has('gpu.memUtil.reranker') ? parseFloat(configMap.get('gpu.memUtil.reranker')!) : undefined,
+    gpuMemUtilRlm: configMap.has('gpu.memUtil.rlm') ? parseFloat(configMap.get('gpu.memUtil.rlm')!) : undefined,
     // Registered sidecars
     gpuSidecars: configMap.get('gpu.sidecars') || '[]',
     masterUrl: configMap.get('master.url') || process.env.SOUND_SUITE_MASTER_URL || '',
@@ -550,6 +561,13 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.gpuMinRlm !== undefined) {
     updates.push({ key: 'gpu.min.rlm', value: String(config.gpuMinRlm) });
+  }
+  // Per-model vLLM gpu-memory-utilization
+  if (config.gpuMemUtilReranker !== undefined) {
+    updates.push({ key: 'gpu.memUtil.reranker', value: String(config.gpuMemUtilReranker) });
+  }
+  if (config.gpuMemUtilRlm !== undefined) {
+    updates.push({ key: 'gpu.memUtil.rlm', value: String(config.gpuMemUtilRlm) });
   }
   if (config.gpuSidecars !== undefined) {
     updates.push({ key: 'gpu.sidecars', value: config.gpuSidecars });

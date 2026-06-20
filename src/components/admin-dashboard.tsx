@@ -16,6 +16,7 @@ import AdminRoleAssignments from '@/components/admin-role-assignments';
 import AdminHostProvisioning from '@/components/admin-host-provisioning';
 import AdminAIServices from '@/components/admin-ai-services';
 import CacheManager from '@/components/admin/cache-manager';
+import WeightSection from '@/components/admin/weight-section';
 import { CopyButton } from '@/components/copy-button';
 import { AppConfig, ModelDownloadInfo } from '@/lib/db/config';
 
@@ -1515,6 +1516,9 @@ function RLMPanel() {
   const [savedQuant, setSavedQuant] = useState<'fp16' | 'awq-int8' | 'awq-int4'>('awq-int4');
   const [maxContext, setMaxContext] = useState(32768);
   const [savedMaxContext, setSavedMaxContext] = useState(32768);
+  // GPU weight (--gpu-memory-utilization). RLM template default is 0.9.
+  const [memUtil, setMemUtil] = useState(0.9);
+  const [savedMemUtil, setSavedMemUtil] = useState(0.9);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1530,9 +1534,11 @@ function RLMPanel() {
         const m = cfg.rlmModel || 'mit-oasys/rlm-qwen3-8b-v0.1';
         const q = (cfg.rlmQuant as 'fp16' | 'awq-int8' | 'awq-int4') || 'awq-int4';
         const c = typeof cfg.rlmMaxContext === 'number' ? cfg.rlmMaxContext : 32768;
+        const u = typeof cfg.gpuMemUtilRlm === 'number' ? cfg.gpuMemUtilRlm : 0.9;
         setModel(m); setSavedModel(m);
         setQuant(q); setSavedQuant(q);
         setMaxContext(c); setSavedMaxContext(c);
+        setMemUtil(u); setSavedMemUtil(u);
       }
     } catch { /* silent */ }
     setLoading(false);
@@ -1547,13 +1553,13 @@ function RLMPanel() {
     return () => clearInterval(id);
   }, [savedAt]);
 
-  const dirty = model !== savedModel || quant !== savedQuant || maxContext !== savedMaxContext;
+  const dirty = model !== savedModel || quant !== savedQuant || maxContext !== savedMaxContext || memUtil !== savedMemUtil;
 
   const handleSave = async () => {
     if (!dirty || saving) return;
     setSaving(true);
     setSaveError(null);
-    const previous = { model: savedModel, quant: savedQuant, maxContext: savedMaxContext };
+    const previous = { model: savedModel, quant: savedQuant, maxContext: savedMaxContext, memUtil: savedMemUtil };
     try {
       // Overlay onto current config so we don't clobber unrelated keys
       // (POST /api/config replaces by key set, like LocalAIPanel does).
@@ -1567,20 +1573,21 @@ function RLMPanel() {
           rlmModel: model,
           rlmQuant: quant,
           rlmMaxContext: maxContext,
+          gpuMemUtilRlm: memUtil,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setSavedModel(model); setSavedQuant(quant); setSavedMaxContext(maxContext);
+      setSavedModel(model); setSavedQuant(quant); setSavedMaxContext(maxContext); setSavedMemUtil(memUtil);
       setSavedAt(Date.now());
     } catch (e) {
-      setModel(previous.model); setQuant(previous.quant); setMaxContext(previous.maxContext);
+      setModel(previous.model); setQuant(previous.quant); setMaxContext(previous.maxContext); setMemUtil(previous.memUtil);
       setSaveError(e instanceof Error ? e.message : 'Save failed');
     }
     setSaving(false);
   };
 
   const handleDiscard = () => {
-    setModel(savedModel); setQuant(savedQuant); setMaxContext(savedMaxContext);
+    setModel(savedModel); setQuant(savedQuant); setMaxContext(savedMaxContext); setMemUtil(savedMemUtil);
     setSaveError(null);
   };
 
@@ -1695,6 +1702,9 @@ function RLMPanel() {
           </div>
         </div>
       </div>
+
+      {/* GPU Weight (memory allocation) */}
+      <WeightSection role="rlm" value={memUtil} onChange={setMemUtil} recommended={0.9} />
 
       {/* Save bar */}
       <div className="sticky bottom-0 bg-white border-t border-gray-200 px-4 py-3 -mx-4 flex items-center justify-between">

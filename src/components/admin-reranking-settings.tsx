@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { AppConfig } from '@/lib/db/config';
+import WeightSection from '@/components/admin/weight-section';
 
 interface Props {
   initialConfig: AppConfig;
@@ -35,6 +36,7 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
   const [fallbackModel, setFallbackModel] = useState(initialConfig.rerankFallbackModel || '');
   const [scoreValidation, setScoreValidation] = useState(initialConfig.rerankScoreValidation);
   const [rerankUseOrchestrator, setRerankUseOrchestrator] = useState(!!initialConfig.rerankUseOrchestrator);
+  const [gpuMemUtil, setGpuMemUtil] = useState(initialConfig.gpuMemUtilReranker ?? 0.6);
   const [gpuIdleEmbedding, setGpuIdleEmbedding] = useState(initialConfig.gpuIdleEmbeddingMin);
   const [gpuIdleCompletion, setGpuIdleCompletion] = useState(initialConfig.gpuIdleCompletionMin);
   const [gpuIdleOcr, setGpuIdleOcr] = useState(initialConfig.gpuIdleOcrMin);
@@ -72,6 +74,7 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
           gpuIdleOcrMin: gpuIdleOcr,
           gpuIdleRerankerMin: gpuIdleReranker,
           rerankUseOrchestrator,
+          gpuMemUtilReranker: gpuMemUtil,
         }),
       });
       if (!res.ok) {
@@ -299,6 +302,16 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
             </div>
           )}
         </div>
+      )}
+
+      {/* GPU Weight (memory allocation) */}
+      {provider === 'vllm' && (
+        <WeightSection
+          role="reranker"
+          value={gpuMemUtil}
+          onChange={setGpuMemUtil}
+          disabled={!enabled}
+        />
       )}
 
       {/* vLLM Host + Top N */}

@@ -537,7 +537,14 @@ function buildVllmCmd(model: string, port: number, extra?: string[]): string[] {
     // leaves negative KV cache on 16 GiB cards and OOMs at startup.
     // Reranker scoring fits well under 8K tokens.
     cmd.push('--max-model-len', '8192');
-    cmd.push('--gpu-memory-utilization', '0.95');
+    // --gpu-memory-utilization is operator-tunable: the registry/admin value
+    // arrives via `extra` (def.vllmArgs → gpu.memUtil.reranker). Only emit a
+    // default here when `extra` doesn't already set it, so the admin value
+    // wins instead of being duplicated (vLLM would take the last occurrence,
+    // but a clean single flag avoids confusion in logs).
+    if (!extra?.some((a) => a === '--gpu-memory-utilization')) {
+      cmd.push('--gpu-memory-utilization', '0.6');
+    }
     // Cross-encoder rerank scores a fresh (query, doc) pair every call —
     // there is no shared prefix worth caching. Disabling prefix caching
     // stops KV blocks from accumulating in VRAM across calls.

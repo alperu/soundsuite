@@ -64,6 +64,20 @@ export async function POST(request: Request) {
       }
     }
 
+    // Per-role vLLM --gpu-memory-utilization (operator-tuned, keyed by short
+    // role name). Applied onto the existing registry entry's vllmArgs so the
+    // container restarts with the operator value. WS path (ws-client.ts) does
+    // the same after resolveMode(); this covers the HTTP-poll fallback.
+    if (body.gpuMemUtils && typeof body.gpuMemUtils === 'object') {
+      const { withGpuMemUtil } = await import('@/lib/mode-templates');
+      for (const [role, val] of Object.entries(body.gpuMemUtils as Record<string, unknown>)) {
+        const def = state.registry[role];
+        if (def && def.type === 'vllm' && typeof val === 'number') {
+          def.vllmArgs = withGpuMemUtil(def.vllmArgs, val);
+        }
+      }
+    }
+
     saveConfig();
 
     return NextResponse.json(

@@ -134,6 +134,9 @@ export async function POST(request: NextRequest) {
       rerankModel: body.rerankModel,
       rerankHost: body.rerankHost,
       rerankTopN: body.rerankTopN,
+      // Per-model vLLM gpu-memory-utilization (weight) — pushed to sidecars
+      gpuMemUtilReranker: body.gpuMemUtilReranker,
+      gpuMemUtilRlm: body.gpuMemUtilRlm,
       // Per-role orchestrator toggles
       embeddingUseOrchestrator: body.embeddingUseOrchestrator,
       completionUseOrchestrator: body.completionUseOrchestrator,
@@ -177,10 +180,15 @@ export async function POST(request: NextRequest) {
     // If GPU auto-manage is enabled and model-related fields changed, push to all sidecars
     const completionModelChanged = body.ollamaCompletionModel !== undefined && body.ollamaCompletionModel !== currentConfig.ollamaCompletionModel;
     const rerankModelChanged = body.rerankModel !== undefined && body.rerankModel !== currentConfig.rerankModel;
+    // gpu-memory-utilization changes must also propagate to the sidecar so the
+    // container restarts with the new --gpu-memory-utilization in its vllmArgs.
+    const gpuMemUtilChanged =
+      (body.gpuMemUtilReranker !== undefined && body.gpuMemUtilReranker !== currentConfig.gpuMemUtilReranker) ||
+      (body.gpuMemUtilRlm !== undefined && body.gpuMemUtilRlm !== currentConfig.gpuMemUtilRlm);
     const anyModelChanged = ollamaModelChanged || completionModelChanged || ocrModelChanged || rerankModelChanged;
 
     const anyOrchestrator = currentConfig.gpuAutoManage || currentConfig.embeddingUseOrchestrator || currentConfig.completionUseOrchestrator || currentConfig.ocrUseOrchestrator || currentConfig.rerankUseOrchestrator;
-    if (anyModelChanged && anyOrchestrator) {
+    if ((anyModelChanged || gpuMemUtilChanged) && anyOrchestrator) {
       try {
         const { getFleetStatus, pushModelRegistry } = await import('@/lib/gpu/fleet-router');
         const fleet = await getFleetStatus();

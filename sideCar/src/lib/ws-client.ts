@@ -341,7 +341,7 @@ async function executeCommand(
       // only trims roles when the operator has explicitly assigned a
       // non-empty mode set. Fail closed, not open.
       if (Array.isArray(payload.enabledModes) && (payload.enabledModes as unknown[]).length > 0) {
-        const { resolveMode, modeToRole, isModeName, ALL_MODES } =
+        const { resolveMode, modeToRole, isModeName, ALL_MODES, withGpuMemUtil } =
           await import('./mode-templates');
         const enabled = (payload.enabledModes as unknown[]).filter(
           (m): m is string => typeof m === 'string',
@@ -353,6 +353,14 @@ async function executeCommand(
         const runtimes =
           (payload.runtimes && typeof payload.runtimes === 'object'
             ? (payload.runtimes as Record<string, unknown>)
+            : {}) as Record<string, unknown>;
+        // Per-role vLLM --gpu-memory-utilization (keyed by short role name),
+        // operator-tuned on /admin/* and stored as gpu.memUtil.*. Applied onto
+        // the freshly resolved ContainerDef below so it survives the wholesale
+        // registry replace.
+        const gpuMemUtils =
+          (payload.gpuMemUtils && typeof payload.gpuMemUtils === 'object'
+            ? (payload.gpuMemUtils as Record<string, unknown>)
             : {}) as Record<string, unknown>;
 
         // Build the per-host effective set of role keys (short names).
@@ -387,6 +395,11 @@ async function executeCommand(
           const overrideVal = overrides[mode];
           if (typeof overrideVal === 'string' && overrideVal.length > 0) {
             def.model = overrideVal;
+          }
+          // Apply per-role gpu-memory-utilization (vLLM roles only).
+          const memUtilVal = gpuMemUtils[role];
+          if (def.type === 'vllm' && typeof memUtilVal === 'number') {
+            def.vllmArgs = withGpuMemUtil(def.vllmArgs, memUtilVal);
           }
 
           const existing = state.registry[role];

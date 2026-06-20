@@ -78,6 +78,36 @@ const RLM_VLLM_ARGS: string[] = [
   '--tool-call-parser', 'qwen3_xml',
 ];
 
+/**
+ * Default vLLM args for ss-reranker. Only carries --gpu-memory-utilization so
+ * the value is operator-tunable (admin /admin/reranking → gpu.memUtil.reranker)
+ * instead of hardcoded in docker.ts. The reranker's other flags
+ * (--max-model-len, --enforce-eager, --no-enable-prefix-caching, --hf-overrides)
+ * stay in buildVllmCmd's model heuristic. 0.6 ≈ 29 GB on a 48 GB card, leaving
+ * ~19 GB headroom — a cross-encoder scoring one (query, doc) pair at 8192 ctx
+ * needs little KV cache. Kept in sync with state.ts:defaultRegistry.reranker.
+ */
+const RERANKER_VLLM_ARGS: string[] = ['--gpu-memory-utilization', '0.6'];
+
+/**
+ * Return a copy of `vllmArgs` with --gpu-memory-utilization set to `util`,
+ * replacing any existing value (rlm ships 0.90 by default) or prepending the
+ * flag when absent (reranker). Used to apply the operator-pushed per-role
+ * gpuMemUtils onto a freshly resolved ContainerDef. No-op for non-finite or
+ * out-of-range values.
+ */
+export function withGpuMemUtil(vllmArgs: string[] | undefined, util: number): string[] {
+  const args = (vllmArgs ?? []).slice();
+  if (!Number.isFinite(util) || util <= 0 || util > 1) return args;
+  const i = args.indexOf('--gpu-memory-utilization');
+  if (i >= 0 && i + 1 < args.length) {
+    args[i + 1] = String(util);
+  } else {
+    args.unshift('--gpu-memory-utilization', String(util));
+  }
+  return args;
+}
+
 /** Strip "ss-" prefix → registry/state key. */
 export function modeToRole(mode: ModeName): string {
   return mode.replace(/^ss-/, '');
@@ -264,6 +294,7 @@ export function resolveMode(
         containerName,
         priority: 'normal',
         runtime: 'docker',
+        vllmArgs: RERANKER_VLLM_ARGS,
       };
 
     case 'ss-rlm':
@@ -453,6 +484,7 @@ function resolveModeForRuntime(
         containerName,
         priority: 'normal',
         runtime: 'docker',
+        vllmArgs: RERANKER_VLLM_ARGS,
       };
     }
     if (mode === 'ss-rlm') {

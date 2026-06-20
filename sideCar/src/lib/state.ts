@@ -112,6 +112,10 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     modes: ['searching'],
     containerName: `${CONTAINER_PREFIX}reranker`,
     priority: 'normal',
+    // Operator-tunable via /admin/reranking (gpu.memUtil.reranker), pushed in
+    // the /config payload's gpuMemUtils. Kept in sync with
+    // mode-templates.ts:RERANKER_VLLM_ARGS. 0.6 ≈ 29 GB on a 48 GB card.
+    vllmArgs: ['--gpu-memory-utilization', '0.6'],
   },
   rlm: {
     image: VLLM_IMAGE,
