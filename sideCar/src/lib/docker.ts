@@ -543,7 +543,7 @@ function buildVllmCmd(model: string, port: number, extra?: string[]): string[] {
     // wins instead of being duplicated (vLLM would take the last occurrence,
     // but a clean single flag avoids confusion in logs).
     if (!extra?.some((a) => a === '--gpu-memory-utilization')) {
-      cmd.push('--gpu-memory-utilization', '0.6');
+      cmd.push('--gpu-memory-utilization', '0.85');
     }
     // Cross-encoder rerank scores a fresh (query, doc) pair every call —
     // there is no shared prefix worth caching. Disabling prefix caching

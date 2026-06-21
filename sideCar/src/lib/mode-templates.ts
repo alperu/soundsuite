@@ -83,11 +83,13 @@ const RLM_VLLM_ARGS: string[] = [
  * the value is operator-tunable (admin /admin/reranking → gpu.memUtil.reranker)
  * instead of hardcoded in docker.ts. The reranker's other flags
  * (--max-model-len, --enforce-eager, --no-enable-prefix-caching, --hf-overrides)
- * stay in buildVllmCmd's model heuristic. 0.6 ≈ 29 GB on a 48 GB card, leaving
- * ~19 GB headroom — a cross-encoder scoring one (query, doc) pair at 8192 ctx
- * needs little KV cache. Kept in sync with state.ts:defaultRegistry.reranker.
+ * stay in buildVllmCmd's model heuristic. 0.85 ≈ 41 GB on a 48 GB card, leaving
+ * ~7 GB headroom for activation spikes/fragmentation. The reranker is usually
+ * the sole GPU tenant, so a large KV cache (≈26 GB → high concurrency) is what
+ * keeps big rerank batches inside the interactive timeout; lowering this starves
+ * throughput for no benefit. Kept in sync with state.ts:defaultRegistry.reranker.
  */
-const RERANKER_VLLM_ARGS: string[] = ['--gpu-memory-utilization', '0.6'];
+const RERANKER_VLLM_ARGS: string[] = ['--gpu-memory-utilization', '0.85'];
 
 /**
  * Return a copy of `vllmArgs` with --gpu-memory-utilization set to `util`,

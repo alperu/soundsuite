@@ -114,8 +114,9 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     priority: 'normal',
     // Operator-tunable via /admin/reranking (gpu.memUtil.reranker), pushed in
     // the /config payload's gpuMemUtils. Kept in sync with
-    // mode-templates.ts:RERANKER_VLLM_ARGS. 0.6 ≈ 29 GB on a 48 GB card.
-    vllmArgs: ['--gpu-memory-utilization', '0.6'],
+    // mode-templates.ts:RERANKER_VLLM_ARGS. 0.85 ≈ 41 GB on a 48 GB card,
+    // leaving ~7 GB headroom while maximizing KV cache for batch concurrency.
+    vllmArgs: ['--gpu-memory-utilization', '0.85'],
   },
   rlm: {
     image: VLLM_IMAGE,

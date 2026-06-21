@@ -16,7 +16,7 @@ import { useEffect, useState } from 'react';
  * before saving. Self-fetches device total; pass `deviceTotalMb` to override.
  */
 
-const PRESETS = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95];
+const PRESETS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95];
 
 function fmtGb(mb: number): string {
   return `${(mb / 1024).toFixed(1)} GB`;
@@ -31,11 +31,11 @@ interface Props {
   disabled?: boolean;
   /** Optional override; when omitted the component fetches device total VRAM. */
   deviceTotalMb?: number | null;
-  /** Preset to tag "Recommended" (role-dependent: reranker 0.6, rlm 0.9). */
+  /** Preset to tag "Recommended" (role-dependent: reranker 0.85, rlm 0.9). */
   recommended?: number;
 }
 
-export default function WeightSection({ role, value, onChange, disabled, deviceTotalMb, recommended = 0.6 }: Props) {
+export default function WeightSection({ role, value, onChange, disabled, deviceTotalMb, recommended = 0.85 }: Props) {
   const [fetchedTotalMb, setFetchedTotalMb] = useState<number | null>(null);
 
   useEffect(() => {

@@ -36,7 +36,7 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
   const [fallbackModel, setFallbackModel] = useState(initialConfig.rerankFallbackModel || '');
   const [scoreValidation, setScoreValidation] = useState(initialConfig.rerankScoreValidation);
   const [rerankUseOrchestrator, setRerankUseOrchestrator] = useState(!!initialConfig.rerankUseOrchestrator);
-  const [gpuMemUtil, setGpuMemUtil] = useState(initialConfig.gpuMemUtilReranker ?? 0.6);
+  const [gpuMemUtil, setGpuMemUtil] = useState(initialConfig.gpuMemUtilReranker ?? 0.85);
   const [gpuIdleEmbedding, setGpuIdleEmbedding] = useState(initialConfig.gpuIdleEmbeddingMin);
   const [gpuIdleCompletion, setGpuIdleCompletion] = useState(initialConfig.gpuIdleCompletionMin);
   const [gpuIdleOcr, setGpuIdleOcr] = useState(initialConfig.gpuIdleOcrMin);
@@ -311,6 +311,7 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
           value={gpuMemUtil}
           onChange={setGpuMemUtil}
           disabled={!enabled}
+          recommended={0.85}
         />
       )}
 

@@ -100,7 +100,7 @@ export interface AppConfig {
   // vLLM-served roles (reranker, rlm). Lower frees VRAM headroom; the value is
   // pushed to sidecars and flows into the container's vllmArgs. UNSET (undefined)
   // means "operator never chose" — the sidecar template default stands (reranker
-  // 0.6, rlm 0.9). Only an explicitly-set value is pushed, so a reranker change
+  // 0.85, rlm 0.9). Only an explicitly-set value is pushed, so a reranker change
   // never silently re-tunes rlm.
   gpuMemUtilReranker?: number;
   gpuMemUtilRlm?: number;

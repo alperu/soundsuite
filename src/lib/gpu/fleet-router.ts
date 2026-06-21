@@ -615,7 +615,7 @@ function buildEffectiveModelMap(
  */
 function buildGpuMemUtils(cfg: Awaited<ReturnType<typeof getConfig>>): Record<string, number> {
   // Only include roles the operator explicitly set. Omitting a role leaves the
-  // sidecar template default intact (reranker 0.6, rlm 0.9) — critically, a
+  // sidecar template default intact (reranker 0.85, rlm 0.9) — critically, a
   // reranker-only change must NOT silently re-tune rlm down from its 0.9.
   const out: Record<string, number> = {};
   if (typeof cfg.gpuMemUtilReranker === 'number') out.reranker = cfg.gpuMemUtilReranker;
