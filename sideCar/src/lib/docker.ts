@@ -549,11 +549,10 @@ function buildVllmCmd(model: string, port: number, extra?: string[]): string[] {
     // there is no shared prefix worth caching. Disabling prefix caching
     // stops KV blocks from accumulating in VRAM across calls.
     cmd.push('--no-enable-prefix-caching');
-    // Skip CUDA graph capture. vLLM captures a new graph per batch shape
-    // the first time it sees one and never releases them, so VRAM climbs
-    // over the first several calls and plateaus near 99% even when idle.
-    // Eager mode trades ~5–15% latency for flat VRAM use.
-    cmd.push('--enforce-eager');
+    // NOTE: --enforce-eager is NOT hardcoded here. It is operator-controllable
+    // via gpu.memUtil/rerank.enforceEager → arrives through `extra`
+    // (def.vllmArgs). Default-on (registry default) for flat VRAM + fast
+    // cold-start; disable to enable CUDA graphs + torch.compile throughput.
     cmd.push('--hf-overrides', JSON.stringify({
       architectures: ['Qwen3ForSequenceClassification'],
       is_original_qwen3_reranker: true,

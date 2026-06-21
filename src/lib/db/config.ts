@@ -69,6 +69,12 @@ export interface AppConfig {
    *  falls back to first-stage order. Batch/background callers keep
    *  rerankTimeoutMs. Default 15000. */
   rerankInteractiveTimeoutMs: number;
+  /** Whether the reranker vLLM runs with --enforce-eager. Default true (safe:
+   *  flat VRAM, fast cold-start). Set false to enable CUDA graphs + torch.compile
+   *  for higher prefill throughput at the cost of longer warm-up and more VRAM
+   *  for graph capture — only safe with gpu-memory-utilization headroom (≤0.85).
+   *  Pushed to the sidecar; toggles --enforce-eager in the reranker's vllmArgs. */
+  rerankEnforceEager: boolean;
   /** Per-document character cap before sending to /v1/rerank. Trims the tail
    *  to fit the model's context window. Default 30000 (~7500 tokens) for
    *  8K-context models like Qwen3-Reranker-8B. */
@@ -244,7 +250,8 @@ export async function getConfig(): Promise<AppConfig> {
     rerankScoreValidation: configMap.get('rerank.scoreValidation') !== 'false', // default: true
     rerankFallbackModel: configMap.get('rerank.fallbackModel') || '',
     rerankTimeoutMs: parseInt(configMap.get('rerank.timeoutMs') || '90000', 10),
-    rerankInteractiveTimeoutMs: parseInt(configMap.get('rerank.interactiveTimeoutMs') || '15000', 10),
+    rerankInteractiveTimeoutMs: parseInt(configMap.get('rerank.interactiveTimeoutMs') || '30000', 10),
+    rerankEnforceEager: configMap.get('rerank.enforceEager') !== 'false', // default true
     rerankMaxDocChars: parseInt(configMap.get('rerank.maxDocChars') || '18000', 10),
     fusionRrfK: parseInt(configMap.get('fusion.rrfK') || '60', 10),
     fusionSoftBoost: parseFloat(configMap.get('fusion.softBoost') || '1.2'),
@@ -519,6 +526,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.rerankInteractiveTimeoutMs !== undefined) {
     updates.push({ key: 'rerank.interactiveTimeoutMs', value: String(config.rerankInteractiveTimeoutMs) });
+  }
+  if (config.rerankEnforceEager !== undefined) {
+    updates.push({ key: 'rerank.enforceEager', value: String(config.rerankEnforceEager) });
   }
   if (config.rerankMaxDocChars !== undefined) {
     updates.push({ key: 'rerank.maxDocChars', value: String(config.rerankMaxDocChars) });

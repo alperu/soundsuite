@@ -341,7 +341,7 @@ async function executeCommand(
       // only trims roles when the operator has explicitly assigned a
       // non-empty mode set. Fail closed, not open.
       if (Array.isArray(payload.enabledModes) && (payload.enabledModes as unknown[]).length > 0) {
-        const { resolveMode, modeToRole, isModeName, ALL_MODES, withGpuMemUtil } =
+        const { resolveMode, modeToRole, isModeName, ALL_MODES, withGpuMemUtil, withBoolFlag } =
           await import('./mode-templates');
         const enabled = (payload.enabledModes as unknown[]).filter(
           (m): m is string => typeof m === 'string',
@@ -362,6 +362,10 @@ async function executeCommand(
           (payload.gpuMemUtils && typeof payload.gpuMemUtils === 'object'
             ? (payload.gpuMemUtils as Record<string, unknown>)
             : {}) as Record<string, unknown>;
+        // Reranker-only: toggle --enforce-eager in its vllmArgs (off = CUDA
+        // graphs + torch.compile for throughput). Undefined → leave default.
+        const rerankEnforceEager =
+          typeof payload.rerankEnforceEager === 'boolean' ? payload.rerankEnforceEager : undefined;
 
         // Build the per-host effective set of role keys (short names).
         const enabledRoles = new Set<string>();
@@ -400,6 +404,10 @@ async function executeCommand(
           const memUtilVal = gpuMemUtils[role];
           if (def.type === 'vllm' && typeof memUtilVal === 'number') {
             def.vllmArgs = withGpuMemUtil(def.vllmArgs, memUtilVal);
+          }
+          // Apply reranker enforce-eager toggle.
+          if (role === 'reranker' && rerankEnforceEager !== undefined) {
+            def.vllmArgs = withBoolFlag(def.vllmArgs, '--enforce-eager', rerankEnforceEager);
           }
 
           const existing = state.registry[role];

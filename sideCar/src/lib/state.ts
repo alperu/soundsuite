@@ -112,11 +112,13 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     modes: ['searching'],
     containerName: `${CONTAINER_PREFIX}reranker`,
     priority: 'normal',
-    // Operator-tunable via /admin/reranking (gpu.memUtil.reranker), pushed in
-    // the /config payload's gpuMemUtils. Kept in sync with
+    // Operator-tunable via /admin/reranking, pushed in the /config payload
+    // (gpuMemUtils + rerankEnforceEager). Kept in sync with
     // mode-templates.ts:RERANKER_VLLM_ARGS. 0.85 ≈ 41 GB on a 48 GB card,
     // leaving ~7 GB headroom while maximizing KV cache for batch concurrency.
-    vllmArgs: ['--gpu-memory-utilization', '0.85'],
+    // --enforce-eager on by default (flat VRAM, fast cold-start); operator can
+    // disable for CUDA graphs + torch.compile throughput.
+    vllmArgs: ['--gpu-memory-utilization', '0.85', '--enforce-eager'],
   },
   rlm: {
     image: VLLM_IMAGE,

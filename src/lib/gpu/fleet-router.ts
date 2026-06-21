@@ -689,6 +689,7 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
     minOnline: dbMin,
     idleTimeouts: dbIdle,
     gpuMemUtils: buildGpuMemUtils(cfg),
+    rerankEnforceEager: cfg.rerankEnforceEager,
     hostOsOverride,
   });
   markSelfConfigPush(agentUrl);
@@ -752,6 +753,7 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
     runtimes,
     registry,
     gpuMemUtils: buildGpuMemUtils(cfg),
+    rerankEnforceEager: cfg.rerankEnforceEager,
     hostOsOverride,
   });
   markSelfConfigPush(agentUrl);

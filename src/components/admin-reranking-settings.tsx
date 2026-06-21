@@ -37,6 +37,12 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
   const [scoreValidation, setScoreValidation] = useState(initialConfig.rerankScoreValidation);
   const [rerankUseOrchestrator, setRerankUseOrchestrator] = useState(!!initialConfig.rerankUseOrchestrator);
   const [gpuMemUtil, setGpuMemUtil] = useState(initialConfig.gpuMemUtilReranker ?? 0.85);
+  const [interactiveTimeoutSec, setInteractiveTimeoutSec] = useState(
+    Math.round((initialConfig.rerankInteractiveTimeoutMs ?? 30000) / 1000),
+  );
+  // enforceEager defaults true (safe). The UI toggle below is its inverse:
+  // "Performance mode" ON ⇒ enforceEager false ⇒ CUDA graphs + torch.compile.
+  const [enforceEager, setEnforceEager] = useState(initialConfig.rerankEnforceEager ?? true);
   const [gpuIdleEmbedding, setGpuIdleEmbedding] = useState(initialConfig.gpuIdleEmbeddingMin);
   const [gpuIdleCompletion, setGpuIdleCompletion] = useState(initialConfig.gpuIdleCompletionMin);
   const [gpuIdleOcr, setGpuIdleOcr] = useState(initialConfig.gpuIdleOcrMin);
@@ -75,6 +81,8 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
           gpuIdleRerankerMin: gpuIdleReranker,
           rerankUseOrchestrator,
           gpuMemUtilReranker: gpuMemUtil,
+          rerankInteractiveTimeoutMs: Math.max(5, interactiveTimeoutSec) * 1000,
+          rerankEnforceEager: enforceEager,
         }),
       });
       if (!res.ok) {
@@ -313,6 +321,51 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
           disabled={!enabled}
           recommended={0.85}
         />
+      )}
+
+      {/* Performance — interactive timeout + compile/CUDA-graph mode */}
+      {provider === 'vllm' && (
+        <div className={`bg-white shadow rounded-lg p-6 ${!enabled ? 'opacity-50 pointer-events-none' : ''}`}>
+          <h2 className="text-xl font-semibold text-gray-900 mb-4">Performance</h2>
+
+          <div className="mb-5">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Interactive timeout (seconds)</label>
+            <input
+              type="number"
+              min={5}
+              max={120}
+              value={interactiveTimeoutSec}
+              onChange={(e) => setInteractiveTimeoutSec(Math.max(5, parseInt(e.target.value) || 0))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              How long a live search waits for the reranker before falling back to first-stage (hybrid) order.
+              Raise it if large rerank batches occasionally show the &quot;degraded&quot; warning. Default 30s.
+            </p>
+          </div>
+
+          <div className="flex items-center justify-between p-4 border rounded-lg">
+            <div className="pr-4">
+              <div className="font-medium text-gray-900">Performance mode (CUDA graphs + torch.compile)</div>
+              <div className="text-sm text-gray-600">
+                Enables vLLM CUDA graphs and compilation for higher prefill throughput on large batches.
+                Costs a longer cold-start and extra VRAM for graph capture — only safe with GPU Weight ≤ 0.85.
+                If the reranker fails to start or VRAM creeps, turn this off. (Off = <code className="px-1 py-0.5 bg-gray-100 rounded">--enforce-eager</code>, the safe default.)
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setEnforceEager(!enforceEager)}
+              className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                !enforceEager ? 'bg-blue-600' : 'bg-gray-200'
+              }`}
+            >
+              <span className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                !enforceEager ? 'translate-x-5' : 'translate-x-0'
+              }`} />
+            </button>
+          </div>
+        </div>
       )}
 
       {/* vLLM Host + Top N */}

@@ -78,6 +78,15 @@ export async function POST(request: Request) {
       }
     }
 
+    // Reranker --enforce-eager toggle (off = CUDA graphs + torch.compile).
+    if (typeof body.rerankEnforceEager === 'boolean') {
+      const { withBoolFlag } = await import('@/lib/mode-templates');
+      const def = state.registry['reranker'];
+      if (def && def.type === 'vllm') {
+        def.vllmArgs = withBoolFlag(def.vllmArgs, '--enforce-eager', body.rerankEnforceEager);
+      }
+    }
+
     saveConfig();
 
     return NextResponse.json(

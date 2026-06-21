@@ -169,7 +169,7 @@ export async function rerank<T extends RerankableResult>(
   // the all-hosts-failed path below falls back to first-stage order. Batch
   // callers (default) keep the long timeout for cold-start tolerance.
   const timeoutMs = opts?.interactive
-    ? (config.rerankInteractiveTimeoutMs ?? 15_000)
+    ? (config.rerankInteractiveTimeoutMs ?? 30_000)
     : (config.rerankTimeoutMs ?? 90_000);
   if (opts?.interactive) {
     logger.info('Reranking (interactive)', { timeoutMs });

@@ -89,7 +89,7 @@ const RLM_VLLM_ARGS: string[] = [
  * keeps big rerank batches inside the interactive timeout; lowering this starves
  * throughput for no benefit. Kept in sync with state.ts:defaultRegistry.reranker.
  */
-const RERANKER_VLLM_ARGS: string[] = ['--gpu-memory-utilization', '0.85'];
+const RERANKER_VLLM_ARGS: string[] = ['--gpu-memory-utilization', '0.85', '--enforce-eager'];
 
 /**
  * Return a copy of `vllmArgs` with --gpu-memory-utilization set to `util`,
@@ -107,6 +107,17 @@ export function withGpuMemUtil(vllmArgs: string[] | undefined, util: number): st
   } else {
     args.unshift('--gpu-memory-utilization', String(util));
   }
+  return args;
+}
+
+/**
+ * Return a copy of `vllmArgs` with a valueless boolean flag (e.g.
+ * --enforce-eager) present when `on`, absent when off. Used to apply an
+ * operator-pushed toggle onto a freshly resolved ContainerDef.
+ */
+export function withBoolFlag(vllmArgs: string[] | undefined, flag: string, on: boolean): string[] {
+  const args = (vllmArgs ?? []).filter((a) => a !== flag);
+  if (on) args.push(flag);
   return args;
 }
 

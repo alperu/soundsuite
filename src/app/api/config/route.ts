@@ -137,6 +137,9 @@ export async function POST(request: NextRequest) {
       // Per-model vLLM gpu-memory-utilization (weight) — pushed to sidecars
       gpuMemUtilReranker: body.gpuMemUtilReranker,
       gpuMemUtilRlm: body.gpuMemUtilRlm,
+      // Reranker throughput knobs
+      rerankInteractiveTimeoutMs: body.rerankInteractiveTimeoutMs,
+      rerankEnforceEager: body.rerankEnforceEager,
       // Per-role orchestrator toggles
       embeddingUseOrchestrator: body.embeddingUseOrchestrator,
       completionUseOrchestrator: body.completionUseOrchestrator,
@@ -185,10 +188,14 @@ export async function POST(request: NextRequest) {
     const gpuMemUtilChanged =
       (body.gpuMemUtilReranker !== undefined && body.gpuMemUtilReranker !== currentConfig.gpuMemUtilReranker) ||
       (body.gpuMemUtilRlm !== undefined && body.gpuMemUtilRlm !== currentConfig.gpuMemUtilRlm);
+    // enforce-eager toggles --enforce-eager in the reranker's start command, so
+    // the container must be recreated — push it like a model/util change.
+    const enforceEagerChanged =
+      body.rerankEnforceEager !== undefined && body.rerankEnforceEager !== currentConfig.rerankEnforceEager;
     const anyModelChanged = ollamaModelChanged || completionModelChanged || ocrModelChanged || rerankModelChanged;
 
     const anyOrchestrator = currentConfig.gpuAutoManage || currentConfig.embeddingUseOrchestrator || currentConfig.completionUseOrchestrator || currentConfig.ocrUseOrchestrator || currentConfig.rerankUseOrchestrator;
-    if ((anyModelChanged || gpuMemUtilChanged) && anyOrchestrator) {
+    if ((anyModelChanged || gpuMemUtilChanged || enforceEagerChanged) && anyOrchestrator) {
       try {
         const { getFleetStatus, pushModelRegistry } = await import('@/lib/gpu/fleet-router');
         const fleet = await getFleetStatus();
