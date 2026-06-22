@@ -43,6 +43,7 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
   // enforceEager defaults true (safe). The UI toggle below is its inverse:
   // "Performance mode" ON ⇒ enforceEager false ⇒ CUDA graphs + torch.compile.
   const [enforceEager, setEnforceEager] = useState(initialConfig.rerankEnforceEager ?? true);
+  const [poolSize, setPoolSize] = useState(initialConfig.rerankPoolSize ?? 150);
   const [gpuIdleEmbedding, setGpuIdleEmbedding] = useState(initialConfig.gpuIdleEmbeddingMin);
   const [gpuIdleCompletion, setGpuIdleCompletion] = useState(initialConfig.gpuIdleCompletionMin);
   const [gpuIdleOcr, setGpuIdleOcr] = useState(initialConfig.gpuIdleOcrMin);
@@ -83,13 +84,20 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
           gpuMemUtilReranker: gpuMemUtil,
           rerankInteractiveTimeoutMs: Math.max(5, interactiveTimeoutSec) * 1000,
           rerankEnforceEager: enforceEager,
+          rerankPoolSize: Math.max(10, poolSize),
         }),
       });
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.error || 'Failed to save');
       }
-      setSaveMessage({ type: 'success', text: 'Reranking configuration saved.' });
+      const result = await res.json().catch(() => ({}));
+      setSaveMessage({
+        type: 'success',
+        text: result?.rerankerRestart
+          ? 'Saved. Reranker is restarting on its assigned sidecar(s) to apply the new GPU/model settings (~30–60s). The next search may be slow once.'
+          : 'Reranking configuration saved.',
+      });
     } catch (e: any) {
       setSaveMessage({ type: 'error', text: e.message });
     } finally {
@@ -341,6 +349,24 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
             <p className="mt-1 text-xs text-gray-500">
               How long a live search waits for the reranker before falling back to first-stage (hybrid) order.
               Raise it if large rerank batches occasionally show the &quot;degraded&quot; warning. Default 30s.
+            </p>
+          </div>
+
+          <div className="mb-5">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Rerank pool size (candidates scored)</label>
+            <input
+              type="number"
+              min={10}
+              max={500}
+              step={10}
+              value={poolSize}
+              onChange={(e) => setPoolSize(Math.max(10, parseInt(e.target.value) || 0))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              How many candidates the reranker actually scores per search. vLLM scores every document sent
+              (the result cut is separate), so this is the main driver of rerank latency. Lower it (e.g. 60–80)
+              to speed up slow hosts at a small relevance cost. Applies instantly — no restart. Default 150.
             </p>
           </div>
 

@@ -75,6 +75,12 @@ export interface AppConfig {
    *  for graph capture — only safe with gpu-memory-utilization headroom (≤0.85).
    *  Pushed to the sidecar; toggles --enforce-eager in the reranker's vllmArgs. */
   rerankEnforceEager: boolean;
+  /** Max candidates the reranker SCORES per call. vLLM scores every document
+   *  sent (top_n only caps what's returned), so prefill cost scales with this.
+   *  Trimmed by first-stage (hybrid) score before scoring. Master-side — no
+   *  container restart. Default 150. Lower it to cut rerank latency on slow
+   *  hosts at a small relevance cost. */
+  rerankPoolSize: number;
   /** Per-document character cap before sending to /v1/rerank. Trims the tail
    *  to fit the model's context window. Default 30000 (~7500 tokens) for
    *  8K-context models like Qwen3-Reranker-8B. */
@@ -253,6 +259,7 @@ export async function getConfig(): Promise<AppConfig> {
     rerankInteractiveTimeoutMs: parseInt(configMap.get('rerank.interactiveTimeoutMs') || '30000', 10),
     rerankEnforceEager: configMap.get('rerank.enforceEager') !== 'false', // default true
     rerankMaxDocChars: parseInt(configMap.get('rerank.maxDocChars') || '18000', 10),
+    rerankPoolSize: parseInt(configMap.get('rerank.poolSize') || '150', 10),
     fusionRrfK: parseInt(configMap.get('fusion.rrfK') || '60', 10),
     fusionSoftBoost: parseFloat(configMap.get('fusion.softBoost') || '1.2'),
     // Per-model GPU idle timeouts
@@ -532,6 +539,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.rerankMaxDocChars !== undefined) {
     updates.push({ key: 'rerank.maxDocChars', value: String(config.rerankMaxDocChars) });
+  }
+  if (config.rerankPoolSize !== undefined) {
+    updates.push({ key: 'rerank.poolSize', value: String(config.rerankPoolSize) });
   }
   if (config.fusionRrfK !== undefined) {
     updates.push({ key: 'fusion.rrfK', value: String(config.fusionRrfK) });

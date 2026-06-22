@@ -11,6 +11,7 @@ import { callLLM, callLLMJson, buildContext, getAvailableProvider } from '../mcp
 import { streamAI } from '../ai/ai-provider';
 import type { AIProviderKey } from '../ai/models';
 import { rerank, RerankableResult } from './reranker';
+import { getConfig } from '../db/config';
 import type { ToolRegistry } from '../mcp/tool-registry';
 import { parseBooleanQuery, astSerialize } from './boolean-query';
 import { runRlmWithTools, type RlmToolSpec, RLM_MODEL_ID } from '../ai/stream-rlm';
@@ -680,10 +681,19 @@ export async function deduplicateAndMerge(
     }
   }
 
-  // Rerank merged pool against original query
+  // Rerank merged pool against original query. Cap the candidate pool to the
+  // configured size FIRST: vLLM scores every document sent (the reranker's
+  // top_n only limits what's returned), so prefill cost scales with the pool.
+  // Trimming by first-stage score keeps only the most promising candidates —
+  // the dominant lever on interactive rerank latency. Master-side: no restart.
   if (merged.length > 0) {
+    const poolSize = await getConfig().then((c) => c.rerankPoolSize ?? 150).catch(() => 150);
+    if (merged.length > poolSize) {
+      merged.sort((a, b) => b.score - a.score);
+      merged = merged.slice(0, poolSize);
+    }
     const rerankable = merged as (DeepSearchSource & RerankableResult)[];
-    merged = await rerank(originalQuery, rerankable, 150, onWarning ? (w) => onWarning({
+    merged = await rerank(originalQuery, rerankable, poolSize, onWarning ? (w) => onWarning({
       source: w.source,
       host: w.host,
       reason: w.reason,

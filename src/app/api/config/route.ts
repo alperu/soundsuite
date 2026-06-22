@@ -140,6 +140,7 @@ export async function POST(request: NextRequest) {
       // Reranker throughput knobs
       rerankInteractiveTimeoutMs: body.rerankInteractiveTimeoutMs,
       rerankEnforceEager: body.rerankEnforceEager,
+      rerankPoolSize: body.rerankPoolSize,
       // Per-role orchestrator toggles
       embeddingUseOrchestrator: body.embeddingUseOrchestrator,
       completionUseOrchestrator: body.completionUseOrchestrator,
@@ -183,31 +184,43 @@ export async function POST(request: NextRequest) {
     // If GPU auto-manage is enabled and model-related fields changed, push to all sidecars
     const completionModelChanged = body.ollamaCompletionModel !== undefined && body.ollamaCompletionModel !== currentConfig.ollamaCompletionModel;
     const rerankModelChanged = body.rerankModel !== undefined && body.rerankModel !== currentConfig.rerankModel;
-    // gpu-memory-utilization changes must also propagate to the sidecar so the
-    // container restarts with the new --gpu-memory-utilization in its vllmArgs.
-    const gpuMemUtilChanged =
-      (body.gpuMemUtilReranker !== undefined && body.gpuMemUtilReranker !== currentConfig.gpuMemUtilReranker) ||
-      (body.gpuMemUtilRlm !== undefined && body.gpuMemUtilRlm !== currentConfig.gpuMemUtilRlm);
-    // enforce-eager toggles --enforce-eager in the reranker's start command, so
-    // the container must be recreated — push it like a model/util change.
+    const gpuMemUtilRerankerChanged =
+      body.gpuMemUtilReranker !== undefined && body.gpuMemUtilReranker !== currentConfig.gpuMemUtilReranker;
+    const gpuMemUtilRlmChanged =
+      body.gpuMemUtilRlm !== undefined && body.gpuMemUtilRlm !== currentConfig.gpuMemUtilRlm;
     const enforceEagerChanged =
       body.rerankEnforceEager !== undefined && body.rerankEnforceEager !== currentConfig.rerankEnforceEager;
-    const anyModelChanged = ollamaModelChanged || completionModelChanged || ocrModelChanged || rerankModelChanged;
+    // Reranker container start-args changed → recreate the reranker container
+    // explicitly (stop+start) on its assigned sidecars so it takes effect now.
+    // NOTE: rerankPoolSize and rerankInteractiveTimeoutMs are master-side only —
+    // they apply on the next search with no container restart.
+    const rerankerContainerChanged = gpuMemUtilRerankerChanged || enforceEagerChanged || rerankModelChanged;
+    // Other roles: lazy push (drift recreates on next use).
+    const plainPushNeeded = ollamaModelChanged || completionModelChanged || ocrModelChanged || gpuMemUtilRlmChanged;
 
     const anyOrchestrator = currentConfig.gpuAutoManage || currentConfig.embeddingUseOrchestrator || currentConfig.completionUseOrchestrator || currentConfig.ocrUseOrchestrator || currentConfig.rerankUseOrchestrator;
-    if ((anyModelChanged || gpuMemUtilChanged || enforceEagerChanged) && anyOrchestrator) {
+    let rerankerRestart = false;
+    if (anyOrchestrator && (plainPushNeeded || rerankerContainerChanged)) {
       try {
-        const { getFleetStatus, pushModelRegistry } = await import('@/lib/gpu/fleet-router');
-        const fleet = await getFleetStatus();
-        for (const sidecar of fleet.sidecars) {
-          pushModelRegistry(sidecar.url).catch(() => {}); // fire-and-forget
+        const { getFleetStatus, pushModelRegistry, restartRerankerOnAssignedSidecars } = await import('@/lib/gpu/fleet-router');
+        if (plainPushNeeded) {
+          const fleet = await getFleetStatus();
+          for (const sidecar of fleet.sidecars) {
+            pushModelRegistry(sidecar.url).catch(() => {}); // fire-and-forget
+          }
+        }
+        if (rerankerContainerChanged) {
+          // Fire-and-forget: a cold reranker restart can take 30-60s; don't
+          // block the config save. Progress is logged.
+          restartRerankerOnAssignedSidecars().catch(() => {});
+          rerankerRestart = true;
         }
       } catch {
         // Non-fatal — fleet router may not be initialized
       }
     }
 
-    return NextResponse.json({ success: true, requeuedCount });
+    return NextResponse.json({ success: true, requeuedCount, rerankerRestart });
   } catch (error: any) {
     return NextResponse.json(
       { error: error.message || 'Failed to update configuration' },

@@ -767,6 +767,57 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
   return result;
 }
 
+/**
+ * Stop and restart the reranker container on every sidecar assigned the
+ * ss-reranker role, applying current config. Used when a container-affecting
+ * reranker setting (gpu-memory-utilization, enforce-eager, model) changes —
+ * so the new vLLM start args take effect immediately rather than lazily on the
+ * next search via drift detection.
+ *
+ * Per sidecar: push the latest registry (so its state.registry has the new
+ * vllmArgs) → /stop → wait → /start. The sidecar's /start runs ensureContainer,
+ * which detects the changed Cmd and RECREATES the container with the new args.
+ * Sidecars run in parallel; each failure is isolated and logged. Fire-and-forget
+ * from callers — a cold reranker start can take 30-60s.
+ */
+export async function restartRerankerOnAssignedSidecars(): Promise<{ restarted: string[]; failed: string[] }> {
+  const restarted: string[] = [];
+  const failed: string[] = [];
+  let urls: string[];
+  try {
+    const { listAllAssignments } = await import('@/lib/db/role-registry');
+    const rows = await listAllAssignments();
+    urls = Array.from(new Set(
+      rows
+        .filter((r) => r.mode === 'ss-reranker' && r.enabled)
+        .map((r) => r.sidecarUrl.replace(/\/+$/, '')),
+    ));
+  } catch (err) {
+    logger.warn('restartReranker: assignment lookup failed', { error: (err as Error).message });
+    return { restarted, failed };
+  }
+  if (urls.length === 0) {
+    logger.info('restartReranker: no sidecars assigned ss-reranker — nothing to restart');
+    return { restarted, failed };
+  }
+  logger.info('restartReranker: restarting reranker to apply new settings', { sidecars: urls });
+  await Promise.all(urls.map(async (url) => {
+    try {
+      // Push the updated registry FIRST so /start recreates with the new args.
+      await pushModelRegistry(url);
+      await sendToSidecar(url, '/stop', { role: 'reranker' }, 'POST', 30_000);
+      await new Promise((r) => setTimeout(r, 5_000));
+      await sendToSidecar(url, '/start', { role: 'reranker' }, 'POST', 60_000);
+      restarted.push(url);
+      logger.info(`restartReranker: reranker restarted on ${url}`);
+    } catch (err) {
+      failed.push(url);
+      logger.warn(`restartReranker: failed on ${url}`, { error: (err as Error).message });
+    }
+  }));
+  return { restarted, failed };
+}
+
 // ─── Smart Routing ───────────────────────────────────────────────────────────
 
 /** Default container port per role (must match sideCar/server.js registry). */
