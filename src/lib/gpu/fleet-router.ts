@@ -614,11 +614,18 @@ function buildEffectiveModelMap(
  * global config keys (gpu.memUtil.*).
  */
 function buildGpuMemUtils(cfg: Awaited<ReturnType<typeof getConfig>>): Record<string, number> {
-  // Only include roles the operator explicitly set. Omitting a role leaves the
-  // sidecar template default intact (reranker 0.85, rlm 0.9) — critically, a
-  // reranker-only change must NOT silently re-tune rlm down from its 0.9.
-  const out: Record<string, number> = {};
-  if (typeof cfg.gpuMemUtilReranker === 'number') out.reranker = cfg.gpuMemUtilReranker;
+  // Reranker: ALWAYS push the effective value (operator-set, else the 0.85
+  // default). The reranker is master-authoritative, and always pushing ensures
+  // the default actually reaches a sidecar that persisted an older value from a
+  // previous build — otherwise a stale config.json (e.g. 0.6) sticks and the
+  // shipped default never takes effect. Keep in sync with
+  // mode-templates.ts:RERANKER_VLLM_ARGS.
+  //
+  // RLM: omit-when-unset — its template default is a deliberately-tuned 0.9 and
+  // a reranker-only change must NOT silently re-tune rlm down.
+  const out: Record<string, number> = {
+    reranker: typeof cfg.gpuMemUtilReranker === 'number' ? cfg.gpuMemUtilReranker : 0.85,
+  };
   if (typeof cfg.gpuMemUtilRlm === 'number') out.rlm = cfg.gpuMemUtilRlm;
   return out;
 }
