@@ -102,10 +102,17 @@ function toMarkdown(session: ChatSession): string {
     }
 
     if (turn.sources && turn.sources.length > 0) {
+      // Neutralize any literal <details>/<summary> tags inside source text or
+      // citations — an embedded "</details>" would otherwise close this block
+      // early and corrupt both the displayed message and the sources list on
+      // load. Previews are lossy already (200-char slice), so stripping the
+      // tag substring is fine.
+      const safe = (str: string) => str.replace(/<\/?(?:details|summary)>/gi, '');
       content += '\n\n<details><summary>Sources</summary>\n\n';
       for (const s of turn.sources) {
-        const cite = s.citation || s.citationShort || `${s.document}, p.${s.page}`;
-        content += `- **${cite}**: ${s.text.slice(0, 200)}${s.text.length > 200 ? '...' : ''}\n`;
+        const cite = safe(s.citation || s.citationShort || `${s.document}, p.${s.page}`);
+        const preview = safe(s.text.slice(0, 200)) + (s.text.length > 200 ? '...' : '');
+        content += `- **${cite}**: ${preview}\n`;
       }
       content += '\n</details>';
     }
@@ -184,7 +191,12 @@ function fromMarkdown(content: string, fileName: string): ChatSession {
       }
 
       // Sources: <details><summary>Sources</summary>\n\n- **cite**: text...\n</details>
-      const srcMatch = text.match(/<details><summary>Sources<\/summary>\s*\n([\s\S]*?)\n<\/details>/);
+      // toMarkdown always appends Sources LAST, so capture to end-of-section
+      // rather than to the first "</details>": a source preview can itself
+      // contain a literal "</details>" (e.g. extracted from a PDF chunk), which
+      // would otherwise close the block early and truncate the sources list.
+      // The "- **" line filter below discards any stray non-source lines.
+      const srcMatch = text.match(/<details><summary>Sources<\/summary>\s*\n([\s\S]*)$/);
       if (srcMatch) {
         sources = srcMatch[1].split('\n').filter(l => l.startsWith('- **')).map(l => {
           const m = l.match(/^- \*\*(.+?)\*\*: (.+)$/);
@@ -193,9 +205,17 @@ function fromMarkdown(content: string, fileName: string): ChatSession {
       }
     }
 
-    // Strip all metadata / details blocks from the content text
-    text = text.replace(/\n*<!-- stats: .+? -->/g, '').trim();
-    text = text.replace(/<details>[\s\S]*?<\/details>/g, '').trim();
+    // Strip the trailing metadata blocks from the displayed content. toMarkdown
+    // appends them in a fixed order after the answer body: the stats comment,
+    // then the Sub-queries <details>, then the Sources <details>. So strip from
+    // the FIRST such marker to end-of-section in one shot. Do NOT use a bare
+    // /<details>...<\/details>/ match — a source preview can contain a literal
+    // "</details>" that closes the block early and leaks the rest of the source
+    // dump back into the visible message (the bug this replaces). Anchoring on
+    // the specific <summary> labels also avoids eating a legitimate bare
+    // <details> the model may have written inside its answer.
+    text = text.replace(/\n*<!-- stats:[\s\S]*$/, '').trim();
+    text = text.replace(/\n*<details><summary>(?:Sub-queries|Sources)<\/summary>[\s\S]*$/, '').trim();
 
     turns.push({
       role: isUser ? 'user' : 'assistant',
