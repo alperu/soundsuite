@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getConfig, updateConfig } from '@/lib/db/config';
 import { prisma } from '@/lib/db/prisma';
 import { invalidateRerankCache } from '@/lib/search/reranker';
+import { logger } from '@/lib/logger';
 
 /**
  * GET /api/config
@@ -210,6 +211,25 @@ export async function POST(request: NextRequest) {
           }
         }
         if (rerankerContainerChanged) {
+          // Log WHICH setting triggered the restart. A cold reranker restart
+          // costs 30-60s; if these appear frequently in the logs, a caller is
+          // re-pushing a changed reranker arg and starving live searches — the
+          // "restart storm" failure mode for the interactive-timeout warnings.
+          logger.warn('Reranker container restart triggered by config change', {
+            gpuMemUtilRerankerChanged,
+            enforceEagerChanged,
+            rerankModelChanged,
+            from: {
+              gpuMemUtilReranker: currentConfig.gpuMemUtilReranker,
+              rerankEnforceEager: currentConfig.rerankEnforceEager,
+              rerankModel: currentConfig.rerankModel,
+            },
+            to: {
+              gpuMemUtilReranker: body.gpuMemUtilReranker,
+              rerankEnforceEager: body.rerankEnforceEager,
+              rerankModel: body.rerankModel,
+            },
+          });
           // Fire-and-forget: a cold reranker restart can take 30-60s; don't
           // block the config save. Progress is logged.
           restartRerankerOnAssignedSidecars().catch(() => {});
