@@ -100,16 +100,21 @@ export function estimateInputTokens(messages: ChatMessage[]): number {
 export function clampOutputTokens(
   messages: ChatMessage[],
   requested: number,
-): { maxTokens: number; clamped: boolean; estimatedInput: number } {
+): { maxTokens: number; clamped: boolean; estimatedInput: number; needsInputTrim: boolean } {
   const estimatedInput = estimateInputTokens(messages);
-  const budget = RLM_CONTEXT_TOKENS - estimatedInput - SAFETY_MARGIN_TOKENS;
-  if (budget < MIN_OUTPUT_TOKENS) {
-    return { maxTokens: MIN_OUTPUT_TOKENS, clamped: true, estimatedInput };
+  // The invariant vLLM enforces: estimatedInput + maxTokens + SAFETY_MARGIN must
+  // stay within RLM_CONTEXT_TOKENS. `ceil` is the largest max_tokens that
+  // satisfies it. NEVER return a value above `ceil` — the previous code returned
+  // MIN_OUTPUT_TOKENS even when ceil was smaller, which is what 400'd vLLM
+  // (e.g. estimatedInput=40193 → ceil=511 but it sent max_tokens=768 → 40961 >
+  // 40960). When ceil < MIN_OUTPUT_TOKENS the input is too large for a useful
+  // answer and the CALLER must trim input (needsInputTrim) before sending.
+  const ceil = RLM_CONTEXT_TOKENS - estimatedInput - SAFETY_MARGIN_TOKENS;
+  if (ceil < MIN_OUTPUT_TOKENS) {
+    return { maxTokens: Math.max(1, ceil), clamped: true, estimatedInput, needsInputTrim: true };
   }
-  if (budget < requested) {
-    return { maxTokens: budget, clamped: true, estimatedInput };
-  }
-  return { maxTokens: requested, clamped: false, estimatedInput };
+  const maxTokens = Math.min(requested, ceil);
+  return { maxTokens, clamped: maxTokens < requested, estimatedInput, needsInputTrim: false };
 }
 
 /**
@@ -142,6 +147,41 @@ export function trimHistoryToFit(messages: ChatMessage[]): number {
     removed += count;
   }
   return removed;
+}
+
+/**
+ * Guarantee the prompt fits. First drop oldest history (trimHistoryToFit). If
+ * the input STILL can't host MIN_OUTPUT_TOKENS — e.g. a very long pasted
+ * document in the single round-1 user turn, where there is no history to drop —
+ * truncate the largest message's content, KEEPING ITS HEAD, until it fits. In
+ * the deep-search prompt the question/paste sits at the top and the injected
+ * excerpts at the bottom, so keep-head preserves the user's text and sheds the
+ * (re-fetchable) excerpts first. Returns messages removed + chars truncated so
+ * the caller can surface a "input was shortened" notice.
+ */
+export function trimMessagesToFit(messages: ChatMessage[]): { removed: number; truncatedChars: number } {
+  const removed = trimHistoryToFit(messages);
+  let truncatedChars = 0;
+  const TRUNC_MARKER = '\n\n…[input truncated to fit the model context window]';
+  const fits = () =>
+    estimateInputTokens(messages) + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS <= RLM_CONTEXT_TOKENS;
+  while (!fits()) {
+    let idx = -1, maxLen = 0;
+    for (let i = 0; i < messages.length; i++) {
+      const len = messages[i].content?.length ?? 0;
+      if (len > maxLen) { maxLen = len; idx = i; }
+    }
+    if (idx < 0 || maxLen <= TRUNC_MARKER.length) break; // nothing left to shed
+    const overTokens =
+      estimateInputTokens(messages) + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS - RLM_CONTEXT_TOKENS;
+    const dropChars = Math.ceil(overTokens * TOKEN_CHAR_RATIO) + TRUNC_MARKER.length + 64;
+    const cur = messages[idx].content ?? '';
+    const keep = Math.max(0, cur.length - dropChars);
+    messages[idx] = { ...messages[idx], content: cur.slice(0, keep) + TRUNC_MARKER };
+    truncatedChars += cur.length - (messages[idx].content?.length ?? 0);
+    if (keep === 0) break; // already minimal — avoid an infinite loop
+  }
+  return { removed, truncatedChars };
 }
 
 export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> {
@@ -371,6 +411,8 @@ export interface RlmDoneEvent {
 }
 export interface RlmStartEvent { type: 'start'; host: string; model: string }
 export interface RlmErrorEvent { type: 'error'; message: string }
+/** Non-fatal signal that the prompt had to be shortened to fit the context. */
+export interface RlmNoticeEvent { type: 'notice'; message: string }
 
 export type RlmRunEvent =
   | RlmStartEvent
@@ -378,7 +420,8 @@ export type RlmRunEvent =
   | RlmToolCallEvent
   | RlmToolResultEvent
   | RlmDoneEvent
-  | RlmErrorEvent;
+  | RlmErrorEvent
+  | RlmNoticeEvent;
 
 export type ToolExecutor = (
   toolName: string,
@@ -436,24 +479,23 @@ export async function* runRlmWithTools(opts: {
     // vLLM rejects prompt_tokens + max_tokens > max_model_len. Clamp first;
     // if even MIN_OUTPUT_TOKENS doesn't fit, trim oldest history and re-clamp.
     let clamp = clampOutputTokens(messages, requestedMaxTokens);
-    if (clamp.clamped) {
-      console.warn(`[RLM] round ${round} clamp max_tokens ${requestedMaxTokens} → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput}, ctx=${RLM_CONTEXT_TOKENS})`);
-    }
-    if (
-      clamp.estimatedInput + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS >
-      RLM_CONTEXT_TOKENS
-    ) {
+    if (clamp.needsInputTrim) {
+      // Input alone is too large to leave room for a useful answer. Drop oldest
+      // history and, if still over (e.g. a giant round-1 paste with no history),
+      // truncate the largest message keeping its head. This GUARANTEES we never
+      // send prompt_tokens + max_tokens > max_model_len (the prior 400).
       const before = messages.length;
-      const removed = trimHistoryToFit(messages);
-      if (removed > 0) {
-        console.warn(`[RLM] round ${round} trim ${removed} oldest message(s) (was=${before}, now=${messages.length}) to fit ctx budget`);
-        clamp = clampOutputTokens(messages, requestedMaxTokens);
-        if (clamp.clamped) {
-          console.warn(`[RLM] round ${round} clamp after trim: max_tokens → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput})`);
-        }
-      } else {
-        console.error(`[RLM] round ${round} cannot trim further; sending request that may 400 (estimatedInput=${clamp.estimatedInput} + maxTokens=${clamp.maxTokens} = ${clamp.estimatedInput + clamp.maxTokens})`);
+      const { removed, truncatedChars } = trimMessagesToFit(messages);
+      clamp = clampOutputTokens(messages, requestedMaxTokens);
+      console.warn(`[RLM] round ${round} input over budget — removed ${removed} msg(s) (was=${before}, now=${messages.length})${truncatedChars > 0 ? `, truncated ${truncatedChars} chars` : ''}; estInput now ${clamp.estimatedInput}, maxTokens ${clamp.maxTokens}`);
+      if (truncatedChars > 0) {
+        yield {
+          type: 'notice',
+          message: `Your input was too long for the model's ${RLM_CONTEXT_TOKENS}-token window — about ${Math.round(truncatedChars / TOKEN_CHAR_RATIO)} tokens of input were dropped to make room for the answer. Shorten the pasted text or split it across turns for a complete result.`,
+        };
       }
+    } else if (clamp.clamped) {
+      console.warn(`[RLM] round ${round} clamp max_tokens ${requestedMaxTokens} → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput}, ctx=${RLM_CONTEXT_TOKENS})`);
     }
     const roundMaxTokens = clamp.maxTokens;
 

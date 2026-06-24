@@ -1389,9 +1389,24 @@ export async function generateReportWithRlm(
   }
   const contextBlock = contextParts.join('\n---\n');
 
-  const historySection = options.history && options.history.length > 0
-    ? `## Previous Conversation\n${options.history.map(t => `**${t.role === 'user' ? 'User' : 'Assistant'}:** ${t.content}`).join('\n\n')}\n\n---\n\n`
-    : '';
+  // Cap prior-conversation context so it can't crowd out the user's question
+  // (incl. long pasted text) and the seed excerpts in the 40K RLM window. The
+  // RLM re-fetches anything it needs via tools, so older turns are the safest
+  // thing to bound. Keep the most RECENT turns (slice from the end).
+  const HISTORY_CHAR_CAP = 12000;
+  let historySection = '';
+  if (options.history && options.history.length > 0) {
+    const lines: string[] = [];
+    let used = 0;
+    for (let i = options.history.length - 1; i >= 0; i--) {
+      const t = options.history[i];
+      const line = `**${t.role === 'user' ? 'User' : 'Assistant'}:** ${t.content}`;
+      if (used + line.length > HISTORY_CHAR_CAP && lines.length > 0) break;
+      lines.unshift(line);
+      used += line.length;
+    }
+    historySection = `## Previous Conversation\n${lines.join('\n\n')}\n\n---\n\n`;
+  }
   const workflowSection = options.workflowContext ? `## Active Workflow Context\n\n${options.workflowContext}\n\n` : '';
 
   const userContent = `${historySection}${workflowSection}## Research Question
@@ -1595,6 +1610,10 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
       options.onToken?.(ev.text);
     } else if (ev.type === 'done') {
       if (!finalReport && ev.content) finalReport = ev.content;
+    } else if (ev.type === 'notice') {
+      // Input had to be shortened to fit the RLM context window — surface it so
+      // the user knows the answer may be missing some of the pasted text.
+      emit({ step: 'rlm-synthesis', message: ev.message, rlmHost: host || undefined, rlmModel: RLM_MODEL_ID });
     } else if (ev.type === 'error') {
       throw new Error(`RLM synthesis failed: ${ev.message}`);
     }
