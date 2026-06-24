@@ -462,6 +462,19 @@ export default function SearchInterface({
   // box has room for a paragraph-sized query by default. Operator can drag
   // the resize handle above the composer to make it taller (or shorter).
   const [inputHeight, setInputHeight] = usePersistedState<number>('search.inputHeight', 192);
+  // Viewport-derived cap for the composer's max height. Computed AFTER mount to
+  // avoid a hydration mismatch: `window.innerHeight` is unavailable during SSR,
+  // so the first client render must reuse the same server-safe constant (600)
+  // the server rendered, then update to the real viewport cap on mount and on
+  // resize. (Previously this read `window` inline in the style prop → server
+  // 600 vs client 800 hydration error.)
+  const [viewportMaxH, setViewportMaxH] = useState(600);
+  useEffect(() => {
+    const update = () => setViewportMaxH(Math.min(window.innerHeight * 0.6, 800));
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
   const [aiTurns, setAiTurns] = useState<AIConversationTurn[]>([]);
   const [deepTurns, setDeepTurns] = useState<DeepSearchTurn[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>(() => `session-${Date.now()}`);
@@ -2753,7 +2766,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                             initialChips={haystackChips}
                             placeholder={hasConversation ? 'Ask a follow-up…' : 'Ask a question about your legal documents…'}
                             minHeight={inputHeight}
-                            maxHeight={Math.max(inputHeight + 200, Math.min(typeof window !== 'undefined' ? window.innerHeight * 0.6 : 600, 800))}
+                            maxHeight={Math.max(inputHeight + 200, viewportMaxH)}
                             onChange={(text, chips) => {
                               setAiQuery(text);
                               setHaystackChips(chips);
@@ -3084,7 +3097,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                             // grow can extend up to ~60% of the viewport
                             // before vertical scrolling kicks in.
                             minHeight: inputHeight,
-                            maxHeight: Math.max(inputHeight + 200, Math.min(typeof window !== 'undefined' ? window.innerHeight * 0.6 : 600, 800)),
+                            maxHeight: Math.max(inputHeight + 200, viewportMaxH),
                           }}
                         />}
                         {/* MustachePicker disabled — replaced by the left-side full-height rail
