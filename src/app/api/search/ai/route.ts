@@ -261,54 +261,84 @@ ${contextChunks || '(No relevant documents found)'}`;
           messages.push({ role: 'user', content: query.trim() });
 
           let fullContent = '';
-          // When useRlm is set, route to ss-rlm's vLLM container via the
-          // fleet-router's first-available sidecar. Falls back to streamAI
-          // if no rlm sidecar is reachable (handler emits an error event).
-          const stream = useRlm
-            ? streamRlm({
-                messages,
-                maxTokens: reqMaxTokens ?? 2048,
-                temperature: 0.3,
-                signal: request.signal,
-              })
-            : streamAI({
-                provider: provider as AIProviderKey,
-                model,
-                messages,
-                maxTokens: reqMaxTokens ?? 2048,
-                temperature: 0.3,
-                thinking,
-                effort,
-              });
-          for await (const event of stream) {
-            if (event.type === 'token') {
-              fullContent += event.text;
-              send({ type: 'token', text: event.text });
-            } else if (event.type === 'done') {
-              console.log(`[AI Search] Completed in ${Date.now() - t0}ms — ${event.usage?.outputTokens ?? 0} output tokens`);
-              send({
-                type: 'result',
-                data: {
-                  answer: event.content,
-                  sources: sources.map(s => ({
-                    text: s.text,
-                    document: s.document,
-                    page: s.page,
-                    score: s.score,
-                    citation: s.citation,
-                    citationShort: s.citationShort,
-                    filingType: s.filingType,
-                    volumeNumber: s.volumeNumber,
-                    caseNumber: s.caseNumber,
-                    filingSlug: s.filingSlug,
-                    annotations: s.annotations,
-                  })),
-                  model: event.model,
-                  provider: event.provider,
-                  usage: event.usage,
-                },
-              });
+          let completed = false;
+
+          // Drain a token/done/error stream into the SSE channel. Returns the
+          // error message if the stream yielded a terminal 'error' event (RLM
+          // emits these for "no sidecar" / unreachable / HTTP / stream errors),
+          // else null. Sets `completed` once a final result is sent.
+          const drain = async (
+            stream: AsyncIterable<{ type: string; text?: string; content?: string; model?: string; provider?: string; usage?: { outputTokens?: number }; message?: string }>,
+          ): Promise<string | null> => {
+            for await (const event of stream) {
+              if (event.type === 'token') {
+                fullContent += event.text ?? '';
+                send({ type: 'token', text: event.text ?? '' });
+              } else if (event.type === 'done') {
+                console.log(`[AI Search] Completed in ${Date.now() - t0}ms — ${event.usage?.outputTokens ?? 0} output tokens`);
+                completed = true;
+                send({
+                  type: 'result',
+                  data: {
+                    answer: event.content,
+                    sources: sources.map(s => ({
+                      text: s.text,
+                      document: s.document,
+                      page: s.page,
+                      score: s.score,
+                      citation: s.citation,
+                      citationShort: s.citationShort,
+                      filingType: s.filingType,
+                      volumeNumber: s.volumeNumber,
+                      caseNumber: s.caseNumber,
+                      filingSlug: s.filingSlug,
+                      annotations: s.annotations,
+                    })),
+                    model: event.model,
+                    provider: event.provider,
+                    usage: event.usage,
+                  },
+                });
+              } else if (event.type === 'error') {
+                return event.message ?? 'stream error';
+              }
             }
+            return null;
+          };
+
+          const aiOpts = {
+            provider: provider as AIProviderKey,
+            model,
+            messages,
+            maxTokens: reqMaxTokens ?? 2048,
+            temperature: 0.3,
+            thinking,
+            effort,
+          };
+
+          if (useRlm) {
+            const rlmErr = await drain(streamRlm({
+              messages,
+              maxTokens: reqMaxTokens ?? 2048,
+              temperature: 0.3,
+              signal: request.signal,
+            }));
+            if (rlmErr && !completed && !fullContent) {
+              // RLM down/unreachable and nothing streamed yet — SKIP it and
+              // answer with the standard provider instead of a silent hang (the
+              // previous behavior: the 'error' event was dropped and the stream
+              // closed empty). This is the "RLM down → skip" contract.
+              console.warn(`[AI Search] RLM unavailable — falling back to ${provider}/${model}: ${rlmErr}`);
+              const aiErr = await drain(streamAI(aiOpts));
+              if (aiErr && !completed) send({ type: 'error', error: aiErr });
+            } else if (rlmErr && !completed) {
+              // RLM failed AFTER streaming partial tokens — can't cleanly switch
+              // providers mid-answer, so surface the error rather than hang.
+              send({ type: 'error', error: rlmErr });
+            }
+          } else {
+            const aiErr = await drain(streamAI(aiOpts));
+            if (aiErr && !completed) send({ type: 'error', error: aiErr });
           }
         } catch (error) {
           send({ type: 'error', error: error instanceof Error ? error.message : 'AI search failed' });

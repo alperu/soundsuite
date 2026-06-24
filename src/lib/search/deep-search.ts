@@ -1821,6 +1821,17 @@ export async function deepSearch(
     // report (Stage 2 does). If it's down/unreachable/timing out/erroring, skip
     // it and synthesize from the already-reranked sources rather than failing
     // the whole search. A real user-abort is still propagated.
+    // Cap the RLM's streamed "thinking". The RLM is instructed to emit a brief
+    // confirmation, but when it instead dumps raw excerpts (tens of thousands of
+    // chars), that flood lands on the answer channel and — if Stage 2 then fails
+    // — gets stranded on screen (the "doesn't render right" 71K raw-excerpt
+    // bug). Its streamed text is discarded anyway (Stage 2 writes the report),
+    // so bounding it is lossless.
+    let rlmStreamedChars = 0;
+    const RLM_STREAM_CAP = 3000;
+    const cappedOnToken = onToken
+      ? (t: string) => { if (rlmStreamedChars >= RLM_STREAM_CAP) return; rlmStreamedChars += t.length; onToken(t); }
+      : undefined;
     try {
       const rlmOut = await generateReportWithRlm(query, decomposition, sources, registry, {
         caseId,
@@ -1829,12 +1840,9 @@ export async function deepSearch(
         workflowContext,
         maxTokens,
         signal,
-        // Stream RLM's evidence-gathering output to the UI so the operator
-        // can SEE the model thinking + asking for more excerpts. The runner
-        // clears streamingAnswer on the 'generating' progress event that
-        // marks handoff to the cloud LLM, so the user gets a clean stream
-        // for the final Claude report.
-        onToken,
+        // Capped (see above) — the operator still sees the model start to
+        // "think"/ask for excerpts, but a runaway dump can't flood the answer.
+        onToken: cappedOnToken,
         onProgress: emit,
         pushWarning,
         maxRounds: rlmMaxRounds,
