@@ -179,6 +179,7 @@ interface SearchInterfaceProps {
   initialCompareMode?: boolean;
   initialToolName?: string | null;
   toolSlugMap?: Record<string, string>;
+  initialChatId?: string | null;
   hasExplicitPath?: boolean;
 }
 
@@ -353,6 +354,7 @@ export default function SearchInterface({
   initialCompareMode = false,
   initialToolName = null,
   toolSlugMap = {},
+  initialChatId = null,
   hasExplicitPath = false,
 }: SearchInterfaceProps) {
   const router = useRouter();
@@ -911,7 +913,7 @@ export default function SearchInterface({
           .map(t => ({
             query: t.query,
             result: t.result!,
-            searchTime: Math.max(0, t.completedAt - s.startTime),
+            searchTime: t.searchTime ?? Math.max(0, t.completedAt - s.startTime),
           }));
         if (turns.length > 0) setDeepTurns(turns);
       }
@@ -1696,15 +1698,37 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
     deepSearchRunner.reset(nextSession);
     aiSearchRunner.reset(nextSession);
     aiQueryRef.current?.focus();
-  }, []);
+    // Drop the /search/history/<id> URL (if any) so a reload doesn't reopen the
+    // old chat over this fresh one.
+    if (initialChatId) router.push('/search/ai', { scroll: false });
+  }, [initialChatId, router]);
+
+  // Monotonic token so a slow in-flight load can't clobber a newer one when the
+  // user clicks through several history items quickly (the "messes up the data
+  // on load" race).
+  const loadSessionToken = useRef(0);
 
   // Load a saved session from history
   const loadSession = useCallback(async (sessionId: string) => {
+    const token = ++loadSessionToken.current;
     try {
       const res = await fetch(`/api/chat/history/${sessionId}`);
+      if (loadSessionToken.current !== token) return; // superseded by a newer load
       if (!res.ok) return;
       const { session } = await res.json();
+      if (loadSessionToken.current !== token) return; // superseded after await
       if (!session) return;
+
+      // Fully reset transient chat state before hydrating so nothing bleeds in
+      // from the previously open chat (streaming answer, progress log, draft
+      // query, errors, timings). setAiTurns/setDeepTurns are reset again below.
+      setAiResults([]);
+      setAiError(null);
+      setAiSearchTime(null);
+      setDeepProgress(null);
+      setAiProgressLog([]);
+      setStreamingAnswer(null);
+      setAiQuery('');
 
       // Set mode
       if (session.mode === 'deep') {
@@ -1753,6 +1777,18 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
           }
         }
         setDeepTurns(newDeepTurns);
+        // Seed the singleton runner with the loaded history so a follow-up
+        // deep search APPENDS to these turns instead of replacing them (and
+        // overwriting the saved file with a single turn pair). Synchronous tail
+        // of loadSession — the cancellation guards above already ensure a
+        // superseded load never reaches this point.
+        deepSearchRunner.hydrate(session.id, newDeepTurns.map(t => ({
+          query: t.query,
+          sessionId: session.id,
+          result: t.result,
+          completedAt: 0,
+          searchTime: t.searchTime ?? undefined,
+        })));
       } else {
         // Reconstruct AI turns from pairs
         const newAiTurns: AIConversationTurn[] = [];
@@ -1781,6 +1817,17 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
       console.error('Failed to load session:', err);
     }
   }, [scrollChatToBottom, setAiProvider, setAiModel, setAiCaseId, setDeepSearchMode, setCompareMode]);
+
+  // Drive loading off the URL: /search/history/<chatId> (initial visit, reload,
+  // shared link, or in-app navigation from the history list) hydrates that chat.
+  // Keyed on initialChatId so each navigation re-runs; the early-return avoids
+  // re-fetching the chat that's already open.
+  useEffect(() => {
+    if (!initialChatId) return;
+    if (initialChatId === currentSessionId) return;
+    loadSession(initialChatId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialChatId]);
 
   // Analysis tool execution
   const handleToolExecute = useCallback(async (params: Record<string, any>) => {
@@ -3478,7 +3525,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
           {infoTab === 'history' && (
             <HistoryPanel
               currentSessionId={currentSessionId}
-              onLoadSession={loadSession}
+              onLoadSession={(id) => router.push(`/search/history/${id}`, { scroll: false })}
             />
           )}
           {infoTab === 'bookmarks' && (

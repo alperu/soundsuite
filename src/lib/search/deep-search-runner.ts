@@ -34,6 +34,10 @@ export interface DeepSearchTurnSnapshot {
   result?: DeepSearchResult;
   error?: string;
   completedAt: number;
+  /** Per-turn elapsed ms. Carried explicitly so historical turns seeded via
+   *  hydrate() keep their saved timing instead of being recomputed against a
+   *  later run's startTime. */
+  searchTime?: number;
 }
 
 export interface DeepSearchRunnerState {
@@ -108,6 +112,17 @@ class DeepSearchRunner {
   reset(sessionId: string) {
     if (this.state.loading) return; // never wipe an active run
     this.state = { ...initialState, sessionId };
+    this.emit();
+  }
+
+  /** Seed completed turns from persisted history when a saved deep-search chat
+   *  is opened. Without this the runner's snapshot holds zero turns for the
+   *  reopened session, so the first follow-up search mirrors back ONLY the new
+   *  turn — clobbering the loaded history in React state and overwriting the
+   *  saved file with a single turn pair. Seeding makes follow-ups append. */
+  hydrate(sessionId: string, turns: DeepSearchTurnSnapshot[]) {
+    if (this.state.loading) return; // never disturb an active run
+    this.state = { ...initialState, sessionId, turns };
     this.emit();
   }
 
@@ -220,12 +235,14 @@ class DeepSearchRunner {
         errMsg = 'Search stopped';
       }
     } finally {
+      const completedAt = Date.now();
       const turn: DeepSearchTurnSnapshot = {
         query: this.state.query,
         sessionId: this.state.sessionId || params.sessionId,
         result: finalResult || undefined,
         error: errMsg || undefined,
-        completedAt: Date.now(),
+        completedAt,
+        searchTime: Math.max(0, completedAt - this.state.startTime),
       };
       // Clear in-flight visuals on completion. Keep warnings so the user can
       // still see anything important the run surfaced.
