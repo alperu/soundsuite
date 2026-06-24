@@ -118,7 +118,12 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     // leaving ~7 GB headroom while maximizing KV cache for batch concurrency.
     // --enforce-eager on by default (flat VRAM, fast cold-start); operator can
     // disable for CUDA graphs + torch.compile throughput.
-    vllmArgs: ['--gpu-memory-utilization', '0.85', '--enforce-eager'],
+    // --max-num-batched-tokens 32768: the vLLM default (~2048) caps the
+    // scheduler at one ~8K-token (query,doc) rerank pair per step → Running:1
+    // and a huge waiting queue even with the KV cache near-empty. 32768 lets it
+    // pack several pairs per forward pass (vLLM rebalances KV cache down to fit,
+    // still ~11x concurrency on 48 GB). Drop to 16384 if the engine OOMs at boot.
+    vllmArgs: ['--gpu-memory-utilization', '0.85', '--enforce-eager', '--max-num-batched-tokens', '32768'],
   },
   rlm: {
     image: VLLM_IMAGE,
