@@ -1817,43 +1817,64 @@ export async function deepSearch(
       }
     }
 
-    const rlmOut = await generateReportWithRlm(query, decomposition, sources, registry, {
-      caseId,
-      chatId,
-      history,
-      workflowContext,
-      maxTokens,
-      signal,
-      // Stream RLM's evidence-gathering output to the UI so the operator
-      // can SEE the model thinking + asking for more excerpts. The runner
-      // clears streamingAnswer on the 'generating' progress event that
-      // marks handoff to the cloud LLM, so the user gets a clean stream
-      // for the final Claude report.
-      onToken,
-      onProgress: emit,
-      pushWarning,
-      maxRounds: rlmMaxRounds,
-      ...(inheritedWhereClauses ? { inheritedWhereClauses } : {}),
-    });
+    // RLM is OPTIONAL supplemental evidence-gathering — it does NOT write the
+    // report (Stage 2 does). If it's down/unreachable/timing out/erroring, skip
+    // it and synthesize from the already-reranked sources rather than failing
+    // the whole search. A real user-abort is still propagated.
+    try {
+      const rlmOut = await generateReportWithRlm(query, decomposition, sources, registry, {
+        caseId,
+        chatId,
+        history,
+        workflowContext,
+        maxTokens,
+        signal,
+        // Stream RLM's evidence-gathering output to the UI so the operator
+        // can SEE the model thinking + asking for more excerpts. The runner
+        // clears streamingAnswer on the 'generating' progress event that
+        // marks handoff to the cloud LLM, so the user gets a clean stream
+        // for the final Claude report.
+        onToken,
+        onProgress: emit,
+        pushWarning,
+        maxRounds: rlmMaxRounds,
+        ...(inheritedWhereClauses ? { inheritedWhereClauses } : {}),
+      });
 
-    rlmAssisted = true;
-    rlmHost = rlmOut.host || undefined;
-    rlmExtraSourceCount = rlmOut.extraSources.length;
+      rlmAssisted = true;
+      rlmHost = rlmOut.host || undefined;
+      rlmExtraSourceCount = rlmOut.extraSources.length;
 
-    // Merge RLM-discovered extras into the source pool. Dedup is already
-    // enforced inside generateReportWithRlm via seenKeys, so a plain concat
-    // here is safe. Skip re-rerank — pool stays small (typical 0-40 extras)
-    // and we want the user to see the cloud-LLM report ASAP.
-    if (rlmOut.extraSources.length > 0) {
-      finalSources = [...sources, ...rlmOut.extraSources];
+      // Merge RLM-discovered extras into the source pool. Dedup is already
+      // enforced inside generateReportWithRlm via seenKeys, so a plain concat
+      // here is safe. Skip re-rerank — pool stays small (typical 0-40 extras)
+      // and we want the user to see the cloud-LLM report ASAP.
+      if (rlmOut.extraSources.length > 0) {
+        finalSources = [...sources, ...rlmOut.extraSources];
+      }
+    } catch (err) {
+      checkAbort(); // a genuine user-abort must still bubble up, not be swallowed
+      if ((err as Error)?.name === 'AbortError') throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[Deep Search] RLM evidence-gathering unavailable — skipping, synthesizing from reranked sources: ${msg}`);
+      pushWarning({
+        source: 'rlm',
+        reason: 'skipped',
+        message: `RLM supplemental evidence-gathering was unavailable and was skipped — the report is based on the reranked results only. (${msg.slice(0, 200)})`,
+      });
+      rlmAssisted = false;
+      // finalSources stays = sources (no RLM extras)
     }
 
-    // Stage 2: hand off to the standard synthesis path (Claude / user's
-    // chosen provider) with the enriched source list.
+    // Stage 2: hand off to the standard synthesis path (Claude / user's chosen
+    // provider). Runs whether RLM succeeded, was skipped, or failed — it writes
+    // the actual report from whatever sources we have.
     checkAbort();
     emit({
       step: 'generating',
-      message: `RLM gathered ${rlmOut.extraSources.length} additional sources — ${provider || 'cloud LLM'} now drafting the report (tokens will append below)...`,
+      message: rlmAssisted
+        ? `RLM gathered ${rlmExtraSourceCount} additional sources — ${provider || 'cloud LLM'} now drafting the report (tokens will append below)...`
+        : `Drafting the report from the reranked results — ${provider || 'cloud LLM'} writing now...`,
       subQueries: decomposition.subQueries,
       intent: decomposition.intent,
       searchStats: { ...stats, finalAfterRerank: finalSources.length, subQueryCount: decomposition.subQueries.length },
