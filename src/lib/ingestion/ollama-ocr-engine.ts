@@ -22,8 +22,9 @@ export interface OllamaOCRConfig {
 const OCR_PROMPT = `OCR this document page. Output only the raw text. No commentary. Preserve paragraph breaks. For tables use | delimiters. Stop when all text is extracted.`;
 
 const MAX_RETRIES = 3;
-const TIMEOUT_MS = 120_000; // 2 min per attempt
+const TIMEOUT_MS = 45_000; // 45 s per attempt — fast-fail so the job queue can retry sooner
 const BASE_DELAY_MS = 3_000;
+const MAX_JITTER_MS = 1_000; // random jitter added to each retry delay
 
 export class OllamaOCREngine implements IOCREngine {
   private host: string;
@@ -198,7 +199,7 @@ export class OllamaOCREngine implements IOCREngine {
         });
 
         if (attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1); // 3s, 6s, 12s
+          const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1) + Math.random() * MAX_JITTER_MS; // 3–4s, 6–7s, 12–13s
           await new Promise(resolve => setTimeout(resolve, delay));
         }
       }

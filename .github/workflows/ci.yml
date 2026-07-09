@@ -30,11 +30,8 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate
 
-      # Jest suite. Informational for now (continue-on-error) so a single
-      # environment-sensitive test doesn't block PRs; tighten once hardened.
       - name: Test
-        run: npm test
-        continue-on-error: true
+        run: npm test -- --coverage --coverageThreshold='{"global":{"lines":70}}'
 
       # Production build. Several route modules open a SQLite connection at
       # import time, so point DATABASE_URL at a throwaway path (mirrors the

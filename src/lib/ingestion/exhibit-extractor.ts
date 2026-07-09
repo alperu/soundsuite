@@ -146,6 +146,8 @@ export interface ExhibitExtractionOptions {
   motionSections?: MotionSection[];
   /** Image preprocessing settings from pipeline config */
   preprocessSettings?: ImagePreprocessSettings;
+  /** Max parallel preprocess/OCR workers. Reads from admin config; defaults to 2. */
+  concurrency?: number;
 }
 
 /**
@@ -254,6 +256,7 @@ export class ExhibitExtractor {
       pages: pageTexts,
       motionSections: optMotionSections,
       preprocessSettings,
+      concurrency = 2,
     } = options || {};
 
     // Use motionSections from options if provided, otherwise from instance property
@@ -278,7 +281,7 @@ export class ExhibitExtractor {
     } else {
       // No information at all — fall back to extracting all images
       this.logger.info('No exhibit boundaries, motion sections, or poppler data — extracting all images', { documentId });
-      return this.extractExhibitsLegacy(filePath, caseId, documentId, boundaries, onProgress, preprocessSettings);
+      return this.extractExhibitsLegacy(filePath, caseId, documentId, boundaries, onProgress, preprocessSettings, concurrency);
     }
 
     this.logger.info(`Target pages computed for exhibit extraction`, {
@@ -353,8 +356,8 @@ export class ExhibitExtractor {
     // Process: preprocess → save → OCR (with pipelined concurrency)
     const exhibits: ExhibitMetadata[] = [];
     const { default: PQueue } = await import('p-queue');
-    const preprocessQueue = new PQueue({ concurrency: 2 });
-    const ocrQueue = new PQueue({ concurrency: 2 });
+    const preprocessQueue = new PQueue({ concurrency });
+    const ocrQueue = new PQueue({ concurrency });
     let processedCount = 0;
 
     for (const image of filteredImages) {
@@ -482,6 +485,7 @@ export class ExhibitExtractor {
     boundaries?: ExhibitBoundary[],
     onProgress?: (processed: number, total: number) => void,
     preprocessSettings?: ImagePreprocessSettings,
+    concurrency: number = 2,
   ): Promise<ExhibitExtractionResult> {
     const images = await this.pdfParser.extractImages(filePath);
 
@@ -520,7 +524,7 @@ export class ExhibitExtractor {
 
     const exhibits: ExhibitMetadata[] = [];
     const { default: PQueue } = await import('p-queue');
-    const queue = new PQueue({ concurrency: 3 });
+    const queue = new PQueue({ concurrency });
     let processedCount = 0;
 
     for (const image of candidateImages) {
