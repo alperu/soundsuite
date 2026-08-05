@@ -134,7 +134,7 @@ New `ITextChunker` implementation `StructuredChunker` used when a page has `stru
 ## 7. Config keys (Config table, `pipeline.*`)
 
 | Key | Default | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `docparseEnabled` | `false` | master switch (UI toggle) |
 | `docparsePolicy` | `selective` | routing when enabled |
 | `docparseTimeoutMs` | `120000` | per-attempt request timeout |
@@ -154,7 +154,7 @@ New `ITextChunker` implementation `StructuredChunker` used when a page has `stru
 ## 9. Rollout order & estimates
 
 | Step | Scope | Est. |
-|---|---|---|
+| --- | --- | --- |
 | 1 | Sidecar ContainerDef (both files!) + master catalog/ports/router + fleet panel visibility | 1–2 d |
 | 2 | `docparse-engine.ts` + config keys + `/admin/ocr` card | 1–2 d |
 | 3 | Prisma migration (operator-approved, backed up) + persistence plumbing | 1 d |
