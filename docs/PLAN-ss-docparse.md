@@ -12,7 +12,7 @@ the current Ollama GGUF path (single model, plain text out), it emits **ordered,
 heading / paragraph / table / footnote / seal / signature / page furniture — with bounding boxes and
 reading order. That structure feeds a table-aware chunker and chunk provenance ("Page 14, ¶ 23,
 under 'Motion to Compel'"), which is the retrieval payoff. The Ollama `OCR:` path stays as the fast
-default and universal fallback; ss-docparse is routed selectively.
+default and universal fallback; ss-docparse is an all-or-nothing document-level switch (§4).
 
 **Naming decision:** `ss-docparse` (not `ss-ocr-full`) — the service does layout + reading order +
 tables, and a second role named "ocr" would confuse operators about which is which.
@@ -21,7 +21,7 @@ tables, and a second role named "ocr" would confuse operators about which is whi
 
 | Surface | What appears | Work needed |
 |---|---|---|
-| `/admin/ocr` | New **"Structured Document Parsing"** card: enable toggle, routing policy (`off` / `selective` / `all`), per-attempt timeout, status line (reachable? version?) | New card in `OCRProviderPanel` (`admin-dashboard.tsx`) |
+| `/admin/ocr` | New **"Structured Document Parsing"** card: enable toggle (binary, §4), per-attempt timeout, status line (reachable? version?), backfill hint when flipping on | New card in `OCRProviderPanel` (`admin-dashboard.tsx`) |
 | `/admin/roleassign` | `ss-docparse` chip, assignable only to CUDA/linux hosts (`docker-vllm` runtime) | None — driven by mode catalog |
 | `/admin/roletypes` | New **`ss-docparse`** row in the Mode Types reference table (label "Document Parsing", availableOn `linux`, default model = the pinned genai-server image/model, "configured at ↗" chip → `/admin/ocr`) | None in the component — the page is read-only over `GET /api/admin/mode-catalog`; the row appears when the catalog entry is added (`mode-catalog.ts` + `mode-catalog-server.ts`, §2). Verify the 4-mode assumption in `admin-role-types.tsx`'s doc comment/fallback doesn't hardcode a count |
 | `/admin/gpu` | Container row per sidecar (status, image, VRAM, actions) | None — driven by registry |
@@ -97,17 +97,29 @@ export interface DocparsePageResult {
   to the current Ollama OCR path and the document is marked `docparseFallbackCount++` (surfaced like
   `ocrFailedCount`). Ingestion never fails because ss-docparse is down.
 
-## 4. Routing policy (which documents go through it)
+## 4. Routing policy — binary, document-level (decision 2026-08-05)
 
-Config `pipeline.docparsePolicy`: `off` (default until proven) | `selective` | `all`.
+Config `pipeline.docparseEnabled`: `false` | `true`. **No per-page heuristic.**
 
-`selective` heuristic (cheap, from data we already have at ingest time):
-- **exclusion first:** reporter's records / transcripts (line-numbered 1–25 pages) NEVER route to
-  docparse in v1 — see §6.1's line-number hazard
-- page text density < OCR threshold (scanned) **and** poppler reports images → parse
-- filing detector says exhibit-heavy or the page count of detected tables > 0 → parse
-- readiness score (Part B work) below a configurable band → parse
-- everything else → fast Ollama `OCR:` path
+An earlier draft proposed a `selective` per-page policy (route scanned/table-heavy pages, skip
+born-digital). Rejected on review: the pre-parse signals (density, poppler, filing type) can detect
+*scanned*, but cannot detect *has structure worth parsing* without running the layout model —
+chicken-and-egg — and worse, headings live mostly in born-digital pleadings, which selective would
+have skipped. That yields heading-path provenance only on the documents least likely to have clean
+headings, and search results that behave differently per document with no visible reason.
+**When enabled, every document goes through docparse; when disabled, none do.** Consistent chunks,
+consistent citations, one mental model.
+
+The single carve-out (not routing — feature protection): reporter's records / transcripts
+(line-numbered 1–25 pages) always keep the existing line-aware path — see §6.1's line-number
+hazard. They are already perfectly structured; docparse adds nothing there.
+
+Latency consequence (see §4.1): with `docparseEnabled`, born-digital pages that today skip OCR
+entirely also pay a parse. This is the price of corpus-wide structure. Mitigations: vLLM batching,
+a dedicated docparse concurrency knob, and the expectation that flipping it on is paired with an
+overnight backfill re-ingest, not done casually mid-day. Optimization noted for v2 (open question
+§10): born-digital pages could derive blocks from the PDF text layer + layout-only detection,
+skipping VL recognition — same structured output, fraction of the cost.
 
 ## 4.1 Latency impact vs the current pipeline
 
@@ -116,7 +128,7 @@ contain it.** Baseline numbers measured on this fleet 2026-08-05 (TITAN RTX host
 
 | Page kind | Current path | Current cost/page | With ss-docparse | Expected cost/page |
 | --- | --- | --- | --- | --- |
-| Text-rich (born-digital) | pdftext extraction, **no OCR** | ~ms | unchanged (`selective` never routes these) | ~ms |
+| Text-rich (born-digital) | pdftext extraction, **no OCR** | ~ms | routed when enabled (binary policy, §4) | est. 1–5 s (layout + recognition; v2 optimization: text-layer blocks at ~ms) |
 | Scanned page | Ollama PaddleOCR-VL `OCR:` | **4–6 s** measured (2.2 s full-page render case) | layout + per-region recognition via vLLM | est. **3–10 s** (TBD — measure in step 1) |
 | Exhibit image | Ollama `OCR:` | **1–3.7 s** measured | same or routed | est. 2–8 s |
 | Transcript (RR) | line-aware text path | ~ms | **excluded by policy (§6.1)** | ~ms |
@@ -132,9 +144,8 @@ step 1; the table gets corrected then.
 
 What bounds the total-wall-clock impact:
 
-1. **`selective` policy (§4)** — the dominant page class (text-rich born-digital) never routes;
-   transcripts never route. Only scanned/table-heavy documents pay, and those are precisely the
-   ones currently producing bad chunks.
+1. **Binary policy (§4)** — the switch is corpus-wide, so the cost is paid deliberately (flip +
+   overnight backfill), not page-by-page unpredictably; transcripts never route regardless.
 2. **Parallelism** — the vLLM server batches concurrent requests natively; docparse gets its own
    concurrency knob rather than sharing `ocrConcurrency`.
 3. **Fallback (§3)** — a slow/down docparse degrades to today's fast path, never blocks ingestion.
@@ -191,7 +202,7 @@ line numbers (1–25) as furniture. Stripping them breaks BOTH the stored `start
 stamping (detector runs on page text) AND the MCP tools' query-time fallback re-detection (which
 reads numbers from the chunk text itself). Mitigations, in order of preference:
 
-1. **v1: route transcripts around docparse.** The `selective` policy (§4) explicitly excludes
+1. **v1: route transcripts around docparse.** The transcript carve-out (§4) explicitly excludes
    documents whose `documentType`/`filingType` indicates a reporter's record — they are already
    line-structured and gain the least from layout analysis. Cheapest and zero-risk.
 2. If transcripts are ever routed through docparse: run `line-number-detector` on the **raw page
@@ -207,9 +218,7 @@ whose `startLine`/`endLine` and MCP citations are byte-identical to the current 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `docparseEnabled` | `false` | master switch (UI toggle) |
-| `docparsePolicy` | `selective` | routing when enabled |
 | `docparseTimeoutMs` | `120000` | per-attempt request timeout |
-| `docparseReadinessBand` | `moderate` | selective-routing threshold |
 
 ## 8. Testing
 
@@ -230,7 +239,7 @@ whose `startLine`/`endLine` and MCP citations are byte-identical to the current 
 | 2 | `docparse-engine.ts` + config keys + `/admin/ocr` card | 1–2 d |
 | 3 | Prisma migration (operator-approved, backed up) + persistence plumbing | 1 d |
 | 4 | `StructuredChunker` + provenance metadata | 2–3 d |
-| 5 | Selective routing + fallback accounting + tests | 1–2 d |
+| 5 | Binary switch + transcript carve-out + fallback accounting + tests | 1–2 d |
 | 6 | A/B validation on probe filings; flip `docparseEnabled` default per results | 0.5 d |
 
 Prerequisite per roadmap: Phase 1 quality gates (garbage detection) should be landed first — they
@@ -243,3 +252,6 @@ protect whichever parse path runs.
 2. Real VRAM footprint alongside the reranker on shared hosts (TITAN RTX 24 GB budget math).
 3. Whether exhibit extraction should also consume docparse blocks (seal/figure blocks → exhibit
    candidates) in v1, or stay on the current poppler path until v2.
+4. v2 cost optimization for born-digital pages: derive blocks from the PDF text layer + layout-only
+   detection (skip VL recognition) — same structured output at ~ms instead of seconds. Decide
+   whether it ships with v1 if the `all`-pages latency proves painful in step 6's measurement.
