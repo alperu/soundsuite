@@ -40,6 +40,33 @@ const DEFAULT_TIMEOUT_MS = 90_000;
 const BASE_DELAY_MS = 3_000;
 const MAX_JITTER_MS = 1_000; // random jitter added to each retry delay
 
+/**
+ * Detect degenerate OCR output — a vision model fed a blank/degraded page can
+ * fall into a repetition loop ("The quick brown fox jumps over the lazy dog."
+ * repeated for the full num_predict budget; observed 2026-08-05 on a scanned
+ * clerk's record page, which indexed 51 garbage chunks). Two cheap signals:
+ * mostly-duplicate lines, or a low unique-shingle ratio for single-line loops.
+ * Legitimate pages repeat short strings (table cells, line numbers) but not
+ * 400+ chars of near-identical content.
+ */
+export function looksDegenerate(text: string): boolean {
+  if (text.length < 400) return false;
+  const lines = text.split(/\n+/).map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length >= 8) {
+    const unique = new Set(lines);
+    if (unique.size / lines.length < 0.2) return true;
+  }
+  // Fixed-stride shingles catch loops without newlines
+  const stride = 40;
+  const shingles = new Set<string>();
+  let count = 0;
+  for (let i = 0; i + stride <= text.length; i += stride) {
+    shingles.add(text.slice(i, i + stride));
+    count++;
+  }
+  return count >= 8 && shingles.size / count < 0.25;
+}
+
 export class OllamaOCREngine implements IOCREngine {
   private host: string;
   private model: string;
@@ -196,6 +223,20 @@ export class OllamaOCREngine implements IOCREngine {
         const result = await response.json();
         const text = (result.response || '').trim();
         const durationMs = Date.now() - startTime;
+
+        // Reject repetition-loop hallucinations instead of indexing them as
+        // page text. Empty text downstream = "no OCR text" (page marked empty
+        // / ocrFailedCount), which is recoverable; 32KB of pangram loops in
+        // the vector index is silent search poisoning.
+        if (looksDegenerate(text)) {
+          logger.warn('Ollama OCR output looks degenerate (repetition loop) — discarding', {
+            model: this.model,
+            textLength: text.length,
+            durationMs,
+            preview: text.slice(0, 120),
+          });
+          return { text: '', confidence: 0 };
+        }
 
         logger.info('Ollama OCR completed', {
           model: this.model,

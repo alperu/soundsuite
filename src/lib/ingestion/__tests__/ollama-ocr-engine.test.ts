@@ -1,4 +1,4 @@
-import { OllamaOCREngine } from '../ollama-ocr-engine';
+import { OllamaOCREngine, looksDegenerate } from '../ollama-ocr-engine';
 
 // Assigned fresh in beforeEach — module-level capture of global.fetch is
 // unreliable across setup-file ordering.
@@ -135,6 +135,44 @@ describe('OllamaOCREngine', () => {
     ])('%s', (_label, input, expected) => {
       const engine = new OllamaOCREngine({ host: HOST, model: MODEL, timeoutMs: input as number | undefined });
       expect((engine as any).timeoutMs).toBe(expected);
+    });
+  });
+
+  describe('degenerate-output guard', () => {
+    const FOX = 'The quick brown fox jumps over the lazy dog.';
+
+    it('discards repetition-loop output (returns empty text, confidence 0)', async () => {
+      routeFetch(() => generateResponse((FOX + '\n\n').repeat(200)));
+      const engine = new OllamaOCREngine({ host: HOST, model: MODEL });
+
+      const result = await engine.recognizeImage(buffer);
+
+      expect(result.text).toBe('');
+      expect(result.confidence).toBe(0);
+    });
+
+    it('keeps legitimate long output', async () => {
+      const legit = Array.from({ length: 60 }, (_, i) =>
+        `${i + 1}. The respondent filed a motion regarding docket entry ${i * 7} on a distinct date.`).join('\n');
+      routeFetch(() => generateResponse(legit));
+      const engine = new OllamaOCREngine({ host: HOST, model: MODEL });
+
+      const result = await engine.recognizeImage(buffer);
+
+      expect(result.text).toBe(legit);
+      expect(result.confidence).toBe(1.0);
+    });
+
+    describe('looksDegenerate', () => {
+      it.each([
+        ['pangram repeated with newlines', (FOX + '\n\n').repeat(50), true],
+        ['pangram repeated without newlines', (FOX + ' ').repeat(50), true],
+        ['short output never flagged', FOX, false],
+        ['normal legal text', Array.from({ length: 30 }, (_, i) => `Paragraph ${i}: distinct factual allegation about event number ${i * 13}.`).join('\n'), false],
+        ['empty', '', false],
+      ])('%s', (_label, text, expected) => {
+        expect(looksDegenerate(text)).toBe(expected);
+      });
     });
   });
 
