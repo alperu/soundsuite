@@ -12,12 +12,20 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as os from 'os';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { createLogger } from './logger';
+
+const execFileAsync = promisify(execFile);
 
 const logger = createLogger('PdfPageRenderer');
 
-const standardFontDataUrl = path.join(process.cwd(), 'node_modules/pdfjs-dist/standard_fonts/');
-const wasmUrl = path.join(process.cwd(), 'node_modules/pdfjs-dist/wasm/');
+// NOTE: pdfjs concatenates filenames directly onto these ("wasmUrl + 'openjpeg.wasm'"),
+// and path.join strips trailing slashes — the '/' must be re-appended or the
+// JPX/JBIG2 wasm decoders fail to load and scanned-page bodies render blank.
+const standardFontDataUrl = path.join(process.cwd(), 'node_modules/pdfjs-dist/standard_fonts') + '/';
+const wasmUrl = path.join(process.cwd(), 'node_modules/pdfjs-dist/wasm') + '/';
 
 // ---------------------------------------------------------------------------
 // pdfjs-dist initialization (same pattern as pdf-parser.ts but with real DOMMatrix)
@@ -35,25 +43,23 @@ async function getNapiCanvas() {
 async function getPdfjsLib() {
   if (_pdfjsLib) return _pdfjsLib;
 
-  // Use real DOMMatrix from @napi-rs/canvas if available, otherwise polyfill
+  // Use the REAL DOMMatrix/Path2D/ImageData from @napi-rs/canvas. pdfjs uses
+  // DOMMatrix arithmetic for text/glyph transforms — the old no-op polyfill
+  // (multiplySelf returning this, identity inverse) silently broke text
+  // painting, producing blank page renders (only image XObjects like stamps
+  // survived). Observed 2026-08-05 on the page-image viewer AND the OCR
+  // full-page-render fallback, where blank renders caused hallucinated OCR.
   try {
     const napi = await getNapiCanvas();
-    if (typeof globalThis.DOMMatrix === 'undefined') {
-      // @napi-rs/canvas exports DOMMatrix via its canvas context
-      // For pdfjs-dist we need a global DOMMatrix
-      (globalThis as any).DOMMatrix = class DOMMatrix {
-        a = 1; b = 0; c = 0; d = 1; e = 0; f = 0;
-        constructor(init?: any) {
-          if (Array.isArray(init) && init.length >= 6)
-            [this.a, this.b, this.c, this.d, this.e, this.f] = init;
-        }
-        multiplySelf() { return this; }
-        inverse() { return new DOMMatrix(); }
-        static fromMatrix() { return new DOMMatrix(); }
-        static fromFloat32Array(a: Float32Array) { return new DOMMatrix(Array.from(a)); }
-        static fromFloat64Array(a: Float64Array) { return new DOMMatrix(Array.from(a)); }
-      };
-    }
+    const n = napi as any;
+    // FORCE-overwrite: pdf-parser.ts / filing-detector install their own
+    // minimal no-op DOMMatrix polyfill at module load (fine for text
+    // extraction, fatal for rendering — identity inverse/multiply smears
+    // tiling patterns and drops image placement). Whichever module loads
+    // first would otherwise win; rendering needs the real implementation.
+    if (n.DOMMatrix) (globalThis as any).DOMMatrix = n.DOMMatrix;
+    if (n.Path2D) (globalThis as any).Path2D = n.Path2D;
+    if (n.ImageData) (globalThis as any).ImageData = n.ImageData;
   } catch {
     // Fallback polyfill if @napi-rs/canvas not available
     if (typeof globalThis.DOMMatrix === 'undefined') {
@@ -72,7 +78,11 @@ async function getPdfjsLib() {
     }
   }
 
-  _pdfjsLib = await import('pdfjs-dist');
+  // The legacy build carries pdfjs's Node.js support (NodeCanvasFactory,
+  // fs-based font/wasm loading, no createImageBitmap/OffscreenCanvas
+  // assumptions). The modern build assumes browser APIs and silently drops
+  // image XObjects in Node — scanned-page bodies rendered blank.
+  _pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
   _pdfjsLib.GlobalWorkerOptions.workerPort = null;
   return _pdfjsLib;
 }
@@ -112,6 +122,10 @@ async function getPooledDocument(filePath: string): Promise<any> {
     data: new Uint8Array(fileBuffer),
     standardFontDataUrl,
     wasmUrl,
+    // Node has no FontFace API — without this, pdfjs skips glyph painting
+    // for embedded fonts and pages render blank (graphics only). With it,
+    // glyphs are drawn as vector paths from the embedded font programs.
+    disableFontFace: true,
   }).promise;
 
   docPool.push({ doc, filePath, lastUsed: Date.now() });
@@ -162,7 +176,41 @@ export interface DocumentInfo {
 }
 
 /**
- * Render a single PDF page to a JPEG buffer using @napi-rs/canvas.
+ * Render a page via poppler's pdftoppm (subprocess). Preferred path: unlike
+ * pdfjs-in-Node, poppler correctly paints scanned-image bodies, embedded-font
+ * text, and tiling patterns (pdfjs silently dropped all three on clerk's
+ * record pages — observed 2026-08-05: a text-dense scan rendered 0.67%
+ * non-white ink through pdfjs vs. a complete page through pdftoppm).
+ */
+async function renderPageWithPoppler(filePath: string, pageNum: number, scale: number): Promise<RenderResult> {
+  // PDF user space is 72 dpi; scale 1.5 → 108 dpi. Clamp to sane bounds.
+  const dpi = Math.min(300, Math.max(36, Math.round(72 * scale)));
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ss-page-render-'));
+  try {
+    const prefix = path.join(tmpDir, 'p');
+    await execFileAsync('pdftoppm', [
+      '-f', String(pageNum), '-l', String(pageNum),
+      '-r', String(dpi),
+      '-jpeg', '-jpegopt', 'quality=85',
+      filePath, prefix,
+    ], { timeout: 60_000 });
+
+    const produced = (await fs.readdir(tmpDir)).filter(f => f.endsWith('.jpg'));
+    if (produced.length !== 1) {
+      throw new Error(`pdftoppm produced ${produced.length} files for page ${pageNum}`);
+    }
+    const buffer = await fs.readFile(path.join(tmpDir, produced[0]));
+    const sharp = (await import('sharp')).default;
+    const meta = await sharp(buffer).metadata();
+    return { buffer, width: meta.width ?? 0, height: meta.height ?? 0 };
+  } finally {
+    fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Render a single PDF page to a JPEG buffer — pdftoppm first, @napi-rs/canvas
+ * + pdfjs as fallback when poppler is unavailable.
  */
 export async function renderPage(filePath: string, pageNum: number, scale: number = 1.5): Promise<RenderResult> {
   const key = cacheKey(filePath, pageNum, scale);
@@ -172,6 +220,18 @@ export async function renderPage(filePath: string, pageNum: number, scale: numbe
   if (cached) {
     cached.lastUsed = Date.now();
     return { buffer: cached.buffer, width: cached.width, height: cached.height };
+  }
+
+  try {
+    const result = await renderPageWithPoppler(filePath, pageNum, scale);
+    pageCache.set(key, { ...result, lastUsed: Date.now() });
+    pruneCache();
+    return result;
+  } catch (popplerErr) {
+    logger.warn('pdftoppm render failed — falling back to pdfjs canvas render', {
+      pageNum,
+      error: popplerErr instanceof Error ? popplerErr.message : String(popplerErr),
+    });
   }
 
   const doc = await getPooledDocument(filePath);
