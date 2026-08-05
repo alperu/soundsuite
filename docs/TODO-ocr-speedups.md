@@ -15,7 +15,11 @@ impact-to-effort.
 
 ## Root causes (ranked by impact)
 
-### 1. Hardcoded `concurrency: 2` in `exhibit-extractor.ts`
+### 1. ✅ DONE — Hardcoded `concurrency: 2` in `exhibit-extractor.ts`
+
+> **Resolved 2026-08-05** (PR #6 + Phase 2): `pipeline.ocrConcurrency` is now
+> passed through `ingestion-pipeline.ts` into `ExhibitExtractionOptions.ocrConcurrency`
+> (clamped 1–8), with a separate optional `preprocessConcurrency`.
 
 `src/lib/ingestion/exhibit-extractor.ts:357`:
 
@@ -31,7 +35,15 @@ value, the queue size is a literal `2`.
 
 Effect: with the slider cranked to 5, exhibit OCR still runs at 2 in-flight.
 
-### 2. Per-attempt timeout is 120 s × 3 attempts = 6 min wasted per stuck OCR
+### 2. ✅ DONE (as configurable, default 90 s) — Per-attempt timeout is 120 s × 3 attempts = 6 min wasted per stuck OCR
+
+> **Resolved 2026-08-05** (Phase 2): `OllamaOCRConfig.timeoutMs`, wired from
+> `pipeline.ocrTimeoutMs` (default **90 000**, not 45 000 — the latency data
+> below shows cold loads of 30–60 s, so 45 s must wait for the host-health
+> watchdog in fix #3). Retry log now distinguishes client-side timeout from
+> host errors, and retry delays carry 0–1 s jitter.
+> Note: the backoff arithmetic below is off — with `MAX_RETRIES = 3` only
+> two delays fire (after attempts 1 and 2), so it's `3s + 6s`, never `+ 12s`.
 
 `src/lib/ingestion/ollama-ocr-engine.ts:25`:
 

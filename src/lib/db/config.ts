@@ -50,6 +50,9 @@ export interface AppConfig {
   parsingWorkerCount: number;
   ocrThreshold: number;
   ocrConcurrency: number;
+  /** Per-attempt Ollama OCR request timeout in ms. Default 90000.
+   *  Cold model loads take 30-60s; median inference 30-40s (docs/TODO-ocr-speedups.md). */
+  ocrTimeoutMs: number;
   embeddingBatchSize: number;
   // Reranking settings
   rerankEnabled: boolean;
@@ -215,6 +218,7 @@ export async function getConfig(): Promise<AppConfig> {
     parsingWorkerCount: parseInt(configMap.get('parsing.workerCount') || '1', 10),
     ocrThreshold: parseInt(configMap.get('pipeline.ocrThreshold') || '50', 10),
     ocrConcurrency: parseInt(configMap.get('pipeline.ocrConcurrency') || '2', 10),
+    ocrTimeoutMs: parseInt(configMap.get('pipeline.ocrTimeoutMs') || '90000', 10),
     embeddingBatchSize: parseInt(configMap.get('pipeline.embeddingBatchSize') || '50', 10),
     // Image preprocessing settings (defaults match DEFAULT_PREPROCESS_SETTINGS)
     ocrUpscale: configMap.get('pipeline.ocrUpscale') !== 'false',

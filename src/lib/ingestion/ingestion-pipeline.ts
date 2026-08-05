@@ -725,7 +725,7 @@ export class IngestionPipeline {
       // Stage: exhibit-extraction (poppler-driven — targeted extraction + OCR)
       await this.publishProgress(documentId, 'exhibit-extraction', 'Extracting exhibits...', 35);
       let exhibitHb = this.startHeartbeat(documentId, 'exhibit-extraction', 'Extracting exhibits...', 35);
-      let exhibitResult: { exhibits: ExhibitMetadata[]; totalCount: number };
+      let exhibitResult: { exhibits: ExhibitMetadata[]; totalCount: number; ocrFailedCount: number };
       try {
         exhibitResult = await this.runStage('exhibit-extraction', documentId, stageTimings, () =>
           this.extractExhibits(filePath, caseId, documentId, exhibitBoundaries, (processed, total) => {
@@ -739,13 +739,26 @@ export class IngestionPipeline {
             pages,
             motionSections,
             preprocessSettings: this.config.preprocessSettings,
-            concurrency: this.config.ocrConcurrency,
+            ocrConcurrency: this.config.ocrConcurrency,
           })
         );
       } finally {
         clearInterval(exhibitHb);
       }
       const exhibitCount = exhibitResult.totalCount;
+      if (exhibitResult.ocrFailedCount > 0) {
+        this.logger.warn('Exhibit extraction completed with OCR failures — some exhibits indexed without text', {
+          documentId,
+          ocrFailedCount: exhibitResult.ocrFailedCount,
+          totalCount: exhibitCount,
+        });
+        await this.publishProgress(
+          documentId,
+          'exhibit-extraction',
+          `Warning: ${exhibitResult.ocrFailedCount}/${exhibitCount} exhibits have no OCR text`,
+          49,
+        ).catch(() => {});
+      }
 
       // Build set of pages handled by exhibit extraction for OCR fallback skip.
       // Includes both exhibit boundary pages AND motion section pages,
@@ -1653,9 +1666,10 @@ export class IngestionPipeline {
       pages?: PageText[];
       motionSections?: MotionSection[];
       preprocessSettings?: import('./image-preprocessor').ImagePreprocessSettings;
-      concurrency?: number;
+      ocrConcurrency?: number;
+      preprocessConcurrency?: number;
     },
-  ): Promise<{ exhibits: ExhibitMetadata[]; totalCount: number }> {
+  ): Promise<{ exhibits: ExhibitMetadata[]; totalCount: number; ocrFailedCount: number }> {
     return await this.exhibitExtractor.extractExhibits(filePath, caseId, documentId, boundaries, onProgress, options);
   }
 

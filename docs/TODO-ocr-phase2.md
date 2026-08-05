@@ -6,38 +6,40 @@ Companion doc with the original latency analysis: [TODO-ocr-speedups.md](./TODO-
 
 ## Phase 2 — OCR robustness
 
-- [ ] **Configurable OCR timeout.** Add `timeoutMs?: number` to `OllamaOCRConfig`
+- [x] **Configurable OCR timeout.** Add `timeoutMs?: number` to `OllamaOCRConfig`
       (`src/lib/ingestion/ollama-ocr-engine.ts`), default **90 000 ms**. Do not lower to 45 s until the
       host-health watchdog (TODO-ocr-speedups fix #3) lands — measured latencies: median 30–40 s,
       cold model loads 30–60 s, worst > 115 s. Wire it from admin config at `src/services/worker-init.ts`
       and the reindex route.
-- [ ] **Distinguish timeout vs host error in retry logs.** In the retry catch
+- [x] **Distinguish timeout vs host error in retry logs.** In the retry catch
       (`ollama-ocr-engine.ts` ~line 193), log "our timeout fired after Ns" separately from
       Ollama 5xx/connection errors — today both surface as `AbortError`.
-- [ ] **Surface OCR failures instead of swallowing them.** After `MAX_RETRIES` the main path pushes
-      the exhibit with `extractedText: ''` / `confidence: 0` and the legacy path drops it entirely —
-      the document still reaches `INDEXED` with silent data loss. Add `ocrFailedCount` to
-      `ExhibitExtractionResult`, log it at the stage boundary, and consider a partial-failure marker
-      on the Document record surfaced in the UI.
-- [ ] **Split `preprocessConcurrency` from `ocrConcurrency`.** `preprocessQueue` (sharp, local CPU)
+- [x] **Surface OCR failures instead of swallowing them.** DONE: `ocrFailedCount` added to
+      `ExhibitExtractionResult` (both paths — legacy no longer drops failed exhibits), warned at the
+      extractor and pipeline stage boundary, and published as a progress warning.
+  - [ ] Remaining: persist a partial-failure marker on the Document record and surface it in the UI
+        (e.g. a "N exhibits missing OCR text" badge with a re-OCR action).
+- [x] **Split `preprocessConcurrency` from `ocrConcurrency`.** `preprocessQueue` (sharp, local CPU)
       and `ocrQueue` (HTTP to Ollama, GPU/network-bound) want different values; sizing the sharp
       queue from a knob named "OCR Concurrency" misleads. Default `preprocessConcurrency` to
       `ocrConcurrency` for backward compatibility.
-- [ ] **Backpressure between preprocess and OCR queues.** `ocrQueue.add()` is not awaited by the
+- [x] **Backpressure between preprocess and OCR queues.** `ocrQueue.add()` is not awaited by the
       preprocess task, so pending OCR closures each hold a preprocessed PNG buffer — heap pressure
       on large documents at high concurrency. Bound the OCR queue or await when it exceeds a
       high-water mark.
-- [ ] **Add tests.** `ollama-ocr-engine.ts` has no test file at all. Minimum:
+- [x] **Add tests.** `ollama-ocr-engine.ts` has no test file at all. Minimum:
       - fake-timer retry test: 3 attempts, delays within [3000, 4000] and [6000, 7000]
       - timeout-abort test (mock fetch that never resolves)
       - extractor in-flight-ceiling test: mock OCR engine counting concurrent calls for
         `concurrency: 1` vs `4`
       - clamp tests for `0 / -1 / NaN / null / 99`
-- [ ] **Fix the backoff comment.** With `MAX_RETRIES = 3` only two delays ever fire (3–4 s, 6–7 s);
+- [x] **Fix the backoff comment.** With `MAX_RETRIES = 3` only two delays ever fire (3–4 s, 6–7 s);
       the "12 s" third delay never happens. TODO-ocr-speedups.md's worst-case arithmetic repeats the
       same error — correct both.
-- [ ] **Mark TODO-ocr-speedups items #1 and #2 done** once the timeout work lands (item #1 is done
-      by Phase 1).
+- [x] **Mark TODO-ocr-speedups items #1 and #2 done** once the timeout work lands (item #1 is done
+      by Phase 1). DONE — both marked with resolution notes.
+  - [ ] Remaining: admin UI field for `pipeline.ocrTimeoutMs` (currently settable only via the
+        Config table; engine reads it with a 90 s default).
 
 ## Separate track — CI enforcement
 

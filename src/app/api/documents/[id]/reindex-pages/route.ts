@@ -108,7 +108,7 @@ export async function POST(
       const { OllamaOCREngine } = await import('@/lib/ingestion/ollama-ocr-engine');
       const ocrHost = config.ocrOllamaHost || config.ollamaHost || 'http://localhost:11434';
       const ocrModel = config.ocrOllamaModel || 'richardyoung/olmocr2:7b-q8';
-      rawOcrEngine = new OllamaOCREngine({ host: ocrHost, model: ocrModel, useOrchestrator: !!config.ocrUseOrchestrator });
+      rawOcrEngine = new OllamaOCREngine({ host: ocrHost, model: ocrModel, useOrchestrator: !!config.ocrUseOrchestrator, timeoutMs: config.ocrTimeoutMs });
     } else {
       rawOcrEngine = new OCREngine();
     }
