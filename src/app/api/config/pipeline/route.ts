@@ -7,6 +7,7 @@ interface PipelineConfigBody {
   parsingWorkerCount?: number;
   embeddingBatchSize?: number;
   ocrConcurrency?: number;
+  ocrTimeoutMs?: number;
   ocrThreshold?: number;
   // Image preprocessing settings
   ocrUpscale?: boolean;
@@ -54,6 +55,12 @@ export async function PATCH(request: NextRequest) {
     if (body.ocrConcurrency !== undefined) {
       const v = Math.max(1, Math.min(8, Math.round(body.ocrConcurrency)));
       updates.push(setConfigValue('pipeline.ocrConcurrency', String(v)));
+    }
+
+    if (body.ocrTimeoutMs !== undefined) {
+      // 10s floor (below that even warm inference fails), 10min ceiling
+      const v = Math.max(10_000, Math.min(600_000, Math.round(body.ocrTimeoutMs)));
+      updates.push(setConfigValue('pipeline.ocrTimeoutMs', String(v)));
     }
 
     if (body.ocrThreshold !== undefined) {

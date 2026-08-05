@@ -17,18 +17,27 @@ export interface OllamaOCRConfig {
   host: string;   // e.g. http://10.10.20.5:11434
   model: string;  // e.g. richardyoung/olmocr2:7b-q8
   useOrchestrator?: boolean; // resolve host per-request via fleet-router
+  /**
+   * Per-attempt request timeout in ms. Default 90 000 — measured latencies
+   * (docs/TODO-ocr-speedups.md): median 30–40 s, cold model loads 30–60 s.
+   * Do not lower below cold-load range unless a host-health watchdog
+   * guarantees the model is resident.
+   */
+  timeoutMs?: number;
 }
 
 const OCR_PROMPT = `OCR this document page. Output only the raw text. No commentary. Preserve paragraph breaks. For tables use | delimiters. Stop when all text is extracted.`;
 
 const MAX_RETRIES = 3;
-const TIMEOUT_MS = 120_000; // 2 min per attempt
+const DEFAULT_TIMEOUT_MS = 90_000;
 const BASE_DELAY_MS = 3_000;
+const MAX_JITTER_MS = 1_000; // random jitter added to each retry delay
 
 export class OllamaOCREngine implements IOCREngine {
   private host: string;
   private model: string;
   private useOrchestrator: boolean;
+  private timeoutMs: number;
   private lastResolvedHost: string | null = null;
   private lastPreflight: { host: string; ok: boolean; at: number; error?: string } | null = null;
   private static PREFLIGHT_OK_TTL_MS = 5_000;
@@ -90,7 +99,10 @@ export class OllamaOCREngine implements IOCREngine {
     this.host = config.host.replace(/\/+$/, '');
     this.model = config.model;
     this.useOrchestrator = config.useOrchestrator ?? false;
-    logger.info('OllamaOCREngine initialized', { host: this.host, model: this.model, orchestrator: this.useOrchestrator });
+    this.timeoutMs = (typeof config.timeoutMs === 'number' && Number.isFinite(config.timeoutMs) && config.timeoutMs > 0)
+      ? config.timeoutMs
+      : DEFAULT_TIMEOUT_MS;
+    logger.info('OllamaOCREngine initialized', { host: this.host, model: this.model, orchestrator: this.useOrchestrator, timeoutMs: this.timeoutMs });
   }
 
   /**
@@ -152,7 +164,7 @@ export class OllamaOCREngine implements IOCREngine {
         const response = await fetch(`${host}/api/generate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(TIMEOUT_MS),
+          signal: AbortSignal.timeout(this.timeoutMs),
           body: JSON.stringify({
             model: this.model,
             prompt: OCR_PROMPT,
@@ -190,15 +202,27 @@ export class OllamaOCREngine implements IOCREngine {
         lastError = error instanceof Error ? error : new Error(String(error));
         const durationMs = Date.now() - startTime;
 
+        // AbortSignal.timeout() aborts with a DOMException named 'TimeoutError'.
+        // Distinguish "our client-side limit fired" from a host-side error (5xx,
+        // connection refused) — they need opposite operator responses (raise
+        // timeoutMs / check model residency vs. fix the Ollama host).
+        const timedOut = lastError.name === 'TimeoutError' || lastError.name === 'AbortError';
+        if (timedOut) {
+          lastError = new Error(`client-side timeout after ${this.timeoutMs}ms (host may be cold-loading the model or overloaded)`);
+        }
+
         logger.warn(`Ollama OCR attempt ${attempt}/${MAX_RETRIES} failed`, {
           host,
           model: this.model,
           durationMs,
+          timedOut,
+          timeoutMs: this.timeoutMs,
           errorMessage: lastError.message,
         });
 
         if (attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1); // 3s, 6s, 12s
+          // Delays fire after attempts 1 and 2 only (MAX_RETRIES=3): 3–4s, 6–7s
+          const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1) + Math.random() * MAX_JITTER_MS;
           await new Promise(resolve => setTimeout(resolve, delay));
         }
       }

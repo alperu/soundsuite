@@ -58,9 +58,10 @@ async function buildProcessDocumentFn(): Promise<(documentId: string, filePath: 
       note: ocrOrchestrator ? 'host resolved per-request via fleet-router' : 'static host',
     });
 
-    ocrEngine = new OllamaOCREngine({ host: ocrHost, model: ocrModel, useOrchestrator: ocrOrchestrator });
+    const ocrTimeoutMs = config.ocrTimeoutMs;
+    ocrEngine = new OllamaOCREngine({ host: ocrHost, model: ocrModel, useOrchestrator: ocrOrchestrator, timeoutMs: ocrTimeoutMs });
     // Ollama vision models should be called sequentially (one GPU request at a time)
-    ocrWorkerFactory = () => new OllamaOCREngine({ host: ocrHost, model: ocrModel, useOrchestrator: ocrOrchestrator });
+    ocrWorkerFactory = () => new OllamaOCREngine({ host: ocrHost, model: ocrModel, useOrchestrator: ocrOrchestrator, timeoutMs: ocrTimeoutMs });
     logger.info('OCR provider: Ollama', { host: ocrHost, model: ocrModel });
   } else {
     ocrEngine = new OCREngine();

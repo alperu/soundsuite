@@ -61,6 +61,7 @@ export default function ProcessingProgress({ caseId }: ProcessingProgressProps) 
   const [pipelineConfig, setPipelineConfig] = useState({
     embeddingBatchSize: 50,
     ocrConcurrency: 2,
+    ocrTimeoutMs: 90000,
     ocrThreshold: 50,
     parsingWorkerCount: 1,
   });
@@ -76,6 +77,7 @@ export default function ProcessingProgress({ caseId }: ProcessingProgressProps) 
           setPipelineConfig({
             embeddingBatchSize: data.embeddingBatchSize ?? 50,
             ocrConcurrency: data.ocrConcurrency ?? 2,
+            ocrTimeoutMs: data.ocrTimeoutMs ?? 90000,
             ocrThreshold: data.ocrThreshold ?? 50,
             parsingWorkerCount: data.parsingWorkerCount ?? 1,
           });
@@ -318,6 +320,29 @@ export default function ProcessingProgress({ caseId }: ProcessingProgressProps) 
                   <span>1</span>
                   <span>8</span>
                 </div>
+              </div>
+
+              {/* OCR Timeout (per attempt) */}
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  OCR Timeout: {Math.round(pipelineConfig.ocrTimeoutMs / 1000)}s per attempt
+                </label>
+                <input
+                  type="range"
+                  min={10}
+                  max={600}
+                  step={5}
+                  value={Math.round(pipelineConfig.ocrTimeoutMs / 1000)}
+                  onChange={e => savePipelineConfig({ ocrTimeoutMs: Number(e.target.value) * 1000 })}
+                  className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                />
+                <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
+                  <span>10s</span>
+                  <span>600s</span>
+                </div>
+                <p className="text-[10px] text-gray-400 mt-0.5">
+                  Cold model loads take 30–60s — values below 90s risk failing slow pages.
+                </p>
               </div>
 
               {/* OCR Text Threshold */}

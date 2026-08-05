@@ -130,6 +130,13 @@ export interface ExhibitMetadata {
 export interface ExhibitExtractionResult {
   exhibits: ExhibitMetadata[];
   totalCount: number;
+  /**
+   * Exhibits whose OCR failed after all retries. They are still saved and
+   * indexed (with empty extractedText / confidence 0) so the image is not
+   * lost, but their text is missing from search — surface this to the user
+   * instead of silently reporting success.
+   */
+  ocrFailedCount: number;
 }
 
 /**
@@ -146,8 +153,14 @@ export interface ExhibitExtractionOptions {
   motionSections?: MotionSection[];
   /** Image preprocessing settings from pipeline config */
   preprocessSettings?: ImagePreprocessSettings;
-  /** Max parallel preprocess/OCR workers. Set by the caller from `pipeline.ocrConcurrency`; defaults to 2 (legacy path: 3). */
-  concurrency?: number;
+  /** Max parallel OCR requests in flight. Set by the caller from `pipeline.ocrConcurrency`; defaults to 2 (legacy path: 3). */
+  ocrConcurrency?: number;
+  /**
+   * Max parallel sharp preprocess workers. Defaults to ocrConcurrency.
+   * Split from ocrConcurrency because preprocess is local-CPU-bound while
+   * OCR is network/GPU-bound — optimal values differ per deployment.
+   */
+  preprocessConcurrency?: number;
 }
 
 /**
@@ -265,7 +278,8 @@ export class ExhibitExtractor {
       pages: pageTexts,
       motionSections: optMotionSections,
       preprocessSettings,
-      concurrency,
+      ocrConcurrency,
+      preprocessConcurrency,
     } = options || {};
 
     // Use motionSections from options if provided, otherwise from instance property
@@ -290,7 +304,7 @@ export class ExhibitExtractor {
     } else {
       // No information at all — fall back to extracting all images
       this.logger.info('No exhibit boundaries, motion sections, or poppler data — extracting all images', { documentId });
-      return this.extractExhibitsLegacy(filePath, caseId, documentId, boundaries, onProgress, preprocessSettings, concurrency);
+      return this.extractExhibitsLegacy(filePath, caseId, documentId, boundaries, onProgress, preprocessSettings, ocrConcurrency);
     }
 
     this.logger.info(`Target pages computed for exhibit extraction`, {
@@ -304,7 +318,7 @@ export class ExhibitExtractor {
 
     if (targetPages.size === 0) {
       this.logger.info('No target pages for exhibit extraction', { documentId });
-      return { exhibits: [], totalCount: 0 };
+      return { exhibits: [], totalCount: 0, ocrFailedCount: 0 };
     }
 
     // Extract images from target pages using pdfdown (already loaded and cached).
@@ -315,7 +329,7 @@ export class ExhibitExtractor {
 
     if (candidateImages.length === 0) {
       this.logger.info('No images extracted from target pages', { documentId });
-      return { exhibits: [], totalCount: 0 };
+      return { exhibits: [], totalCount: 0, ocrFailedCount: 0 };
     }
 
     // Filter: size → dedup
@@ -347,7 +361,7 @@ export class ExhibitExtractor {
     });
 
     if (filteredImages.length === 0) {
-      return { exhibits: [], totalCount: 0 };
+      return { exhibits: [], totalCount: 0, ocrFailedCount: 0 };
     }
 
     // Create output directory
@@ -365,10 +379,12 @@ export class ExhibitExtractor {
     // Process: preprocess → save → OCR (with pipelined concurrency)
     const exhibits: ExhibitMetadata[] = [];
     const { default: PQueue } = await import('p-queue');
-    const safeConcurrency = clampConcurrency(concurrency, 2);
-    const preprocessQueue = new PQueue({ concurrency: safeConcurrency });
-    const ocrQueue = new PQueue({ concurrency: safeConcurrency });
+    const safeOcrConcurrency = clampConcurrency(ocrConcurrency, 2);
+    const safePreprocessConcurrency = clampConcurrency(preprocessConcurrency, safeOcrConcurrency);
+    const preprocessQueue = new PQueue({ concurrency: safePreprocessConcurrency });
+    const ocrQueue = new PQueue({ concurrency: safeOcrConcurrency });
     let processedCount = 0;
+    let ocrFailedCount = 0;
 
     for (const image of filteredImages) {
       preprocessQueue.add(async () => {
@@ -425,6 +441,11 @@ export class ExhibitExtractor {
             return;
           }
 
+          // Backpressure: each pending OCR task holds a preprocessed PNG in its
+          // closure, so don't let the OCR queue grow unbounded ahead of a slow
+          // OCR host — wait until the backlog drains below 2× concurrency.
+          await ocrQueue.onSizeLessThan(safeOcrConcurrency * 2);
+
           // Queue OCR (IO-bound — runs while next image is preprocessing)
           ocrQueue.add(async () => {
             try {
@@ -441,7 +462,9 @@ export class ExhibitExtractor {
                 pageNumber: image.pageNumber,
                 imageIndex: image.imageIndex,
               });
-              // Still save the exhibit without OCR text
+              // Still save the exhibit without OCR text, but count the failure
+              // so the pipeline can surface it instead of reporting success.
+              ocrFailedCount++;
               exhibits.push({
                 pageNumber: image.pageNumber,
                 imagePath: relativeImagePath,
@@ -478,9 +501,18 @@ export class ExhibitExtractor {
     await preprocessQueue.onIdle();
     await ocrQueue.onIdle();
 
+    if (ocrFailedCount > 0) {
+      this.logger.warn(`${ocrFailedCount}/${exhibits.length} exhibits indexed WITHOUT OCR text (all retries failed)`, {
+        documentId,
+        ocrFailedCount,
+        totalCount: exhibits.length,
+      });
+    }
+
     return {
       exhibits,
       totalCount: exhibits.length,
+      ocrFailedCount,
     };
   }
 
@@ -501,7 +533,7 @@ export class ExhibitExtractor {
 
     if (images.length === 0) {
       this.logger.info('No embedded images found (legacy path)', { documentId });
-      return { exhibits: [], totalCount: 0 };
+      return { exhibits: [], totalCount: 0, ocrFailedCount: 0 };
     }
 
     // Filter: size → dedup → boundary
@@ -526,7 +558,7 @@ export class ExhibitExtractor {
     });
 
     if (candidateImages.length === 0) {
-      return { exhibits: [], totalCount: 0 };
+      return { exhibits: [], totalCount: 0, ocrFailedCount: 0 };
     }
 
     const exhibitDir = path.join(this.publicDir, 'exhibits', caseId);
@@ -536,6 +568,7 @@ export class ExhibitExtractor {
     const { default: PQueue } = await import('p-queue');
     const queue = new PQueue({ concurrency: clampConcurrency(concurrency, 3) });
     let processedCount = 0;
+    let ocrFailedCount = 0;
 
     for (const image of candidateImages) {
       queue.add(async () => {
@@ -559,16 +592,30 @@ export class ExhibitExtractor {
           const imagePath = path.join(exhibitDir, filename);
           await fs.writeFile(imagePath, preprocessedBuffer);
 
-          const ocrResult = await this.ocrEngine.recognizeImage(preprocessedBuffer);
           const relativeImagePath = `/exhibits/${caseId}/${filename}`;
 
-          exhibits.push({
-            pageNumber: image.pageNumber,
-            imagePath: relativeImagePath,
-            extractedText: ocrResult.text,
-            confidence: ocrResult.confidence,
-            exhibitLabel,
-          });
+          // OCR failure must not drop the exhibit — keep the saved image and
+          // count the failure so the pipeline can surface it.
+          try {
+            const ocrResult = await this.ocrEngine.recognizeImage(preprocessedBuffer);
+            exhibits.push({
+              pageNumber: image.pageNumber,
+              imagePath: relativeImagePath,
+              extractedText: ocrResult.text,
+              confidence: ocrResult.confidence,
+              exhibitLabel,
+            });
+          } catch (ocrError) {
+            this.logger.error(`OCR failed for exhibit (legacy) page ${image.pageNumber}`, ocrError, { documentId });
+            ocrFailedCount++;
+            exhibits.push({
+              pageNumber: image.pageNumber,
+              imagePath: relativeImagePath,
+              extractedText: '',
+              confidence: 0,
+              exhibitLabel,
+            });
+          }
 
           processedCount++;
           onProgress?.(processedCount, candidateImages.length);
@@ -579,7 +626,16 @@ export class ExhibitExtractor {
     }
 
     await queue.onIdle();
-    return { exhibits, totalCount: exhibits.length };
+
+    if (ocrFailedCount > 0) {
+      this.logger.warn(`${ocrFailedCount}/${exhibits.length} exhibits indexed WITHOUT OCR text (legacy path)`, {
+        documentId,
+        ocrFailedCount,
+        totalCount: exhibits.length,
+      });
+    }
+
+    return { exhibits, totalCount: exhibits.length, ocrFailedCount };
   }
 
   /**

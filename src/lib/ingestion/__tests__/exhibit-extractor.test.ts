@@ -215,10 +215,16 @@ describe('ExhibitExtractor', () => {
         testDocumentId
       );
 
-      // Should have processed the second exhibit successfully
-      expect(result.totalCount).toBe(1);
-      expect(result.exhibits).toHaveLength(1);
-      expect(result.exhibits[0].pageNumber).toBe(2);
+      // Both exhibits are kept: the failed one with empty text (counted in
+      // ocrFailedCount) and the successful one with its OCR text.
+      expect(result.totalCount).toBe(2);
+      expect(result.exhibits).toHaveLength(2);
+      expect(result.ocrFailedCount).toBe(1);
+      const failed = result.exhibits.find((e) => e.pageNumber === 1);
+      expect(failed?.extractedText).toBe('');
+      expect(failed?.confidence).toBe(0);
+      const ok = result.exhibits.find((e) => e.pageNumber === 2);
+      expect(ok?.extractedText).toBe('Exhibit text from page 2');
     });
 
     it('should store exhibit metadata with all required fields', async () => {
