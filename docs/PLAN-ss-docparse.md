@@ -113,7 +113,8 @@ Verified against the live code before committing to the binary policy:
   `ChunkMetadata`, the vector store, or search (zero references in `vector-store.ts` /
   `embedding-provider.ts`). No heading path, nothing queryable, nothing citable.
 - **One behavior worth keeping:** the splitter **prepends the current section heading to child
-  chunk text** (`legal-text-splitter.ts:414`) as embedding context. The StructuredChunker (§6)
+  chunk text** (production: `langchain-text-chunker.ts:206-211`; the similar
+  `legal-text-splitter.ts` code is dead outside tests) as embedding context. The StructuredChunker (§6)
   must retain this — with docparse's real headings instead of regex guesses — since removing the
   prefix would regress embedding quality on long sections. Added to the §6.1 inventory.
 
@@ -218,7 +219,7 @@ schema. Inventory of what must survive, with consumers:
 | `filingId`, `filingType`, `volumeNumber`, `caseNumber`, `documentType` | pipeline | filing-aware search filters, citations |
 | **`startLine` / `endLine`** (transcript lines 1–25, RR docs) | `line-number-detector.ts` → `ingestion-pipeline.ts:856` | MCP citation builders (`query-case-knowledge.ts:542`, `scan-for-pattern.ts:305`) → "page X, lines Y–Z" transcript citations |
 | `annotations` (JSON `PageAnnotation[]`) | annotation overlap pass | annotation-aware retrieval/UI |
-| **Heading-prefix in chunk text** (section heading prepended to child chunks) | `legal-text-splitter.ts:414` | embedding quality on long sections — StructuredChunker must keep this behavior, sourced from docparse's real headings (§3.1) |
+| **Heading-prefix in chunk text** (sacPrefix + section heading prepended) | **`langchain-text-chunker.ts:206-211`** — the production chunker is `LangChainTextChunker` (`worker-init.ts:42`, reindex + draft routes); `legal-text-splitter.ts` is dead code outside tests (audit 2026-08-05, corrected from an earlier cite) | embedding quality on long sections — StructuredChunker keeps the shape, sourced from docparse's real headings (§6.2) |
 
 **The transcript line-number hazard (biggest regression risk):** §6 item 3 excludes "page
 furniture" from chunk text — but a layout model will plausibly classify reporter's-record margin
@@ -236,6 +237,112 @@ reads numbers from the chunk text itself). Mitigations, in order of preference:
 
 **Acceptance test for step 5:** an RR volume ingested with docparse enabled must produce chunks
 whose `startLine`/`endLine` and MCP citations are byte-identical to the current path.
+
+## 6.2 Heading embedding design (agent research 2026-08-05, decisions final)
+
+How headings participate in the **embedded** chunk text vs metadata. Baseline: production
+`LangChainTextChunker` assembles `sacPrefix + nearestHeading + '\n' + body`
+(`langchain-text-chunker.ts:167-214`); the prefix is part of the stored `text` column, which also
+feeds the BM25 inverted index (`vector-store.ts:196`), the UI, synthesis, and the regex/line-number
+consumers. Known baseline bug: the prefix is stacked ON TOP of the 1000-char body cap instead of
+budgeted, and `documentSummary` in sacPrefix is unbounded.
+
+**Decisions:**
+
+1. **Prefix stays inside `text`** (one column; no shadow `embedText`). Matches today's behavior and
+   keeps one text-assembly convention. Named escape hatch (do not build speculatively): if eval
+   shows BM25 pollution from repeated heading terms, add `EmbeddedChunk.embedText`.
+2. **Assembly:** `sacPrefix + headingPath.slice(-2).join(' > ') + '\n' + body` — nearest heading
+   plus at most ONE parent, separator ` > ` (not `/` — statute citations; not `|` — sacPrefix).
+   Two levels keeps the text shape near-identical to the existing single-heading corpus (mixed-index
+   comparability) while upgrading accuracy from regex guess to real layout.
+3. **Budgets:** headingContext ≤ 48 tokens (~19% of the ~250-token body); sacPrefix+headingContext
+   ≤ 96 tokens combined; `documentSummary` bounded to 40 tokens. The prefix is SUBTRACTED from the
+   body budget (fixes the baseline bug — promoted to a regression test). Over cap: drop the parent
+   level first, then middle-truncate the nearest heading on a word boundary; never shrink the body.
+4. **Dedup is structural, not textual:** docparse emits headings as separate typed blocks, so a
+   body chunk never contains its own heading (same invariant as today's `splitIntoSections`).
+   A heading block's own chunk uses the parent path as context. No `startsWith` guard — assert the
+   invariant in tests.
+5. **Tables embed** `headingContext + caption + normalized cell text` (cells ` | `, rows `\n`);
+   `html` is metadata-only (markup is 400-600 tokens of scaffolding vs ~150 of cell text — the
+   vector must encode content, not tag-ness). **Atomic-table ceiling: 2048 chars (~512 tokens)**
+   for `table` blocks only — the global 1000-char cap would fragment most real tables and void the
+   §6 atomicity payoff. Prose keeps 1000.
+6. **Furniture** (page header/footer/number) and **seal/signature** blocks: excluded from embedded
+   text, retained via `blockOrders` metadata (per-page boilerplate dominates BM25 doc frequency;
+   signatures are near-identical across filings). **Footnotes: included**, labeled `Footnote:`,
+   inheriting the anchor paragraph's headingContext — they carry real citations/carve-outs.
+7. **Metadata-only** (never embedded): full `headingPath` array, `blockOrders`, `bbox`, table
+   `html`. Rule of thumb: identifiers and coordinates are metadata; anything a lawyer would read
+   aloud is embeddable.
+8. **Query side unchanged.** All query-embedding call sites are bare (`query-case-knowledge.ts:148`
+   etc.) and stay bare — document-side structure context is asymmetric by design; model instruction
+   prefixes (qwen3's query-side Instruct template) are a separate per-provider concern, not the
+   chunker's. Binding: one exported `buildChunkContext()` in structured-chunker.ts is the sole
+   producer of the convention.
+9. **No global re-embed needed.** Old (regex-heading) and new (real-heading) generations share the
+   same assembly shape; RRF ranks them on one scale. Per-document upgrades ride `reindex-pages`;
+   consumers treat `headingPath` as optional with fallback to parsing the heading line from `text`.
+   Revisit bulk re-embed only if eval shows a ranking gap.
+10. **Acceptance tests** (beyond §6.1): prefix-is-budgeted; no double-prepend; cap enforcement;
+    separator round-trip; furniture-excluded/footnote-retained; table atomicity + header-repeat +
+    zero `<` in embedded text; metadata-additive vs current chunker; `scan_for_pattern` + line-number
+    fallback byte-parity on stored `text`; mixed-index top-10 sanity across generations.
+
+## 6.3 Search-side utilization (/search) — required for docparse to pay off (audit 2026-08-05)
+
+Audit finding: the chunk record is **hand-projected five times** between LanceDB and the browser
+(`vector-store.ts:69-115/232-248/759-777` → `query-case-knowledge.ts:43-58/490-503/555-567` →
+`deep-search.ts:25-38/454-468` → `api/search/deep/route.ts:115-126` →
+`search-interface.tsx:79-97/116-131`), each an explicit field list that silently drops unknown
+fields — the exact leak that killed `structureType`. Search uses zero structure today.
+
+**Storage shape (decided):** `heading_path` as `/`-joined TEXT (rendered ` > ` in UI),
+`block_orders`/`bbox` as JSON TEXT, `block_type` TEXT, `table_html` TEXT. LanceDB's inferred-schema
+evolution path (`vector-store.ts:278-283`) defaults unknown columns to strings — list columns are
+not safely evolvable; heading filters use `LIKE 'prefix%'` via `_rawWhere` (`:745-749`).
+
+**Decision — heading-prefix single-injection rule:** the breadcrumb lives in chunk `text` (§6.2#1).
+Rerank and synthesis therefore MUST NOT prepend it again from metadata for docparse chunks
+(double-counting would degrade them vs legacy); metadata `headingPath` is for UI breadcrumbs,
+filters, and citations only. Legacy chunks already carry their regex-heading in text — symmetric.
+
+Prioritized work items (sizes S/M):
+
+- **P0 plumbing** (nothing works without it):
+  1. Widen LanceDB row + read/write mapping with the new columns (S) — `vector-store.ts`.
+  2. One shared `ChunkProvenance` type carried through ALL FIVE projections incl. the
+     easy-to-miss chat-attachment (`query-case-knowledge.ts:490-503`) and AI-search
+     (`search-interface.tsx:79-97`) branches (S, 5 files). Do not create a sixth hand-list.
+- **P1 retrieval quality:**
+  3. Boolean-query fields `heading` → `heading_path` (prefix match), `blockType` → `block_type`
+     (`boolean-to-fts.ts:78-102` + emitter LIKE op + autocomplete list) — enables "search within
+     Findings of Fact" / "tables only" (S).
+  4. Block-type boost/demote in `deep-search.ts:704-733` (existing transcript-boost pattern):
+     boost `table` on numeric/tabular intent, demote `seal`/furniture (S).
+  5. **Dedup-key fix (bug):** `deep-search.ts:640` keys on first 100 text chars — header-repeated
+     table fragments collide BY CONSTRUCTION and get dropped; include `blockOrders[0]` (S).
+- **P2 synthesis context:**
+  6. Unify the FOUR copies of the `[cite]\ntext` context builder (`deep-search.ts:865/1068/1385/1537`)
+     into one helper; legacy chunks may get a metadata-breadcrumb injected there later, docparse
+     chunks never (single-injection rule) (S).
+  7. Table chunks reach synthesis as markdown-table rendered from `table_html` instead of flattened
+     cell text (M) — the plan's stated payoff, currently unrealizable end-to-end.
+- **P3 citations/UI:**
+  8. `CitationInput` gains `headingPath`/`paragraphNumber` → "CR 14, ¶ 23 (Findings of Fact)"
+     (`citation-formatter.ts:17-37`; also `scan-for-pattern.ts:279-324` hand-copy — MUST land in
+     both) (M).
+  9. Result cards show the breadcrumb (`search-interface.tsx:3988-4010` + duplicate AI block
+     `:4357-4379`) (S); chunk-preview panel exposes `heading_path`/`block_type`
+     (`chunk-preview-route` + grid) — the operator view where a bad docparse run shows first,
+     land BEFORE rollout (S).
+  10. Deep-link to block: extend `getExplorerUrl` (`search-interface.tsx:256-258`) with
+      `&block=`/`&bbox=` + viewer scroll-highlight (M).
+  11. Table chunks render as a React `<table>` parsed from `table_html` — NOT
+      `dangerouslySetInnerHTML` (component currently has none; keep it that way) (M).
+- **P4 MCP parity:** advertise `headingPath`/`blockType` in the `query_case_knowledge` schema
+  (bump from 1.1.0) so non-UI consumers see structure (S).
 
 ## 7. Config keys (Config table, `pipeline.*`)
 
@@ -264,7 +371,9 @@ whose `startLine`/`endLine` and MCP citations are byte-identical to the current 
 | 3 | Prisma migration (operator-approved, backed up) + persistence plumbing | 1 d |
 | 4 | `StructuredChunker` + provenance metadata | 2–3 d |
 | 5 | Binary switch + transcript carve-out + fallback accounting + tests | 1–2 d |
-| 6 | A/B validation on probe filings; flip `docparseEnabled` default per results | 0.5 d |
+| 6 | Search-side integration §6.3: P0 plumbing + P1 retrieval (incl. dedup-key bug) + P2 synthesis | 2–3 d |
+| 7 | Search-side §6.3 P3 citations/UI + P4 MCP parity | 2 d |
+| 8 | A/B validation on probe filings; flip `docparseEnabled` default per results | 0.5 d |
 
 Prerequisite per roadmap: Phase 1 quality gates (garbage detection) should be landed first — they
 protect whichever parse path runs.
