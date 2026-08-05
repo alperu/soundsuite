@@ -6,7 +6,7 @@
  * Tabs: System Health | Embedding Config | Workers | Redis Cache | Filing Types | Jobs | Action Log
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import AdminSettings from '@/components/admin-settings';
 import AdminRerankingSettings from '@/components/admin-reranking-settings';
@@ -667,6 +667,32 @@ function OCRProviderPanel({ initialConfig }: { initialConfig: AppConfig }) {
   const [ppSaving, setPpSaving] = useState(false);
   const [ppSaveSuccess, setPpSaveSuccess] = useState(false);
 
+  // Performance settings (auto-saved, debounced — mirrors the processing panel sliders)
+  const [perfConcurrency, setPerfConcurrency] = useState(initialConfig.ocrConcurrency ?? 2);
+  const [perfTimeoutMs, setPerfTimeoutMs] = useState(initialConfig.ocrTimeoutMs ?? 90000);
+  const [perfSaved, setPerfSaved] = useState(false);
+  const perfDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const savePerf = (updates: { ocrConcurrency?: number; ocrTimeoutMs?: number }) => {
+    if (updates.ocrConcurrency !== undefined) setPerfConcurrency(updates.ocrConcurrency);
+    if (updates.ocrTimeoutMs !== undefined) setPerfTimeoutMs(updates.ocrTimeoutMs);
+    if (perfDebounceRef.current) clearTimeout(perfDebounceRef.current);
+    perfDebounceRef.current = setTimeout(() => {
+      fetch('/api/config/pipeline', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      })
+        .then(res => {
+          if (res.ok) {
+            setPerfSaved(true);
+            setTimeout(() => setPerfSaved(false), 2000);
+          }
+        })
+        .catch(() => {});
+    }, 500);
+  };
+
   const handleSavePreprocessing = async () => {
     setPpSaving(true);
     setPpSaveSuccess(false);
@@ -924,6 +950,64 @@ function OCRProviderPanel({ initialConfig }: { initialConfig: AppConfig }) {
           </div>
         </div>
       )}
+
+      {/* Performance Settings */}
+      <div className="bg-white shadow rounded-lg p-6">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-xl font-semibold text-gray-900">Performance</h2>
+          {perfSaved && <span className="text-sm text-green-600">✓ Saved</span>}
+        </div>
+        <p className="text-sm text-gray-600 mb-4">
+          Concurrency and timeout for exhibit/page OCR. Changes apply to workers created after the
+          change — restart processing to pick them up immediately.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              OCR Concurrency: {perfConcurrency}
+            </label>
+            <input
+              type="range"
+              min={1}
+              max={8}
+              step={1}
+              value={perfConcurrency}
+              onChange={e => savePerf({ ocrConcurrency: Number(e.target.value) })}
+              className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+            />
+            <div className="flex justify-between text-xs text-gray-400 mt-0.5">
+              <span>1</span>
+              <span>8</span>
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              Parallel OCR requests during exhibit extraction. Higher is faster but loads the OCR host.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              OCR Timeout: {Math.round(perfTimeoutMs / 1000)}s per attempt
+            </label>
+            <input
+              type="range"
+              min={10}
+              max={600}
+              step={5}
+              value={Math.round(perfTimeoutMs / 1000)}
+              onChange={e => savePerf({ ocrTimeoutMs: Number(e.target.value) * 1000 })}
+              className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+            />
+            <div className="flex justify-between text-xs text-gray-400 mt-0.5">
+              <span>10s</span>
+              <span>600s</span>
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              Cold model loads take 30–60s — values below 90s risk failing slow pages.
+            </p>
+          </div>
+        </div>
+      </div>
 
       {/* Image Preprocessing Settings */}
       <div className="bg-white shadow rounded-lg p-6">
