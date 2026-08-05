@@ -97,6 +97,29 @@ export interface DocparsePageResult {
   to the current Ollama OCR path and the document is marked `docparseFallbackCount++` (surfaced like
   `ocrFailedCount`). Ingestion never fails because ss-docparse is down.
 
+## 3.1 What the current pipeline actually stores (audit 2026-08-05 — why full docparse is needed)
+
+Verified against the live code before committing to the binary policy:
+
+- **Layout is destroyed at PDF extraction.** `pdf-parser.ts:324` flattens pdfjs text items with
+  `.map(item => item.str).join(' ')` — coordinates, font size/name, and even line breaks are
+  discarded before any downstream code runs. There is no layout to preserve; docparse is not
+  duplicating anything.
+- **Heading detection exists only as regex heuristics on that flattened text.**
+  `legal-text-splitter.ts:50-63` matches `SECTION n` / `ARTICLE ...` / `WHEREAS` / all-caps lines /
+  numbered paragraphs. Fragile by construction (all-caps party names false-positive; multi-column
+  text arrives scrambled), but it drives split boundaries today.
+- **Nothing structural is persisted.** The splitter's `structureType` never reaches the stored
+  `ChunkMetadata`, the vector store, or search (zero references in `vector-store.ts` /
+  `embedding-provider.ts`). No heading path, nothing queryable, nothing citable.
+- **One behavior worth keeping:** the splitter **prepends the current section heading to child
+  chunk text** (`legal-text-splitter.ts:414`) as embedding context. The StructuredChunker (§6)
+  must retain this — with docparse's real headings instead of regex guesses — since removing the
+  prefix would regress embedding quality on long sections. Added to the §6.1 inventory.
+
+Conclusion: docparse does not overlap any stored feature; it replaces regex guessing with real
+structure and makes it persistent for the first time.
+
 ## 4. Routing policy — binary, document-level (decision 2026-08-05)
 
 Config `pipeline.docparseEnabled`: `false` | `true`. **No per-page heuristic.**
@@ -195,6 +218,7 @@ schema. Inventory of what must survive, with consumers:
 | `filingId`, `filingType`, `volumeNumber`, `caseNumber`, `documentType` | pipeline | filing-aware search filters, citations |
 | **`startLine` / `endLine`** (transcript lines 1–25, RR docs) | `line-number-detector.ts` → `ingestion-pipeline.ts:856` | MCP citation builders (`query-case-knowledge.ts:542`, `scan-for-pattern.ts:305`) → "page X, lines Y–Z" transcript citations |
 | `annotations` (JSON `PageAnnotation[]`) | annotation overlap pass | annotation-aware retrieval/UI |
+| **Heading-prefix in chunk text** (section heading prepended to child chunks) | `legal-text-splitter.ts:414` | embedding quality on long sections — StructuredChunker must keep this behavior, sourced from docparse's real headings (§3.1) |
 
 **The transcript line-number hazard (biggest regression risk):** §6 item 3 excludes "page
 furniture" from chunk text — but a layout model will plausibly classify reporter's-record margin
