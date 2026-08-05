@@ -39,7 +39,9 @@ the master's config push wholesale-replaces `state.registry[role]` from mode-tem
   Mac hosts (`availableOn: ['linux']`; Docker Desktop Mac has no GPU passthrough).
 - **Image:** the official PaddleOCR genai vLLM server image (pin a digest at implementation time;
   verify it bundles PP-DocLayoutV3 + PaddleOCR-VL-1.6 weights or mounts a model volume).
-- **Port:** `8100` (reranker owns 8099; add to `MODE_PORTS`).
+- **Port:** `8101` (8099 = reranker, 8100 = **rlm** — taken, per `sideCar/src/lib/state.ts`; add to
+  `MODE_PORTS`). Port-collision check against BOTH the master `MODE_PORTS` map and the sidecar
+  `defaultRegistry` is part of step 1's review checklist.
 - **VRAM:** ~4000 MB planning figure (0.9B recognizer + layout model + vLLM overhead) — measure and
   correct during implementation.
 - **Idle policy:** same idle-timer semantics as reranker (`docker stop` on idle, configurable
@@ -49,7 +51,7 @@ the master's config push wholesale-replaces `state.registry[role]` from mode-tem
   1. `src/lib/gpu/mode-catalog.ts`: add `'ss-docparse'` to the `ModeName` union **and**
      `ALL_MODES` (this is what `isModeName()` — the assignment API's validator — accepts),
      plus `MODE_METADATA` (`availableOn: ['linux']`, label "Document Parsing") and
-     `STATIC_FALLBACK_MODEL` (pinned genai-server model id) and `MODE_PORTS` (`8100`).
+     `STATIC_FALLBACK_MODEL` (pinned genai-server model id) and `MODE_PORTS` (`8101`).
   2. `mode-catalog-server.ts`: default-model resolution (reads the `/admin/ocr` docparse config)
      — no Mac stripping needed (never available there).
   3. `src/lib/db/role-registry.ts` / push path: `ss-docparse` must flow through `enabledModes` +
