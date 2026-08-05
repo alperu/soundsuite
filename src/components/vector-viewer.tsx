@@ -149,6 +149,7 @@ interface VectorViewerProps {
   initialFilterId?: string;
   initialChunkId?: string;
   initialModalPage?: number;
+  initialViewerPage?: number;
   initialTableQuery?: { isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string };
   initialCaseId?: string;
   initialDocumentId?: string;
@@ -169,6 +170,7 @@ export default function VectorViewer({
   initialFilterId,
   initialChunkId,
   initialModalPage,
+  initialViewerPage,
   initialTableQuery,
   initialCaseId,
   initialDocumentId,
@@ -320,6 +322,7 @@ export default function VectorViewer({
                 initialDocumentId={initialDocumentId}
                 initialStatusFilter={initialStatusFilter}
                 initialModalPage={initialViewMode === 'pagereport' ? initialModalPage : undefined}
+                initialViewerPage={initialViewMode === 'pagereport' ? initialViewerPage : undefined}
                 reportFilter={reportFilter}
               />
             )}
@@ -984,6 +987,7 @@ function PageReportContent({
   initialDocumentId,
   initialStatusFilter,
   initialModalPage,
+  initialViewerPage,
   reportFilter,
 }: {
   cases: Case[];
@@ -993,6 +997,7 @@ function PageReportContent({
   initialDocumentId?: string;
   initialStatusFilter?: string;
   initialModalPage?: number;
+  initialViewerPage?: number;
   reportFilter?: (f: VectorsFilter) => void;
 }) {
   const router = useRouter();
@@ -1017,8 +1022,10 @@ function PageReportContent({
     initialStatusFilter === 'indexed' || initialStatusFilter === 'unindexed' || initialStatusFilter === 'empty' ? initialStatusFilter : 'all'
   );
 
-  // Modals — chunksModalPage is URL-addressable (/vectors/pagereport/doc-{id}/page-{n})
-  const [pageViewerPage, setPageViewerPage] = useState<number | null>(null);
+  // Modals — both URL-addressable: page-{n} (chunks) / pageview-{n} (image viewer)
+  const [pageViewerPage, setPageViewerPage] = useState<number | null>(
+    initialDocumentId && initialViewerPage ? initialViewerPage : null,
+  );
   const [chunksModalPage, setChunksModalPage] = useState<number | null>(
     initialDocumentId && initialModalPage ? initialModalPage : null,
   );
@@ -1065,12 +1072,13 @@ function PageReportContent({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Update URL helper — /vectors/pagereport/{doc-|case-}{id}/{page-n}?status=
-  const updateUrl = useCallback((overrides: { caseId?: string; documentId?: string; status?: string; modalPage?: number | null }) => {
+  // Update URL helper — /vectors/pagereport/{doc-|case-}{id}/{page-n | pageview-n}?status=
+  const updateUrl = useCallback((overrides: { caseId?: string; documentId?: string; status?: string; modalPage?: number | null; viewerPage?: number | null }) => {
     const c = overrides.caseId ?? selectedCaseId;
     const d = overrides.documentId ?? selectedDocId;
     const s = overrides.status ?? statusFilter;
     const mp = overrides.modalPage === undefined ? chunksModalPage : overrides.modalPage;
+    const vp = overrides.viewerPage === undefined ? pageViewerPage : overrides.viewerPage;
     const filter: VectorsFilter = d
       ? { kind: 'doc', id: d }
       : c
@@ -1079,10 +1087,11 @@ function PageReportContent({
     reportFilter?.(filter);
     const params = new URLSearchParams();
     if (s && s !== 'all') params.set('status', s);
-    // page selection only meaningful with a document selected
-    const selection = d && mp ? `page-${mp}` : undefined;
+    // page selections only meaningful with a document selected;
+    // the image viewer wins when both modals have state
+    const selection = d && vp ? `pageview-${vp}` : d && mp ? `page-${mp}` : undefined;
     router.replace(buildVectorsPath('pagereport', filter, selection, params), { scroll: false });
-  }, [router, reportFilter, selectedCaseId, selectedDocId, statusFilter, chunksModalPage]);
+  }, [router, reportFilter, selectedCaseId, selectedDocId, statusFilter, chunksModalPage, pageViewerPage]);
 
   const openChunksModal = useCallback((p: number) => {
     setChunksModalPage(p);
@@ -1094,23 +1103,35 @@ function PageReportContent({
     updateUrl({ modalPage: null });
   }, [updateUrl]);
 
+  const openPageViewer = useCallback((p: number) => {
+    setPageViewerPage(p);
+    updateUrl({ viewerPage: p });
+  }, [updateUrl]);
+
+  const closePageViewer = useCallback(() => {
+    setPageViewerPage(null);
+    updateUrl({ viewerPage: null });
+  }, [updateUrl]);
+
   // Handlers that sync state + IndexedDB + URL
   const handleCaseChange = useCallback((id: string) => {
     setSelectedCaseId(id);
     setSelectedDocId('');
     setSelectedPages(new Set());
     setChunksModalPage(null);
+    setPageViewerPage(null);
     setPreference('vectors.pageReport.caseId', id).catch(() => {});
     setPreference('vectors.pageReport.documentId', '').catch(() => {});
-    updateUrl({ caseId: id, documentId: '', modalPage: null });
+    updateUrl({ caseId: id, documentId: '', modalPage: null, viewerPage: null });
   }, [updateUrl]);
 
   const handleDocChange = useCallback((id: string) => {
     setSelectedDocId(id);
     setSelectedPages(new Set());
     setChunksModalPage(null);
+    setPageViewerPage(null);
     setPreference('vectors.pageReport.documentId', id).catch(() => {});
-    updateUrl({ documentId: id, modalPage: null });
+    updateUrl({ documentId: id, modalPage: null, viewerPage: null });
   }, [updateUrl]);
 
   const handleStatusFilter = useCallback((f: StatusFilter) => {
@@ -1451,7 +1472,7 @@ function PageReportContent({
                       </td>
                       <td className="px-4 py-2.5">
                         <button
-                          onClick={() => setPageViewerPage(p.pageNumber)}
+                          onClick={() => openPageViewer(p.pageNumber)}
                           className="text-blue-600 hover:text-blue-800 hover:underline font-mono text-xs cursor-pointer"
                           title="View PDF page"
                         >
@@ -1465,7 +1486,7 @@ function PageReportContent({
                           </p>
                         ) : (
                           <button
-                            onClick={() => setPageViewerPage(p.pageNumber)}
+                            onClick={() => openPageViewer(p.pageNumber)}
                             className="text-gray-400 italic text-xs hover:text-blue-600 hover:underline cursor-pointer inline-flex items-center gap-1"
                             title="No text extracted — click to view PDF page"
                           >
@@ -1508,7 +1529,7 @@ function PageReportContent({
                       <td className="px-4 py-2.5 whitespace-nowrap">
                         {p.status === 'indexed' ? (
                           <button
-                            onClick={() => setPageViewerPage(p.pageNumber)}
+                            onClick={() => openPageViewer(p.pageNumber)}
                             className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 hover:bg-green-200 transition-colors cursor-pointer"
                             title="View PDF page"
                           >
@@ -1519,7 +1540,7 @@ function PageReportContent({
                           </button>
                         ) : p.status === 'empty' ? (
                           <button
-                            onClick={() => setPageViewerPage(p.pageNumber)}
+                            onClick={() => openPageViewer(p.pageNumber)}
                             className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500 hover:bg-gray-200 transition-colors cursor-pointer"
                             title="View PDF page (empty)"
                           >
@@ -1530,7 +1551,7 @@ function PageReportContent({
                           </button>
                         ) : (
                           <button
-                            onClick={() => setPageViewerPage(p.pageNumber)}
+                            onClick={() => openPageViewer(p.pageNumber)}
                             className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700 hover:bg-red-200 transition-colors cursor-pointer"
                             title="View PDF page"
                           >
@@ -1580,8 +1601,8 @@ function PageReportContent({
           documentId={selectedDocId}
           pageNumber={pageViewerPage}
           totalPages={reportData?.totalPages || 0}
-          onClose={() => setPageViewerPage(null)}
-          onNavigate={setPageViewerPage}
+          onClose={closePageViewer}
+          onNavigate={openPageViewer}
         />
       )}
 

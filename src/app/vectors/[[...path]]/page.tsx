@@ -92,6 +92,7 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
 
   let initialChunkId: string | undefined;
   let initialModalPage: number | undefined;
+  let initialViewerPage: number | undefined;
   const selSeg = path?.[2];
   if (selSeg) {
     const decoded = decodeURIComponent(selSeg);
@@ -99,6 +100,8 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
       initialChunkId = decoded.slice('chunk-'.length);
     } else if (initialViewMode === 'pagereport' && /^page-\d+$/.test(decoded)) {
       initialModalPage = parseInt(decoded.slice('page-'.length), 10);
+    } else if (initialViewMode === 'pagereport' && /^pageview-\d+$/.test(decoded)) {
+      initialViewerPage = parseInt(decoded.slice('pageview-'.length), 10);
     }
   }
 
@@ -130,6 +133,7 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
       initialFilterId={initialFilterId}
       initialChunkId={initialChunkId}
       initialModalPage={initialModalPage}
+      initialViewerPage={initialViewerPage}
       initialTableQuery={initialTableQuery}
       initialCaseId={initialCaseId}
       initialDocumentId={initialDocumentId}
