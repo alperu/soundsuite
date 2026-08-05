@@ -38,8 +38,10 @@ Companion doc with the original latency analysis: [TODO-ocr-speedups.md](./TODO-
       same error — correct both.
 - [x] **Mark TODO-ocr-speedups items #1 and #2 done** once the timeout work lands (item #1 is done
       by Phase 1). DONE — both marked with resolution notes.
-  - [ ] Remaining: admin UI field for `pipeline.ocrTimeoutMs` (currently settable only via the
-        Config table; engine reads it with a 90 s default).
+  - [x] Admin UI field for `pipeline.ocrTimeoutMs`: "OCR Timeout" slider (10–600 s) in the
+        pipeline settings panel (`processing-progress.tsx`), PATCHed via `/api/config/pipeline`
+        (clamped 10 s–10 min). Applies to engines created after the change (worker init reads
+        config at startup) — restart processing to pick it up immediately.
 
 ## Separate track — CI enforcement
 
