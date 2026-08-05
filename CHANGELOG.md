@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0](https://github.com/alperu/soundsuite/compare/v1.1.0...v1.2.0) (2026-06-22)
+
+
+### Features
+
+* **gpu:** admin-configurable per-model GPU weight (--gpu-memory-utilization) ([de4a543](https://github.com/alperu/soundsuite/commit/de4a543ede0286ca168c10e8240ecad317378203))
+* **gpu:** raise shipped reranker gpu-memory-utilization default 0.6 → 0.85 ([dd9ff36](https://github.com/alperu/soundsuite/commit/dd9ff368328db6ec9cda59e6a10815c068d158b2))
+* **rerank:** operator-tunable interactive timeout + enforce-eager toggle ([41261b0](https://github.com/alperu/soundsuite/commit/41261b070c656f56897c514a9b1fc8033f814c63))
+* **rerank:** pool-size setting + explicit reranker restart on container-arg change ([ed64f34](https://github.com/alperu/soundsuite/commit/ed64f34e5ec31779ec25229f9b727d315d89fc77))
+
+
+### Bug Fixes
+
+* **rerank:** always push reranker gpu-memory-utilization default (0.85) ([1dfc0d9](https://github.com/alperu/soundsuite/commit/1dfc0d9f6f490852db89357090df931730e503a9))
+
 ## [1.1.0](https://github.com/alperu/soundsuite/compare/v1.0.2...v1.1.0) (2026-06-10)
 
 
