@@ -1389,9 +1389,24 @@ export async function generateReportWithRlm(
   }
   const contextBlock = contextParts.join('\n---\n');
 
-  const historySection = options.history && options.history.length > 0
-    ? `## Previous Conversation\n${options.history.map(t => `**${t.role === 'user' ? 'User' : 'Assistant'}:** ${t.content}`).join('\n\n')}\n\n---\n\n`
-    : '';
+  // Cap prior-conversation context so it can't crowd out the user's question
+  // (incl. long pasted text) and the seed excerpts in the 40K RLM window. The
+  // RLM re-fetches anything it needs via tools, so older turns are the safest
+  // thing to bound. Keep the most RECENT turns (slice from the end).
+  const HISTORY_CHAR_CAP = 12000;
+  let historySection = '';
+  if (options.history && options.history.length > 0) {
+    const lines: string[] = [];
+    let used = 0;
+    for (let i = options.history.length - 1; i >= 0; i--) {
+      const t = options.history[i];
+      const line = `**${t.role === 'user' ? 'User' : 'Assistant'}:** ${t.content}`;
+      if (used + line.length > HISTORY_CHAR_CAP && lines.length > 0) break;
+      lines.unshift(line);
+      used += line.length;
+    }
+    historySection = `## Previous Conversation\n${lines.join('\n\n')}\n\n---\n\n`;
+  }
   const workflowSection = options.workflowContext ? `## Active Workflow Context\n\n${options.workflowContext}\n\n` : '';
 
   const userContent = `${historySection}${workflowSection}## Research Question
@@ -1595,6 +1610,10 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
       options.onToken?.(ev.text);
     } else if (ev.type === 'done') {
       if (!finalReport && ev.content) finalReport = ev.content;
+    } else if (ev.type === 'notice') {
+      // Input had to be shortened to fit the RLM context window — surface it so
+      // the user knows the answer may be missing some of the pasted text.
+      emit({ step: 'rlm-synthesis', message: ev.message, rlmHost: host || undefined, rlmModel: RLM_MODEL_ID });
     } else if (ev.type === 'error') {
       throw new Error(`RLM synthesis failed: ${ev.message}`);
     }
@@ -1798,43 +1817,72 @@ export async function deepSearch(
       }
     }
 
-    const rlmOut = await generateReportWithRlm(query, decomposition, sources, registry, {
-      caseId,
-      chatId,
-      history,
-      workflowContext,
-      maxTokens,
-      signal,
-      // Stream RLM's evidence-gathering output to the UI so the operator
-      // can SEE the model thinking + asking for more excerpts. The runner
-      // clears streamingAnswer on the 'generating' progress event that
-      // marks handoff to the cloud LLM, so the user gets a clean stream
-      // for the final Claude report.
-      onToken,
-      onProgress: emit,
-      pushWarning,
-      maxRounds: rlmMaxRounds,
-      ...(inheritedWhereClauses ? { inheritedWhereClauses } : {}),
-    });
+    // RLM is OPTIONAL supplemental evidence-gathering — it does NOT write the
+    // report (Stage 2 does). If it's down/unreachable/timing out/erroring, skip
+    // it and synthesize from the already-reranked sources rather than failing
+    // the whole search. A real user-abort is still propagated.
+    // Cap the RLM's streamed "thinking". The RLM is instructed to emit a brief
+    // confirmation, but when it instead dumps raw excerpts (tens of thousands of
+    // chars), that flood lands on the answer channel and — if Stage 2 then fails
+    // — gets stranded on screen (the "doesn't render right" 71K raw-excerpt
+    // bug). Its streamed text is discarded anyway (Stage 2 writes the report),
+    // so bounding it is lossless.
+    let rlmStreamedChars = 0;
+    const RLM_STREAM_CAP = 3000;
+    const cappedOnToken = onToken
+      ? (t: string) => { if (rlmStreamedChars >= RLM_STREAM_CAP) return; rlmStreamedChars += t.length; onToken(t); }
+      : undefined;
+    try {
+      const rlmOut = await generateReportWithRlm(query, decomposition, sources, registry, {
+        caseId,
+        chatId,
+        history,
+        workflowContext,
+        maxTokens,
+        signal,
+        // Capped (see above) — the operator still sees the model start to
+        // "think"/ask for excerpts, but a runaway dump can't flood the answer.
+        onToken: cappedOnToken,
+        onProgress: emit,
+        pushWarning,
+        maxRounds: rlmMaxRounds,
+        ...(inheritedWhereClauses ? { inheritedWhereClauses } : {}),
+      });
 
-    rlmAssisted = true;
-    rlmHost = rlmOut.host || undefined;
-    rlmExtraSourceCount = rlmOut.extraSources.length;
+      rlmAssisted = true;
+      rlmHost = rlmOut.host || undefined;
+      rlmExtraSourceCount = rlmOut.extraSources.length;
 
-    // Merge RLM-discovered extras into the source pool. Dedup is already
-    // enforced inside generateReportWithRlm via seenKeys, so a plain concat
-    // here is safe. Skip re-rerank — pool stays small (typical 0-40 extras)
-    // and we want the user to see the cloud-LLM report ASAP.
-    if (rlmOut.extraSources.length > 0) {
-      finalSources = [...sources, ...rlmOut.extraSources];
+      // Merge RLM-discovered extras into the source pool. Dedup is already
+      // enforced inside generateReportWithRlm via seenKeys, so a plain concat
+      // here is safe. Skip re-rerank — pool stays small (typical 0-40 extras)
+      // and we want the user to see the cloud-LLM report ASAP.
+      if (rlmOut.extraSources.length > 0) {
+        finalSources = [...sources, ...rlmOut.extraSources];
+      }
+    } catch (err) {
+      checkAbort(); // a genuine user-abort must still bubble up, not be swallowed
+      if ((err as Error)?.name === 'AbortError') throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[Deep Search] RLM evidence-gathering unavailable — skipping, synthesizing from reranked sources: ${msg}`);
+      pushWarning({
+        source: 'rlm',
+        reason: 'skipped',
+        message: `RLM supplemental evidence-gathering was unavailable and was skipped — the report is based on the reranked results only. (${msg.slice(0, 200)})`,
+      });
+      rlmAssisted = false;
+      // finalSources stays = sources (no RLM extras)
     }
 
-    // Stage 2: hand off to the standard synthesis path (Claude / user's
-    // chosen provider) with the enriched source list.
+    // Stage 2: hand off to the standard synthesis path (Claude / user's chosen
+    // provider). Runs whether RLM succeeded, was skipped, or failed — it writes
+    // the actual report from whatever sources we have.
     checkAbort();
     emit({
       step: 'generating',
-      message: `RLM gathered ${rlmOut.extraSources.length} additional sources — ${provider || 'cloud LLM'} now drafting the report (tokens will append below)...`,
+      message: rlmAssisted
+        ? `RLM gathered ${rlmExtraSourceCount} additional sources — ${provider || 'cloud LLM'} now drafting the report (tokens will append below)...`
+        : `Drafting the report from the reranked results — ${provider || 'cloud LLM'} writing now...`,
       subQueries: decomposition.subQueries,
       intent: decomposition.intent,
       searchStats: { ...stats, finalAfterRerank: finalSources.length, subQueryCount: decomposition.subQueries.length },

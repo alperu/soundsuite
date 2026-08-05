@@ -54,10 +54,16 @@ async function rerankerPreflight(host: string, model?: string): Promise<{ ok: bo
   const cached = _preflightCache;
   if (cached && cached.host === host) {
     const ttl = cached.ok ? PREFLIGHT_OK_TTL_MS : PREFLIGHT_FAIL_TTL_MS;
-    if (now - cached.at < ttl) return { ok: cached.ok, error: cached.error };
+    if (now - cached.at < ttl) {
+      // A cache-HIT-ok here followed by a fetch abort means the model was warm
+      // ≤30s ago but is now slow/evicted — distinct from a genuine cold start.
+      logger.info('Rerank preflight cache hit', { host, ok: cached.ok, ageMs: now - cached.at });
+      return { ok: cached.ok, error: cached.error };
+    }
   }
   const base = host.replace(/\/+$/, '');
   // Step 1: /health — confirms HTTP server is up
+  const healthStart = now;
   const healthCtrl = new AbortController();
   const healthTimer = setTimeout(() => healthCtrl.abort(), PREFLIGHT_TIMEOUT_MS);
   try {
@@ -82,6 +88,8 @@ async function rerankerPreflight(host: string, model?: string): Promise<{ ok: bo
     _preflightCache = { host, at: now, ok: true };
     return { ok: true };
   }
+  const healthMs = Date.now() - healthStart;
+  const warmStart = Date.now();
   const warmCtrl = new AbortController();
   const warmTimer = setTimeout(() => warmCtrl.abort(), WARMUP_TIMEOUT_MS);
   try {
@@ -94,15 +102,26 @@ async function rerankerPreflight(host: string, model?: string): Promise<{ ok: bo
     if (!res.ok) {
       const result = { ok: false, error: `warm-up HTTP ${res.status}` };
       _preflightCache = { host, at: now, ...result };
+      logger.warn('Rerank preflight warm-up non-200', { host, status: res.status, healthMs, warmupMs: Date.now() - warmStart });
       return result;
     }
     _preflightCache = { host, at: now, ok: true };
+    logger.info('Rerank preflight ok (fresh)', { host, healthMs, warmupMs: Date.now() - warmStart });
     return { ok: true };
   } catch (err) {
+    const warmupMs = Date.now() - warmStart;
+    // A warm-up timeout here is the cold-start signature: /health bound (server
+    // up) but the 1-doc rerank didn't return within WARMUP_TIMEOUT_MS — the
+    // model is still loading into VRAM (fresh container or post-eviction reload).
     const msg = (err as Error).name === 'AbortError'
       ? `model not ready (warm-up timeout after ${WARMUP_TIMEOUT_MS}ms — likely loading)`
       : (err as Error).message;
     _preflightCache = { host, at: now, ok: false, error: msg };
+    logger.warn('Rerank preflight warm-up failed', {
+      host, healthMs, warmupMs,
+      coldStartSuspected: (err as Error).name === 'AbortError',
+      error: msg,
+    });
     return { ok: false, error: msg };
   } finally {
     clearTimeout(warmTimer);
@@ -248,11 +267,22 @@ export async function rerank<T extends RerankableResult>(
   // one /release. Net leak: +1 activeRequests per failed call, which kept
   // idle timers from ever starting and pinned VRAM at 99%.
   let lifecycleAcquired = false;
+  const lifecycleStart = Date.now();
   try {
     await rerankerLifecycle.ensureRunning(config.rerankHost);
     lifecycleAcquired = true;
+    const lifecycleMs = Date.now() - lifecycleStart;
+    // A slow ensureRunning means the sidecar had to (re)start a stopped
+    // container — i.e. the reranker was idle-unloaded or restarted since the
+    // last search. That start cost is the leading edge of a cold start.
+    if (lifecycleMs > 1_000) {
+      logger.warn('Rerank lifecycle ensureRunning slow (container was not running)', { host: config.rerankHost, elapsedMs: lifecycleMs });
+    } else {
+      logger.info('Rerank lifecycle ensureRunning', { host: config.rerankHost, elapsedMs: lifecycleMs });
+    }
   } catch (err) {
     warn('lifecycle', config.rerankHost, (err as Error).message);
+    logger.warn('Rerank lifecycle ensureRunning failed', { host: config.rerankHost, elapsedMs: Date.now() - lifecycleStart, error: (err as Error).message });
     // Fall through — preflight on each candidate will catch unreachable hosts.
   }
 
@@ -317,6 +347,22 @@ export async function rerank<T extends RerankableResult>(
     }
 
     if (!reranked) {
+      // Structured post-mortem for the recurring degrade. Correlate this with
+      // the per-phase logs above (lifecycle / preflight / fetch) on the same
+      // host to see WHERE the interactive budget went: lifecycle slow ⇒ cold
+      // container start; preflight warm-up timeout ⇒ model still loading;
+      // fetch abortedOnTimeout ⇒ warm container but slow/evicted GPU.
+      logger.warn('Rerank degraded — all hosts failed', {
+        interactive: !!opts?.interactive,
+        totalElapsedMs: Date.now() - startMs,
+        timeoutMs,
+        docCount: results.length,
+        lifecycleAcquired,
+        candidatesTried: candidates.slice(0, MAX_HOSTS_TO_TRY),
+        lastReason: lastWarning?.reason,
+        lastHost: lastWarning?.host,
+        lastMessage: lastWarning?.message,
+      });
       // All hosts failed — return original order (graceful degrade). Emit one
       // clear, user-facing signal so the UI can show a "results not reranked"
       // badge instead of silently serving first-stage order.
@@ -477,18 +523,53 @@ async function rerankViaVllm<T extends RerankableResult>(
     });
   }
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  // Phase timing for the actual rerank inference call. This is the single most
+  // diagnostic signal for the recurring "operation was aborted due to timeout"
+  // warnings: it separates a slow/evicted GPU (fetch runs the full timeoutMs
+  // then aborts) from a cold container that never answered (preflight fails
+  // earlier). docCount + totalDocChars reveal whether a large batch is the cause.
+  const totalDocChars = documents.reduce((a, d) => a + d.length, 0);
+  const fetchStart = Date.now();
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        query,
+        documents,
+        top_n: Math.min(topN, results.length),
+        return_documents: false,
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    const elapsedMs = Date.now() - fetchStart;
+    const name = (err as Error)?.name;
+    const aborted = name === 'TimeoutError' || /abort/i.test((err as Error)?.message ?? '');
+    logger.warn('Rerank vLLM fetch error', {
+      host,
       model,
-      query,
-      documents,
-      top_n: Math.min(topN, results.length),
-      return_documents: false,
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+      docCount: documents.length,
+      totalDocChars,
+      elapsedMs,
+      timeoutMs,
+      // true ⇒ the call ran the FULL budget and was aborted (slow/evicted GPU or
+      // model reloading mid-request), as opposed to a fast connection failure.
+      abortedOnTimeout: aborted && elapsedMs >= timeoutMs - 250,
+      errorName: name,
+      causeCode: (err as { cause?: { code?: string } })?.cause?.code,
+      error: (err as Error)?.message,
+    });
+    throw err;
+  }
+  const fetchElapsedMs = Date.now() - fetchStart;
+  if (fetchElapsedMs > 5_000) {
+    logger.warn('Rerank vLLM fetch slow', { host, model, docCount: documents.length, totalDocChars, elapsedMs: fetchElapsedMs, status: res.status });
+  } else {
+    logger.info('Rerank vLLM fetch ok', { host, model, docCount: documents.length, elapsedMs: fetchElapsedMs, status: res.status });
+  }
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');

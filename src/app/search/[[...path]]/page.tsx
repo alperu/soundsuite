@@ -94,14 +94,19 @@ export default async function SearchPage({ params }: SearchPageProps) {
   // /search/direct       → direct
   // /search/analysistools              → analysis (grid)
   // /search/analysistools/toolslug     → analysis (specific tool)
+  // /search/history/<chatId> → AI mode, auto-load that saved chat
   let initialMode: 'ai' | 'direct' | 'analysis' = 'ai';
   let initialToolSlug: string | null = null;
   let initialDeepMode = false;
   let initialCompareMode = false;
+  let initialChatId: string | null = null;
 
   if (path && path.length > 0) {
     const first = path[0].toLowerCase();
-    if (first === 'direct') {
+    if (first === 'history') {
+      // Preserve the session id's original casing (e.g. "session-1782255255884").
+      if (path.length > 1) initialChatId = path[1];
+    } else if (first === 'direct') {
       initialMode = 'direct';
     } else if (first === 'analysistools') {
       initialMode = 'analysis';
@@ -148,6 +153,7 @@ export default async function SearchPage({ params }: SearchPageProps) {
       initialCompareMode={initialCompareMode}
       initialToolName={initialToolName}
       toolSlugMap={toolSlugMap}
+      initialChatId={initialChatId}
       hasExplicitPath={!!(path && path.length > 0)}
     />
   );

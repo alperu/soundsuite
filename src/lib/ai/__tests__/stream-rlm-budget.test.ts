@@ -11,6 +11,7 @@ import {
   estimateInputTokens,
   clampOutputTokens,
   trimHistoryToFit,
+  trimMessagesToFit,
   RLM_CONTEXT_TOKENS,
   TOKEN_CHAR_RATIO,
   MIN_OUTPUT_TOKENS,
@@ -74,27 +75,79 @@ describe('clampOutputTokens', () => {
     expect(r.maxTokens).toBeGreaterThanOrEqual(MIN_OUTPUT_TOKENS);
   });
 
-  it('floors at MIN_OUTPUT_TOKENS even when the budget says less', () => {
-    // Force budget < MIN_OUTPUT_TOKENS so the floor kicks in.
-    // estimatedInput = 32768 - SAFETY - 1 (1 token less than min would allow)
+  it('does NOT inflate max_tokens to the MIN floor when that would overflow ctx', () => {
+    // Regression for the HTTP 400: estimatedInput leaves a budget below
+    // MIN_OUTPUT_TOKENS. The old code returned MIN_OUTPUT_TOKENS anyway, so
+    // input + max_tokens exceeded max_model_len and vLLM 400'd. Now it must flag
+    // needsInputTrim and keep the invariant.
     const inputTokens = RLM_CONTEXT_TOKENS - SAFETY_MARGIN_TOKENS - MIN_OUTPUT_TOKENS + 1;
     const msgs: ChatMessage[] = [{ role: 'system', content: lorem(inputTokens * TOKEN_CHAR_RATIO) }];
     const r = clampOutputTokens(msgs, 4096);
     expect(r.clamped).toBe(true);
-    expect(r.maxTokens).toBe(MIN_OUTPUT_TOKENS);
+    expect(r.needsInputTrim).toBe(true);
+    expect(r.maxTokens).toBeLessThan(MIN_OUTPUT_TOKENS);
+    expect(r.estimatedInput + r.maxTokens + SAFETY_MARGIN_TOKENS).toBeLessThanOrEqual(RLM_CONTEXT_TOKENS);
   });
 
-  it('never returns max_tokens such that input + max_tokens exceeds the ctx (above the floor)', () => {
-    for (const chars of [10_000, 50_000, 80_000]) {
-      const msgs: ChatMessage[] = [{ role: 'system', content: lorem(chars) }];
-      const r = clampOutputTokens(msgs, 4096);
-      // Above the floor, we must respect prompt + output ≤ ctx (with margin).
-      if (r.maxTokens > MIN_OUTPUT_TOKENS) {
-        expect(r.estimatedInput + r.maxTokens + SAFETY_MARGIN_TOKENS).toBeLessThanOrEqual(
-          RLM_CONTEXT_TOKENS,
-        );
+  it('never inflates max_tokens above the real ceiling, and flags needsInputTrim (the 400 fix)', () => {
+    // Sweep input sizes straddling the exact boundary that produced the 400
+    // (estimatedInput ≈ 40193 with the real prompt). The old code inflated
+    // max_tokens to MIN_OUTPUT_TOKENS (768) here, overflowing the window.
+    const trimThreshold = RLM_CONTEXT_TOKENS - SAFETY_MARGIN_TOKENS - MIN_OUTPUT_TOKENS; // 39936
+    for (const estInput of [39936, 40193, 40800, RLM_CONTEXT_TOKENS + 500]) {
+      const msgs: ChatMessage[] = [{ role: 'system', content: lorem(Math.round(estInput * TOKEN_CHAR_RATIO)) }];
+      const r = clampOutputTokens(msgs, 768);
+      const ceil = RLM_CONTEXT_TOKENS - r.estimatedInput - SAFETY_MARGIN_TOKENS;
+      // Never inflate output above what actually fits (this is the bug fix).
+      expect(r.maxTokens).toBeLessThanOrEqual(Math.max(1, ceil));
+      // needsInputTrim ⇔ even MIN_OUTPUT_TOKENS doesn't fit → caller must trim input.
+      expect(r.needsInputTrim).toBe(r.estimatedInput > trimThreshold);
+      // When the input DOES leave room (ceil ≥ MIN_OUTPUT), the full no-400
+      // invariant holds from clamping alone.
+      if (ceil >= MIN_OUTPUT_TOKENS) {
+        expect(r.estimatedInput + r.maxTokens + SAFETY_MARGIN_TOKENS).toBeLessThanOrEqual(RLM_CONTEXT_TOKENS);
       }
     }
+  });
+
+  it('fixes the exact 40193-token prompt that 400d (returns a fitting output, not 768)', () => {
+    const msgs: ChatMessage[] = [{ role: 'system', content: lorem(Math.round(40193 * TOKEN_CHAR_RATIO)) }];
+    const r = clampOutputTokens(msgs, 768);
+    expect(r.estimatedInput).toBeGreaterThanOrEqual(40193); // ~40193 (rounding)
+    expect(r.needsInputTrim).toBe(true);
+    // Old code → 768 → 40193+768=40961 > 40960 (the 400). New ≤ 511 → fits.
+    expect(r.estimatedInput + r.maxTokens + SAFETY_MARGIN_TOKENS).toBeLessThanOrEqual(RLM_CONTEXT_TOKENS);
+  });
+});
+
+describe('trimMessagesToFit', () => {
+  it('truncates a giant single user turn (no history to drop) until the prompt fits', () => {
+    // Reproduces the user-paste case: one enormous round-1 user message, no
+    // assistant turns. trimHistoryToFit can do nothing, so the content itself
+    // must be shortened (head kept) so the request can never 400.
+    const messages: ChatMessage[] = [
+      { role: 'system', content: lorem(200) },
+      { role: 'user', content: 'KEEP-THIS-HEAD ' + lorem(300_000) }, // ~94k tokens — far over
+    ];
+    const { removed, truncatedChars } = trimMessagesToFit(messages);
+    expect(removed).toBe(0);
+    expect(truncatedChars).toBeGreaterThan(0);
+    // Head preserved (the user's question sits at the top of the prompt).
+    expect(messages[1].content?.startsWith('KEEP-THIS-HEAD')).toBe(true);
+    // The budget invariant now holds — the request can be sent without a 400.
+    expect(estimateInputTokens(messages) + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS).toBeLessThanOrEqual(
+      RLM_CONTEXT_TOKENS,
+    );
+  });
+
+  it('is a no-op when already fits', () => {
+    const messages: ChatMessage[] = [
+      { role: 'system', content: lorem(100) },
+      { role: 'user', content: lorem(100) },
+    ];
+    const { removed, truncatedChars } = trimMessagesToFit(messages);
+    expect(removed).toBe(0);
+    expect(truncatedChars).toBe(0);
   });
 });
 

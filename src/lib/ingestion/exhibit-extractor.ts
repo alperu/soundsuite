@@ -146,6 +146,17 @@ export interface ExhibitExtractionOptions {
   motionSections?: MotionSection[];
   /** Image preprocessing settings from pipeline config */
   preprocessSettings?: ImagePreprocessSettings;
+  /** Max parallel preprocess/OCR workers. Set by the caller from `pipeline.ocrConcurrency`; defaults to 2 (legacy path: 3). */
+  concurrency?: number;
+}
+
+/**
+ * p-queue throws a TypeError for concurrency values < 1 (0, negative, NaN, null),
+ * which would fail the whole extraction stage — clamp to a safe 1–8 range instead.
+ */
+function clampConcurrency(value: number | undefined | null, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.min(8, Math.floor(value)));
 }
 
 /**
@@ -254,6 +265,7 @@ export class ExhibitExtractor {
       pages: pageTexts,
       motionSections: optMotionSections,
       preprocessSettings,
+      concurrency,
     } = options || {};
 
     // Use motionSections from options if provided, otherwise from instance property
@@ -278,7 +290,7 @@ export class ExhibitExtractor {
     } else {
       // No information at all — fall back to extracting all images
       this.logger.info('No exhibit boundaries, motion sections, or poppler data — extracting all images', { documentId });
-      return this.extractExhibitsLegacy(filePath, caseId, documentId, boundaries, onProgress, preprocessSettings);
+      return this.extractExhibitsLegacy(filePath, caseId, documentId, boundaries, onProgress, preprocessSettings, concurrency);
     }
 
     this.logger.info(`Target pages computed for exhibit extraction`, {
@@ -353,8 +365,9 @@ export class ExhibitExtractor {
     // Process: preprocess → save → OCR (with pipelined concurrency)
     const exhibits: ExhibitMetadata[] = [];
     const { default: PQueue } = await import('p-queue');
-    const preprocessQueue = new PQueue({ concurrency: 2 });
-    const ocrQueue = new PQueue({ concurrency: 2 });
+    const safeConcurrency = clampConcurrency(concurrency, 2);
+    const preprocessQueue = new PQueue({ concurrency: safeConcurrency });
+    const ocrQueue = new PQueue({ concurrency: safeConcurrency });
     let processedCount = 0;
 
     for (const image of filteredImages) {
@@ -482,6 +495,7 @@ export class ExhibitExtractor {
     boundaries?: ExhibitBoundary[],
     onProgress?: (processed: number, total: number) => void,
     preprocessSettings?: ImagePreprocessSettings,
+    concurrency?: number,
   ): Promise<ExhibitExtractionResult> {
     const images = await this.pdfParser.extractImages(filePath);
 
@@ -520,7 +534,7 @@ export class ExhibitExtractor {
 
     const exhibits: ExhibitMetadata[] = [];
     const { default: PQueue } = await import('p-queue');
-    const queue = new PQueue({ concurrency: 3 });
+    const queue = new PQueue({ concurrency: clampConcurrency(concurrency, 3) });
     let processedCount = 0;
 
     for (const image of candidateImages) {

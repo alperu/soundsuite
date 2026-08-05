@@ -89,7 +89,13 @@ const RLM_VLLM_ARGS: string[] = [
  * keeps big rerank batches inside the interactive timeout; lowering this starves
  * throughput for no benefit. Kept in sync with state.ts:defaultRegistry.reranker.
  */
-const RERANKER_VLLM_ARGS: string[] = ['--gpu-memory-utilization', '0.85', '--enforce-eager'];
+// --max-num-batched-tokens 32768: vLLM's default (~2048) lets the scheduler
+// admit only one ~8K-token (query,doc) rerank pair per step (Running:1) while a
+// large queue waits and the KV cache sits near-empty. 32768 packs several pairs
+// per forward pass; vLLM rebalances KV cache down to fit (~11x concurrency still
+// on 48 GB). Drop to 16384 if the engine OOMs at boot. Kept in sync with
+// state.ts:defaultRegistry.reranker.vllmArgs.
+const RERANKER_VLLM_ARGS: string[] = ['--gpu-memory-utilization', '0.85', '--enforce-eager', '--max-num-batched-tokens', '32768'];
 
 /**
  * Return a copy of `vllmArgs` with --gpu-memory-utilization set to `util`,
