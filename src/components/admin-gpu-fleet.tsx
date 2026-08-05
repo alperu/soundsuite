@@ -410,6 +410,7 @@ export default function GpuFleetPanel() {
   // (status `not_found` w/ no image). Keyed by short role name
   // ("embedding"), value is one of 'host' | 'docker-ollama' | 'docker-vllm'.
   const [runtimeByRole, setRuntimeByRole] = useState<Record<string, string>>({});
+  const [ocrVersionCheck, setOcrVersionCheck] = useState<{ model: string; required: string | null; version: string | null; ok: boolean | null } | null>(null);
 
   const fetchFleet = useCallback(async () => {
     try {
@@ -699,6 +700,24 @@ export default function GpuFleetPanel() {
         }
         if (!cancelled) setRuntimeByRole(map);
       } catch { /* ignore — chip falls back to "—" */ }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedUrl]);
+
+  // Probe the selected sidecar's OCR Ollama endpoint version against the
+  // configured OCR model's minimum (ocr-model-caps.minOllamaVersion). Catches
+  // stale ollama/ollama:latest containers (e.g. 0.24.0) that silently can't
+  // load PaddleOCR-VL (< 0.31.2), which otherwise just shows as "not loaded".
+  useEffect(() => {
+    if (!selectedUrl) { setOcrVersionCheck(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/admin/gpu-fleet/ocr-version?sidecarUrl=${encodeURIComponent(selectedUrl)}`);
+        if (cancelled || !res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setOcrVersionCheck(data);
+      } catch { /* ignore — badge simply not shown */ }
     })();
     return () => { cancelled = true; };
   }, [selectedUrl]);
@@ -1063,6 +1082,15 @@ export default function GpuFleetPanel() {
                               </td>
                               <td className="py-2 px-3 text-xs font-mono">
                                 {renderPsCell(c)}
+                                {role === 'ocr' && ocrVersionCheck?.ok === false && (
+                                  <div
+                                    className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-50 border border-red-200 text-[11px] text-red-700 font-sans"
+                                    title={`${ocrVersionCheck.model} needs Ollama >= ${ocrVersionCheck.required}, but this endpoint runs ${ocrVersionCheck.version}. On the host: docker pull ollama/ollama, then remove the container so the sidecar recreates it from the new image.`}
+                                  >
+                                    <span>⚠</span>
+                                    <span>Ollama {ocrVersionCheck.version} &lt; {ocrVersionCheck.required} required by {ocrVersionCheck.model.split('/').pop()}</span>
+                                  </div>
+                                )}
                               </td>
                               <td className="py-2 px-3 text-xs font-mono">{c.vram ? `${c.vram} MB` : c.config?.vram ? `${c.config.vram} MB` : '-'}</td>
                               <td className="py-2 px-3 text-xs">{roleInfo?.activeRequests ?? '-'}</td>
