@@ -739,6 +739,7 @@ export class IngestionPipeline {
             pages,
             motionSections,
             preprocessSettings: this.config.preprocessSettings,
+            concurrency: this.config.ocrConcurrency,
           })
         );
       } finally {
@@ -1652,6 +1653,7 @@ export class IngestionPipeline {
       pages?: PageText[];
       motionSections?: MotionSection[];
       preprocessSettings?: import('./image-preprocessor').ImagePreprocessSettings;
+      concurrency?: number;
     },
   ): Promise<{ exhibits: ExhibitMetadata[]; totalCount: number }> {
     return await this.exhibitExtractor.extractExhibits(filePath, caseId, documentId, boundaries, onProgress, options);
