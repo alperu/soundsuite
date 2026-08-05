@@ -150,7 +150,7 @@ interface VectorViewerProps {
   initialChunkId?: string;
   initialModalPage?: number;
   initialViewerPage?: number;
-  initialTableQuery?: { isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string };
+  initialTableQuery?: { isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string; sortBy?: string; sortDir?: string };
   initialCaseId?: string;
   initialDocumentId?: string;
   initialStatusFilter?: string;
@@ -425,7 +425,7 @@ function TableViewContent({
   statsLoading: boolean;
   initialFilter?: VectorsFilter;
   initialChunkId?: string;
-  initialQuery?: { isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string };
+  initialQuery?: { isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string; sortBy?: string; sortDir?: string };
   reportFilter?: (f: VectorsFilter) => void;
 }) {
   const router = useRouter();
@@ -450,12 +450,21 @@ function TableViewContent({
   const [pageMax, setPageMax] = useState(initialQuery?.pageMax ?? '');
   const [filterTrigger, setFilterTrigger] = useState(0);
 
+  // Column sorting (server-side, whole filtered set)
+  const CHUNK_SORT_FIELDS = ['pageNumber', 'chunkIndex', 'isExhibit', 'readinessScore', 'documentId', 'createdAt'] as const;
+  type ChunkSortField = (typeof CHUNK_SORT_FIELDS)[number];
+  const [sortBy, setSortBy] = useState<ChunkSortField | ''>(
+    CHUNK_SORT_FIELDS.includes(initialQuery?.sortBy as ChunkSortField) ? (initialQuery!.sortBy as ChunkSortField) : '',
+  );
+  const [sortDir, setSortDir] = useState<SortDir>(initialQuery?.sortDir === 'desc' ? 'desc' : 'asc');
+
   // Sync /vectors/tableview/{filter}/{chunk-selection}?type&q&pmin&pmax.
   // The path filter is the most specific selected entity (doc > filing > case).
   const syncUrl = useCallback((overrides?: {
     selection?: string | null;
     caseId?: string; filingId?: string; documentId?: string;
     isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string;
+    sortBy?: string; sortDir?: string;
   }) => {
     const c = overrides?.caseId ?? caseId;
     const f = overrides?.filingId ?? filingId;
@@ -477,11 +486,14 @@ function TableViewContent({
     if (q.trim()) qp.set('q', q.trim());
     if (pmin) qp.set('pmin', pmin);
     if (pmax) qp.set('pmax', pmax);
+    const sb = overrides?.sortBy ?? sortBy;
+    const sd = overrides?.sortDir ?? sortDir;
+    if (sb) { qp.set('sort', sb); qp.set('dir', sd); }
     const selection = overrides?.selection === undefined
       ? (expandedChunk ? `chunk-${expandedChunk}` : undefined)
       : (overrides.selection ? `chunk-${overrides.selection}` : undefined);
     router.replace(buildVectorsPath('tableview', filter, selection, qp), { scroll: false });
-  }, [router, reportFilter, caseId, filingId, documentId, isExhibit, textSearch, pageMin, pageMax, expandedChunk]);
+  }, [router, reportFilter, caseId, filingId, documentId, isExhibit, textSearch, pageMin, pageMax, sortBy, sortDir, expandedChunk]);
 
   const toggleChunk = useCallback((id: string) => {
     const next = expandedChunk === id ? null : id;
@@ -514,6 +526,7 @@ function TableViewContent({
         if (textSearch.trim()) params.set('textSearch', textSearch.trim());
         if (pageMin) params.set('pageMin', pageMin);
         if (pageMax) params.set('pageMax', pageMax);
+        if (sortBy) { params.set('sortBy', sortBy); params.set('sortDir', sortDir); }
 
         const res = await fetch(`/api/vectors?${params}`);
         const data = await res.json();
@@ -533,7 +546,18 @@ function TableViewContent({
     fetchChunks();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, filterTrigger]);
+  }, [page, filterTrigger, sortBy, sortDir]);
+
+  const handleSort = useCallback((field: ChunkSortField) => {
+    const nextDir: SortDir = sortBy === field && sortDir === 'asc' ? 'desc' : 'asc';
+    const nextBy = field;
+    setSortBy(nextBy);
+    setSortDir(nextDir);
+    setPage(1);
+    setExpandedChunk(null);
+    syncUrl({ selection: null, sortBy: nextBy, sortDir: nextDir });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortBy, sortDir, syncUrl]);
 
   const handleApplyFilters = (e: React.FormEvent) => {
     e.preventDefault();
@@ -733,12 +757,12 @@ function TableViewContent({
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="px-4 py-3 text-left font-medium text-gray-600">Text Preview</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap">Page</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap">Chunk #</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap">Type</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap" title="Document readiness score (ingestion quality, 0-100)">Score</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap">Document</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap">Indexed</th>
+                  <SortableHeader field="pageNumber" label="Page" current={sortBy} dir={sortDir} onClick={handleSort} />
+                  <SortableHeader field="chunkIndex" label="Chunk #" current={sortBy} dir={sortDir} onClick={handleSort} />
+                  <SortableHeader field="isExhibit" label="Type" current={sortBy} dir={sortDir} onClick={handleSort} />
+                  <SortableHeader field="readinessScore" label="Score" current={sortBy} dir={sortDir} onClick={handleSort} className="!whitespace-nowrap" />
+                  <SortableHeader field="documentId" label="Document" current={sortBy} dir={sortDir} onClick={handleSort} />
+                  <SortableHeader field="createdAt" label="Indexed" current={sortBy} dir={sortDir} onClick={handleSort} />
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -1622,7 +1646,7 @@ function PageReportContent({
 // Sortable Header
 // ---------------------------------------------------------------------------
 
-function SortableHeader({
+function SortableHeader<F extends string>({
   field,
   label,
   current,
@@ -1630,11 +1654,12 @@ function SortableHeader({
   onClick,
   className = '',
 }: {
-  field: PageSortField;
+  field: F;
   label: string;
-  current: PageSortField;
+  /** '' = no active sort (tableview's initial state) */
+  current: F | '';
   dir: SortDir;
-  onClick: (f: PageSortField) => void;
+  onClick: (f: F) => void;
   className?: string;
 }) {
   const isActive = current === field;

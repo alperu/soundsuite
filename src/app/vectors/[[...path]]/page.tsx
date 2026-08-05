@@ -120,6 +120,8 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
     textSearch: typeof sp.q === 'string' ? sp.q : undefined,
     pageMin: typeof sp.pmin === 'string' ? sp.pmin : undefined,
     pageMax: typeof sp.pmax === 'string' ? sp.pmax : undefined,
+    sortBy: typeof sp.sort === 'string' ? sp.sort : undefined,
+    sortDir: typeof sp.dir === 'string' ? sp.dir : undefined,
   };
 
   return (
