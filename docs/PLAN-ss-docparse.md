@@ -44,11 +44,23 @@ the master's config push wholesale-replaces `state.registry[role]` from mode-tem
   correct during implementation.
 - **Idle policy:** same idle-timer semantics as reranker (`docker stop` on idle, configurable
   timeout in `/admin/gpu`).
-- **Master side:** add mode metadata in `src/lib/gpu/mode-catalog.ts` + `mode-catalog-server.ts`
-  (`availableOn: ['linux']`), `MODE_PORTS`, and a `docparse` role in `fleet-router.ts`
-  (`resolveEndpoint('docparse')`), mirroring the reranker's shape. This single catalog entry is also
-  what makes the role visible on `/admin/roletypes` (read-only Mode Types table) and assignable on
-  `/admin/roleassign` — no per-page UI work.
+- **Master side — full role-assignment chain** (the catalog is typed, so this is an explicit
+  checklist, not one entry; mirror `ss-reranker` at every step):
+  1. `src/lib/gpu/mode-catalog.ts`: add `'ss-docparse'` to the `ModeName` union **and**
+     `ALL_MODES` (this is what `isModeName()` — the assignment API's validator — accepts),
+     plus `MODE_METADATA` (`availableOn: ['linux']`, label "Document Parsing") and
+     `STATIC_FALLBACK_MODEL` (pinned genai-server model id) and `MODE_PORTS` (`8100`).
+  2. `mode-catalog-server.ts`: default-model resolution (reads the `/admin/ocr` docparse config)
+     — no Mac stripping needed (never available there).
+  3. `src/lib/db/role-registry.ts` / push path: `ss-docparse` must flow through `enabledModes` +
+     `modelOverrides` to the sidecar on assignment save (verify nothing filters to a hardcoded
+     4-mode list).
+  4. `admin-role-assignments.tsx`: runtime options for the chip — `docker-vllm` only (extend
+     `availableRuntimesForOs` handling if it special-cases roles).
+  5. `fleet-router.ts`: `docparse` role + `resolveEndpoint('docparse')` with the reranker's
+     gpuOnly routing guard (no silent CPU fallback).
+  Once (1) lands, the role is visible on `/admin/roletypes` and assignable on `/admin/roleassign`;
+  (3)–(5) are what make an assignment actually take effect on the sidecar and route requests.
 - **Health/version check:** extend the pattern from `/api/admin/gpu-fleet/ocr-version` — probe the
   server's health endpoint; surface a fleet-panel badge when unreachable or version-mismatched.
 
