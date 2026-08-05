@@ -23,6 +23,7 @@ tables, and a second role named "ocr" would confuse operators about which is whi
 |---|---|---|
 | `/admin/ocr` | New **"Structured Document Parsing"** card: enable toggle, routing policy (`off` / `selective` / `all`), per-attempt timeout, status line (reachable? version?) | New card in `OCRProviderPanel` (`admin-dashboard.tsx`) |
 | `/admin/roleassign` | `ss-docparse` chip, assignable only to CUDA/linux hosts (`docker-vllm` runtime) | None — driven by mode catalog |
+| `/admin/roletypes` | New **`ss-docparse`** row in the Mode Types reference table (label "Document Parsing", availableOn `linux`, default model = the pinned genai-server image/model, "configured at ↗" chip → `/admin/ocr`) | None in the component — the page is read-only over `GET /api/admin/mode-catalog`; the row appears when the catalog entry is added (`mode-catalog.ts` + `mode-catalog-server.ts`, §2). Verify the 4-mode assumption in `admin-role-types.tsx`'s doc comment/fallback doesn't hardcode a count |
 | `/admin/gpu` | Container row per sidecar (status, image, VRAM, actions) | None — driven by registry |
 
 NOT on `/admin/embedding` — that page is vector-generation only.
@@ -45,7 +46,9 @@ the master's config push wholesale-replaces `state.registry[role]` from mode-tem
   timeout in `/admin/gpu`).
 - **Master side:** add mode metadata in `src/lib/gpu/mode-catalog.ts` + `mode-catalog-server.ts`
   (`availableOn: ['linux']`), `MODE_PORTS`, and a `docparse` role in `fleet-router.ts`
-  (`resolveEndpoint('docparse')`), mirroring the reranker's shape.
+  (`resolveEndpoint('docparse')`), mirroring the reranker's shape. This single catalog entry is also
+  what makes the role visible on `/admin/roletypes` (read-only Mode Types table) and assignable on
+  `/admin/roleassign` — no per-page UI work.
 - **Health/version check:** extend the pattern from `/api/admin/gpu-fleet/ocr-version` — probe the
   server's health endpoint; surface a fleet-panel badge when unreachable or version-mismatched.
 
