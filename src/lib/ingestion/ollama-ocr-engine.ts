@@ -10,6 +10,7 @@ import { IOCREngine, OCRResult } from './ocr-engine';
 import { createLogger } from '../logger';
 import { OcrNotReadyError } from './errors';
 import { NoGpuReadyEndpointError } from '@/lib/gpu/errors';
+import { ocrModelCaps, type OcrModelCaps } from '@/lib/gpu/ocr-model-caps';
 
 const logger = createLogger('OllamaOCR');
 
@@ -26,6 +27,12 @@ export interface OllamaOCRConfig {
   timeoutMs?: number;
 }
 
+/**
+ * Instruction prompt for general vision models (minicpm-v, olmOCR,
+ * llama3.2-vision). Fixed-task recognizers (PaddleOCR-VL) instead get their
+ * task prompt (e.g. "OCR:") from ocrModelCaps — a free-form instruction is
+ * meaningless input to them.
+ */
 const OCR_PROMPT = `OCR this document page. Output only the raw text. No commentary. Preserve paragraph breaks. For tables use | delimiters. Stop when all text is extracted.`;
 
 const MAX_RETRIES = 3;
@@ -36,6 +43,7 @@ const MAX_JITTER_MS = 1_000; // random jitter added to each retry delay
 export class OllamaOCREngine implements IOCREngine {
   private host: string;
   private model: string;
+  private caps: OcrModelCaps;
   private useOrchestrator: boolean;
   private timeoutMs: number;
   private lastResolvedHost: string | null = null;
@@ -98,6 +106,7 @@ export class OllamaOCREngine implements IOCREngine {
   constructor(config: OllamaOCRConfig) {
     this.host = config.host.replace(/\/+$/, '');
     this.model = config.model;
+    this.caps = ocrModelCaps(config.model);
     this.useOrchestrator = config.useOrchestrator ?? false;
     this.timeoutMs = (typeof config.timeoutMs === 'number' && Number.isFinite(config.timeoutMs) && config.timeoutMs > 0)
       ? config.timeoutMs
@@ -167,12 +176,14 @@ export class OllamaOCREngine implements IOCREngine {
           signal: AbortSignal.timeout(this.timeoutMs),
           body: JSON.stringify({
             model: this.model,
-            prompt: OCR_PROMPT,
+            prompt: this.caps.promptStyle === 'fixed-task'
+              ? (this.caps.fixedTaskPrompt ?? 'OCR:')
+              : OCR_PROMPT,
             images: [base64Image],
             stream: false,
             options: {
               temperature: 0,
-              num_predict: 2048,
+              num_predict: this.caps.numPredict,
             },
           }),
         });

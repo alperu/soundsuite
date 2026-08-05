@@ -65,9 +65,13 @@ export async function GET(request: NextRequest) {
     const totalPages = Math.ceil(total / limit);
     const offset = (page - 1) * limit;
 
-    // Fetch page of data — exclude vector column
-    let query = table.query()
-      .select(['id', 'text', 'document_id', 'case_id', 'page_number', 'chunk_index', 'is_exhibit', 'exhibit_path', 'created_at']);
+    // Fetch page of data — exclude vector column. readiness_score only
+    // exists on tables that have been scored/backfilled at least once.
+    const schema = await table.schema();
+    const hasReadiness = schema.fields.some((f: { name: string }) => f.name === 'readiness_score');
+    const columns = ['id', 'text', 'document_id', 'case_id', 'page_number', 'chunk_index', 'is_exhibit', 'exhibit_path', 'created_at'];
+    if (hasReadiness) columns.push('readiness_score');
+    let query = table.query().select(columns);
 
     if (whereClause) {
       query = query.where(whereClause);
@@ -86,6 +90,13 @@ export async function GET(request: NextRequest) {
       isExhibit: row.is_exhibit,
       exhibitPath: row.exhibit_path || null,
       createdAt: row.created_at,
+      // -1 = not yet scored → null for the UI. Number() also handles the
+      // BigInt that LanceDB returns for Int64 columns.
+      readinessScore: (() => {
+        if (!hasReadiness || row.readiness_score == null) return null;
+        const score = Number(row.readiness_score);
+        return Number.isFinite(score) && score >= 0 ? score : null;
+      })(),
     }));
 
     return NextResponse.json({ chunks, total, page, limit, totalPages });

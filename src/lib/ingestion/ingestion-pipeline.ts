@@ -22,6 +22,9 @@ import { PrismaClient } from '@prisma/client';
 import { createLogger, Logger } from '../logger';
 import { getRedis, isRedisAvailable } from '../redis';
 import { verifyIndexing, VerificationResult } from './indexing-verifier';
+import { collectSignals } from './readiness/collect';
+import { computeReadiness } from './readiness/score';
+import type { ReadinessResult } from './readiness/types';
 import { extractAnnotationsForDocument, PageAnnotation, buildAnnotationMarkers } from './annotation-extractor';
 import { detectLineNumbers } from '../citations/line-number-detector';
 import * as fs from 'fs/promises';
@@ -92,6 +95,12 @@ export interface IngestionPipelineConfig {
   ocrRemote?: boolean;
   /** Image preprocessing settings for OCR optimization. Uses defaults if not provided. */
   preprocessSettings?: import('./image-preprocessor').ImagePreprocessSettings;
+  /** AI Readiness Score: compute at end of ingestion (default: true). */
+  readinessEnabled?: boolean;
+  /** Score below which gating applies (default: 70). */
+  readinessThreshold?: number;
+  /** 'warn' = score + surface only (default); 'block' = below-threshold docs go to ERROR. */
+  readinessGating?: 'off' | 'warn' | 'block';
 }
 
 /**
@@ -906,11 +915,45 @@ export class IngestionPipeline {
 
       // Stage: verification (non-fatal — checks page coverage and chunk counts)
       let verification: VerificationResult | undefined;
+      let readiness: ReadinessResult | undefined;
       try {
-        await this.publishProgress(documentId, 'vector-indexing', 'Verifying indexing...', 93);
+        await this.publishProgress(documentId, 'verification', 'Verifying indexing...', 93);
         verification = await verifyIndexing(documentId, pageCount, embeddedChunks.length, this.database);
 
-        // Store verification result in checkpoint for admin visibility
+        // AI Readiness Score — must run HERE, before clearCheckpoint wipes
+        // PageCache (the per-page signals are destroyed on success). Result
+        // is persisted to Document columns in the final status update below.
+        if (this.config.readinessEnabled !== false) {
+          try {
+            const renderFailedCount = pages.filter((p) => p.renderFailed).length;
+            const signals = collectSignals({
+              verification,
+              chunkCount: embeddedChunks.length,
+              renderFailedCount,
+              ocrThreshold: this.config.ocrThreshold ?? 50,
+            });
+            readiness = computeReadiness(signals);
+            this.logger.info('Readiness scored', {
+              documentId,
+              score: readiness.score,
+              band: readiness.band,
+              formatClass: readiness.formatClass,
+              warnings: readiness.warnings.map((w) => w.code),
+            });
+            // Propagate onto the chunk rows so search/vectors surfaces can
+            // display per-chunk quality. Non-fatal by design.
+            await this.vectorStore.stampReadinessScore(documentId, readiness.score);
+          } catch (scoreError) {
+            this.logger.warn('Readiness scoring failed (non-fatal)', {
+              documentId,
+              error: scoreError instanceof Error ? scoreError.message : String(scoreError),
+            });
+          }
+        }
+
+        // Store verification result in checkpoint for admin visibility.
+        // Strip the page rows first — they carry the full document text and
+        // would bloat the checkpoint blob.
         const existingCheckpoint: IngestCheckpoint = {};
         try {
           const data: IngestCheckpoint = {
@@ -919,7 +962,7 @@ export class IngestionPipeline {
             totalPages: pageCount,
             updatedAt: new Date().toISOString(),
           };
-          (data as any).verification = verification;
+          (data as any).verification = { ...verification, pages: undefined };
           await this.database.document.update({
             where: { id: documentId },
             data: { ingestCheckpoint: JSON.stringify(data) },
@@ -952,14 +995,31 @@ export class IngestionPipeline {
       // Final stop check — don't overwrite STOPPED with INDEXED
       await this.checkIfStopped(documentId);
 
-      // Update document status to INDEXED and stamp the embedding model used
+      // Update document status to INDEXED and stamp the embedding model used.
+      // Readiness fields ride along; with gating 'block', a below-threshold
+      // document is marked ERROR instead (its chunks stay indexed — the
+      // operator can lower the threshold or re-OCR and reprocess).
       const modelName = this.embeddingProvider.getModelName();
+      const readinessBlocks =
+        readiness !== undefined &&
+        this.config.readinessGating === 'block' &&
+        readiness.score < (this.config.readinessThreshold ?? 70);
       await this.database.document.update({
         where: { id: documentId },
         data: {
-          status: 'INDEXED',
-          errorMessage: null,
+          status: readinessBlocks ? 'ERROR' : 'INDEXED',
+          errorMessage: readinessBlocks
+            ? `Readiness score ${readiness!.score} (${readiness!.band}) below threshold ${this.config.readinessThreshold ?? 70}: ${readiness!.warnings.map((w) => w.code).join(', ')}`
+            : null,
           embeddingModel: modelName,
+          ...(readiness !== undefined
+            ? {
+                readinessScore: readiness.score,
+                readinessBand: readiness.band,
+                readinessWarnings: JSON.stringify(readiness.warnings),
+                readinessScoredAt: new Date(),
+              }
+            : {}),
         },
       });
 

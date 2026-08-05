@@ -23,6 +23,18 @@ export interface VerificationResult {
   totalChunksIndexed: number;
   /** Informational warnings */
   warnings: string[];
+  /**
+   * The cached page rows loaded during verification (with text), so the
+   * readiness scorer can run detectors without a second full PageCache
+   * read on large documents.
+   */
+  pages: Array<{
+    pageNumber: number;
+    text: string;
+    textDensity: number;
+    source: 'extract' | 'ocr';
+    confidence: number | null;
+  }>;
 }
 
 /**
@@ -47,13 +59,15 @@ export async function verifyIndexing(
   let pagesWithText = 0;
   let pagesWithoutText = 0;
   let ocrPages = 0;
+  let loadedPages: VerificationResult['pages'] = [];
 
   try {
     // Load all cached pages
     const cachedPages = await (database as any).pageCache.findMany({
       where: { documentId },
-      select: { pageNumber: true, text: true, textDensity: true, source: true },
+      select: { pageNumber: true, text: true, textDensity: true, source: true, confidence: true },
     });
+    loadedPages = cachedPages;
 
     const pageMap = new Map<number, { text: string; textDensity: number; source: string }>();
     for (const page of cachedPages) {
@@ -108,6 +122,7 @@ export async function verifyIndexing(
     gapPages,
     totalChunksIndexed: totalChunks,
     warnings,
+    pages: loadedPages,
   };
 
   // Log result
@@ -115,6 +130,7 @@ export async function verifyIndexing(
     logger.warn('Indexing verification warnings', {
       documentId,
       ...result,
+      pages: `${loadedPages.length} rows`,
       gapPages: gapPages.length > 20 ? `${gapPages.length} pages` : gapPages,
     });
   } else {

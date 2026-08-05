@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ConfirmDialog, type ModeCatalogEntry, type ModeOs } from '@/components/admin-role-types';
 import { settingsPageForMode } from '@/lib/gpu/mode-catalog';
+import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
 
 /* ─────────────────────────── Types ─────────────────────────── */
 
@@ -717,7 +718,18 @@ export default function AdminRoleAssignments() {
                             const assignment = assigns.find((a) => a.mode === mode.name);
                             const selectedRuntime = resolveRuntime(assignment, sidecar.os);
                             const modeRuntimes = runtimesForMode(mode.name);
-                            const modeAvailableOnHost = mode.availableOn.includes(sidecar.os as ModeOs);
+                            // ss-ocr availability is model-aware: the server catalog
+                            // strips Mac when the global OCR model is Docker-only
+                            // (PaddleOCR-VL). A per-host modelOverride to a
+                            // Mac-compatible model re-enables this host — keep such
+                            // rows assignable instead of graying them out.
+                            const ocrOverrideEscape =
+                              mode.name === 'ss-ocr' &&
+                              sidecar.os === 'mac-docker-ollama' &&
+                              !!assignment?.modelOverride &&
+                              ocrModelCaps(assignment.modelOverride).macCompatible;
+                            const modeAvailableOnHost =
+                              mode.availableOn.includes(sidecar.os as ModeOs) || ocrOverrideEscape;
                             const panelKey = `${sidecar.url}::${mode.name}`;
                             const panelOpen = openPanel === panelKey;
                             const enabled = !!assignment?.enabled;
@@ -729,7 +741,11 @@ export default function AdminRoleAssignments() {
                                   {!modeAvailableOnHost && (
                                     <span
                                       className="ml-1 text-amber-500"
-                                      title={`${mode.name} is not supported on ${sidecar.os} — vllm-metal lacks cross-encoder support. Use a Linux+NVIDIA sidecar for reranking.`}
+                                      title={
+                                        mode.name === 'ss-ocr'
+                                          ? `The selected OCR model is Docker-only and Docker on Mac has no GPU passthrough — ss-ocr can't run on this host. Change the model on OCR settings, or set a Mac-compatible per-host model override (e.g. minicpm-v).`
+                                          : `${mode.name} is not supported on ${sidecar.os} — vllm-metal lacks cross-encoder support. Use a Linux+NVIDIA sidecar for reranking.`
+                                      }
                                     >
                                       ⓘ
                                     </span>

@@ -6,7 +6,10 @@ import {
   removeAssignment,
   type AssignmentInput,
 } from '@/lib/db/role-registry';
-import { clearSidecarRole } from '@/lib/gpu/status-cache';
+import { clearSidecarRole, getSidecarStatus } from '@/lib/gpu/status-cache';
+import { getConfig } from '@/lib/db/config';
+import { resolveModelFromConfig } from '@/lib/gpu/mode-catalog';
+import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
 
 /**
  * Mode names ("ss-ocr") → role keys used in CachedSidecarStatus.containers
@@ -84,6 +87,39 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
+
+    // Model-aware OS validation: ss-ocr with a Docker-only effective model
+    // (e.g. PaddleOCR-VL) cannot be served on Mac hosts — Docker Desktop on
+    // Mac has no GPU passthrough. The effective model folds in the per-host
+    // modelOverride, so a Mac row pinned to a Mac-compatible model (e.g.
+    // minicpm-v) stays assignable while the global OCR model is Docker-only.
+    if (mode === 'ss-ocr' && body.enabled !== false) {
+      const os = getSidecarStatus(body.sidecarUrl)?.host?.os;
+      const isMac = os === 'mac-docker-ollama' || os === 'darwin';
+      if (isMac) {
+        let override: string | null =
+          typeof body.modelOverride === 'string' && body.modelOverride.trim()
+            ? body.modelOverride.trim()
+            : null;
+        if (body.modelOverride === undefined) {
+          // Patch-style call that doesn't touch the override — keep the
+          // existing row's override in the effective-model computation.
+          const rows = await listAssignmentsForHost(body.sidecarUrl);
+          const existing = rows.find((r) => r.mode === 'ss-ocr');
+          if (existing?.modelOverride?.trim()) override = existing.modelOverride.trim();
+        }
+        const effective = override ?? resolveModelFromConfig('ss-ocr', await getConfig());
+        if (!ocrModelCaps(effective).macCompatible) {
+          return NextResponse.json(
+            {
+              error: `OCR model "${effective}" is Docker-only and cannot be served on Mac host ${body.sidecarUrl}. Set a Mac-compatible per-host model override (e.g. minicpm-v) or change the OCR model on /admin/ocr.`,
+            },
+            { status: 400 },
+          );
+        }
+      }
+    }
+
     const row = await setAssignment({ ...body, sidecarUrl: body.sidecarUrl, mode } as AssignmentInput);
     // If the role was disabled, invalidate the local route cache for this
     // (host, role) pair and push the new config so the sidecar stops the

@@ -22,6 +22,7 @@ import {
   listAllAssignments,
 } from '@/lib/db/role-registry';
 import { resolveModelFromConfig, type ModeName } from '@/lib/gpu/mode-catalog';
+import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
 import { seedAssignmentsForHost } from '@/lib/db/role-registry-seed';
 import { getProvisioning } from '@/lib/db/host-provisioning';
 
@@ -517,6 +518,48 @@ function detectHostOs(agentUrl: string): 'linux' | 'mac-docker-ollama' | 'window
 }
 
 /**
+ * Model-aware per-host mode gate. The effective model passed in already
+ * folds in the per-host modelOverride, so a Mac host pinned to e.g.
+ * minicpm-v stays eligible for ss-ocr even while the global OCR model is
+ * PaddleOCR-VL — and vice versa: a Mac host is dropped when its effective
+ * model is Docker-only (no Mac serving path; Docker Desktop on Mac has no
+ * GPU passthrough).
+ */
+function modeAllowedOnHost(
+  mode: string,
+  effectiveModel: string | undefined,
+  hostOs: 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2' | 'unknown',
+): boolean {
+  if (mode === 'ss-ocr' && hostOs === 'mac-docker-ollama' && !ocrModelCaps(effectiveModel).macCompatible) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Filter enabledModes to what this host can actually serve given the
+ * effective (override-aware) model per mode. Logs any drops so an operator
+ * can see why a Mac sidecar stopped receiving ss-ocr.
+ */
+function filterModesForHost(
+  agentUrl: string,
+  enabledModes: string[],
+  effectiveModels: Record<string, string>,
+  hostOs: 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2' | 'unknown',
+): string[] {
+  const allowed = enabledModes.filter((m) => modeAllowedOnHost(m, effectiveModels[m], hostOs));
+  const dropped = enabledModes.filter((m) => !allowed.includes(m));
+  if (dropped.length > 0) {
+    logger.warn('Dropping model-incompatible modes for host', {
+      agent: agentUrl,
+      hostOs,
+      dropped: dropped.map((m) => `${m}=${effectiveModels[m]}`),
+    });
+  }
+  return allowed;
+}
+
+/**
  * Build a legacy `registry: { role: ContainerDef }` payload from a set of
  * enabled modes + per-mode overrides + the host's OS. Mirrors the sidecar's
  * mode-templates.resolveMode() so old sidecars (pre-2.3) that only
@@ -656,7 +699,7 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
     logger.warn(`On-demand seed failed for ${agentUrl}: ${(err as Error).message}`);
   }
 
-  const enabledModes = await getEnabledModesForHost(agentUrl);
+  const allModes = await getEnabledModesForHost(agentUrl);
   const perHostOverrides = await getModelOverridesForHost(agentUrl);
   const runtimes = await getRuntimesForHost(agentUrl, hostOs);
   const cfg = await getConfig();
@@ -664,7 +707,11 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
   // value from /admin/* into modelOverrides for every enabled mode that
   // doesn't have an explicit per-host override. Sidecar applies these on
   // top of its own resolveMode() boot defaults.
-  const effectiveModels = buildEffectiveModelMap(enabledModes, perHostOverrides, cfg);
+  const allEffectiveModels = buildEffectiveModelMap(allModes, perHostOverrides, cfg);
+  // Model-aware gate: e.g. ss-ocr with a Docker-only effective model
+  // (PaddleOCR-VL) is never pushed to Mac hosts.
+  const enabledModes = filterModesForHost(agentUrl, allModes, allEffectiveModels, hostOs);
+  const effectiveModels = Object.fromEntries(enabledModes.map((m) => [m, allEffectiveModels[m]]));
   const registry = buildLegacyRegistry(enabledModes, (m) => effectiveModels[m], hostOs);
   // Per-host minOnline + idleTimeouts MUST ride along — the sidecar's
   // /acquire gate (`Role "X" is disabled (minOnline=0)`) reads from
@@ -720,11 +767,14 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
     logger.warn(`On-demand seed (full-config) failed for ${agentUrl}: ${(err as Error).message}`);
   }
 
-  const enabledModes = await getEnabledModesForHost(agentUrl);
+  const allModes = await getEnabledModesForHost(agentUrl);
   const perHostOverrides = await getModelOverridesForHost(agentUrl);
   const runtimes = await getRuntimesForHost(agentUrl, hostOs);
   const cfg = await getConfig();
-  const effectiveModels = buildEffectiveModelMap(enabledModes, perHostOverrides, cfg);
+  const allEffectiveModels = buildEffectiveModelMap(allModes, perHostOverrides, cfg);
+  // Model-aware gate — same filter as pushModelRegistry.
+  const enabledModes = filterModesForHost(agentUrl, allModes, allEffectiveModels, hostOs);
+  const effectiveModels = Object.fromEntries(enabledModes.map((m) => [m, allEffectiveModels[m]]));
   const registry = buildLegacyRegistry(enabledModes, (m) => effectiveModels[m], hostOs);
   const dbIdle = await getEffectiveIdleTimeoutsMs(agentUrl);
   const dbMin = await getEffectiveMinOnline(agentUrl);
@@ -930,6 +980,21 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
     // gpuReady=false for this container (e.g. partial offload it couldn't fix).
     // Skip such sidecars entirely so we never route to them.
     if (roleIsGpuOnly && container.gpuReady === false) continue;
+
+    // Model-aware OS guard: never route OCR to a Mac whose effective model
+    // is Docker-only (e.g. PaddleOCR-VL). Config pushes already drop such
+    // modes, but a stale assignment/container from before a model switch
+    // could still report 'running' — the container config carries the model
+    // the sidecar actually serves.
+    if (role === 'ocr') {
+      const os = cached.host?.os;
+      const isMac = os === 'mac-docker-ollama' || os === 'darwin';
+      const servedModel = (container as { config?: { model?: string } }).config?.model;
+      if (isMac && servedModel && !ocrModelCaps(servedModel).macCompatible) {
+        logger.info(`Route: skipping ${sidecar.hostname} for ocr — model "${servedModel}" is Docker-only, host is Mac`);
+        continue;
+      }
+    }
 
     const load = cached.roles?.[role]?.activeRequests ?? cached.activeRequests ?? 0;
 

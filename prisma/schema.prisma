@@ -86,6 +86,12 @@ model Document {
   detectedExhibits Int      @default(0)
   embeddingModel   String?
   ingestCheckpoint String?
+  // AI Readiness Score — 0-100 ingestion quality gate, scored at the end of
+  // ingestion before PageCache cleanup. Null = not yet scored.
+  readinessScore    Int?
+  readinessBand     String?   // 'HIGH' | 'OK' | 'RISKY' | 'POOR'
+  readinessWarnings Json?     // ReadinessWarning[] (src/lib/ingestion/readiness/types.ts)
+  readinessScoredAt DateTime?
   // XETO v1 — generic tag bag
   tags             Json     @default("{}")
   createdAt        DateTime @default(now())
@@ -103,6 +109,7 @@ model Document {
   @@index([hash])
   @@index([documentType])
   @@index([embeddingModel])
+  @@index([readinessBand])
 }
 
 model JobLog {

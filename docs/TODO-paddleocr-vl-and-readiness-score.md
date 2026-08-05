@@ -104,7 +104,8 @@ Helpful: the `<__media__>` prefix issue is llama-server-only; Ollama's `images: 
 - [x] Effective-model enforcement: assignment-API validation, push-time `filterModesForHost`, routing guard in `resolveEndpoint`, UI override escape hatch (plan item 5) — **done 2026-08-05**
 - [ ] Optional polish: save-time notice on `/admin/ocr` listing which Mac hosts will be skipped (enforcement already handles them; this is operator visibility only)
 - [ ] Verify docker-ollama image versions ≥0.31.2 across fleet (plan item 6) — **tooling added 2026-08-05**: `ocr-model-caps.minOllamaVersion` ('0.31.2' for PaddleOCR-VL) + `/api/admin/gpu-fleet/ocr-version` probe; the fleet panel's OCR row now shows a red "Ollama X < Y required" badge per sidecar. Remaining: actually update stale hosts (`docker pull ollama/ollama` + remove the ss-ocr container so the sidecar recreates it — observed 0.24.0 on the TITAN RTX host 2026-08-05).
-- [ ] A/B on a scanned + a table-heavy + a handwritten filing: MiniCPM-V vs PaddleOCR-VL `OCR:` vs `Spotting:` (use `/api/config/ocr-test` + reindex-pages); decide the default task; document the choice.
+- [x] **First live PaddleOCR-VL test (2026-08-05): SUCCESS.** Operator switched `/admin/ocr` to `AuditAid/PaddleOCR-VL-1.6-0.9B`; reindexed pages 187–188 of `26-586-CV 071626 Clk Rcd.pdf` (1403-page clerk record whose embedded text layer has no word spacing). Both pages went through the **full-page render fallback** (embedded images below size thresholds), fleet-router resolved an OCR host, preflight passed, `OCR:` fixed-task prompt used, **~6 s/page**, output is clean properly-spaced legal text (affidavit transcribed correctly, caption block preserved, exhibit label captured). Quirk noted: the caption's `§` section symbols rendered as `$`. Remaining from this test: the reindex path only re-OCRs pages with density < 50 — space-less-but-dense text-layer pages are untouched; fixing the whole file needs a full reprocess (delete + re-ingest) or a force-OCR option on reindex-pages.
+- [ ] A/B on a table-heavy + a handwritten filing: MiniCPM-V vs PaddleOCR-VL `OCR:` vs `Spotting:`; decide the default task; document the choice.
 - [ ] Deferred (Phase 3 of the roadmap doc): full PP-DocLayoutV3 two-stage pipeline as a vLLM sidecar service (`paddleocr-genai-vllm-server` ContainerDef) — the benchmarked-quality path; new service, not a model swap.
 
 ---
@@ -112,8 +113,12 @@ Helpful: the `<__media__>` prefix issue is llama-server-only; Ollama's `images: 
 # Part B — AI Readiness Score: detailed change report
 
 > **Status 2026-08-05: IMPLEMENTED** (items 1–9 of §B.7). Modules at `src/lib/ingestion/readiness/{types,detectors,score,collect}.ts` + `__tests__/` (32 tests passing). Columns added via direct SQL (`prisma db push` blocked by pre-existing Jurisdiction/Json-default drift — see §B.4 note below; DB backed up to `sound-suite.db.bak-readiness`). Config keys `pipeline.readinessEnabled/Threshold/Gating` live in `AppConfig`. Scoring wired into the verification block before `clearCheckpoint`, persisted on the final Document update (gating `'warn'` default, `'block'` sets ERROR). Stage-name bug (`'vector-indexing'`→`'verification'`) fixed. Surfaced: `/api/documents` select, document-grid badge with warning tooltip, `/vectors` document pickers show "· score BAND" (⚠ on RISKY/POOR). Item 10 (relax OCR hard-fail) remains open — until it lands, PARSE_ERRORS mainly reflects `renderFailed` pages.
+>
+> **Backfill (added 2026-08-05):** `GET/POST /api/admin/readiness-backfill` scores already-INDEXED documents. PageCache is gone for those, so it reconstructs per-page signals from LanceDB chunk text grouped by `page_number` (falling back to PageCache when it survives, e.g. post-reindex); estimate-path scores carry a `BACKFILL_ESTIMATE` info warning (no OCR provenance — reprocess for an exact score). Body: `{caseId?, documentIds?, force?, limit?}`; `force=true` rescores. **Ran against the live corpus: all 79 INDEXED docs scored — 24 HIGH / 9 OK / 37 RISKY / 6 POOR.** The POOR band is dominated by Reporter's Record volumes and clerk's-record scans — consistent with the known RR gap (dead `extractTextForRR`, no transcript-class density suppression); treat RR scores as conservative until that lands.
+>
+> **Per-chunk score (added 2026-08-05):** LanceDB chunk rows now carry `readiness_score` (Int, −1 = unscored; new inserts default it, `VectorStore.stampReadinessScore()` stamps the document score onto all of a doc's chunks after verification, and the backfill stamps too). `/api/vectors` returns it (`Number()`-coerced — LanceDB Int64 comes back as BigInt) and `/vectors` table view shows a color-banded Score column. **Data-hygiene note (investigated 2026-08-05, initially misreported as orphans):** chunks whose `document_id` has no Document row are NOT stale garbage. Full audit of all 36,656 rows: 36,542 belong to live Documents; 109 belong to **live Draft rows** (drafts are indexed under their Draft id — the /vectors page lists them as 📝 pseudo-documents); and 5 are **intentional synthetic `filing-index-<caseId>` chunks** written by the filing-index stage (`ingestion-pipeline.ts:1984`). Zero true orphans — no cleanup needed. These non-Document chunks legitimately show "—" in the Score column (drafts/filing-indexes aren't readiness-scored). If drafts should get scores later, stamp from `Draft.indexingStatus` metadata analogously.
 
-Clean-room TS implementation of the aksharaMD scoring design (see `research-aksharamd-features.md` §1 for baselines/penalties). All line numbers verified at commit `095b646`.
+Native TS scoring design (baselines + penalty table below in §B). All line numbers verified at commit `095b646`.
 
 ## B.0 Three architecture-shaping findings
 
@@ -186,9 +191,11 @@ Do **not** stuff the score into `Document.tags` (that's the XETO/Haystack marker
 Config keys, following the exact `src/lib/db/config.ts:176-260` accessor pattern (+ `AppConfig` fields, ends :161):
 
 ```ts
-readinessEnabled:   configMap.get('pipeline.readinessEnabled') !== 'false',
-readinessThreshold: parseInt(configMap.get('pipeline.readinessThreshold') || '70', 10),
-readinessGating:    (configMap.get('pipeline.readinessGating') as any) || 'warn', // 'off'|'warn'|'block'
+const accessors = {
+  readinessEnabled:   configMap.get('pipeline.readinessEnabled') !== 'false',
+  readinessThreshold: parseInt(configMap.get('pipeline.readinessThreshold') || '70', 10),
+  readinessGating:    (configMap.get('pipeline.readinessGating') as any) || 'warn', // 'off'|'warn'|'block'
+};
 ```
 
 ## B.5 Status flow — no new status

@@ -16,7 +16,7 @@ async function getData() {
 
   const documents = await prisma.document.findMany({
     where: { status: 'INDEXED' },
-    select: { id: true, fileName: true, caseId: true, filingId: true },
+    select: { id: true, fileName: true, caseId: true, filingId: true, readinessScore: true, readinessBand: true },
     orderBy: { fileName: 'asc' },
   });
 
@@ -33,6 +33,8 @@ async function getData() {
     fileName: `📝 Draft: ${d.title} (${d.documentType})`,
     caseId: d.caseId,
     filingId: null as string | null,
+    readinessScore: null as number | null,
+    readinessBand: null as string | null,
     isDraft: true,
   }));
 

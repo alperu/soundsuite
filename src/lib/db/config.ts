@@ -53,6 +53,11 @@ export interface AppConfig {
   /** Per-attempt Ollama OCR request timeout in ms. Default 90000.
    *  Cold model loads take 30-60s; median inference 30-40s (docs/TODO-ocr-speedups.md). */
   ocrTimeoutMs: number;
+  // AI Readiness Score (ingestion quality gate)
+  readinessEnabled: boolean;
+  readinessThreshold: number;
+  /** 'off' = don't score; 'warn' = score + surface only; 'block' = below-threshold docs go to ERROR. */
+  readinessGating: 'off' | 'warn' | 'block';
   embeddingBatchSize: number;
   // Reranking settings
   rerankEnabled: boolean;
@@ -219,6 +224,9 @@ export async function getConfig(): Promise<AppConfig> {
     ocrThreshold: parseInt(configMap.get('pipeline.ocrThreshold') || '50', 10),
     ocrConcurrency: parseInt(configMap.get('pipeline.ocrConcurrency') || '2', 10),
     ocrTimeoutMs: parseInt(configMap.get('pipeline.ocrTimeoutMs') || '90000', 10),
+    readinessEnabled: configMap.get('pipeline.readinessEnabled') !== 'false',
+    readinessThreshold: parseInt(configMap.get('pipeline.readinessThreshold') || '70', 10),
+    readinessGating: (configMap.get('pipeline.readinessGating') as any) || 'warn',
     embeddingBatchSize: parseInt(configMap.get('pipeline.embeddingBatchSize') || '50', 10),
     // Image preprocessing settings (defaults match DEFAULT_PREPROCESS_SETTINGS)
     ocrUpscale: configMap.get('pipeline.ocrUpscale') !== 'false',

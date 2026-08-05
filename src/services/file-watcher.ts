@@ -175,7 +175,10 @@ export class FileWatcher {
       });
 
       if (existingDoc) {
-        this.logger.info(`Skipping duplicate file (hash already exists)`, { filePath, hash });
+        const healed = await this.healOrphanedDuplicate(existingDoc, filePath);
+        if (!healed) {
+          this.logger.info(`Skipping duplicate file (hash already exists)`, { filePath, hash });
+        }
         return;
       }
 
@@ -226,6 +229,69 @@ export class FileWatcher {
   }
 
   /**
+   * Self-heal for hash-duplicate records whose file no longer exists on disk.
+   *
+   * Scenario: Google Drive briefly materializes a "name (1).pdf" copy during
+   * sync; we register it first, Drive then deletes it, and the surviving real
+   * file is forever skipped as a "duplicate hash" while the record points at a
+   * ghost path. Same story for a rename (identical content, new name).
+   *
+   * If the existing record's path is dead, repoint it at the surviving file.
+   * ERROR records that were mid-ingestion (attached to a filing) are requeued
+   * so the pipeline retries; unfiled ones revert to DISCOVERED.
+   *
+   * Returns true if the record was repointed, false if it was left alone.
+   */
+  private async healOrphanedDuplicate(
+    existingDoc: { id: string; caseId: string; filePath: string; status: string; filingId: string | null },
+    filePath: string
+  ): Promise<boolean> {
+    if (existingDoc.filePath === filePath) {
+      return false;
+    }
+
+    try {
+      const stat = await fs.stat(existingDoc.filePath);
+      if (stat.isFile()) {
+        // Old file still exists — genuine duplicate content in two places.
+        return false;
+      }
+    } catch {
+      // ENOENT/ENOTDIR — old path is dead, fall through to heal.
+    }
+
+    const wasError = existingDoc.status === 'ERROR';
+    await this.prisma.document.update({
+      where: { id: existingDoc.id },
+      data: {
+        filePath,
+        fileName: path.basename(filePath),
+        ...(wasError
+          ? {
+              status: existingDoc.filingId ? 'QUEUED' : 'DISCOVERED',
+              errorMessage: null,
+              ingestCheckpoint: null,
+            }
+          : {}),
+      },
+    });
+
+    this.logger.info(`Repointed orphaned duplicate record to surviving file`, {
+      documentId: existingDoc.id,
+      oldPath: existingDoc.filePath,
+      newPath: filePath,
+      requeued: wasError && !!existingDoc.filingId,
+    });
+
+    this.filingsCache.invalidateCase(existingDoc.caseId).catch(() => {});
+    const watchPath = this.config.watchPaths.find(wp => filePath.startsWith(wp));
+    if (watchPath) {
+      new FolderIndexService().invalidateContent(watchPath).catch(() => {});
+    }
+    return true;
+  }
+
+  /**
    * Handle file modification
    * Requirements: 1.3, 1.4, 1.5, 1.6
    */
@@ -247,7 +313,10 @@ export class FileWatcher {
       });
 
       if (existingDoc) {
-        this.logger.info(`Skipping modified file (hash unchanged)`, { filePath, hash });
+        const healed = await this.healOrphanedDuplicate(existingDoc, filePath);
+        if (!healed) {
+          this.logger.info(`Skipping modified file (hash unchanged)`, { filePath, hash });
+        }
         return;
       }
 

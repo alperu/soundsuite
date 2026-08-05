@@ -18,6 +18,16 @@ interface VectorChunk {
   isExhibit: boolean;
   exhibitPath: string | null;
   createdAt: number;
+  /** Document readiness score stamped on the chunk (null = not scored). */
+  readinessScore?: number | null;
+}
+
+/** Score badge classes matching the document-grid band colors. */
+function chunkScoreBadge(score: number): string {
+  if (score >= 85) return 'bg-green-100 text-green-700';
+  if (score >= 70) return 'bg-green-50 text-green-600';
+  if (score >= 50) return 'bg-amber-100 text-amber-700';
+  return 'bg-red-100 text-red-700';
 }
 
 interface VectorStats {
@@ -50,6 +60,16 @@ interface Document {
   fileName: string;
   caseId: string;
   filingId: string | null;
+  /** AI Readiness Score (0-100), null = not yet scored (e.g. drafts, pre-feature docs). */
+  readinessScore?: number | null;
+  readinessBand?: string | null;
+}
+
+/** "Motion.pdf · ⚠ 62 RISKY" — readiness suffix for document pickers. */
+function docOptionLabel(d: Document): string {
+  if (d.readinessScore == null || !d.readinessBand) return d.fileName;
+  const flag = d.readinessBand === 'RISKY' || d.readinessBand === 'POOR' ? '⚠ ' : '';
+  return `${d.fileName} · ${flag}${d.readinessScore} ${d.readinessBand}`;
 }
 
 interface PageReportData {
@@ -478,7 +498,7 @@ function TableViewContent({
               >
                 <option value="">All Documents</option>
                 {filteredDocs.map((d) => (
-                  <option key={d.id} value={d.id}>{d.fileName}</option>
+                  <option key={d.id} value={d.id}>{docOptionLabel(d)}</option>
                 ))}
               </select>
             </div>
@@ -577,6 +597,7 @@ function TableViewContent({
                   <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap">Page</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap">Chunk #</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap">Type</th>
+                  <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap" title="Document readiness score (ingestion quality, 0-100)">Score</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap">Document</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-600 whitespace-nowrap">Indexed</th>
                 </tr>
@@ -615,6 +636,15 @@ function TableViewContent({
                         }`}>
                           {chunk.isExhibit ? 'Exhibit' : 'Text'}
                         </span>
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {chunk.readinessScore != null ? (
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${chunkScoreBadge(chunk.readinessScore)}`}>
+                            {chunk.readinessScore}
+                          </span>
+                        ) : (
+                          <span className="text-gray-300">—</span>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-gray-600 whitespace-nowrap max-w-[200px] truncate" title={getDocName(chunk.documentId)}>
                         {getDocName(chunk.documentId)}
@@ -1065,7 +1095,7 @@ function PageReportContent({
             >
               <option value="">Select a document...</option>
               {filteredDocs.map((d) => (
-                <option key={d.id} value={d.id}>{d.fileName}</option>
+                <option key={d.id} value={d.id}>{docOptionLabel(d)}</option>
               ))}
             </select>
           </div>

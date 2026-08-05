@@ -19,6 +19,7 @@ import CacheManager from '@/components/admin/cache-manager';
 import WeightSection from '@/components/admin/weight-section';
 import { CopyButton } from '@/components/copy-button';
 import { AppConfig, ModelDownloadInfo } from '@/lib/db/config';
+import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
 
 interface Props {
   initialConfig: AppConfig;
@@ -638,6 +639,7 @@ const OLLAMA_OCR_MODELS = [
   { id: 'richardyoung/olmocr2:7b-q8', label: 'olmOCR-2 Q8 (~9 GB VRAM) — Best accuracy, Apache 2.0', vram: '~9 GB' },
   { id: 'minicpm-v', label: 'MiniCPM-V 2.6 (~8 GB) — Beats GPT-4o on OCRBench', vram: '~8 GB' },
   { id: 'llama3.2-vision', label: 'Llama 3.2 Vision 11B (~12 GB) — Good general vision', vram: '~12 GB' },
+  { id: 'AuditAid/PaddleOCR-VL-1.6-0.9B', label: 'PaddleOCR-VL 1.6 (~2 GB) — Best document parsing, Apache 2.0', vram: '~2 GB' },
 ];
 
 function OCRProviderPanel({ initialConfig }: { initialConfig: AppConfig }) {
@@ -884,6 +886,11 @@ function OCRProviderPanel({ initialConfig }: { initialConfig: AppConfig }) {
                     <div className="flex-1">
                       <h4 className="text-sm font-semibold text-blue-800">{selected.id}</h4>
                       <p className="text-xs text-blue-600 mt-1">VRAM: {selected.vram}</p>
+                      {!ocrModelCaps(selected.id).macCompatible && (
+                        <p className="text-xs text-amber-700 mt-1 font-medium">
+                          Docker-only — not available on Mac hosts. Mac sidecars are excluded from ss-ocr assignment on Role Assignments while this model is selected.
+                        </p>
+                      )}
                       {!ocrUseOrchestrator && (
                         <>
                           <p className="text-xs text-blue-700 mt-2 font-medium">

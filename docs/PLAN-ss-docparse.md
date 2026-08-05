@@ -102,6 +102,8 @@ export interface DocparsePageResult {
 Config `pipeline.docparsePolicy`: `off` (default until proven) | `selective` | `all`.
 
 `selective` heuristic (cheap, from data we already have at ingest time):
+- **exclusion first:** reporter's records / transcripts (line-numbered 1–25 pages) NEVER route to
+  docparse in v1 — see §6.1's line-number hazard
 - page text density < OCR threshold (scanned) **and** poppler reports images → parse
 - filing detector says exhibit-heavy or the page count of detected tables > 0 → parse
 - readiness score (Part B work) below a configurable band → parse
@@ -130,6 +132,38 @@ New `ITextChunker` implementation `StructuredChunker` used when a page has `stru
 5. **Chunk provenance:** every chunk records `{ pageNumber, headingPath: string[], blockOrders:
    number[], bbox? }` → search hits become citable and deep-linkable.
 6. Pages without structure keep the existing `LegalTextSplitter` unchanged.
+
+### 6.1 Backward compatibility — existing chunk metadata MUST NOT regress
+
+The pipeline already embeds rich per-chunk metadata that downstream features depend on. The
+StructuredChunker emits the **full existing `ChunkMetadata`** (`text-chunker.ts:18-37`) — the new
+provenance (`headingPath`, `blockOrders`, `bbox`) is **additive fields**, never a replacement
+schema. Inventory of what must survive, with consumers:
+
+| Existing field(s) | Set by | Consumed by |
+| --- | --- | --- |
+| `pageNumber`, `chunkIndex` | all chunkers | search results, citations, reindex-pages vector clearing |
+| `isExhibit`, `exhibitPath` | chunkers (exhibit chunks) | exhibit retrieval (`retrieve_exhibit`), UI |
+| `filingId`, `filingType`, `volumeNumber`, `caseNumber`, `documentType` | pipeline | filing-aware search filters, citations |
+| **`startLine` / `endLine`** (transcript lines 1–25, RR docs) | `line-number-detector.ts` → `ingestion-pipeline.ts:856` | MCP citation builders (`query-case-knowledge.ts:542`, `scan-for-pattern.ts:305`) → "page X, lines Y–Z" transcript citations |
+| `annotations` (JSON `PageAnnotation[]`) | annotation overlap pass | annotation-aware retrieval/UI |
+
+**The transcript line-number hazard (biggest regression risk):** §6 item 3 excludes "page
+furniture" from chunk text — but a layout model will plausibly classify reporter's-record margin
+line numbers (1–25) as furniture. Stripping them breaks BOTH the stored `startLine`/`endLine`
+stamping (detector runs on page text) AND the MCP tools' query-time fallback re-detection (which
+reads numbers from the chunk text itself). Mitigations, in order of preference:
+
+1. **v1: route transcripts around docparse.** The `selective` policy (§4) explicitly excludes
+   documents whose `documentType`/`filingType` indicates a reporter's record — they are already
+   line-structured and gain the least from layout analysis. Cheapest and zero-risk.
+2. If transcripts are ever routed through docparse: run `line-number-detector` on the **raw page
+   text before furniture exclusion**, stamp `startLine`/`endLine` from block bbox → line mapping,
+   and keep the margin numbers in chunk text for the fallback path.
+3. Never exclude a block as furniture when the page matches the transcript line-number pattern.
+
+**Acceptance test for step 5:** an RR volume ingested with docparse enabled must produce chunks
+whose `startLine`/`endLine` and MCP citations are byte-identical to the current path.
 
 ## 7. Config keys (Config table, `pipeline.*`)
 

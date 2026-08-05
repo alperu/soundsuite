@@ -19,9 +19,33 @@ interface Document {
   detectedExhibits: number;
   errorMessage: string | null;
   embeddingModel: string | null;
+  readinessScore?: number | null;
+  readinessBand?: string | null;
+  readinessWarnings?: unknown;
   createdAt: string;
   updatedAt: string;
   stageProgress?: StageProgress;
+}
+
+/** Badge styling per readiness band — RISKY/POOR reuse the isPartial amber/red language. */
+const READINESS_BADGE: Record<string, string> = {
+  HIGH: 'bg-green-100 text-green-700',
+  OK: 'bg-green-50 text-green-600',
+  RISKY: 'bg-amber-100 text-amber-700',
+  POOR: 'bg-red-100 text-red-700',
+};
+
+function readinessTooltip(doc: Document): string {
+  const base = `Readiness ${doc.readinessScore} (${doc.readinessBand}) — ingestion quality score`;
+  try {
+    const warnings = typeof doc.readinessWarnings === 'string'
+      ? JSON.parse(doc.readinessWarnings)
+      : doc.readinessWarnings;
+    if (Array.isArray(warnings) && warnings.length > 0) {
+      return `${base}\n${warnings.map((w: any) => `• ${w.detail ?? w.code}`).join('\n')}`;
+    }
+  } catch { /* tooltip stays basic */ }
+  return base;
 }
 
 interface DocumentGridProps {
@@ -111,6 +135,14 @@ function DocumentCard({
           <span className={`text-xs font-semibold uppercase ${textColors[doc.status]}`}>
             {isPartial && doc.status === 'INDEXED' ? 'PARTIAL' : doc.status}
           </span>
+          {doc.readinessScore != null && doc.readinessBand && doc.status === 'INDEXED' && (
+            <span
+              className={`ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold ${READINESS_BADGE[doc.readinessBand] ?? 'bg-gray-100 text-gray-600'}`}
+              title={readinessTooltip(doc)}
+            >
+              {doc.readinessScore}
+            </span>
+          )}
         </div>
         <span className="text-xs text-gray-400">{relativeTime(doc.updatedAt)}</span>
       </div>

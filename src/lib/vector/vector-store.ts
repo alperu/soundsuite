@@ -247,6 +247,9 @@ export class VectorStore {
       end_line: chunk.metadata.endLine ?? 0,
       annotations: chunk.metadata.annotations || '',
       created_at: Date.now(),
+      // Document readiness score stamped after verification via
+      // stampReadinessScore(); -1 = not yet scored.
+      readiness_score: -1,
     }));
 
     try {
@@ -272,7 +275,10 @@ export class VectorStore {
         if (missingCol) {
           try {
             logger.info('Adding missing column to LanceDB table', { column: missingCol });
-            await this.table.addColumns([{ name: missingCol, valueSql: "''" }]);
+            // Numeric columns need a numeric default or the evolved column
+            // types as string and later updates/filters fail.
+            const NUMERIC_COL_DEFAULTS: Record<string, string> = { readiness_score: '-1' };
+            await this.table.addColumns([{ name: missingCol, valueSql: NUMERIC_COL_DEFAULTS[missingCol] ?? "''" }]);
             // Retry the insert after adding the column
             await this.table.add(rows);
             this.storedVectorDim = null;
@@ -291,6 +297,33 @@ export class VectorStore {
         this.storedVectorDim = null;
         await this.ensureFtsIndex();
         return;
+      }
+
+      // Reverse mismatch: the TABLE has columns the rows lack ("Append with
+      // different schema: ... missing=[readiness_score]"). Happens when the
+      // table was evolved (e.g. by the readiness backfill) while a process
+      // built rows from an older code version, or when a future column is
+      // added. Fill the missing fields with per-column defaults and retry —
+      // never drop the table for this.
+      const missingMatch = errMsg.match(/missing=\[([^\]]+)\]/);
+      if (missingMatch && this.table) {
+        const missingCols = missingMatch[1].split(',').map((s) => s.trim()).filter(Boolean);
+        const COLUMN_DEFAULTS: Record<string, unknown> = { readiness_score: -1 };
+        logger.warn('Rows missing table columns — filling defaults and retrying insert', {
+          columns: missingCols,
+        });
+        const patched = rows.map((r) => {
+          const extra: Record<string, unknown> = {};
+          for (const col of missingCols) extra[col] = COLUMN_DEFAULTS[col] ?? '';
+          return { ...r, ...extra };
+        });
+        try {
+          await this.table.add(patched);
+          this.storedVectorDim = null;
+          return;
+        } catch (retryErr) {
+          throw new Error(`Failed to insert chunks after filling missing columns [${missingCols.join(', ')}]: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`);
+        }
       }
 
       throw new Error(`Failed to insert chunks: ${errMsg}`);
@@ -619,6 +652,36 @@ export class VectorStore {
       await this.table.delete(`document_id = "${documentId}"`);
     } catch (error) {
       throw new Error(`Failed to delete chunks for document ${documentId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Stamp the document-level readiness score onto every chunk row of a
+   * document. Runs after the verification stage (chunks are already
+   * inserted with readiness_score = -1). Adds the column on older tables
+   * that predate it.
+   */
+  async stampReadinessScore(documentId: string, score: number): Promise<void> {
+    if (!this.db || !this.table) return;
+
+    try {
+      const schema = await this.table.schema();
+      const hasColumn = schema.fields.some((f: { name: string }) => f.name === 'readiness_score');
+      if (!hasColumn) {
+        logger.info('Adding readiness_score column to LanceDB table');
+        await this.table.addColumns([{ name: 'readiness_score', valueSql: '-1' }]);
+      }
+      const escaped = documentId.replace(/'/g, "''");
+      await this.table.update({
+        where: `document_id = '${escaped}'`,
+        values: { readiness_score: score },
+      });
+    } catch (error) {
+      // Non-fatal — the Document row still carries the score.
+      logger.warn('Failed to stamp readiness score on chunks', {
+        documentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

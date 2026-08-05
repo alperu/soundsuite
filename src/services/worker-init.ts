@@ -138,6 +138,9 @@ async function buildProcessDocumentFn(): Promise<(documentId: string, filePath: 
       ocrConcurrency: effectiveOcrConcurrency,
       ocrThreshold: config.ocrThreshold,
       ocrRemote: config.ocrProvider === 'ollama',
+      readinessEnabled: config.readinessEnabled,
+      readinessThreshold: config.readinessThreshold,
+      readinessGating: config.readinessGating,
       preprocessSettings: {
         upscale: config.ocrUpscale,
         minWidth: config.ocrMinWidth,
