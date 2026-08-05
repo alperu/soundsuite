@@ -109,6 +109,43 @@ Config `pipeline.docparsePolicy`: `off` (default until proven) | `selective` | `
 - readiness score (Part B work) below a configurable band → parse
 - everything else → fast Ollama `OCR:` path
 
+## 4.1 Latency impact vs the current pipeline
+
+Will this slow ingestion down? **For routed pages, yes — that is the trade; the policy exists to
+contain it.** Baseline numbers measured on this fleet 2026-08-05 (TITAN RTX host, warm model):
+
+| Page kind | Current path | Current cost/page | With ss-docparse | Expected cost/page |
+| --- | --- | --- | --- | --- |
+| Text-rich (born-digital) | pdftext extraction, **no OCR** | ~ms | unchanged (`selective` never routes these) | ~ms |
+| Scanned page | Ollama PaddleOCR-VL `OCR:` | **4–6 s** measured (2.2 s full-page render case) | layout + per-region recognition via vLLM | est. **3–10 s** (TBD — measure in step 1) |
+| Exhibit image | Ollama `OCR:` | **1–3.7 s** measured | same or routed | est. 2–8 s |
+| Transcript (RR) | line-aware text path | ~ms | **excluded by policy (§6.1)** | ~ms |
+
+Context: the old MiniCPM-V baseline was 30–40 s median per OCR call, so even docparse's worst
+estimate stays well under what ingestion tolerated a month ago.
+
+Why the docparse estimate is a range, not a number: the two-stage pipeline runs layout detection
+(PP-DocLayoutV3, typically sub-second) then recognition **per detected region** — a dense page with
+30 blocks costs more than one full-page `OCR:` call, but vLLM continuous batching amortizes
+regions, and the 0.9 B recognizer is small. Measuring real pages is the first deliverable of
+step 1; the table gets corrected then.
+
+What bounds the total-wall-clock impact:
+
+1. **`selective` policy (§4)** — the dominant page class (text-rich born-digital) never routes;
+   transcripts never route. Only scanned/table-heavy documents pay, and those are precisely the
+   ones currently producing bad chunks.
+2. **Parallelism** — the vLLM server batches concurrent requests natively; docparse gets its own
+   concurrency knob rather than sharing `ocrConcurrency`.
+3. **Fallback (§3)** — a slow/down docparse degrades to today's fast path, never blocks ingestion.
+4. **`all` policy is opt-in** — turning every page into a GPU parse is a deliberate operator
+   choice for a quality-first backfill (e.g. re-ingesting a critical case overnight), not the
+   default.
+
+Rule of thumb for operator expectations: a 100-page scanned filing that today OCRs in ~8–10 min at
+concurrency 1 (or ~2 min at 5) should be planned at roughly 1.5–2× that under docparse until
+step 1 produces measured numbers.
+
 ## 5. Structure persistence (additive, nullable — safe migration)
 
 - `PageCache`: add nullable `structuredJson` (serialized `DocparsePageResult`), `parseMethod`
