@@ -53,11 +53,13 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
   const sp = await searchParams;
   const { cases, filings, documents } = await getData();
 
-  // Parse URL segments into view mode
-  // /vectors              → tableview (default)
-  // /vectors/tableview    → tableview
-  // /vectors/breakdown    → breakdown
-  // /vectors/pagereport   → pagereport
+  // Parse URL segments: /vectors/{tool}/{filter}/{selection}
+  //   tool      → tableview (default) | breakdown | pagereport
+  //   filter    → all | case-{id} | filing-{id} | doc-{id}   (per-tool subset)
+  //   selection → chunk-{id} (tableview) | page-{n} (pagereport)
+  // Filter kinds a tool does not support are ignored (URL is normalized
+  // client-side on the next interaction). Legacy pagereport query params
+  // (?caseId=&documentId=&status=) are still honored.
   let initialViewMode: 'tableview' | 'breakdown' | 'pagereport' = 'tableview';
 
   if (path && path.length > 0) {
@@ -71,10 +73,51 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
     }
   }
 
-  // Parse query params for page report
-  const initialCaseId = typeof sp.caseId === 'string' ? sp.caseId : undefined;
-  const initialDocumentId = typeof sp.documentId === 'string' ? sp.documentId : undefined;
+  const FILTER_KINDS_BY_TOOL: Record<typeof initialViewMode, string[]> = {
+    tableview: ['case', 'filing', 'doc'],
+    breakdown: ['case'],
+    pagereport: ['case', 'doc'],
+  };
+
+  let initialFilterKind: 'all' | 'case' | 'filing' | 'doc' = 'all';
+  let initialFilterId: string | undefined;
+  const filterSeg = path?.[1];
+  if (filterSeg && filterSeg !== 'all') {
+    const m = /^(case|filing|doc)-(.+)$/.exec(decodeURIComponent(filterSeg));
+    if (m && FILTER_KINDS_BY_TOOL[initialViewMode].includes(m[1])) {
+      initialFilterKind = m[1] as 'case' | 'filing' | 'doc';
+      initialFilterId = m[2];
+    }
+  }
+
+  let initialChunkId: string | undefined;
+  let initialModalPage: number | undefined;
+  const selSeg = path?.[2];
+  if (selSeg) {
+    const decoded = decodeURIComponent(selSeg);
+    if (initialViewMode === 'tableview' && decoded.startsWith('chunk-')) {
+      initialChunkId = decoded.slice('chunk-'.length);
+    } else if (initialViewMode === 'pagereport' && /^page-\d+$/.test(decoded)) {
+      initialModalPage = parseInt(decoded.slice('page-'.length), 10);
+    }
+  }
+
+  // Pagereport entity filter: path segment wins, legacy query params as fallback
+  const initialCaseId =
+    (initialViewMode === 'pagereport' && initialFilterKind === 'case' ? initialFilterId : undefined) ??
+    (typeof sp.caseId === 'string' ? sp.caseId : undefined);
+  const initialDocumentId =
+    (initialViewMode === 'pagereport' && initialFilterKind === 'doc' ? initialFilterId : undefined) ??
+    (typeof sp.documentId === 'string' ? sp.documentId : undefined);
   const initialStatusFilter = typeof sp.status === 'string' ? sp.status : undefined;
+
+  // Tableview secondary filters (query params — orthogonal to the path filter)
+  const initialTableQuery = {
+    isExhibit: typeof sp.type === 'string' ? sp.type : undefined,
+    textSearch: typeof sp.q === 'string' ? sp.q : undefined,
+    pageMin: typeof sp.pmin === 'string' ? sp.pmin : undefined,
+    pageMax: typeof sp.pmax === 'string' ? sp.pmax : undefined,
+  };
 
   return (
     <VectorViewer
@@ -83,6 +126,11 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
       documents={documents}
       initialViewMode={initialViewMode}
       hasExplicitPath={!!(path && path.length > 0)}
+      initialFilterKind={initialFilterKind}
+      initialFilterId={initialFilterId}
+      initialChunkId={initialChunkId}
+      initialModalPage={initialModalPage}
+      initialTableQuery={initialTableQuery}
       initialCaseId={initialCaseId}
       initialDocumentId={initialDocumentId}
       initialStatusFilter={initialStatusFilter}

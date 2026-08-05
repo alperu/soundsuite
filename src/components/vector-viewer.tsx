@@ -90,12 +90,66 @@ interface PageReportData {
 
 type ViewMode = 'tableview' | 'breakdown' | 'pagereport';
 
+// ---------------------------------------------------------------------------
+// URL scheme: /vectors/{tool}/{filter}/{selection}
+//   filter    → all | case-{id} | filing-{id} | doc-{id}
+//   selection → chunk-{id} (tableview) | page-{n} (pagereport)
+// Secondary tableview filters (type/q/pmin/pmax) and pagereport status ride
+// as query params. Each tool only accepts the filter kinds it can act on;
+// switching tools carries the filter across when the target supports it.
+// ---------------------------------------------------------------------------
+
+type VectorFilterKind = 'all' | 'case' | 'filing' | 'doc';
+
+interface VectorsFilter {
+  kind: VectorFilterKind;
+  id?: string;
+}
+
+const TOOL_FILTER_KINDS: Record<ViewMode, VectorFilterKind[]> = {
+  tableview: ['case', 'filing', 'doc'],
+  breakdown: ['case'],
+  pagereport: ['case', 'doc'],
+};
+
+function buildVectorsPath(
+  tool: ViewMode,
+  filter?: VectorsFilter,
+  selection?: string,
+  query?: URLSearchParams,
+): string {
+  const segs = [`/vectors/${tool}`];
+  const hasFilter = filter && filter.kind !== 'all' && filter.id
+    && TOOL_FILTER_KINDS[tool].includes(filter.kind);
+  if (hasFilter) {
+    segs.push(`${filter!.kind}-${encodeURIComponent(filter!.id!)}`);
+  } else if (selection) {
+    segs.push('all'); // selection needs a filter slot to keep segment positions stable
+  }
+  if (selection) segs.push(encodeURIComponent(selection));
+  const qs = query?.toString();
+  return segs.join('/') + (qs ? `?${qs}` : '');
+}
+
+/** Carry a filter to another tool, dropping it if the target can't use it. */
+function carryFilter(filter: VectorsFilter, target: ViewMode): VectorsFilter {
+  if (filter.kind !== 'all' && filter.id && TOOL_FILTER_KINDS[target].includes(filter.kind)) {
+    return filter;
+  }
+  return { kind: 'all' };
+}
+
 interface VectorViewerProps {
   cases: Case[];
   filings: Filing[];
   documents: Document[];
   initialViewMode?: ViewMode;
   hasExplicitPath?: boolean;
+  initialFilterKind?: VectorFilterKind;
+  initialFilterId?: string;
+  initialChunkId?: string;
+  initialModalPage?: number;
+  initialTableQuery?: { isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string };
   initialCaseId?: string;
   initialDocumentId?: string;
   initialStatusFilter?: string;
@@ -111,6 +165,11 @@ export default function VectorViewer({
   documents,
   initialViewMode = 'tableview',
   hasExplicitPath = false,
+  initialFilterKind = 'all',
+  initialFilterId,
+  initialChunkId,
+  initialModalPage,
+  initialTableQuery,
   initialCaseId,
   initialDocumentId,
   initialStatusFilter,
@@ -120,10 +179,25 @@ export default function VectorViewer({
   const [stats, setStats] = useState<VectorStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
 
-  // URL-driven navigation
+  // Last-known entity filter, reported up by the active tool so switching
+  // tools can carry it across (when the target tool supports the kind).
+  const currentFilterRef = useRef<VectorsFilter>(
+    initialFilterKind !== 'all' && initialFilterId
+      ? { kind: initialFilterKind, id: initialFilterId }
+      : initialDocumentId
+        ? { kind: 'doc', id: initialDocumentId }
+        : initialCaseId
+          ? { kind: 'case', id: initialCaseId }
+          : { kind: 'all' },
+  );
+  const reportFilter = useCallback((f: VectorsFilter) => {
+    currentFilterRef.current = f;
+  }, []);
+
+  // URL-driven navigation — /vectors/{tool}/{filter}; selection never carries
   const setViewMode = useCallback((m: ViewMode) => {
     setViewModeState(m);
-    router.push(`/vectors/${m}`, { scroll: false });
+    router.push(buildVectorsPath(m, carryFilter(currentFilterRef.current, m)), { scroll: false });
   }, [router]);
 
   // Fetch stats once on mount
@@ -222,6 +296,10 @@ export default function VectorViewer({
                 documents={documents}
                 stats={stats}
                 statsLoading={statsLoading}
+                initialFilter={currentFilterRef.current}
+                initialChunkId={initialViewMode === 'tableview' ? initialChunkId : undefined}
+                initialQuery={initialTableQuery}
+                reportFilter={reportFilter}
               />
             )}
             {viewMode === 'breakdown' && (
@@ -229,6 +307,8 @@ export default function VectorViewer({
                 cases={cases}
                 stats={stats}
                 statsLoading={statsLoading}
+                initialCaseId={currentFilterRef.current.kind === 'case' ? currentFilterRef.current.id : undefined}
+                reportFilter={reportFilter}
               />
             )}
             {viewMode === 'pagereport' && (
@@ -239,6 +319,8 @@ export default function VectorViewer({
                 initialCaseId={initialCaseId}
                 initialDocumentId={initialDocumentId}
                 initialStatusFilter={initialStatusFilter}
+                initialModalPage={initialViewMode === 'pagereport' ? initialModalPage : undefined}
+                reportFilter={reportFilter}
               />
             )}
           </div>
@@ -328,17 +410,26 @@ function TableViewContent({
   documents,
   stats,
   statsLoading,
+  initialFilter,
+  initialChunkId,
+  initialQuery,
+  reportFilter,
 }: {
   cases: Case[];
   filings: Filing[];
   documents: Document[];
   stats: VectorStats | null;
   statsLoading: boolean;
+  initialFilter?: VectorsFilter;
+  initialChunkId?: string;
+  initialQuery?: { isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string };
+  reportFilter?: (f: VectorsFilter) => void;
 }) {
+  const router = useRouter();
   const [chunks, setChunks] = useState<VectorChunk[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [expandedChunk, setExpandedChunk] = useState<string | null>(null);
+  const [expandedChunk, setExpandedChunk] = useState<string | null>(initialChunkId ?? null);
 
   // Pagination
   const [page, setPage] = useState(1);
@@ -346,15 +437,54 @@ function TableViewContent({
   const [totalPages, setTotalPages] = useState(0);
   const limit = 50;
 
-  // Filters
-  const [caseId, setCaseId] = useState('');
-  const [filingId, setFilingId] = useState('');
-  const [documentId, setDocumentId] = useState('');
-  const [isExhibit, setIsExhibit] = useState('');
-  const [textSearch, setTextSearch] = useState('');
-  const [pageMin, setPageMin] = useState('');
-  const [pageMax, setPageMax] = useState('');
+  // Filters — primary entity filter seeds from the URL path segment
+  const [caseId, setCaseId] = useState(initialFilter?.kind === 'case' ? initialFilter.id ?? '' : '');
+  const [filingId, setFilingId] = useState(initialFilter?.kind === 'filing' ? initialFilter.id ?? '' : '');
+  const [documentId, setDocumentId] = useState(initialFilter?.kind === 'doc' ? initialFilter.id ?? '' : '');
+  const [isExhibit, setIsExhibit] = useState(initialQuery?.isExhibit ?? '');
+  const [textSearch, setTextSearch] = useState(initialQuery?.textSearch ?? '');
+  const [pageMin, setPageMin] = useState(initialQuery?.pageMin ?? '');
+  const [pageMax, setPageMax] = useState(initialQuery?.pageMax ?? '');
   const [filterTrigger, setFilterTrigger] = useState(0);
+
+  // Sync /vectors/tableview/{filter}/{chunk-selection}?type&q&pmin&pmax.
+  // The path filter is the most specific selected entity (doc > filing > case).
+  const syncUrl = useCallback((overrides?: {
+    selection?: string | null;
+    caseId?: string; filingId?: string; documentId?: string;
+    isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string;
+  }) => {
+    const c = overrides?.caseId ?? caseId;
+    const f = overrides?.filingId ?? filingId;
+    const d = overrides?.documentId ?? documentId;
+    const filter: VectorsFilter = d
+      ? { kind: 'doc', id: d }
+      : f
+        ? { kind: 'filing', id: f }
+        : c
+          ? { kind: 'case', id: c }
+          : { kind: 'all' };
+    reportFilter?.(filter);
+    const qp = new URLSearchParams();
+    const ex = overrides?.isExhibit ?? isExhibit;
+    const q = overrides?.textSearch ?? textSearch;
+    const pmin = overrides?.pageMin ?? pageMin;
+    const pmax = overrides?.pageMax ?? pageMax;
+    if (ex) qp.set('type', ex);
+    if (q.trim()) qp.set('q', q.trim());
+    if (pmin) qp.set('pmin', pmin);
+    if (pmax) qp.set('pmax', pmax);
+    const selection = overrides?.selection === undefined
+      ? (expandedChunk ? `chunk-${expandedChunk}` : undefined)
+      : (overrides.selection ? `chunk-${overrides.selection}` : undefined);
+    router.replace(buildVectorsPath('tableview', filter, selection, qp), { scroll: false });
+  }, [router, reportFilter, caseId, filingId, documentId, isExhibit, textSearch, pageMin, pageMax, expandedChunk]);
+
+  const toggleChunk = useCallback((id: string) => {
+    const next = expandedChunk === id ? null : id;
+    setExpandedChunk(next);
+    syncUrl({ selection: next });
+  }, [expandedChunk, syncUrl]);
 
   const filteredFilings = caseId
     ? filings.filter(f => f.caseId === caseId)
@@ -407,6 +537,7 @@ function TableViewContent({
     setPage(1);
     setExpandedChunk(null);
     setFilterTrigger(t => t + 1);
+    syncUrl({ selection: null });
   };
 
   const handleResetFilters = () => {
@@ -420,6 +551,11 @@ function TableViewContent({
     setPage(1);
     setExpandedChunk(null);
     setFilterTrigger(t => t + 1);
+    syncUrl({
+      selection: null,
+      caseId: '', filingId: '', documentId: '',
+      isExhibit: '', textSearch: '', pageMin: '', pageMax: '',
+    });
   };
 
   const formatDate = (ts: number) => new Date(ts).toLocaleString();
@@ -608,7 +744,7 @@ function TableViewContent({
                   return (
                     <tr
                       key={chunk.id}
-                      onClick={() => setExpandedChunk(isExpanded ? null : chunk.id)}
+                      onClick={() => toggleChunk(chunk.id)}
                       className={`cursor-pointer transition-colors ${isExpanded ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                     >
                       <td className="px-4 py-3 max-w-md">
@@ -688,12 +824,28 @@ function BreakdownContent({
   cases,
   stats,
   statsLoading,
+  initialCaseId,
+  reportFilter,
 }: {
   cases: Case[];
   stats: VectorStats | null;
   statsLoading: boolean;
+  initialCaseId?: string;
+  reportFilter?: (f: VectorsFilter) => void;
 }) {
+  const router = useRouter();
   const getCaseName = (id: string) => cases.find(c => c.id === id)?.name;
+
+  // Breakdown's only supported filter kind is case- (clicking a case bar
+  // toggles it); the document breakdown narrows to the selected case.
+  const [selectedCaseId, setSelectedCaseId] = useState(initialCaseId ?? '');
+  const toggleCase = useCallback((id: string) => {
+    const next = selectedCaseId === id ? '' : id;
+    setSelectedCaseId(next);
+    const filter: VectorsFilter = next ? { kind: 'case', id: next } : { kind: 'all' };
+    reportFilter?.(filter);
+    router.replace(buildVectorsPath('breakdown', filter), { scroll: false });
+  }, [selectedCaseId, reportFilter, router]);
 
   if (!stats && statsLoading) {
     return (
@@ -714,7 +866,14 @@ function BreakdownContent({
         {stats.caseBreakdown.length > 0 ? (
           <div className="space-y-3">
             {stats.caseBreakdown.map((c) => (
-              <BarRow key={c.id} label={c.name} value={c.chunks} max={stats.totalChunks} color="bg-blue-500" />
+              <div
+                key={c.id}
+                onClick={() => toggleCase(c.id)}
+                title={selectedCaseId === c.id ? 'Click to clear case filter' : 'Click to filter documents by this case'}
+                className={`cursor-pointer rounded-md transition-colors -mx-2 px-2 py-1 ${selectedCaseId === c.id ? 'bg-blue-50 ring-1 ring-blue-200' : 'hover:bg-gray-50'}`}
+              >
+                <BarRow label={c.name} value={c.chunks} max={stats.totalChunks} color="bg-blue-500" />
+              </div>
             ))}
           </div>
         ) : (
@@ -724,10 +883,17 @@ function BreakdownContent({
 
       {/* Document Breakdown */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Chunks by Document</h3>
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">
+          Chunks by Document
+          {selectedCaseId && (
+            <span className="ml-2 text-sm font-normal text-blue-600">
+              — {getCaseName(selectedCaseId) || 'selected case'}
+            </span>
+          )}
+        </h3>
         {stats.documentBreakdown.length > 0 ? (
           <div className="space-y-2">
-            {stats.documentBreakdown.map((d) => {
+            {stats.documentBreakdown.filter(d => !selectedCaseId || d.caseId === selectedCaseId).map((d) => {
               const caseName = getCaseName(d.caseId);
               return (
                 <div key={d.id} className="flex items-center gap-4">
@@ -817,6 +983,8 @@ function PageReportContent({
   initialCaseId,
   initialDocumentId,
   initialStatusFilter,
+  initialModalPage,
+  reportFilter,
 }: {
   cases: Case[];
   filings: Filing[];
@@ -824,6 +992,8 @@ function PageReportContent({
   initialCaseId?: string;
   initialDocumentId?: string;
   initialStatusFilter?: string;
+  initialModalPage?: number;
+  reportFilter?: (f: VectorsFilter) => void;
 }) {
   const router = useRouter();
 
@@ -847,9 +1017,11 @@ function PageReportContent({
     initialStatusFilter === 'indexed' || initialStatusFilter === 'unindexed' || initialStatusFilter === 'empty' ? initialStatusFilter : 'all'
   );
 
-  // Modals
+  // Modals — chunksModalPage is URL-addressable (/vectors/pagereport/doc-{id}/page-{n})
   const [pageViewerPage, setPageViewerPage] = useState<number | null>(null);
-  const [chunksModalPage, setChunksModalPage] = useState<number | null>(null);
+  const [chunksModalPage, setChunksModalPage] = useState<number | null>(
+    initialDocumentId && initialModalPage ? initialModalPage : null,
+  );
 
   // Selection
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
@@ -877,47 +1049,68 @@ function PageReportContent({
       if (validStatus) {
         setStatusFilter(storedStatus as StatusFilter);
       }
-      // Sync URL with restored IDB values
-      const params = new URLSearchParams();
-      if (storedCase) params.set('caseId', storedCase);
-      if (storedDoc) params.set('documentId', storedDoc);
+      // Sync URL with restored IDB values (path-segment form)
+      const filter: VectorsFilter = storedDoc
+        ? { kind: 'doc', id: storedDoc }
+        : storedCase
+          ? { kind: 'case', id: storedCase }
+          : { kind: 'all' };
+      reportFilter?.(filter);
       const s = validStatus ? storedStatus : 'all';
+      const params = new URLSearchParams();
       if (s && s !== 'all') params.set('status', s);
-      const qs = params.toString();
-      router.replace(`/vectors/pagereport${qs ? '?' + qs : ''}`, { scroll: false });
+      router.replace(buildVectorsPath('pagereport', filter, undefined, params), { scroll: false });
       idbInitialized.current = true;
     }).catch(() => { idbInitialized.current = true; });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Update URL helper
-  const updateUrl = useCallback((overrides: { caseId?: string; documentId?: string; status?: string }) => {
-    const params = new URLSearchParams();
+  // Update URL helper — /vectors/pagereport/{doc-|case-}{id}/{page-n}?status=
+  const updateUrl = useCallback((overrides: { caseId?: string; documentId?: string; status?: string; modalPage?: number | null }) => {
     const c = overrides.caseId ?? selectedCaseId;
     const d = overrides.documentId ?? selectedDocId;
     const s = overrides.status ?? statusFilter;
-    if (c) params.set('caseId', c);
-    if (d) params.set('documentId', d);
+    const mp = overrides.modalPage === undefined ? chunksModalPage : overrides.modalPage;
+    const filter: VectorsFilter = d
+      ? { kind: 'doc', id: d }
+      : c
+        ? { kind: 'case', id: c }
+        : { kind: 'all' };
+    reportFilter?.(filter);
+    const params = new URLSearchParams();
     if (s && s !== 'all') params.set('status', s);
-    const qs = params.toString();
-    router.replace(`/vectors/pagereport${qs ? '?' + qs : ''}`, { scroll: false });
-  }, [router, selectedCaseId, selectedDocId, statusFilter]);
+    // page selection only meaningful with a document selected
+    const selection = d && mp ? `page-${mp}` : undefined;
+    router.replace(buildVectorsPath('pagereport', filter, selection, params), { scroll: false });
+  }, [router, reportFilter, selectedCaseId, selectedDocId, statusFilter, chunksModalPage]);
+
+  const openChunksModal = useCallback((p: number) => {
+    setChunksModalPage(p);
+    updateUrl({ modalPage: p });
+  }, [updateUrl]);
+
+  const closeChunksModal = useCallback(() => {
+    setChunksModalPage(null);
+    updateUrl({ modalPage: null });
+  }, [updateUrl]);
 
   // Handlers that sync state + IndexedDB + URL
   const handleCaseChange = useCallback((id: string) => {
     setSelectedCaseId(id);
     setSelectedDocId('');
     setSelectedPages(new Set());
+    setChunksModalPage(null);
     setPreference('vectors.pageReport.caseId', id).catch(() => {});
     setPreference('vectors.pageReport.documentId', '').catch(() => {});
-    updateUrl({ caseId: id, documentId: '' });
+    updateUrl({ caseId: id, documentId: '', modalPage: null });
   }, [updateUrl]);
 
   const handleDocChange = useCallback((id: string) => {
     setSelectedDocId(id);
     setSelectedPages(new Set());
+    setChunksModalPage(null);
     setPreference('vectors.pageReport.documentId', id).catch(() => {});
-    updateUrl({ documentId: id });
+    updateUrl({ documentId: id, modalPage: null });
   }, [updateUrl]);
 
   const handleStatusFilter = useCallback((f: StatusFilter) => {
@@ -1298,7 +1491,7 @@ function PageReportContent({
                       <td className="px-4 py-2.5 text-xs whitespace-nowrap">
                         {p.chunkCount > 0 ? (
                           <button
-                            onClick={() => setChunksModalPage(p.pageNumber)}
+                            onClick={() => openChunksModal(p.pageNumber)}
                             className="text-blue-600 hover:text-blue-800 hover:underline font-medium cursor-pointer"
                           >
                             {p.chunkCount}
@@ -1397,7 +1590,7 @@ function PageReportContent({
         <ChunksModal
           documentId={selectedDocId}
           pageNumber={chunksModalPage}
-          onClose={() => setChunksModalPage(null)}
+          onClose={closeChunksModal}
         />
       )}
     </>
