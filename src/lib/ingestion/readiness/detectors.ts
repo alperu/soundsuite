@@ -27,7 +27,7 @@ const BIGRAM_ENTROPY_GARBLED = 4.3;
  * text collapses. Deliberately small — it only needs to separate prose
  * from letter soup, not spell-check.
  */
-const WORDLIST = new Set(
+export const WORDLIST = new Set(
   (
     'the of and to in a is that for on with as by at from this be are was were or an it not which shall may have has ' +
     'had will would can could must should their there herein hereby its his her they them then than into upon under ' +

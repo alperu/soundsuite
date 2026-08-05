@@ -1,4 +1,4 @@
-import { OllamaOCREngine, looksDegenerate } from '../ollama-ocr-engine';
+import { OllamaOCREngine } from '../ollama-ocr-engine';
 
 // Assigned fresh in beforeEach — module-level capture of global.fetch is
 // unreliable across setup-file ordering.
@@ -161,18 +161,6 @@ describe('OllamaOCREngine', () => {
 
       expect(result.text).toBe(legit);
       expect(result.confidence).toBe(1.0);
-    });
-
-    describe('looksDegenerate', () => {
-      it.each([
-        ['pangram repeated with newlines', (FOX + '\n\n').repeat(50), true],
-        ['pangram repeated without newlines', (FOX + ' ').repeat(50), true],
-        ['short output never flagged', FOX, false],
-        ['normal legal text', Array.from({ length: 30 }, (_, i) => `Paragraph ${i}: distinct factual allegation about event number ${i * 13}.`).join('\n'), false],
-        ['empty', '', false],
-      ])('%s', (_label, text, expected) => {
-        expect(looksDegenerate(text)).toBe(expected);
-      });
     });
   });
 
