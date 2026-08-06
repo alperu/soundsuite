@@ -110,21 +110,32 @@ export function assessOcrOutput(
   if (task === 'table') {
     const hasHtmlTable = /<table[\s>]/i.test(raw);
     const cellCount = (raw.match(/<t[dh][\s>]/gi) || []).length;
+    // PaddleOCR-VL 'Table Recognition:' actually emits OTSL cell markup —
+    // <fcel>value<lcel>…<nl> (first-cell / linked-cell / empty-cell /
+    // new-row tokens), NOT HTML. Measured on real financial exhibits
+    // 2026-08-06 (Phase 0). A normalizer converts OTSL → HTML downstream;
+    // the gate must accept it as valid structure.
+    const otslCells = (raw.match(/<(?:fcel|lcel|ecel|nl)>/g) || []).length;
     const pipeLines = raw.split('\n').filter(l => (l.match(/\|/g) || []).length >= 2).length;
     if (hasHtmlTable) {
       if (cellCount < 4) reasons.push('table-empty');
       // Unclosed table or output ending mid-tag ⇒ num_predict exhaustion.
       // A truncated table looks structured and is wrong — reject.
       if (!/<\/table>/i.test(raw) || /<[a-z][^>]*$/i.test(raw)) reasons.push('table-truncated');
+    } else if (otslCells >= 4) {
+      // OTSL: output ending mid-token ⇒ truncation.
+      if (/<[a-z][^>]*$/i.test(raw)) reasons.push('table-truncated');
     } else if (pipeLines < 2) {
-      // Neither HTML nor a markdown pipe table — the model returned prose
-      // or noise for a table crop.
+      // Neither HTML, OTSL, nor a markdown pipe table — the model returned
+      // prose or noise for a table crop.
       reasons.push('table-empty');
     }
   }
 
   // Content under judgment: markup stripped for table output, raw otherwise.
-  const t = task === 'table' ? raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : raw;
+  const t = task === 'table'
+    ? raw.replace(/<(?:fcel|lcel|ecel|nl)>/g, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+    : raw;
 
   // Repetition: skipped for 'table' (row structure legitimately repeats even
   // after markup stripping) and 'seal' (a 3-word output has no shingles).

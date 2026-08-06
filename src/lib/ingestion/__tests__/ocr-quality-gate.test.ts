@@ -53,6 +53,22 @@ describe('assessOcrOutput', () => {
       expect(r.reasons).toEqual([]);
     });
 
+    it('passes OTSL cell markup (what PaddleOCR-VL actually emits — Phase 0 finding)', () => {
+      const otsl = '<fcel>Transaction Date<fcel>Description<fcel>Amount<nl>' +
+        Array.from({ length: 12 }, (_, i) => `<fcel>2023-11-0${(i % 9) + 1}<fcel>Payment received<fcel>$${120 + i}.00<nl>`).join('') +
+        '<fcel>Total<lcel><fcel>$1,545.00<nl>';
+      const r = assessOcrOutput(otsl, { task: 'table' });
+      expect(r.ok).toBe(true);
+      expect(r.reasons).toEqual([]);
+    });
+
+    it('rejects OTSL ending mid-token as truncated', () => {
+      const truncated = '<fcel>Date<fcel>Amount<nl><fcel>2023-11-01<fcel>$120<nl><fcel>2023-11-02<fce';
+      const r = assessOcrOutput(truncated, { task: 'table' });
+      expect(r.ok).toBe(false);
+      expect(r.reasons).toContain('table-truncated');
+    });
+
     it('passes markdown pipe tables', () => {
       const md = '| Date | Description | Amount |\n|---|---|---|\n' +
         Array.from({ length: 10 }, (_, i) => `| 2024-01-0${i} | Payment | $${100 + i} |`).join('\n');

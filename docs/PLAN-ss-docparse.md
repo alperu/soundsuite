@@ -98,13 +98,23 @@ transcripts get shredded into fake tables (§6.1 hazard, now doubly binding).
   script/LaTeX checks, adds `table-empty` + `table-truncated`; 'seal' disables repetition.
   Region-level rejection drops `html` only — never the block's plain text.
 
-### Phase 0 measurement gate (0.5 d — run BEFORE building escalation)
+### Phase 0 measurement gate — RESULTS 2026-08-06 (financial exhibit pages, live ss-ocr host)
 
-On ~20 known table-bearing scanned pages: does plain `OCR:` already emit usable table markup?
-If yes, the scanned-side escalation (span detection + y-band cropping — the design's admitted
-weakest link) collapses to "tag the span `type:'table'`" and ~2 days of work is deleted. Also
-measure: born-digital/scanned corpus split (decides how much the hybrid captures vs the service),
-and per-region latency (est. 2–5 s — comparable to a full page, table HTML decode dominates).
+Measured on real scanned financial statements (Macy's / Schwab / account-activity pages from an RR
+volume; corpus confirmed table-sparse — a pipe-density sweep of all 37k chunks found ONE strongly
+tabular page plus the financial-exhibit cluster):
+
+1. **`Table Recognition:` emits OTSL cell markup, NOT HTML** — `<fcel>value<lcel>…<ecel>…<nl>`
+   (first/linked/empty-cell + new-row tokens). Real structure on every tested page. **New work
+   item: OTSL → HTML/markdown normalizer** (small, pure function) feeding `block.html`; the
+   quality gate accepts OTSL as valid table structure (implemented + tested 2026-08-06).
+2. **Plain `OCR:` does NOT yield machine-usable rows** — it returns space-aligned flat text
+   (columns visually preserved, structurally lost). ⇒ **escalation IS required** for scanned
+   tables; the "collapse to tagging" shortcut is dead.
+3. **Full-page `Table Recognition:` appears to capture only the FIRST table region** (Schwab page:
+   280 chars vs 1.7k of OCR text) — validates crops-per-region over full-page task calls.
+4. **Latency: 1.7–6.2 s per task call** at full-page size — in line with the 2–5 s/region estimate.
+5. Remaining Phase 0 item (open): born-digital/scanned corpus split measurement.
 
 ### Honest losses vs the vLLM service (kept as future third producer)
 
