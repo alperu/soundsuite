@@ -39,7 +39,12 @@ async function buildProcessDocumentFn(): Promise<(documentId: string, filePath: 
   const config = await getConfig();
 
   const pdfParser = new PDFParser();
-  const textChunker = new LangChainTextChunker();
+  // StructuredChunker chunks block-carrying pages structurally (real
+  // headings, atomic tables, furniture excluded) and delegates pages
+  // without blocks to LangChainTextChunker unchanged — so with
+  // docparseEnabled off this is byte-identical to the bare chunker.
+  const { StructuredChunker } = await import('@/lib/ingestion/structured-chunker');
+  const textChunker = new StructuredChunker(new LangChainTextChunker());
 
   // Instantiate OCR engine based on admin config
   let ocrEngine: import('@/lib/ingestion/ocr-engine').IOCREngine;
