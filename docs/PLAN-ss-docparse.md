@@ -132,6 +132,32 @@ Trigger to build the service later: scanned>50% + structure needed there, table-
   bounds clamp, `withSemaphore()` (don't starve the page-image viewer), NO preprocessImage on
   vector renders (CLAHE/sharpen erases hairline rules). DOMMatrix load-order landmine documented.
 
+### Adoptions from external research review (2026-08-06)
+
+Cross-checked an external "document object model" research write-up. Rejected its centerpiece — a
+Python sidecar for native tables (PyMuPDF is **AGPL in Python too**, `find_tables` lives in the
+Python binding layer; a new deployable contradicts the no-new-services constraint; corpus tables
+are rare and `pdf-parse` covers ruled ones). **pdfplumber (MIT) joins poppler `-bbox-layout` as a
+test-time oracle only** — CI/dev recall validation, never the runtime path. Four adoptions:
+
+1. **Chunk-adjacency context expansion at retrieval** (→ §6.3 P2 item 6b): after retrieval, expand
+   context through neighbors (`documentId + pageNumber + chunkIndex` ordering — zero schema change),
+   parent-section chunks, and referenced tables at ANSWER time instead of embedding fatter chunks.
+   Cuts synthesis tokens while improving answers.
+2. **Identifier capture from furniture:** when the block extractor classifies headers/footers, it
+   extracts recognizable identifiers (Bates numbers, ECF stamps, clerk file-marks) into chunk
+   metadata (`batesNumber`, `fileStamp`) before excluding the block from embeddings. Furniture is
+   noise; its identifiers are citations.
+3. **`parserVersion` stamping on Document** (alongside the existing `embeddingModel`): makes staged
+   migrations queryable ("which docs predate structure?"). One additive nullable column, §5 rules.
+4. **Section tree = named v2 target:** v1 keeps denormalized `headingPath`; `blockOrders` +
+   persisted `structuredJson` already preserve enough to build first-class section records
+   (parent/child, TOC navigation, section summaries) later WITHOUT re-parsing. v1 must not block
+   this (and doesn't).
+
+Skipped: dual-extractor merge on table pages (double cost, rarest class; Phase 0 picks one path)
+and a general chunk-pointer graph table (adjacency expansion delivers the value without it).
+
 ### Revised rollout (replaces §9 steps 1–2; steps 3–8 survive verbatim)
 
 | Step | Scope | Est. |
