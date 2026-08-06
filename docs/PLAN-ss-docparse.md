@@ -1,8 +1,12 @@
 # PLAN: `ss-docparse` — structured document parsing service
 
-**Date:** 2026-08-05
+**Date:** 2026-08-05 · **Revised 2026-08-06** (hybrid architecture — see §0.1)
 **Parents:** `research-ocr-structured-parsing-roadmap.md` (Phase 3), `TODO-paddleocr-vl-and-readiness-score.md` (§A.7 deferred item)
 **Status:** draft for review — no code yet
+**⚠ REVISION NOTICE:** the dedicated vLLM service (§2 fleet wiring, port 8101, new role) is
+**superseded** by the §0.1 hybrid: pdfjs-derived structure + the EXISTING ss-ocr role's fixed-task
+prompts. §§3–6.3 (block schema, chunker, embedding, search-side) survive unchanged — only the
+producer changed. The service remains documented below as a possible future third producer.
 
 ## 0. What and why (one paragraph)
 
@@ -17,6 +21,134 @@ default and universal fallback; ss-docparse is an all-or-nothing document-level 
 **Naming decision:** `ss-docparse` (not `ss-ocr-full`) — the service does layout + reading order +
 tables, and a second role named "ocr" would confuse operators about which is which.
 
+## 0.1 REVISION 2026-08-06 — hybrid two-producer architecture (no new fleet role)
+
+Operator question that triggered this: "can't we use existing ss-ocr for tables/seals/images and
+pdf-parser for headings/paragraphs/footers?" Two research agents (code-grounded design + parser
+bake-off with ground-truth PDFs) answered **yes**, with evidence. Decision: build the hybrid;
+defer the vLLM service to an optional future third producer behind the same schema.
+
+### Architecture
+
+```
+per page ──┬─ born-digital (density ≥ ocrThreshold, unchanged trigger)
+           │    PdfBlockExtractor (pdfjs positioned items + getOperatorList rules)
+           │      → heading/paragraph/furniture blocks, real bboxes, reading order
+           │      → table CANDIDATE regions (ruling lines + column alignment; pdf-parse
+           │        as ruled-grid extractor gated on ruling-line count)
+           └─ scanned (unchanged trigger)
+                OllamaOCREngine.recognizeTask(img,'ocr')  → flat text block
+                + text-side table-span detection (Phase 0 decides if escalation needed)
+
+both: table candidate → renderPage() [pdftoppm, LRU-cached] → sharp.extract(bbox±2% pad)
+      → recognizeTask(crop,'table')  [PaddleOCR-VL 'Table Recognition:'] → block.html
+      (gate-reject/fail ⇒ keep plain-text block — region failures NEVER zero text)
+
+→ DocparseBlock[] (§3, + producer:'pdf'|'ocr'|'docparse') → StructuredChunker §6 → search §6.3
+```
+
+**Fleet impact: none.** Region calls ride `resolveEndpoint('ocr')`. §2 is deleted from v1 scope
+(no port 8101, no registry double-write, no assignment chain). Saves ~4 GB VRAM, one container,
+one idle-timer/cold-start class — and Mac hosts gain born-digital structure (pdfjs producer needs
+no GPU; the vLLM plan gave Macs nothing).
+
+### Parser decision (bake-off 2026-08-06, ground-truth tagged/untagged pair + 230 real pages)
+
+- **Primary: pdfjs-dist positioned items** (already a dep; `transform` x/y, width/height,
+  fontName/styles) + `getOperatorList()` for ruling lines. The repo already proves the pattern:
+  `reconstructRRPageText()` (`pdf-parser.ts:568-600`) does y-bucketing + x-sorting today.
+- **Add `pdf-parse@2.x` (Apache-2.0, pdfjs-based, 7.2M/wk)** as the ruled-table extractor — it
+  correctly recovered a real borderless-ish email-index table (13×5, multi-line cells, ~90 ms);
+  use its exported geometry classes (cell bboxes), gate it on ruling-line count.
+- **REJECTED: MuPDF/mupdf.js** — decisive experiment: flawless on a tagged PDF, **zero tables and
+  zero headings on the visually-identical untagged copy** (its 'structured' mode reads the PDF tag
+  tree; PyMuPDF's find_tables is Python-side, unreachable from JS). Corpus is 100% untagged
+  (Quartz/Debenu producers). Also AGPL-3.0 — a hazard for this product, moot given it doesn't work.
+- **REJECTED: PDFium bindings** (no positional text API), **pdf-table-extractor** (dead since 2016),
+  unpdf/pdf2json (pdfjs re-wrappers). **Poppler `pdftotext -bbox-layout`**: test-time oracle for
+  reading-order validation only (no font info; GPL stays arm's-length as subprocess).
+- **Fact correction to §3.1:** the primary text extractor is `@d0paminedriven/pdfdown` (Rust NAPI,
+  MIT, 8 weekly downloads — single-author supply-chain note); pdfjs is its fallback. The structure
+  layer reads positions via pdfjs regardless.
+
+### Corpus reality check (drives priorities)
+
+230-page sweep: genuine tables are RARE (~1 ruled table; ~11% pages trip naive column heuristics,
+mostly false positives from RR transcripts' line numbers + speaker indents). The dominant
+structural wins here are **reading order, headings, furniture, and record-layout segmentation**
+(docket/"Civil Settings" sheets — alignment-only, no rules — are the hard genuine miss). Hard
+rule: **suppress all table detection on pages where the RR line-number detector fires**, or
+transcripts get shredded into fake tables (§6.1 hazard, now doubly binding).
+
+### Engine changes (existing code, small)
+
+- `OcrTask = 'ocr'|'table'|'seal'|'formula'|'chart'`; additive `ITaskOCREngine` capability
+  interface + `asTaskEngine()` — do NOT widen `IOCREngine.recognizeImage` (the forked-child
+  `OCREngine` can't implement tasks). `recognizeImage` ≡ `recognizeTask(buf,'ocr')`.
+- `ocr-model-caps`: `taskPrompts` map ('Table Recognition:' etc.) + `numPredictByTask`
+  (table: 16384 — truncated table HTML is worse than none). Instruction models (minicpm-v):
+  `supportsTask` false for non-'ocr' — never synthesize a "describe this table" prompt; the gate
+  can't catch fluent confabulation.
+- **Latent bug 1 — `CachedOCREngine`:** cache key is `sha256(image)` only; same crop under
+  `OCR:` vs `Table Recognition:` collides. Key must become `${task}:${sha256}`. Correctness bug
+  the moment tasks exist.
+- **Latent bug 2 — quality gate:** `assessOcrOutput` unchanged would REJECT valid table HTML
+  (markup trips repetition shingles; numeric tables trip letter-soup; long attrs trip
+  run-together). Add `{task}` profiles: 'table' strips markup before ratio checks, keeps
+  script/LaTeX checks, adds `table-empty` + `table-truncated`; 'seal' disables repetition.
+  Region-level rejection drops `html` only — never the block's plain text.
+
+### Phase 0 measurement gate (0.5 d — run BEFORE building escalation)
+
+On ~20 known table-bearing scanned pages: does plain `OCR:` already emit usable table markup?
+If yes, the scanned-side escalation (span detection + y-band cropping — the design's admitted
+weakest link) collapses to "tag the span `type:'table'`" and ~2 days of work is deleted. Also
+measure: born-digital/scanned corpus split (decides how much the hybrid captures vs the service),
+and per-region latency (est. 2–5 s — comparable to a full page, table HTML decode dominates).
+
+### Honest losses vs the vLLM service (kept as future third producer)
+
+1. **Scanned pages stay structurally flat** — no heading path/bboxes/reading order there; only
+   table escalation adds structure. If scanned share of corpus is high AND structure matters on
+   them, revisit the service.
+2. Layout **typing** confidence on unusual typography (geometry gives ground-truth position, but
+   heading-vs-emphasis is heuristic, silent on failure).
+3. Table **crop** quality (PP-DocLayoutV3's tight bboxes; recognition quality is the SAME model).
+4. No figure/formula regions (nothing produces them); `DocparseBlock.confidence` stays undefined
+   — never fabricate 1.0.
+Trigger to build the service later: scanned>50% + structure needed there, table-region recall
+<70%, or spare VRAM appears. Same block schema ⇒ third producer drops in with zero downstream churn.
+
+### Schema deltas
+
+- `DocparsePageResult.producer: 'pdf' | 'ocr' | 'docparse'` — persisted; makes per-page quality
+  A/B-able and a later service rollout measurable.
+- `docparseFallbackCount` (§3) replaced by per-document counters: `pdfBlockPages`, `ocrFlatPages`,
+  `tableRegionsAttempted/Accepted` — surfaced like `ocrFailedCount`.
+- `blocks?: DocparseBlock[]` must be added to BOTH `PageText` declarations
+  (`pdf-parser.ts:38-44` AND `text-chunker.ts:49`) — the structureType-leak shape again.
+- Region crops: new `page-region-cropper.ts` over `renderPage()` (LRU: N crops = 1 render),
+  `sharp.extract`, 2% bbox pad (clipped header rows are the top TEDS loss), min-size reject,
+  bounds clamp, `withSemaphore()` (don't starve the page-image viewer), NO preprocessImage on
+  vector renders (CLAHE/sharpen erases hairline rules). DOMMatrix load-order landmine documented.
+
+### Revised rollout (replaces §9 steps 1–2; steps 3–8 survive verbatim)
+
+| Step | Scope | Est. |
+| --- | --- | --- |
+| 0 | Phase 0 measurement (gates 2b/3) | 0.5 d |
+| 1a | Engine task selection + caps + CachedOCREngine key fix + tests | 0.5 d |
+| 1b | Quality-gate task profiles + tests | 0.5 d |
+| 2a | `pdf-block-extractor.ts` (headings/furniture/reading-order/bboxes) + column-alignment tables + pdf-parse ruled-grid + `PageText.blocks` both decls | 2–3 d |
+| 2b | `page-region-cropper.ts` | 1 d |
+| 3 | Escalation orchestrator (inside existing OCR p-queue, same ocrConcurrency — no new knob) + routing + `/admin/ocr` card + structure counters | 1.5–2 d |
+| 4–9 | Original steps 3–8 unchanged (persistence, StructuredChunker, binary switch + RR carve-out, search-side §6.3, A/B) | as planned |
+
+Net: fleet/catalog/port/router work → zero; added work is pure local compute, testable without a
+GPU, and remains useful even if the vLLM service is built later. Ingestion overhead: typical
+filings +10–15%; table-dense worst case ~2× (equal to the service plan's EXPECTED case);
+born-digital pages add zero GPU traffic unless a table is found.
+
 ## 1. Where it's operated (UI surfaces)
 
 | Surface | What appears | Work needed |
@@ -28,7 +160,7 @@ tables, and a second role named "ocr" would confuse operators about which is whi
 
 NOT on `/admin/embedding` — that page is vector-generation only.
 
-## 2. Fleet / sidecar wiring
+## 2. Fleet / sidecar wiring — ⚠ SUPERSEDED by §0.1 (kept for the future third-producer option)
 
 **⚠ Registry landmine (memory: project_sidecar_registry_overwrite):** every ContainerDef change must
 go in BOTH `sideCar/src/lib/state.ts` (`defaultRegistry`) AND `sideCar/src/lib/mode-templates.ts` —
