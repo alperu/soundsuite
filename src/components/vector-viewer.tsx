@@ -2143,11 +2143,19 @@ function MetaViewContent({
 
       {summary && !loading && (
         summary.pages.length === 0 ? (
+          summary.parserVersion ? (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800">
+              The structure stage ran on this document ({summary.parserVersion}) and stored no
+              structured pages — expected for <strong>Reporter&apos;s Record / transcript volumes</strong>,
+              which deliberately bypass structural parsing to preserve line-number citations
+              (the §6.1 carve-out), and for fully scanned documents. Re-indexing will not change this.
+            </div>
+          ) : (
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
-            No structure stored for this document ({summary.structuredPages} structured pages,
-            parserVersion: {summary.parserVersion ?? 'none'}). It was likely indexed before
+            No structure stored for this document (parserVersion: none). It was indexed before
             structured parsing was enabled — re-index it via clear-index to attach structure.
           </div>
+          )
         ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {/* Page list */}
