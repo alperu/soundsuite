@@ -269,6 +269,61 @@ describe('pdf-block-extractor pure core', () => {
     });
   });
 
+  describe('bold heading signal (real font names via commonObjs)', () => {
+    const B = 'TimesNewRomanPS-BoldMT';
+    const R = 'TimesNewRomanPSMT';
+
+    it('standalone centered bold title becomes a heading; bold caption run stays a paragraph', () => {
+      const items: PositionedItem[] = [
+        // caption run: consecutive narrow-centered lines, some bold
+        run('IN THE COURT OF APPEALS', 230, 700, { w: 150, h: 14, font: B }),
+        run('AUSTIN, TEXAS', 260, 684, { w: 90, h: 14, font: B }),
+        run('PETITIONER,', 265, 668, { w: 80, h: 14, font: B }),
+        // body prose
+        run('The following declaration is submitted in support of the', 72, 620, { w: 468, h: 14, font: R }),
+        run('pending motion and its exhibits described above here.', 72, 588, { w: 380, h: 14, font: R }),
+        // standalone centered bold section title between non-centered lines
+        run('CERTIFICATE OF SERVICE', 230, 540, { w: 150, h: 14, font: B }),
+        run('I certify a true copy was served on all counsel of record', 72, 500, { w: 468, h: 14, font: R }),
+        run('by electronic filing manager on the date of this filing.', 72, 468, { w: 440, h: 14, font: R }),
+      ];
+      const blocks = buildBlocks(items, PAGE);
+      const headings = blocks.filter(b => b.type === 'heading');
+      expect(headings).toHaveLength(1);
+      expect(headings[0].text).toBe('CERTIFICATE OF SERVICE');
+      // caption lines stay grouped as a paragraph, not three headings
+      const caption = blocks.find(b => b.text.includes('AUSTIN'));
+      expect(caption!.type).toBe('paragraph');
+      expect(caption!.text.split('\n')).toHaveLength(3);
+    });
+
+    it('a body line OPENING with bold emphasis is not a heading (whole-line rule)', () => {
+      const items: PositionedItem[] = [
+        { ...run('Emphasized opening', 72, 700, { w: 130, h: 14, font: B }) },
+        { ...run('continues into regular prose on the same line here.', 210, 700, { w: 330, h: 14, font: R }) },
+        run('And the paragraph carries on at normal weight below it,', 72, 668, { w: 440, h: 14, font: R }),
+        run('finishing with a third line that fixes the page leading.', 72, 636, { w: 430, h: 14, font: R }),
+      ];
+      const blocks = buildBlocks(items, PAGE);
+      expect(blocks.filter(b => b.type === 'heading')).toHaveLength(0);
+      expect(blocks.filter(b => b.type === 'paragraph')).toHaveLength(1);
+    });
+
+    it('lowercase bold wrap line merges into the bold heading (page-12 "fair value." shape)', () => {
+      const items: PositionedItem[] = [
+        run('C. The sale is a concealed transaction that cannot yield', 72, 700, { w: 440, h: 14, font: B }),
+        run('fair value.', 72, 668, { w: 80, h: 14, font: B }),
+        run('The record shows the marketing agent lists the property', 72, 636, { w: 440, h: 14, font: R }),
+        run('below its appraised value in the pending listing today.', 72, 604, { w: 430, h: 14, font: R }),
+      ];
+      const blocks = buildBlocks(items, PAGE);
+      const headings = blocks.filter(b => b.type === 'heading');
+      expect(headings).toHaveLength(1);
+      expect(headings[0].text).toContain('fair value.');
+      expect(blocks.filter(b => b.type === 'paragraph')).toHaveLength(1);
+    });
+  });
+
   it('full-width ALL-CAPS document title becomes ONE heading, not part of the body (page-1 title)', () => {
     // Real page-1 shape: two near-full-width caps title lines (opaque font,
     // so the bold heuristic is blind), then a caps salutation ending ':',

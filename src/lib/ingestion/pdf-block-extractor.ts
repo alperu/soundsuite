@@ -310,6 +310,32 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
     l.x0 > page.width * 0.15 &&
     l.x1 < maxX1 - RAGGED_MIN;
 
+  // Caption grids (court name, party names, cause number) are RUNS of
+  // centered lines — a narrow-centered line whose neighbor is also centered
+  // is caption content and must never become a heading, even when bold
+  // (measured: this filing's caption lines ARE bold). A STANDALONE centered
+  // line between non-centered neighbors is a section title ("UNSWORN
+  // DECLARATION", "CERTIFICATE OF SERVICE").
+  const inCenteredRun = (l: Line): boolean => {
+    if (!(isCentered(l) && l.x1 - l.x0 < page.width * 0.5)) return false;
+    const idx = lines.indexOf(l);
+    return (idx > 0 && isCentered(lines[idx - 1])) ||
+      (idx >= 0 && idx + 1 < lines.length && isCentered(lines[idx + 1]));
+  };
+
+  // Whole-line bold heading signal. Requires REAL font names — the pdfjs
+  // wrapper resolves opaque g_d0_fN ids via getOperatorList/commonObjs
+  // (Word-exported filings keep headings bold at body size; measured: the
+  // title, every section heading incl. wrapped lines, and the certificate
+  // titles are TimesNewRomanPS-BoldMT while body text is regular). Whole
+  // line, not first item: a body line OPENING with bold emphasis is prose.
+  // Right-half runs (e-file stamp, signature offsets) are excluded.
+  const isBoldHeadingLine = (l: Line): boolean =>
+    l.items.length > 0 &&
+    l.items.every(it => isBoldFont(it.fontName)) &&
+    l.x0 < page.width * 0.5 &&
+    !inCenteredRun(l);
+
   // ALL-CAPS heading signal (real page 1: the document title "APPELLANT'S
   // EMERGENCY MOTION …" is body-sized, in an opaque font pdfjs reports as
   // g_d0_fN — the bold heuristic can't see it — and nearly full-width, so
@@ -327,11 +353,9 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
     // Right-aligned caps runs (e-file stamp clerk lines at x≈544+) are
     // furniture, not headings.
     if (l.x0 >= page.width * 0.5) return false;
-    // NARROW centered caps lines are caption content (court name, party
-    // names) — but a near-full-width title passes the centered edge test
-    // too ("APPELLANT'S EMERGENCY MOTION …" at x0=95..x1=517), so width
-    // decides: only narrow-centered is excluded.
-    return !(isCentered(l) && l.x1 - l.x0 < page.width * 0.5);
+    // Caption runs excluded; standalone centered caps titles ("UNSWORN
+    // DECLARATION" — page-20 defect) and near-full-width titles pass.
+    return !inCenteredRun(l);
   };
 
   // Leading statistics come from NON-CENTERED body lines when enough exist:
@@ -398,8 +422,10 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       (next !== undefined && nearMargin(next.x0)) ||
       cur.x1 >= maxX1 - RAGGED_MIN;
     if (!anchored) return false;
+    // \p{Lu}: Turkish-language exhibits open paragraphs with Ü/İ/Ş — an
+    // ASCII [A-Z] cue silently disabled the rule for the whole document.
     return /[.!?:;"'’”)\]]$/.test(prev.text.trim()) &&
-           /^["'“(\[]?[A-Z0-9]/.test(cur.text.trim());
+           /^["'“(\[]?[\p{Lu}0-9]/u.test(cur.text.trim());
   };
 
   const paragraphBreak = (prev: Line, cur: Line, next?: Line): boolean => {
@@ -448,7 +474,7 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       para.length <= 2 &&
       first.text.length <= HEADING_MAX_CHARS &&
       (first.fontSize >= bodySize * HEADING_SIZE_RATIO ||
-        (isBoldFont(first.items[0]?.fontName) && first.text.length <= 80) ||
+        (isBoldHeadingLine(first) && first.text.length <= 80) ||
         (para.length === 1 && (isNumberedHeadingLine(first, page) || isCapsHeadingLine(first))));
     blocks.push({
       type: isHeading ? 'heading' : 'paragraph',
@@ -500,7 +526,7 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
     const headingLike =
       lines[i].text.length <= HEADING_MAX_CHARS &&
       (lines[i].fontSize >= bodySize * HEADING_SIZE_RATIO ||
-        isBoldFont(lines[i].items[0]?.fontName) ||
+        isBoldHeadingLine(lines[i]) ||
         isNumberedHeadingLine(lines[i], page) ||
         isCapsHeadingLine(lines[i]));
 
@@ -519,7 +545,10 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
     if (pendingHeading && pendingHeadingLine) {
       const gap = pendingHeadingLine.y - lines[i].y;
       const gapOk = haveLead ? gap <= 1.4 * modalLead : gap <= PARA_GAP_FACTOR * lines[i].fontSize;
-      const startsLower = !headingLike && /^[a-z]/.test(lines[i].text);
+      // NOT gated on headingLike: a lowercase BOLD wrap line ("fair value."
+      // finishing a bold heading) is headingLike-by-bold yet must merge; only
+      // a size-jump marks a genuinely new heading.
+      const startsLower = !sizeLike && /^[a-z]/.test(lines[i].text);
       // ALL-CAPS wrap of an ALL-CAPS heading ("…AND THE FOREIGN" ↵
       // "RETALIATION"): tightly gated — short, caps-only, no enumerator,
       // heading itself caps-dominant and unterminated. Body sentences and
@@ -626,13 +655,30 @@ export async function extractPageBlocks(
       const page = await doc.getPage(pageNumber);
       const viewport = page.getViewport({ scale: 1 });
       const content = await page.getTextContent();
+      // Resolve opaque font ids (g_d0_fN) to REAL font names
+      // (TimesNewRomanPS-BoldMT) so isBoldFont sees boldness — Word-exported
+      // filings keep headings bold at body size and the ids alone are
+      // useless. getOperatorList populates page.commonObjs with the font
+      // objects; on failure the opaque ids pass through unchanged.
+      const fontCache = new Map<string, string>();
+      try {
+        await page.getOperatorList();
+        for (const it of content.items as any[]) {
+          if (!it.fontName || fontCache.has(it.fontName)) continue;
+          try {
+            fontCache.set(it.fontName, page.commonObjs.get(it.fontName)?.name ?? it.fontName);
+          } catch {
+            fontCache.set(it.fontName, it.fontName);
+          }
+        }
+      } catch { /* opaque names still work for everything except bold */ }
       const items: PositionedItem[] = content.items.map((it: any) => ({
         str: it.str ?? '',
         x: it.transform?.[4] ?? 0,
         y: it.transform?.[5] ?? 0,
         width: it.width ?? 0,
         height: it.height ?? Math.hypot(it.transform?.[2] ?? 0, it.transform?.[3] ?? 0) ?? 10,
-        fontName: it.fontName,
+        fontName: fontCache.get(it.fontName) ?? it.fontName,
       }));
       const blocks = buildBlocks(items, { width: viewport.width, height: viewport.height });
       results.push({ pageNumber, blocks, producer: 'pdf' });
