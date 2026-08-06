@@ -2174,6 +2174,13 @@ function MetaViewContent({
               </span>
               <span className="text-xs text-gray-400 font-mono">{summary.parserVersion}</span>
             </div>
+            <div
+              className="px-4 py-1.5 border-b border-gray-100 bg-gray-50 flex items-center justify-between gap-2 text-[11px] font-medium text-gray-500"
+              title="H=heading · ¶=paragraph · T=table · hd=page header · ft=page footer · #=page number · fn=footnote"
+            >
+              <span>Page</span>
+              <span>Blocks (H heading · ¶ para · T table · hd/ft furniture)</span>
+            </div>
             <div className="overflow-y-auto max-h-[70vh] divide-y divide-gray-100">
               {summary.pages.map(p => (
                 <div

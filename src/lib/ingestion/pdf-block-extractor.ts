@@ -310,6 +310,30 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
     l.x0 > page.width * 0.15 &&
     l.x1 < maxX1 - RAGGED_MIN;
 
+  // ALL-CAPS heading signal (real page 1: the document title "APPELLANT'S
+  // EMERGENCY MOTION …" is body-sized, in an opaque font pdfjs reports as
+  // g_d0_fN — the bold heuristic can't see it — and nearly full-width, so
+  // neither the centered nor the enumerator signal fires; it merged into the
+  // body paragraph). Discriminators: caps-dominant with enough letters,
+  // UNTERMINATED (the caps salutation "TO THE HONORABLE … :" ends with
+  // punctuation), and NOT centered (centered caps caption lines — court
+  // name, party names — must stay caption paragraphs).
+  const isCapsHeadingLine = (l: Line): boolean => {
+    const t = l.text.trim();
+    if (t.length > 80 || /[.!?:;,]$/.test(t)) return false;
+    const letters = t.replace(/[^a-zA-Z]/g, '');
+    if (letters.length < 8) return false;
+    if (letters.replace(/[^A-Z]/g, '').length / letters.length < 0.8) return false;
+    // Right-aligned caps runs (e-file stamp clerk lines at x≈544+) are
+    // furniture, not headings.
+    if (l.x0 >= page.width * 0.5) return false;
+    // NARROW centered caps lines are caption content (court name, party
+    // names) — but a near-full-width title passes the centered edge test
+    // too ("APPELLANT'S EMERGENCY MOTION …" at x0=95..x1=517), so width
+    // decides: only narrow-centered is excluded.
+    return !(isCentered(l) && l.x1 - l.x0 < page.width * 0.5);
+  };
+
   // Leading statistics come from NON-CENTERED body lines when enough exist:
   // a centered court caption is single-spaced (measured 16pt at 14pt type on
   // page 1 of a real motion) while the prose below is double-spaced (32pt);
@@ -382,7 +406,7 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       first.text.length <= HEADING_MAX_CHARS &&
       (first.fontSize >= bodySize * HEADING_SIZE_RATIO ||
         (isBoldFont(first.items[0]?.fontName) && first.text.length <= 80) ||
-        (para.length === 1 && isNumberedHeadingLine(first, page)));
+        (para.length === 1 && (isNumberedHeadingLine(first, page) || isCapsHeadingLine(first))));
     blocks.push({
       type: isHeading ? 'heading' : 'paragraph',
       text: para.map(l => l.text).join('\n'),
@@ -434,7 +458,8 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       lines[i].text.length <= HEADING_MAX_CHARS &&
       (lines[i].fontSize >= bodySize * HEADING_SIZE_RATIO ||
         isBoldFont(lines[i].items[0]?.fontName) ||
-        isNumberedHeadingLine(lines[i], page));
+        isNumberedHeadingLine(lines[i], page) ||
+        isCapsHeadingLine(lines[i]));
 
     // Wrapped-heading continuation (observed on a real motion: heading line
     // ends "…cannot yield" and the wrap "fair value." sits at NORMAL body
@@ -443,16 +468,22 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
     // lowercase — a sentence can't start lowercase, so it must be a wrap.
     // ("heading lacks terminal punctuation" was tried and rejected: all-caps
     // headings legitimately end unpunctuated and it cascaded body lines in.)
-    if (pendingHeading && pendingHeadingLine && !headingLike) {
+    // capsWrap continuations are allowed to merge even when the wrap line is
+    // itself headingLike-by-caps (a two-line ALL-CAPS title makes BOTH lines
+    // caps-heading-like; without this they'd emit as two heading blocks) —
+    // but never when the line is heading-like by SIZE (genuinely new heading).
+    const sizeLike = lines[i].fontSize >= bodySize * HEADING_SIZE_RATIO;
+    if (pendingHeading && pendingHeadingLine) {
       const gap = pendingHeadingLine.y - lines[i].y;
       const gapOk = haveLead ? gap <= 1.4 * modalLead : gap <= PARA_GAP_FACTOR * lines[i].fontSize;
-      const startsLower = /^[a-z]/.test(lines[i].text);
+      const startsLower = !headingLike && /^[a-z]/.test(lines[i].text);
       // ALL-CAPS wrap of an ALL-CAPS heading ("…AND THE FOREIGN" ↵
       // "RETALIATION"): tightly gated — short, caps-only, no enumerator,
       // heading itself caps-dominant and unterminated. Body sentences and
       // the next section heading (numbered ⇒ headingLike) can't match.
       const capsWrap =
-        /^[A-Z][A-Z\s,'&-]{0,39}$/.test(lines[i].text.trim()) &&
+        !sizeLike &&
+        /^[A-Z][A-Z\s,'&-]{0,79}$/.test(lines[i].text.trim()) &&
         !NUMBERED_HEADING_RE.test(lines[i].text.trim()) &&
         !/[.!?:]$/.test(pendingHeading.text.trim()) &&
         (() => {

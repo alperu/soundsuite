@@ -195,6 +195,31 @@ describe('pdf-block-extractor pure core', () => {
     expect(bigBody!.text.split('\n').length).toBe(9);
   });
 
+  it('full-width ALL-CAPS document title becomes ONE heading, not part of the body (page-1 title)', () => {
+    // Real page-1 shape: two near-full-width caps title lines (opaque font,
+    // so the bold heuristic is blind), then a caps salutation ending ':',
+    // then double-spaced prose. The title must come out as a single heading;
+    // the salutation must NOT (terminated caps).
+    const items: PositionedItem[] = [
+      run('MOVANT’S EMERGENCY MOTION TO STAY TRIAL COURT', 95, 700, { w: 422, h: 14 }),
+      run('ORDER AND ENJOIN SALE OF REAL PROPERTY PENDING APPEAL', 79, 684, { w: 454, h: 14 }),
+      run('TO THE HONORABLE COURT OF APPEALS:', 72, 652, { w: 300, h: 14 }),
+      run('Movant respectfully shows the Court the following facts and', 72, 620, { w: 468, h: 14 }),
+      run('authorities in support of the emergency relief requested.', 72, 588, { w: 468, h: 14 }),
+      run('The record establishes each element required for a stay of', 72, 556, { w: 468, h: 14 }),
+      run('the underlying order pending resolution of this appeal.', 72, 524, { w: 468, h: 14 }),
+    ];
+    const blocks = buildBlocks(items, PAGE);
+    const headings = blocks.filter(b => b.type === 'heading');
+    expect(headings).toHaveLength(1);
+    expect(headings[0].text).toBe(
+      'MOVANT’S EMERGENCY MOTION TO STAY TRIAL COURT ORDER AND ENJOIN SALE OF REAL PROPERTY PENDING APPEAL');
+    const paras = blocks.filter(b => b.type === 'paragraph');
+    expect(paras).toHaveLength(1);
+    expect(paras[0].text).toContain('HONORABLE');
+    expect(paras[0].text).toContain('pending resolution');
+  });
+
   it('heading mid-flow on a double-spaced page still splits out (absorption regression)', () => {
     // Uniform 32pt leading: no gap ever exceeds 1.4×lead, so only the
     // heading-like signal can break the paragraph before the heading line.
