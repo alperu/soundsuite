@@ -2269,7 +2269,7 @@ function MetaViewContent({
                               </span>
                             )}
                             {b.type === 'figure' && b.text && (
-                              <div className="absolute inset-0 overflow-y-auto p-1 bg-white/85 text-[9px] leading-tight text-gray-800 whitespace-pre-wrap opacity-0 hover:opacity-100 transition-opacity">
+                              <div className="absolute inset-0 overflow-y-auto p-1.5 bg-white/80 text-[10px] leading-tight text-gray-900 whitespace-pre-wrap">
                                 {b.text}
                               </div>
                             )}
