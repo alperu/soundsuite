@@ -620,6 +620,72 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
 }
 
 // ---------------------------------------------------------------------------
+// Embedded-image detection (task #2: figure blocks)
+// ---------------------------------------------------------------------------
+
+/** Minimal op ids we track — matches pdfjs OPS values passed in by the
+ * wrapper so the core stays pure/testable. */
+export interface ImageOps {
+  save: number;
+  restore: number;
+  transform: number;
+  paintImageXObject: number;
+  paintInlineImageXObject: number;
+  paintImageMaskXObject: number;
+}
+
+/**
+ * Recover image placement rects from a pdfjs operator list by tracking the
+ * CTM (save/restore/transform). pdfjs paints images into the unit square
+ * transformed by the CTM, so the rect is the CTM image of [0,1]².
+ * Returns TOP-left-origin rects in PDF points. Images smaller than `minPt`
+ * in either dimension (rules, bullets, logos) are dropped.
+ */
+export function computeImageRects(
+  fnArray: number[],
+  argsArray: any[],
+  ops: ImageOps,
+  pageHeight: number,
+  minPt = 24,
+): Array<[number, number, number, number]> {
+  let ctm: number[] = [1, 0, 0, 1, 0, 0];
+  const stack: number[][] = [];
+  const mul = (m: number[], n: number[]): number[] => [
+    m[0] * n[0] + m[2] * n[1],
+    m[1] * n[0] + m[3] * n[1],
+    m[0] * n[2] + m[2] * n[3],
+    m[1] * n[2] + m[3] * n[3],
+    m[0] * n[4] + m[2] * n[5] + m[4],
+    m[1] * n[4] + m[3] * n[5] + m[5],
+  ];
+  const rects: Array<[number, number, number, number]> = [];
+  for (let i = 0; i < fnArray.length; i++) {
+    const fn = fnArray[i];
+    if (fn === ops.save) stack.push(ctm.slice());
+    else if (fn === ops.restore) ctm = stack.pop() ?? [1, 0, 0, 1, 0, 0];
+    else if (fn === ops.transform) ctm = mul(ctm, argsArray[i] as number[]);
+    else if (fn === ops.paintImageXObject || fn === ops.paintInlineImageXObject || fn === ops.paintImageMaskXObject) {
+      const corners = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([x, y]) => [
+        ctm[0] * x + ctm[2] * y + ctm[4],
+        ctm[1] * x + ctm[3] * y + ctm[5],
+      ]);
+      const xs = corners.map(c => c[0]);
+      const ys = corners.map(c => c[1]);
+      const w = Math.max(...xs) - Math.min(...xs);
+      const h = Math.max(...ys) - Math.min(...ys);
+      if (w < minPt || h < minPt) continue;
+      rects.push([
+        Math.min(...xs),
+        pageHeight - Math.max(...ys),
+        Math.max(...xs),
+        pageHeight - Math.min(...ys),
+      ]);
+    }
+  }
+  return rects;
+}
+
+// ---------------------------------------------------------------------------
 // pdfjs wrapper
 // ---------------------------------------------------------------------------
 
@@ -667,8 +733,9 @@ export async function extractPageBlocks(
       // useless. getOperatorList populates page.commonObjs with the font
       // objects; on failure the opaque ids pass through unchanged.
       const fontCache = new Map<string, string>();
+      let opList: { fnArray: number[]; argsArray: any[] } | null = null;
       try {
-        await page.getOperatorList();
+        opList = await page.getOperatorList();
         for (const it of content.items as any[]) {
           if (!it.fontName || fontCache.has(it.fontName)) continue;
           try {
@@ -687,6 +754,24 @@ export async function extractPageBlocks(
         fontName: fontCache.get(it.fontName) ?? it.fontName,
       }));
       const blocks = buildBlocks(items, { width: viewport.width, height: viewport.height });
+      // Figure blocks for embedded images (task #2) — appended after the
+      // text blocks; the operator list is already paid for by the font
+      // resolution above. Skipped entirely on transcript pages (zero-block
+      // carve-out must stay zero-block).
+      if (opList && blocks.length > 0) {
+        try {
+          for (const rect of computeImageRects(opList.fnArray, opList.argsArray, {
+            save: pdfjs.OPS.save,
+            restore: pdfjs.OPS.restore,
+            transform: pdfjs.OPS.transform,
+            paintImageXObject: pdfjs.OPS.paintImageXObject,
+            paintInlineImageXObject: pdfjs.OPS.paintInlineImageXObject,
+            paintImageMaskXObject: pdfjs.OPS.paintImageMaskXObject,
+          }, viewport.height)) {
+            blocks.push({ type: 'figure', text: '', bbox: rect, order: blocks.length });
+          }
+        } catch { /* figures are best-effort */ }
+      }
       results.push({ pageNumber, blocks, producer: 'pdf' });
       page.cleanup();
     }

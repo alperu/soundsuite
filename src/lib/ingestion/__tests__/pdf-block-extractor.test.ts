@@ -4,6 +4,7 @@ import {
   modalFontSize,
   detectTableRegions,
   looksLikeTranscriptPage,
+  computeImageRects,
   PositionedItem,
 } from '../pdf-block-extractor';
 
@@ -417,6 +418,40 @@ describe('pdf-block-extractor pure core', () => {
     const heading = blocks.find(b => b.type === 'heading')!;
     expect(heading.text).toBe('D. Appellant raises substantial questions on the merits.');
     expect(blocks.filter(b => b.type === 'paragraph')).toHaveLength(1);
+  });
+
+  describe('computeImageRects (figure blocks)', () => {
+    const OPS = { save: 1, restore: 2, transform: 3, paintImageXObject: 4, paintInlineImageXObject: 5, paintImageMaskXObject: 6 };
+
+    it('recovers a scaled+translated image rect in top-left origin', () => {
+      // save; transform [300 0 0 200 100 400]; paint; restore
+      const rects = computeImageRects(
+        [OPS.save, OPS.transform, OPS.paintImageXObject, OPS.restore],
+        [null, [300, 0, 0, 200, 100, 400], ['img0'], null],
+        OPS, 792,
+      );
+      // unit square → x 100..400, y 400..600 (bottom-left) → top-left y 192..392
+      expect(rects).toEqual([[100, 192, 400, 392]]);
+    });
+
+    it('restore pops the CTM so later images are not double-transformed', () => {
+      const rects = computeImageRects(
+        [OPS.save, OPS.transform, OPS.paintImageXObject, OPS.restore, OPS.save, OPS.transform, OPS.paintImageXObject, OPS.restore],
+        [null, [100, 0, 0, 100, 0, 0], ['a'], null, null, [50, 0, 0, 50, 500, 700], ['b'], null],
+        OPS, 792,
+      );
+      expect(rects).toHaveLength(2);
+      expect(rects[1]).toEqual([500, 42, 550, 92]);
+    });
+
+    it('drops sub-minimum images (rules, bullets)', () => {
+      const rects = computeImageRects(
+        [OPS.save, OPS.transform, OPS.paintImageXObject, OPS.restore],
+        [null, [500, 0, 0, 2, 50, 50], ['hairline'], null],
+        OPS, 792,
+      );
+      expect(rects).toEqual([]);
+    });
   });
 
   it('modal font size reflects body text, not headings', () => {
