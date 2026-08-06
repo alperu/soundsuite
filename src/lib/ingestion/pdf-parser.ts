@@ -40,6 +40,11 @@ export interface PageText {
   text: string;
   textDensity: number; // Characters per page
   renderFailed?: boolean; // True if page rendering/extraction failed
+  /** Structured blocks from a docparse producer (PLAN-ss-docparse §0.1).
+   * NOTE: declared on BOTH PageText interfaces (here and text-chunker.ts) —
+   * they are structurally-typed twins; adding a field to only one silently
+   * drops it at the chunker boundary (the structureType leak, §3.1). */
+  blocks?: import('./docparse-types').DocparseBlock[];
 }
 
 /**

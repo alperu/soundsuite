@@ -49,6 +49,9 @@ export interface Chunk {
 export interface PageText {
   pageNumber: number;
   text: string;
+  /** Structured blocks (PLAN-ss-docparse §0.1) — twin of the declaration in
+   * pdf-parser.ts; keep BOTH in sync or the field is silently dropped. */
+  blocks?: import('./docparse-types').DocparseBlock[];
 }
 
 /**
