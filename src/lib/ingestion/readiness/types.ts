@@ -46,7 +46,9 @@ export interface PageTextLike {
   pageNumber: number;
   text: string;
   textDensity: number;
-  source: 'extract' | 'ocr';
+  /** 'empty' = classified blank-by-design (render ok + OCR empty + ink below
+   * threshold) — excluded from quality scoring rather than penalized. */
+  source: 'extract' | 'ocr' | 'empty';
   confidence: number | null;
 }
 

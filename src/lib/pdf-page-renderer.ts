@@ -174,6 +174,14 @@ export interface RenderResult {
   buffer: Buffer;
   width: number;
   height: number;
+  /**
+   * True when the buffer is NOT a faithful render of the page — the 1x1
+   * placeholder or the blank white-canvas fallback produced after a render
+   * failure. Consumers doing content analysis (blank-page ink checks, OCR)
+   * must treat placeholder renders as "render failed", never as evidence
+   * the page is empty.
+   */
+  placeholder?: boolean;
 }
 
 export interface DocumentInfo {
@@ -253,6 +261,7 @@ export async function renderPage(filePath: string, pageNum: number, scale: numbe
   const height = Math.floor(viewport.height);
 
   let jpegBuffer: Buffer;
+  let placeholder = false;
 
   try {
     const napi = await getNapiCanvas();
@@ -284,6 +293,8 @@ export async function renderPage(filePath: string, pageNum: number, scale: numbe
       canvasData[i + 2] = 255; canvasData[i + 3] = 255;
     }
 
+    // Both branches below produce a stand-in, not a render of the page.
+    placeholder = true;
     try {
       const sharp = (await import('sharp')).default;
       jpegBuffer = await sharp(Buffer.from(canvasData.buffer), {
@@ -297,11 +308,13 @@ export async function renderPage(filePath: string, pageNum: number, scale: numbe
     page.cleanup();
   }
 
-  // Cache the result
-  pageCache.set(key, { buffer: jpegBuffer, width, height, lastUsed: Date.now() });
-  pruneCache();
+  // Cache the result (placeholders are NOT cached — a later retry may succeed)
+  if (!placeholder) {
+    pageCache.set(key, { buffer: jpegBuffer, width, height, lastUsed: Date.now() });
+    pruneCache();
+  }
 
-  return { buffer: jpegBuffer, width, height };
+  return { buffer: jpegBuffer, width, height, placeholder };
 }
 
 /**
