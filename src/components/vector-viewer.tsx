@@ -2268,6 +2268,11 @@ function MetaViewContent({
                                 ¶{pn}
                               </span>
                             )}
+                            {b.type === 'figure' && b.text && (
+                              <div className="absolute inset-0 overflow-y-auto p-1 bg-white/85 text-[9px] leading-tight text-gray-800 whitespace-pre-wrap opacity-0 hover:opacity-100 transition-opacity">
+                                {b.text}
+                              </div>
+                            )}
                           </div>
                         );
                       });

@@ -47,7 +47,7 @@ describe('produceStructuredPages', () => {
       cropFn: crop.fn as any, extractFn: fakeExtract({ 1: [PARA_BLOCK, { ...TABLE_BLOCK }] }),
     });
 
-    expect(counters).toEqual({ pdfBlockPages: 1, ocrFlatPages: 0, tableRegionsAttempted: 1, tableRegionsAccepted: 1, rrPages: 0 });
+    expect(counters).toEqual({ pdfBlockPages: 1, ocrFlatPages: 0, tableRegionsAttempted: 1, tableRegionsAccepted: 1, rrPages: 0, figuresOcrAttempted: 0, figuresOcrAccepted: 0 });
     const table = pages[0].blocks!.find(b => b.type === 'table')!;
     expect(table.html).toContain('<table>');
     expect(table.markdown).toContain('| Date | Amount |');
@@ -107,6 +107,34 @@ describe('produceStructuredPages', () => {
     });
     expect(c2.pdfBlockPages).toBe(0);
     expect(pages2[0].blocks).toBeUndefined();
+  });
+
+  it('OCRs figure blocks via the ocr task (task #11)', async () => {
+    const FIG = { type: 'figure' as const, text: '', bbox: [78, 73, 546, 462] as [number, number, number, number], order: 1 };
+    const pages = [page(1, 500)];
+    const engine = new FakeEngine('Screenshot text recovered from the exhibit image.');
+    const crop = fakeCrop();
+    const counters = await produceStructuredPages({
+      filePath: '/x.pdf', pages, ocrThreshold: 50, ocrEngine: engine,
+      cropFn: crop.fn as any, extractFn: fakeExtract({ 1: [PARA_BLOCK, { ...FIG }] }),
+    });
+    expect(counters.figuresOcrAttempted).toBe(1);
+    expect(counters.figuresOcrAccepted).toBe(1);
+    expect(engine.tasks).toContain('ocr');
+    const fig = pages[0].blocks!.find(b => b.type === 'figure')!;
+    expect(fig.text).toBe('Screenshot text recovered from the exhibit image.');
+  });
+
+  it('figure keeps empty text when OCR is gate-rejected', async () => {
+    const FIG = { type: 'figure' as const, text: '', bbox: [78, 73, 546, 462] as [number, number, number, number], order: 0 };
+    const pages = [page(1, 500)];
+    const engine = new FakeEngine(''); // gate-rejected
+    const counters = await produceStructuredPages({
+      filePath: '/x.pdf', pages, ocrThreshold: 50, ocrEngine: engine,
+      cropFn: fakeCrop().fn as any, extractFn: fakeExtract({ 1: [{ ...FIG }] }),
+    });
+    expect(counters.figuresOcrAccepted).toBe(0);
+    expect(pages[0].blocks![0].text).toBe('');
   });
 
   describe('transcriptDoc route (PLAN-rr-structure item 6)', () => {

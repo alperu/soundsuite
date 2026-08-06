@@ -36,6 +36,9 @@ export interface StructureCounters {
   tableRegionsAccepted: number;
   /** Pages given RR speaker-turn blocks (transcriptDoc route). */
   rrPages: number;
+  /** Figure blocks OCR'd via the 'ocr' task (task #11). */
+  figuresOcrAttempted: number;
+  figuresOcrAccepted: number;
 }
 
 export interface ProduceOptions {
@@ -71,6 +74,8 @@ export async function produceStructuredPages(opts: ProduceOptions): Promise<Stru
     tableRegionsAttempted: 0,
     tableRegionsAccepted: 0,
     rrPages: 0,
+    figuresOcrAttempted: 0,
+    figuresOcrAccepted: 0,
   };
 
   // Transcript documents: RR blocks from the lines already reconstructed by
@@ -123,6 +128,30 @@ export async function produceStructuredPages(opts: ProduceOptions): Promise<Stru
     if (result.width) page.pageWidth = result.width;
     if (result.height) page.pageHeight = result.height;
     counters.pdfBlockPages++;
+
+    // Figure OCR (task #11): crop each embedded-image region and run the
+    // plain 'ocr' task so exhibit screenshots carry their text in Meta View.
+    // Failures/rejections leave text '' — never fatal.
+    if (taskEngine && taskEngine.supportsTask('ocr')) {
+      for (const block of result.blocks) {
+        if (block.type !== 'figure' || !block.bbox) continue;
+        counters.figuresOcrAttempted++;
+        try {
+          const region = await crop(opts.filePath, page.pageNumber, block.bbox);
+          if (!region) continue;
+          const ocr = await taskEngine.recognizeTask(region.buffer, 'ocr');
+          if (ocr.text && ocr.text.trim().length > 0) {
+            block.text = ocr.text.trim();
+            counters.figuresOcrAccepted++;
+          }
+        } catch (err) {
+          logger.warn('Figure OCR failed — figure keeps empty text', {
+            pageNumber: page.pageNumber,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
 
     if (!canEscalate) continue;
     for (const block of result.blocks) {
