@@ -2286,6 +2286,24 @@ function MetaViewContent({
                     <span key={t} className={`px-1.5 py-0.5 rounded ${cls}`}>{t}</span>
                   ))}
                 </div>
+                {/* RR line-color legend: one chip per block, in its overlay
+                    color, labelled with speaker (or block type) + line range */}
+                {detail.blocks.some(b => b.lines?.length) && (
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+                    {detail.blocks.map((b, bi) => {
+                      if (!b.lines?.length) return null;
+                      const c = LINE_PALETTE[bi % LINE_PALETTE.length];
+                      const range = b.lineStart != null
+                        ? (b.lineStart === b.lineEnd ? ` L${b.lineStart}` : ` L${b.lineStart}–${b.lineEnd}`)
+                        : '';
+                      return (
+                        <span key={b.order} className={`px-1.5 py-0.5 rounded border ${c.border} ${c.bg} ${c.label} font-medium`}>
+                          {b.speaker ?? b.type}{range}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 
