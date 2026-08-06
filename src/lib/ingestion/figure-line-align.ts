@@ -92,26 +92,48 @@ export function alignOcrLines(
   crop: Pick<RegionCrop, 'bboxPt' | 'widthPx' | 'heightPx'>,
 ): DocparseBlockLine[] {
   const lines = ocrText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  if (lines.length === 0 || bands.length === 0) return [];
-  const n = Math.min(lines.length, bands.length);
-  if (Math.abs(lines.length - bands.length) > Math.ceil(0.3 * Math.max(lines.length, bands.length))) {
-    return [];
-  }
+  if (lines.length === 0 || bands.length < 2) return [];
   const [px0, py0, px1, py1] = crop.bboxPt;
   const sx = (px1 - px0) / crop.widthPx;
   const sy = (py1 - py0) / crop.heightPx;
+  const toBbox = (b: TextBand): [number, number, number, number] => [
+    px0 + b.x0 * sx,
+    py0 + b.y0 * sy,
+    px0 + b.x1 * sx,
+    py0 + b.y1 * sy,
+  ];
+
+  // Exact mapping when OCR lines ≈ visual bands.
+  if (Math.abs(lines.length - bands.length) <= Math.max(1, Math.floor(0.25 * Math.min(lines.length, bands.length)))) {
+    const n = Math.min(lines.length, bands.length);
+    return bands.slice(0, n).map((b, i) => ({ text: lines[i], bbox: toBbox(b) }));
+  }
+
+  // Reflow fallback (measured: PaddleOCR emits LOGICAL lines — wrapped text
+  // merged — so exact counts disagree on exactly the document-screenshot
+  // figures that matter). Flow the text word-by-word into the bands, each
+  // taking roughly what fits its pixel width; alignment is approximate but
+  // the text lands where text is, which beats a corner panel.
+  const words = lines.join(' ').split(/\s+/).filter(w => w.length > 0);
   const out: DocparseBlockLine[] = [];
-  for (let i = 0; i < n; i++) {
+  let wi = 0;
+  for (let i = 0; i < bands.length && wi < words.length; i++) {
     const b = bands[i];
-    out.push({
-      text: lines[i],
-      bbox: [
-        px0 + b.x0 * sx,
-        py0 + b.y0 * sy,
-        px0 + b.x1 * sx,
-        py0 + b.y1 * sy,
-      ],
-    });
+    const charW = Math.max(3, (b.y1 - b.y0) * 0.5); // ≈ glyph advance from band height
+    const capacity = Math.max(4, Math.round((b.x1 - b.x0) / charW));
+    let text = '';
+    while (wi < words.length) {
+      const cand = text.length === 0 ? words[wi] : `${text} ${words[wi]}`;
+      if (cand.length > capacity && text.length > 0) break;
+      text = cand;
+      wi++;
+    }
+    // Last band absorbs any remainder so no text is lost.
+    if (i === bands.length - 1 && wi < words.length) {
+      text = `${text} ${words.slice(wi).join(' ')}`;
+      wi = words.length;
+    }
+    out.push({ text, bbox: toBbox(b) });
   }
   return out;
 }

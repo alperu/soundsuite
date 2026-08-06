@@ -52,9 +52,26 @@ describe('alignOcrLines', () => {
     expect(lines[1].bbox![2]).toBe(200);
   });
 
-  it('returns [] when line/band counts disagree beyond tolerance', () => {
+  it('returns [] when fewer than two bands exist (alignment pointless)', () => {
     const bands = [{ y0: 0, y1: 10, x0: 0, x1: 100 }];
     expect(alignOcrLines('a\nb\nc\nd\ne', bands, crop)).toEqual([]);
+  });
+
+  it('reflows words into bands when counts disagree (logical vs visual lines)', () => {
+    // 2 logical OCR lines, 4 visual bands → reflow, not reject
+    const bands = [
+      { y0: 0, y1: 20, x0: 0, x1: 200 },
+      { y0: 30, y1: 50, x0: 0, x1: 200 },
+      { y0: 60, y1: 80, x0: 0, x1: 200 },
+      { y0: 90, y1: 110, x0: 0, x1: 200 },
+    ];
+    const text = 'alpha beta gamma delta epsilon zeta\neta theta iota kappa lambda mu';
+    const lines = alignOcrLines(text, bands, crop);
+    expect(lines.length).toBeGreaterThanOrEqual(3);
+    // no text lost: all words present across bands in order
+    expect(lines.map(l => l.text).join(' ').split(/\s+/)).toEqual(text.split(/[\s\n]+/));
+    // each band has a bbox from its own geometry
+    expect(lines[0].bbox![1]).toBeLessThan(lines[1].bbox![1]);
   });
 
   it('tolerates small count mismatches by truncating to the shorter list', () => {
