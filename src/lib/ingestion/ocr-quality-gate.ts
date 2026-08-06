@@ -89,15 +89,52 @@ function isRepetitionLoop(text: string): boolean {
   return shingleRatioLow(text.replace(/\d+/g, '#'));
 }
 
-export function assessOcrOutput(text: string): OcrQualityAssessment {
-  const t = text.trim();
-  const reasons: string[] = [];
-  if (!t) return { ok: true, reasons }; // empty is handled as "no text" upstream
+/** Task the output came from — mirrors OcrTask (kept as literals so this
+ * module stays pure/dependency-light). Default 'ocr' preserves every
+ * existing call site and test unchanged. */
+export type OcrGateTask = 'ocr' | 'table' | 'seal' | 'formula' | 'chart';
 
-  if (isRepetitionLoop(t)) reasons.push('repetition-loop');
+export function assessOcrOutput(
+  text: string,
+  opts: { task?: OcrGateTask } = {},
+): OcrQualityAssessment {
+  const task = opts.task ?? 'ocr';
+  const raw = text.trim();
+  const reasons: string[] = [];
+  if (!raw) return { ok: true, reasons }; // empty is handled as "no text" upstream
+
+  // Table Recognition: output is HTML (or markdown pipes). Markup is
+  // repetitive by construction (`</td><td>` × N) and would trip the text
+  // profile's repetition/soup/run-together checks on VALID tables — so
+  // structural checks run on raw markup, content checks on stripped text.
+  if (task === 'table') {
+    const hasHtmlTable = /<table[\s>]/i.test(raw);
+    const cellCount = (raw.match(/<t[dh][\s>]/gi) || []).length;
+    const pipeLines = raw.split('\n').filter(l => (l.match(/\|/g) || []).length >= 2).length;
+    if (hasHtmlTable) {
+      if (cellCount < 4) reasons.push('table-empty');
+      // Unclosed table or output ending mid-tag ⇒ num_predict exhaustion.
+      // A truncated table looks structured and is wrong — reject.
+      if (!/<\/table>/i.test(raw) || /<[a-z][^>]*$/i.test(raw)) reasons.push('table-truncated');
+    } else if (pipeLines < 2) {
+      // Neither HTML nor a markdown pipe table — the model returned prose
+      // or noise for a table crop.
+      reasons.push('table-empty');
+    }
+  }
+
+  // Content under judgment: markup stripped for table output, raw otherwise.
+  const t = task === 'table' ? raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : raw;
+
+  // Repetition: skipped for 'table' (row structure legitimately repeats even
+  // after markup stripping) and 'seal' (a 3-word output has no shingles).
+  if (task !== 'table' && task !== 'seal' && isRepetitionLoop(t)) {
+    reasons.push('repetition-loop');
+  }
 
   // Unexpected script: CJK glyphs at parity with (or exceeding) Latin letters.
   // A stray stamp glyph on an English page is dominated by Latin and passes.
+  // Valid for every task — it is exactly the failure mode of a garbage crop.
   const cjkCount = (t.match(CJK_RE) || []).length;
   if (cjkCount >= 2) {
     const latinCount = (t.match(/[A-Za-z]/g) || []).length;
@@ -108,8 +145,10 @@ export function assessOcrOutput(text: string): OcrQualityAssessment {
   // the model is reciting math training data, not reading the page.
   if ((t.match(LATEX_RE) || []).length >= 2) reasons.push('latex-hallucination');
 
-  // Letter soup: enough tokens to judge, near-zero legal/function-word hits.
-  if (t.length >= SOUP_MIN_CHARS) {
+  // Letter soup / run-together: text-profile checks; skipped for 'table'
+  // (numeric tables with short header abbreviations false-positive) and
+  // 'seal' (too short to judge).
+  if (task !== 'table' && task !== 'seal' && t.length >= SOUP_MIN_CHARS) {
     const tokens = t.split(/\s+/).filter(Boolean);
     if (tokens.some(tok => tok.length >= RUN_TOGETHER_TOKEN_LEN && /[a-z]/i.test(tok))) {
       reasons.push('run-together-text');

@@ -37,6 +37,44 @@ describe('assessOcrOutput', () => {
     });
   });
 
+  describe('table task profile', () => {
+    const VALID_TABLE =
+      '<table><tr><th>Date</th><th>Description</th><th>Amount</th></tr>' +
+      Array.from({ length: 20 }, (_, i) =>
+        `<tr><td>2024-0${(i % 9) + 1}-01</td><td>Payment</td><td>$${1200 + i}.00</td></tr>`).join('') +
+      '</table>';
+
+    it('passes valid HTML tables that the text profile would reject', () => {
+      // Sanity: the text profile DOES reject this (repetitive markup)
+      expect(assessOcrOutput(VALID_TABLE).ok).toBe(false);
+      // The table profile passes it
+      const r = assessOcrOutput(VALID_TABLE, { task: 'table' });
+      expect(r.ok).toBe(true);
+      expect(r.reasons).toEqual([]);
+    });
+
+    it('passes markdown pipe tables', () => {
+      const md = '| Date | Description | Amount |\n|---|---|---|\n' +
+        Array.from({ length: 10 }, (_, i) => `| 2024-01-0${i} | Payment | $${100 + i} |`).join('\n');
+      expect(assessOcrOutput(md, { task: 'table' }).ok).toBe(true);
+    });
+
+    it.each([
+      ['empty table', '<table></table>', 'table-empty'],
+      ['truncated table (no close, mid-tag)', '<table><tr><td>Jan</td><td>$100</td></tr><tr><td>Feb</td><td', 'table-truncated'],
+      ['prose instead of a table', 'This page contains a discussion of the mortgage payments made by the respondent over several months during the case.', 'table-empty'],
+      ['CJK hallucination on a crop', '欽定四庫全書 三五 丁二', 'unexpected-script'],
+    ])('%s → %s', (_label, text, expectedReason) => {
+      const r = assessOcrOutput(text, { task: 'table' });
+      expect(r.ok).toBe(false);
+      expect(r.reasons).toContain(expectedReason);
+    });
+
+    it('seal task: short outputs pass, repetition check disabled', () => {
+      expect(assessOcrOutput('DISTRICT COURT OF TRAVIS COUNTY TEXAS', { task: 'seal' }).ok).toBe(true);
+    });
+  });
+
   describe('passes legitimate content', () => {
     it.each([
       ['empty output', ''],

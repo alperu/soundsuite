@@ -24,10 +24,23 @@
  * future versions all resolve correctly.
  */
 
+/** Mirror of OcrTask in ocr-engine.ts — duplicated as a literal union so this
+ * module stays dependency-free and client-safe (no server-only imports). */
+export type OcrTaskName = 'ocr' | 'table' | 'seal' | 'formula' | 'chart';
+
 export interface OcrModelCaps {
   promptStyle: 'instruction' | 'fixed-task';
-  /** Task prompt for fixed-task models. */
+  /** @deprecated Use taskPrompts.ocr — kept as an alias during migration. */
   fixedTaskPrompt?: string;
+  /** Per-task prompts for fixed-task recognizers. Absence of a task ⇒ the
+   * model does not support it (supportsTask false); NEVER synthesize an
+   * instruction-style substitute — a chat VLM asked to "describe this table
+   * as HTML" confabulates cells, and the quality gate cannot catch fluent
+   * fabrication. */
+  taskPrompts?: Partial<Record<OcrTaskName, string>>;
+  /** Per-task num_predict overrides. table is deliberately large: truncated
+   * table HTML looks structured and is wrong — worse than none. */
+  numPredictByTask?: Partial<Record<OcrTaskName, number>>;
   /** false ⇒ ss-ocr is not assignable on mac-docker-ollama hosts. */
   macCompatible: boolean;
   /** Ollama num_predict. Fixed-task document parsers need headroom on dense
@@ -51,8 +64,16 @@ export function ocrModelCaps(model: string | undefined | null): OcrModelCaps {
     return {
       promptStyle: 'fixed-task',
       fixedTaskPrompt: 'OCR:',
+      taskPrompts: {
+        ocr: 'OCR:',
+        table: 'Table Recognition:',
+        seal: 'Seal Recognition:',
+        formula: 'Formula Recognition:',
+        chart: 'Chart Recognition:',
+      },
       macCompatible: false,
       numPredict: 8192,
+      numPredictByTask: { table: 16384, seal: 512, formula: 2048, chart: 4096 },
       minOllamaVersion: '0.31.2',
     };
   }

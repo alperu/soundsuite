@@ -6,7 +6,7 @@
  * with NVIDIA GPUs (e.g. A6000 48 GB).
  */
 
-import { IOCREngine, OCRResult } from './ocr-engine';
+import { IOCREngine, ITaskOCREngine, OcrTask, OCRResult } from './ocr-engine';
 import { createLogger } from '../logger';
 import { OcrNotReadyError } from './errors';
 import { NoGpuReadyEndpointError } from '@/lib/gpu/errors';
@@ -41,7 +41,7 @@ const DEFAULT_TIMEOUT_MS = 90_000;
 const BASE_DELAY_MS = 3_000;
 const MAX_JITTER_MS = 1_000; // random jitter added to each retry delay
 
-export class OllamaOCREngine implements IOCREngine {
+export class OllamaOCREngine implements ITaskOCREngine {
   private host: string;
   private model: string;
   private caps: OcrModelCaps;
@@ -145,6 +145,25 @@ export class OllamaOCREngine implements IOCREngine {
   }
 
   async recognizeImage(imageBuffer: Buffer): Promise<OCRResult> {
+    return this.recognizeTask(imageBuffer, 'ocr');
+  }
+
+  /**
+   * A task is supported when the model is a fixed-task recognizer with a
+   * prompt for it. Instruction models (minicpm-v, olmOCR) support only
+   * 'ocr' — never synthesize a "describe this table" instruction prompt;
+   * a chat VLM confabulates cells and the gate cannot catch fluent
+   * fabrication.
+   */
+  supportsTask(task: OcrTask): boolean {
+    if (task === 'ocr') return true;
+    return this.caps.promptStyle === 'fixed-task' && !!this.caps.taskPrompts?.[task];
+  }
+
+  async recognizeTask(imageBuffer: Buffer, task: OcrTask): Promise<OCRResult> {
+    if (!this.supportsTask(task)) {
+      throw new Error(`Model ${this.model} does not support OCR task '${task}'`);
+    }
     const base64Image = imageBuffer.toString('base64');
     const imageSizeKB = Math.round(imageBuffer.length / 1024);
     let lastError: Error | undefined;
@@ -166,6 +185,7 @@ export class OllamaOCREngine implements IOCREngine {
       logger.info('Sending image to Ollama for OCR', {
         host,
         model: this.model,
+        task,
         imageSizeKB,
         attempt,
       });
@@ -178,13 +198,13 @@ export class OllamaOCREngine implements IOCREngine {
           body: JSON.stringify({
             model: this.model,
             prompt: this.caps.promptStyle === 'fixed-task'
-              ? (this.caps.fixedTaskPrompt ?? 'OCR:')
+              ? (this.caps.taskPrompts?.[task] ?? this.caps.fixedTaskPrompt ?? 'OCR:')
               : OCR_PROMPT,
             images: [base64Image],
             stream: false,
             options: {
               temperature: 0,
-              num_predict: this.caps.numPredict,
+              num_predict: this.caps.numPredictByTask?.[task] ?? this.caps.numPredict,
             },
           }),
         });
@@ -203,10 +223,11 @@ export class OllamaOCREngine implements IOCREngine {
         // indexing it as page text. Empty text downstream = "no OCR text"
         // (page marked empty / ocrFailedCount), which is recoverable;
         // garbage in the vector index is silent search poisoning.
-        const quality = assessOcrOutput(text);
+        const quality = assessOcrOutput(text, { task });
         if (!quality.ok) {
           logger.warn('Ollama OCR output failed quality gate — discarding', {
             model: this.model,
+            task,
             textLength: text.length,
             durationMs,
             reasons: quality.reasons,
@@ -217,6 +238,7 @@ export class OllamaOCREngine implements IOCREngine {
 
         logger.info('Ollama OCR completed', {
           model: this.model,
+          task,
           textLength: text.length,
           durationMs,
           attempt,

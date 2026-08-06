@@ -33,11 +33,35 @@ export interface IOCREngine {
 }
 
 /**
+ * Recognition task for fixed-task recognizers (PaddleOCR-VL): plain text,
+ * table structure, seal, formula, or chart recognition on a page/region image.
+ */
+export type OcrTask = 'ocr' | 'table' | 'seal' | 'formula' | 'chart';
+
+/**
+ * Opt-in capability interface for engines that support per-request task
+ * selection. Deliberately NOT a widening of IOCREngine.recognizeImage —
+ * the forked-child OCREngine cannot provide tasks and must not be forced
+ * into a protocol change. Callers must feature-detect via asTaskEngine().
+ */
+export interface ITaskOCREngine extends IOCREngine {
+  recognizeTask(imageBuffer: Buffer, task: OcrTask): Promise<OCRResult>;
+  supportsTask(task: OcrTask): boolean;
+}
+
+/** Feature-detect task support. Returns null for engines without it. */
+export function asTaskEngine(e: IOCREngine): ITaskOCREngine | null {
+  return typeof (e as Partial<ITaskOCREngine>).recognizeTask === 'function'
+    ? (e as ITaskOCREngine)
+    : null;
+}
+
+/**
  * Wraps any IOCREngine with an in-memory cache keyed by SHA-256 of the image buffer.
  * Prevents re-OCR-ing the same image across pipeline stages (e.g. OCR fallback → exhibit extraction).
  * The cache is per-document — call clearCache() between documents.
  */
-export class CachedOCREngine implements IOCREngine {
+export class CachedOCREngine implements ITaskOCREngine {
   private inner: IOCREngine;
   private cache: Map<string, OCRResult>;
 
@@ -52,13 +76,39 @@ export class CachedOCREngine implements IOCREngine {
     return this.cache;
   }
 
+  // Cache keys are `${task}:${sha256}` — the SAME image asked with different
+  // tasks (OCR: vs Table Recognition:) yields different results and MUST NOT
+  // collide. recognizeImage uses the 'ocr' task key so mixed callers share.
+  private key(imageBuffer: Buffer, task: OcrTask): string {
+    return `${task}:${crypto.createHash('sha256').update(imageBuffer).digest('hex')}`;
+  }
+
   async recognizeImage(imageBuffer: Buffer): Promise<OCRResult> {
-    const hash = crypto.createHash('sha256').update(imageBuffer).digest('hex');
-    const cached = this.cache.get(hash);
+    const key = this.key(imageBuffer, 'ocr');
+    const cached = this.cache.get(key);
     if (cached) return cached;
     const result = await this.inner.recognizeImage(imageBuffer);
-    this.cache.set(hash, result);
+    this.cache.set(key, result);
     return result;
+  }
+
+  async recognizeTask(imageBuffer: Buffer, task: OcrTask): Promise<OCRResult> {
+    const taskEngine = asTaskEngine(this.inner);
+    if (!taskEngine) {
+      if (task === 'ocr') return this.recognizeImage(imageBuffer);
+      throw new Error(`Inner OCR engine does not support task '${task}'`);
+    }
+    const key = this.key(imageBuffer, task);
+    const cached = this.cache.get(key);
+    if (cached) return cached;
+    const result = await taskEngine.recognizeTask(imageBuffer, task);
+    this.cache.set(key, result);
+    return result;
+  }
+
+  supportsTask(task: OcrTask): boolean {
+    if (task === 'ocr') return true;
+    return asTaskEngine(this.inner)?.supportsTask(task) ?? false;
   }
 
   clearCache(): void {

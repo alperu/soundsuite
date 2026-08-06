@@ -164,6 +164,61 @@ describe('OllamaOCREngine', () => {
     });
   });
 
+  describe('task selection (fixed-task recognizer)', () => {
+    const PADDLE = 'AuditAid/PaddleOCR-VL-1.6-0.9B';
+    const paddleTags = () => ({
+      ok: true,
+      json: () => Promise.resolve({ models: [{ name: `${PADDLE}:latest` }] }),
+    });
+
+    function captureGenerate(responseText: string) {
+      const bodies: any[] = [];
+      mockFetch.mockImplementation((url: string, init?: any) => {
+        if (String(url).includes('/api/tags')) return Promise.resolve(paddleTags());
+        bodies.push(JSON.parse(init.body));
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ response: responseText }) });
+      });
+      return bodies;
+    }
+
+    it('sends the task prompt and per-task num_predict for table recognition', async () => {
+      const table = '<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr><tr><td>3</td><td>4</td></tr></table>';
+      const bodies = captureGenerate(table);
+      const engine = new OllamaOCREngine({ host: HOST, model: PADDLE });
+
+      const result = await engine.recognizeTask(buffer, 'table');
+
+      expect(bodies[0].prompt).toBe('Table Recognition:');
+      expect(bodies[0].options.num_predict).toBe(16384);
+      expect(result.text).toBe(table);
+    });
+
+    it('recognizeImage is equivalent to task ocr', async () => {
+      const bodies = captureGenerate('plain page text');
+      const engine = new OllamaOCREngine({ host: HOST, model: PADDLE });
+
+      await engine.recognizeImage(buffer);
+
+      expect(bodies[0].prompt).toBe('OCR:');
+      expect(bodies[0].options.num_predict).toBe(8192);
+    });
+
+    it('supportsTask: paddle yes, instruction model ocr-only', () => {
+      const paddle = new OllamaOCREngine({ host: HOST, model: PADDLE });
+      const chat = new OllamaOCREngine({ host: HOST, model: 'minicpm-v' });
+      expect(paddle.supportsTask('table')).toBe(true);
+      expect(paddle.supportsTask('seal')).toBe(true);
+      expect(chat.supportsTask('ocr')).toBe(true);
+      expect(chat.supportsTask('table')).toBe(false);
+    });
+
+    it('rejects unsupported tasks without any network call', async () => {
+      const chat = new OllamaOCREngine({ host: HOST, model: 'minicpm-v' });
+      await expect(chat.recognizeTask(buffer, 'table')).rejects.toThrow(/does not support/);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
   it('throws OcrNotReadyError without calling /api/generate when the model is not pulled', async () => {
     mockFetch.mockImplementation((url: string) => {
       if (String(url).includes('/api/tags')) {
