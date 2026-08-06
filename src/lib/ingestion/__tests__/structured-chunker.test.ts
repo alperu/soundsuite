@@ -38,7 +38,7 @@ describe('StructuredChunker', () => {
   it('chunks structured pages with heading prefix and furniture excluded', async () => {
     const chunker = new StructuredChunker(new FakeInner());
     const pages = [page(1, [
-      block('page_header', 'Filed 3/31/2026 Velva L. Price', 0),
+      block('page_header', 'Filed 1/01/2026 District Clerk', 0),
       block('heading', 'ORDERS ABOUT CONDUCT', 1),
       block('paragraph', 'All parties are ordered to behave.', 2),
       block('page_number', 'Page 1 of 2', 3),
@@ -46,7 +46,7 @@ describe('StructuredChunker', () => {
     const chunks = await chunker.chunkPages(pages, 'd', 'c', SAC);
     expect(chunks).toHaveLength(1);
     expect(chunks[0].text).toBe('[Case: In re Doe | Filing: motion]\n\nORDERS ABOUT CONDUCT\nAll parties are ordered to behave.');
-    expect(chunks[0].text).not.toContain('Velva');
+    expect(chunks[0].text).not.toContain('District Clerk');
     expect(chunks[0].text).not.toContain('Page 1 of 2');
   });
 
