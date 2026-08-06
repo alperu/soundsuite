@@ -2058,6 +2058,13 @@ function MetaViewContent({
   const [detail, setDetail] = useState<{ blocks: MetaBlock[]; producer?: string; parseMethod?: string | null; pageDims?: { width: number; height: number } | null; structured: boolean } | null>(null);
   const [view, setView] = useState<'blocks' | 'overlay'>('overlay');
   const [showParaNums, setShowParaNums] = useState(false);
+  // Figures whose OCR text the operator clicked away (click again to restore)
+  const [hiddenFigs, setHiddenFigs] = useState<Set<number>>(new Set());
+  const toggleFig = (order: number) => setHiddenFigs(prev => {
+    const next = new Set(prev);
+    if (next.has(order)) next.delete(order); else next.add(order);
+    return next;
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -2105,6 +2112,7 @@ function MetaViewContent({
   useEffect(() => {
     if (!selectedDocId || selectedPage == null) { setDetail(null); return; }
     let cancelled = false;
+    setHiddenFigs(new Set());
     fetch(`/api/documents/${selectedDocId}/structure?page=${selectedPage}`)
       .then(res => res.json())
       .then(data => { if (!cancelled) setDetail(data); })
@@ -2255,7 +2263,8 @@ function MetaViewContent({
                           <div
                             key={b.order}
                             title={`[${b.order}] ${b.type}: ${b.text.slice(0, 140)}`}
-                            className={`absolute border ${BLOCK_COLORS[b.type] ?? BLOCK_COLORS.unknown}`}
+                            onClick={b.type === 'figure' && b.text ? () => toggleFig(b.order) : undefined}
+                            className={`absolute border ${BLOCK_COLORS[b.type] ?? BLOCK_COLORS.unknown}${b.type === 'figure' && b.text ? ' cursor-pointer' : ''}`}
                             style={{
                               left: `${(x0 / pw) * 100}%`,
                               top: `${(y0 / ph) * 100}%`,
@@ -2268,7 +2277,7 @@ function MetaViewContent({
                                 ¶{pn}
                               </span>
                             )}
-                            {b.type === 'figure' && b.text && !(b.lines?.length) && (
+                            {b.type === 'figure' && b.text && !(b.lines?.length) && !hiddenFigs.has(b.order) && (
                               <div className="absolute inset-0 overflow-y-auto p-1.5 bg-white/80 text-[10px] leading-tight text-gray-900 whitespace-pre-wrap">
                                 {b.text}
                               </div>
@@ -2280,14 +2289,15 @@ function MetaViewContent({
                     {/* Figure OCR lines aligned to their position in the image
                         (ink-band alignment; falls back to the block panel when
                         alignment was not possible) */}
-                    {detail.blocks.filter(b => b.type === 'figure' && b.lines?.length).flatMap(b =>
+                    {detail.blocks.filter(b => b.type === 'figure' && b.lines?.length && !hiddenFigs.has(b.order)).flatMap(b =>
                       b.lines!.filter(l => l.bbox).map((l, li) => {
                         const [x0, y0, x1, y1] = l.bbox!;
                         const { width: pw, height: ph } = detail.pageDims!;
                         return (
                           <div
                             key={`fig${b.order}-${li}`}
-                            className="absolute bg-white/85 text-gray-900 leading-none whitespace-nowrap overflow-hidden"
+                            onClick={() => toggleFig(b.order)}
+                            className="absolute bg-white/85 text-gray-900 leading-none whitespace-nowrap overflow-hidden cursor-pointer"
                             style={{
                               left: `${(x0 / pw) * 100}%`,
                               top: `${(y0 / ph) * 100}%`,
