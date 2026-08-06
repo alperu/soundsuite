@@ -87,7 +87,7 @@ describe('pdf-block-extractor pure core', () => {
     expect(blocks.find(b => b.type === 'paragraph')?.text).toContain('respondent');
   });
 
-  it('suppresses table detection on transcript-like pages', () => {
+  it('transcript pages produce ZERO blocks (§6.1 full carve-out → legacy line-aware path)', () => {
     // 20 numbered lines with speaker-indent structure (RR signature)
     const items: PositionedItem[] = [];
     for (let i = 1; i <= 20; i++) {
@@ -97,8 +97,9 @@ describe('pdf-block-extractor pure core', () => {
     }
     const lines = groupIntoLines(items);
     expect(looksLikeTranscriptPage(lines)).toBe(true);
-    const blocks = buildBlocks(items, PAGE);
-    expect(blocks.filter(b => b.type === 'table')).toHaveLength(0);
+    // No blocks at all: the page must delegate to the legacy chunker so
+    // startLine/endLine detection over chunk text stays byte-identical.
+    expect(buildBlocks(items, PAGE)).toHaveLength(0);
   });
 
   it('detects numbered ALL-CAPS headings at body size (real-filing gap)', () => {

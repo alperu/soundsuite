@@ -222,7 +222,8 @@ export default function VectorViewer({
     (async () => {
       try {
         const lastTool = await getPreference<ViewMode>('vectors.lastTool');
-        if (!lastTool || !['tableview', 'breakdown', 'pagereport'].includes(lastTool)) return;
+        // Derived from TOOL_FILTER_KINDS so a new tool can't be forgotten here
+        if (!lastTool || !Object.keys(TOOL_FILTER_KINDS).includes(lastTool)) return;
         const lastUrl = await getPreference<string>(`vectors.url.${lastTool}`);
         if (lastUrl && lastUrl.startsWith('/vectors')) {
           router.replace(lastUrl, { scroll: false });
@@ -2199,7 +2200,7 @@ function MetaViewContent({
                     <img
                       src={`/api/documents/${selectedDocId}/page-image/${selectedPage}?scale=1.5`}
                       alt={`Page ${selectedPage}`}
-                      className="w-full border border-gray-200"
+                      className="block w-full h-auto border border-gray-200"
                     />
                     {detail.blocks.filter(b => b.bbox).map(b => {
                       const [x0, y0, x1, y1] = b.bbox!;

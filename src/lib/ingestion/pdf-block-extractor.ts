@@ -259,6 +259,15 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
   const bodySize = modalFontSize(lines);
   const isTranscript = looksLikeTranscriptPage(lines);
 
+  // §6.1 FULL transcript carve-out: Reporter's-Record pages produce NO
+  // blocks at all, so the StructuredChunker delegates them to the legacy
+  // line-aware path and chunk text stays byte-identical — preserving
+  // startLine/endLine stamping (detectLineNumbers over chunk text at
+  // ingestion) and the MCP citation fallback that re-reads margin numbers
+  // from stored text. Structural chunking would re-assemble that text and
+  // silently break "Vol 3, page 105, lines 4-17" citations.
+  if (isTranscript) return [];
+
   // 1. classify furniture by geometry
   const topBand = page.height * (1 - FURNITURE_BAND);
   const bottomBand = page.height * FURNITURE_BAND;
