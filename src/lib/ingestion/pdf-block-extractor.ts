@@ -290,20 +290,6 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
   // clusters, new line not centered) for paragraph breaks without extra
   // leading. Centered caption pages are protected by the cluster gate.
   const bodyLines = lines.filter((_, i) => kind[i] === 'body');
-  const leadCounts = new Map<number, number>();
-  for (let j = 1; j < bodyLines.length; j++) {
-    const d = Math.round(bodyLines[j - 1].y - bodyLines[j].y);
-    if (d > 0 && d < 200) leadCounts.set(d, (leadCounts.get(d) ?? 0) + 1);
-  }
-  let modalLead = 0;
-  let modalCount = 0;
-  for (const [lead, count] of leadCounts) {
-    if (count > modalCount || (count === modalCount && lead < modalLead)) {
-      modalLead = lead;
-      modalCount = count;
-    }
-  }
-  const haveLead = bodyLines.length >= 3 && modalLead > 0;
   const INDENT_MIN = Math.max(12, bodySize * 1.2);
   const RAGGED_MIN = bodySize * 1.5;
   const maxX1 = bodyLines.length ? Math.max(...bodyLines.map(l => l.x1)) : page.width;
@@ -323,6 +309,32 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
     Math.abs((l.x0 + l.x1) / 2 - page.width / 2) <= page.width * 0.08 &&
     l.x0 > page.width * 0.15 &&
     l.x1 < maxX1 - RAGGED_MIN;
+
+  // Leading statistics come from NON-CENTERED body lines when enough exist:
+  // a centered court caption is single-spaced (measured 16pt at 14pt type on
+  // page 1 of a real motion) while the prose below is double-spaced (32pt);
+  // with the caption included the two leads TIED 8-vs-8 and the tie-break
+  // picked 16pt, shattering every body paragraph into one-line blocks.
+  // Centered lines are never paragraph prose, so they don't get a vote —
+  // unless fewer than 3 non-centered lines remain (mostly-centered pages),
+  // where all body lines vote rather than falling back to the legacy
+  // font-size rule that re-shatters double-spaced text.
+  const nonCentered = bodyLines.filter(l => !isCentered(l));
+  const leadLines = nonCentered.length >= 3 ? nonCentered : bodyLines;
+  const leadCounts = new Map<number, number>();
+  for (let j = 1; j < leadLines.length; j++) {
+    const d = Math.round(leadLines[j - 1].y - leadLines[j].y);
+    if (d > 0 && d < 200) leadCounts.set(d, (leadCounts.get(d) ?? 0) + 1);
+  }
+  let modalLead = 0;
+  let modalCount = 0;
+  for (const [lead, count] of leadCounts) {
+    if (count > modalCount || (count === modalCount && lead < modalLead)) {
+      modalLead = lead;
+      modalCount = count;
+    }
+  }
+  const haveLead = leadLines.length >= 3 && modalLead > 0;
 
   const paragraphBreak = (prev: Line, cur: Line): boolean => {
     const gap = prev.y - cur.y;

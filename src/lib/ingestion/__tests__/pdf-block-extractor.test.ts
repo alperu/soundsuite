@@ -149,6 +149,52 @@ describe('pdf-block-extractor pure core', () => {
     expect(paras[2].text).toContain('legal impossibility');
   });
 
+  it('single-spaced centered caption does not shatter the double-spaced body (page-1 regression)', () => {
+    // Measured on page 1 of a real motion: the centered caption block is
+    // single-spaced (16pt leading at 14pt type) and TIED the body's 32pt
+    // leading 8-vs-8 in the lead histogram; the old smaller-lead tie-break
+    // made modalLead=16, so all nine body lines became one-line paragraphs.
+    const centered = (s: string, y: number) =>
+      run(s, 306 - s.length * 2.5, y, { w: s.length * 5, h: 14 });
+    const body = (s: string, y: number, x = 72) => run(s, x, y, { w: 612 - x - 72, h: 14 });
+    const items: PositionedItem[] = [
+      // caption: 8 centered lines, 16pt leading
+      centered('IN THE COURT OF APPEALS', 707),
+      centered('FOR THE THIRD JUDICIAL DISTRICT', 691),
+      centered('SITTING AT THE CAPITAL', 675),
+      centered('IN RE THE MARRIAGE OF', 659),
+      centered('PETITIONER AND RESPONDENT', 643),
+      centered('EMERGENCY MOTION TO STAY', 627),
+      centered('AND FOR OTHER RELIEF', 611),
+      centered('FILED UNDER RULE 29.3', 595),
+      // body: indented ¶ start, then 8 full-width lines, 32pt leading
+      body('Petitioner respectfully moves this Court for an emergency', 549, 108),
+      body('stay of the sale ordered below, and in support shows the', 517),
+      body('following facts and authorities, each established by the', 485),
+      body('record and the attached declarations of the parties and', 453),
+      body('counsel, which demonstrate that the ordered sale would', 421),
+      body('irreparably moot the pending appeal before this Court can', 389),
+      body('reach the merits of the underlying receivership dispute', 357),
+      body('and the associated turnover orders entered by the trial', 325),
+      run('court in aid of its judgment enforcement jurisdiction.', 72, 293, { w: 300, h: 14 }), // ragged ¶ end
+      // second x0=108 line so the indent cluster has ≥2 members
+      body('A separate indented paragraph begins here with facts that', 261, 108),
+      body('continue at the margin on the following line as usual.', 229),
+    ];
+    const blocks = buildBlocks(items, PAGE);
+    const paras = blocks.filter(b => b.type === 'paragraph');
+    // The nine-line body run must be ONE paragraph (plus the second indented
+    // one) — NOT nine one-line blocks.
+    const bigBody = paras.find(p => p.text.includes('respectfully moves'));
+    expect(bigBody).toBeDefined();
+    expect(bigBody!.text).toContain('enforcement jurisdiction');
+    const separate = paras.find(p => p.text.includes('separate indented paragraph'));
+    expect(separate).toBeDefined();
+    expect(separate).not.toBe(bigBody);
+    // No shatter: every paragraph containing body prose spans multiple lines
+    expect(bigBody!.text.split('\n').length).toBe(9);
+  });
+
   it('heading mid-flow on a double-spaced page still splits out (absorption regression)', () => {
     // Uniform 32pt leading: no gap ever exceeds 1.4×lead, so only the
     // heading-like signal can break the paragraph before the heading line.
