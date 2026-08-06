@@ -123,6 +123,34 @@ function isBoldFont(fontName?: string): boolean {
   return !!fontName && /bold|black|heavy|demi/i.test(fontName);
 }
 
+/** "I." / "II." / "A." / "1." / "1.2." enumerator at line start. */
+const NUMBERED_HEADING_RE = /^(?:[IVXLCDM]{1,7}\.|[A-Z]\.|\d{1,2}(?:\.\d{1,2})*\.)\s+\S/;
+
+/**
+ * Numbered-heading signal (added after observing real filings: pleading
+ * headings like "I. NATURE OF THE EMERGENCY" are often body-sized and not
+ * bold, so the font heuristics miss them). The enumerator alone is NOT
+ * sufficient — numbered body lists ("1. Set this motion for hearing…")
+ * share the shape. Discriminators: the text is uppercase-dominant, or the
+ * line is horizontally centered on the page.
+ */
+export function isNumberedHeadingLine(
+  line: { text: string; x0: number; x1: number },
+  page: PageGeometry,
+): boolean {
+  const t = line.text.trim();
+  if (t.length > HEADING_MAX_CHARS || !NUMBERED_HEADING_RE.test(t)) return false;
+  const letters = t.replace(/[^a-zA-Z]/g, '');
+  if (letters.length >= 4) {
+    const upper = letters.replace(/[^A-Z]/g, '').length;
+    if (upper / letters.length >= 0.8) return true;
+  }
+  // centered: line midpoint within 8% of page midpoint AND clearly indented
+  const mid = (line.x0 + line.x1) / 2;
+  const centered = Math.abs(mid - page.width / 2) <= page.width * 0.08 && line.x0 > page.width * 0.15;
+  return centered && t.length <= 80;
+}
+
 /** Reporter's-Record page signature: a margin column of line numbers 1–25.
  * Table detection must be suppressed on these pages (§6.1). */
 export function looksLikeTranscriptPage(lines: Line[]): boolean {
@@ -273,7 +301,8 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       para.length <= 2 &&
       first.text.length <= HEADING_MAX_CHARS &&
       (first.fontSize >= bodySize * HEADING_SIZE_RATIO ||
-        (isBoldFont(first.items[0]?.fontName) && first.text.length <= 80));
+        (isBoldFont(first.items[0]?.fontName) && first.text.length <= 80) ||
+        (para.length === 1 && isNumberedHeadingLine(first, page)));
     blocks.push({
       type: isHeading ? 'heading' : 'paragraph',
       text: para.map(l => l.text).join('\n'),
@@ -321,7 +350,13 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
     }
     para.push(lines[i]);
     // headings are short — flush immediately so the next line starts a body block
-    if (para.length === 1 && (lines[i].fontSize >= bodySize * HEADING_SIZE_RATIO || isBoldFont(lines[i].items[0]?.fontName)) && lines[i].text.length <= HEADING_MAX_CHARS) {
+    if (
+      para.length === 1 &&
+      lines[i].text.length <= HEADING_MAX_CHARS &&
+      (lines[i].fontSize >= bodySize * HEADING_SIZE_RATIO ||
+        isBoldFont(lines[i].items[0]?.fontName) ||
+        isNumberedHeadingLine(lines[i], page))
+    ) {
       flushPara();
     }
   }

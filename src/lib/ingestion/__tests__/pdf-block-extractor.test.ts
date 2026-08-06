@@ -101,6 +101,29 @@ describe('pdf-block-extractor pure core', () => {
     expect(blocks.filter(b => b.type === 'table')).toHaveLength(0);
   });
 
+  it('detects numbered ALL-CAPS headings at body size (real-filing gap)', () => {
+    const items = [
+      // centered-ish, uppercase, same size as body, not bold
+      run('I. NATURE OF THE EMERGENCY', 194, 700),
+      ...paragraph(['This is an accelerated interlocutory appeal from an order', 'appointing a receiver over the appellant’s homestead.'], 72, 670),
+    ];
+    const blocks = buildBlocks(items, PAGE);
+    expect(blocks[0].type).toBe('heading');
+    expect(blocks[0].text).toBe('I. NATURE OF THE EMERGENCY');
+    expect(blocks[1].type).toBe('paragraph');
+  });
+
+  it('does NOT classify numbered body list items as headings', () => {
+    const items = [
+      ...paragraph(['WHEREFORE, PREMISES CONSIDERED, Movant prays that the Court:'], 72, 700),
+      run('1. Set this motion for hearing at the earliest possible date;', 90, 660),
+      run('2. Enter an order expunging the notice in its entirety; and', 90, 630),
+      run('3. Grant such other and further relief to which Movant is entitled.', 90, 600),
+    ];
+    const blocks = buildBlocks(items, PAGE);
+    expect(blocks.filter(b => b.type === 'heading')).toHaveLength(0);
+  });
+
   it('modal font size reflects body text, not headings', () => {
     const items = [
       run('BIG HEADING', 150, 700, { h: 18 }),
