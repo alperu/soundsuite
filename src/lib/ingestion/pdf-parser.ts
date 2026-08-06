@@ -45,6 +45,12 @@ export interface PageText {
    * they are structurally-typed twins; adding a field to only one silently
    * drops it at the chunker boundary (the structureType leak, §3.1). */
   blocks?: import('./docparse-types').DocparseBlock[];
+  /** Structure is metadata-ONLY for this page: the StructuredChunker must
+   * delegate it to the legacy chunker even though blocks are present.
+   * Set document-wide for Reporter's Records (PLAN-rr-structure item 5) so
+   * chunk text stays byte-identical while Meta View gets full structure.
+   * TWIN-DECLARED in text-chunker.ts — keep both in sync. */
+  structureOnly?: boolean;
 }
 
 /**

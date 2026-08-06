@@ -52,6 +52,10 @@ export interface PageText {
   /** Structured blocks (PLAN-ss-docparse §0.1) — twin of the declaration in
    * pdf-parser.ts; keep BOTH in sync or the field is silently dropped. */
   blocks?: import('./docparse-types').DocparseBlock[];
+  /** Metadata-only structure flag (PLAN-rr-structure item 5): when true the
+   * StructuredChunker delegates this page to the legacy chunker despite
+   * blocks being present (RR byte-identity). Twin of pdf-parser.ts. */
+  structureOnly?: boolean;
 }
 
 /**
