@@ -143,6 +143,27 @@ export async function produceStructuredPages(opts: ProduceOptions): Promise<Stru
           if (ocr.text && ocr.text.trim().length > 0) {
             block.text = ocr.text.trim();
             counters.figuresOcrAccepted++;
+            // Line alignment (best-effort): ink-density bands from the crop
+            // give each OCR line its true position so Meta View can
+            // superimpose text where it appears in the image. Empty on
+            // band/line-count disagreement — the viewer falls back to the
+            // unaligned panel.
+            try {
+              const sharp = (await import('sharp')).default;
+              const { data, info } = await sharp(region.buffer)
+                .grayscale()
+                .raw()
+                .toBuffer({ resolveWithObject: true });
+              const { detectTextBands, alignOcrLines } = await import('./figure-line-align');
+              const bands = detectTextBands(new Uint8Array(data), info.width, info.height);
+              const aligned = alignOcrLines(block.text, bands, region);
+              if (aligned.length > 0) block.lines = aligned;
+            } catch (alignErr) {
+              logger.debug?.('Figure line alignment failed — unaligned panel', {
+                pageNumber: page.pageNumber,
+                error: alignErr instanceof Error ? alignErr.message : String(alignErr),
+              });
+            }
           }
         } catch (err) {
           logger.warn('Figure OCR failed — figure keeps empty text', {

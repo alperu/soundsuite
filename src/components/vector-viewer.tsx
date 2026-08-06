@@ -2238,7 +2238,7 @@ function MetaViewContent({
             {detail && view === 'overlay' && (
               <div className="p-4 overflow-auto max-h-[70vh]">
                 {detail.pageDims ? (
-                  <div className="relative inline-block w-full">
+                  <div className="relative inline-block w-full" style={{ containerType: 'inline-size' }}>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={`/api/documents/${selectedDocId}/page-image/${selectedPage}?scale=1.5`}
@@ -2268,7 +2268,7 @@ function MetaViewContent({
                                 ¶{pn}
                               </span>
                             )}
-                            {b.type === 'figure' && b.text && (
+                            {b.type === 'figure' && b.text && !(b.lines?.length) && (
                               <div className="absolute inset-0 overflow-y-auto p-1.5 bg-white/80 text-[10px] leading-tight text-gray-900 whitespace-pre-wrap">
                                 {b.text}
                               </div>
@@ -2277,6 +2277,33 @@ function MetaViewContent({
                         );
                       });
                     })()}
+                    {/* Figure OCR lines aligned to their position in the image
+                        (ink-band alignment; falls back to the block panel when
+                        alignment was not possible) */}
+                    {detail.blocks.filter(b => b.type === 'figure' && b.lines?.length).flatMap(b =>
+                      b.lines!.filter(l => l.bbox).map((l, li) => {
+                        const [x0, y0, x1, y1] = l.bbox!;
+                        const { width: pw, height: ph } = detail.pageDims!;
+                        return (
+                          <div
+                            key={`fig${b.order}-${li}`}
+                            className="absolute bg-white/85 text-gray-900 leading-none whitespace-nowrap overflow-hidden"
+                            style={{
+                              left: `${(x0 / pw) * 100}%`,
+                              top: `${(y0 / ph) * 100}%`,
+                              width: `${((x1 - x0) / pw) * 100}%`,
+                              height: `${((y1 - y0) / ph) * 100}%`,
+                              // cqw tracks the rendered page width, so glyphs
+                              // scale with the image; band height in pt →
+                              // fraction of page width → container units
+                              fontSize: `${Math.max(0.8, ((y1 - y0) / pw) * 82)}cqw`,
+                            }}
+                            title={l.text}
+                          >
+                            {l.text}
+                          </div>
+                        );
+                      }))}
                     {/* RR per-line rects labelled with printed line numbers */}
                     {detail.blocks.flatMap((b, bi) => (b.lines ?? [])
                       .filter(l => l.bbox && l.lineNumber != null)
