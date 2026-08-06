@@ -120,6 +120,8 @@ export async function produceStructuredPages(opts: ProduceOptions): Promise<Stru
     const result = byPage.get(page.pageNumber);
     if (!result || result.blocks.length === 0) continue;
     page.blocks = result.blocks;
+    if (result.width) page.pageWidth = result.width;
+    if (result.height) page.pageHeight = result.height;
     counters.pdfBlockPages++;
 
     if (!canEscalate) continue;

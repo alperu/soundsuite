@@ -772,7 +772,7 @@ export async function extractPageBlocks(
           }
         } catch { /* figures are best-effort */ }
       }
-      results.push({ pageNumber, blocks, producer: 'pdf' });
+      results.push({ pageNumber, blocks, producer: 'pdf', width: viewport.width, height: viewport.height });
       page.cleanup();
     }
   } finally {

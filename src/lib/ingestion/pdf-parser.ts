@@ -60,6 +60,10 @@ export interface PageText {
   /** RR-only companion to rrLines: page height in PDF points for
    * bottom-left → top-left bbox conversion. */
   pageHeight?: number;
+  /** Page width in PDF points — persisted with structure so Meta View's
+   * overlay never depends on a live PDF probe (task #10: a transient
+   * getPageDimensions failure disabled the overlay). */
+  pageWidth?: number;
 }
 
 /**
@@ -689,6 +693,7 @@ export class PDFParser {
         textDensity: text.trim().length,
         rrLines,
         pageHeight: page.getViewport({ scale: 1 }).height,
+        pageWidth: page.getViewport({ scale: 1 }).width,
       });
       page.cleanup();
 

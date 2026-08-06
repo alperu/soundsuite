@@ -867,7 +867,15 @@ export class IngestionPipeline {
             await (this.database as any).pageCache.updateMany({
               where: { documentId, pageNumber: p.pageNumber },
               data: {
-                structuredJson: JSON.stringify({ pageNumber: p.pageNumber, producer, blocks: p.blocks }),
+                structuredJson: JSON.stringify({
+                  pageNumber: p.pageNumber,
+                  producer,
+                  // Persisted so Meta View never needs a live PDF probe for
+                  // overlay math (task #10); undefined for flat-OCR pages.
+                  pageWidth: p.pageWidth,
+                  pageHeight: p.pageHeight,
+                  blocks: p.blocks,
+                }),
                 parseMethod: 'docparse',
               },
             }).catch(() => {});

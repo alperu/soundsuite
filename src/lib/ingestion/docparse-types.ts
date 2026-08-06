@@ -70,4 +70,8 @@ export interface DocparsePageResult {
   pageNumber: number;
   blocks: DocparseBlock[];
   producer: BlockProducer;
+  /** Page dimensions in PDF points — persisted with the structure so the
+   * Meta View overlay never depends on a live PDF probe (task #10). */
+  width?: number;
+  height?: number;
 }

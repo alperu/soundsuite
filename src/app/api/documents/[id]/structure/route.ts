@@ -48,12 +48,27 @@ export async function GET(
         });
       }
       const parsed = JSON.parse(row.structuredJson);
-      // Page dimensions (PDF points) for bbox → percentage overlay math
-      let pageDims: { width: number; height: number } | null = null;
-      try {
-        const { getPageDimensions } = await import('@/lib/pdf-page-renderer');
-        pageDims = await getPageDimensions(doc.filePath, pageNumber);
-      } catch { /* overlay degrades gracefully without dims */ }
+      // Page dimensions (PDF points) for bbox → percentage overlay math.
+      // Preferred source: dims persisted with the structure at parse time
+      // (task #10 — a transient live-probe failure used to disable the
+      // overlay). Live probe with one retry covers rows persisted before
+      // dims were stored.
+      let pageDims: { width: number; height: number } | null =
+        parsed.pageWidth && parsed.pageHeight
+          ? { width: Math.floor(parsed.pageWidth), height: Math.floor(parsed.pageHeight) }
+          : null;
+      if (!pageDims) {
+        for (let attempt = 0; attempt < 2 && !pageDims; attempt++) {
+          try {
+            const { getPageDimensions } = await import('@/lib/pdf-page-renderer');
+            pageDims = await getPageDimensions(doc.filePath, pageNumber);
+          } catch (e) {
+            console.error(`getPageDimensions failed (attempt ${attempt + 1}) for page ${pageNumber}:`,
+              e instanceof Error ? e.message : e);
+            if (attempt === 0) await new Promise(r => setTimeout(r, 250));
+          }
+        }
+      }
       return NextResponse.json({
         pageNumber,
         structured: true,
