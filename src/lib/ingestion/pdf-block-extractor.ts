@@ -481,6 +481,10 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       text: para.map(l => l.text).join('\n'),
       bbox: lineBBox(para, page),
       order: order++,
+      // page → paragraph → line hierarchy (PLAN-rr-structure item 4 for the
+      // born-digital side): unnumbered lines with per-line bboxes, same
+      // convention as the RR producer's numbered lines.
+      lines: para.map(l => ({ text: l.text, bbox: lineBBox([l], page) })),
     });
     para = [];
   };
@@ -491,6 +495,7 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       text: regionLines.map(l => l.text).join('\n'),
       bbox: lineBBox(regionLines, page),
       order: order++,
+      lines: regionLines.map(l => ({ text: l.text, bbox: lineBBox([l], page) })),
     });
     regionLines = [];
     currentRegion = -1;
@@ -565,6 +570,7 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       const combined = `${pendingHeading.text} ${lines[i].text}`.trim();
       if (gapOk && (startsLower || capsWrap) && combined.length <= 200) {
         pendingHeading.text = combined;
+        pendingHeading.lines?.push({ text: lines[i].text, bbox: lineBBox([lines[i]], page) });
         if (pendingHeading.bbox) {
           const lb = lineBBox([lines[i]], page);
           pendingHeading.bbox = [

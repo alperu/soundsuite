@@ -2057,6 +2057,7 @@ function MetaViewContent({
   const [selectedPage, setSelectedPage] = useState<number | null>(initialPage ?? null);
   const [detail, setDetail] = useState<{ blocks: MetaBlock[]; producer?: string; parseMethod?: string | null; pageDims?: { width: number; height: number } | null; structured: boolean } | null>(null);
   const [view, setView] = useState<'blocks' | 'overlay'>('overlay');
+  const [showParaNums, setShowParaNums] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -2211,7 +2212,17 @@ function MetaViewContent({
               <span className="text-sm font-medium text-gray-700">
                 Page {selectedPage} — {detail?.producer ?? '…'} / {detail?.parseMethod ?? ''}
               </span>
-              <div className="flex gap-1">
+              <div className="flex items-center gap-1">
+                {view === 'overlay' && (
+                  <label className="flex items-center gap-1 text-xs text-gray-600 mr-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={showParaNums}
+                      onChange={e => setShowParaNums(e.target.checked)}
+                    />
+                    ¶ numbers
+                  </label>
+                )}
                 {(['overlay', 'blocks'] as const).map(v => (
                   <button
                     key={v}
@@ -2234,23 +2245,33 @@ function MetaViewContent({
                       alt={`Page ${selectedPage}`}
                       className="block w-full h-auto border border-gray-200"
                     />
-                    {detail.blocks.filter(b => b.bbox).map(b => {
-                      const [x0, y0, x1, y1] = b.bbox!;
-                      const { width: pw, height: ph } = detail.pageDims!;
-                      return (
-                        <div
-                          key={b.order}
-                          title={`[${b.order}] ${b.type}: ${b.text.slice(0, 140)}`}
-                          className={`absolute border ${BLOCK_COLORS[b.type] ?? BLOCK_COLORS.unknown}`}
-                          style={{
-                            left: `${(x0 / pw) * 100}%`,
-                            top: `${(y0 / ph) * 100}%`,
-                            width: `${((x1 - x0) / pw) * 100}%`,
-                            height: `${((y1 - y0) / ph) * 100}%`,
-                          }}
-                        />
-                      );
-                    })}
+                    {(() => {
+                      let paraOrdinal = 0;
+                      return detail.blocks.filter(b => b.bbox).map(b => {
+                        const [x0, y0, x1, y1] = b.bbox!;
+                        const { width: pw, height: ph } = detail.pageDims!;
+                        const pn = b.type === 'paragraph' ? ++paraOrdinal : null;
+                        return (
+                          <div
+                            key={b.order}
+                            title={`[${b.order}] ${b.type}: ${b.text.slice(0, 140)}`}
+                            className={`absolute border ${BLOCK_COLORS[b.type] ?? BLOCK_COLORS.unknown}`}
+                            style={{
+                              left: `${(x0 / pw) * 100}%`,
+                              top: `${(y0 / ph) * 100}%`,
+                              width: `${((x1 - x0) / pw) * 100}%`,
+                              height: `${((y1 - y0) / ph) * 100}%`,
+                            }}
+                          >
+                            {showParaNums && pn !== null && (
+                              <span className="absolute -top-2 -left-1 px-1 rounded bg-blue-600 text-white text-[9px] font-mono leading-3">
+                                ¶{pn}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      });
+                    })()}
                     {/* RR per-line rects labelled with printed line numbers */}
                     {detail.blocks.flatMap((b, bi) => (b.lines ?? [])
                       .filter(l => l.bbox && l.lineNumber != null)
@@ -2288,10 +2309,10 @@ function MetaViewContent({
                 </div>
                 {/* RR line-color legend: one chip per block, in its overlay
                     color, labelled with speaker (or block type) + line range */}
-                {detail.blocks.some(b => b.lines?.length) && (
+                {detail.blocks.some(b => b.lines?.some(l => l.lineNumber != null)) && (
                   <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
                     {detail.blocks.map((b, bi) => {
-                      if (!b.lines?.length) return null;
+                      if (!b.lines?.some(l => l.lineNumber != null)) return null;
                       const c = LINE_PALETTE[bi % LINE_PALETTE.length];
                       const range = b.lineStart != null
                         ? (b.lineStart === b.lineEnd ? ` L${b.lineStart}` : ` L${b.lineStart}–${b.lineEnd}`)
