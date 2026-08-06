@@ -23,7 +23,7 @@ const block = (type: DocparseBlock['type'], text: string, order: number): Docpar
 const page = (pageNumber: number, blocks?: DocparseBlock[]): PageText =>
   ({ pageNumber, text: 'raw page text', ...(blocks ? { blocks } : {}) });
 
-const SAC: SacContext = { caseName: 'In re Stevens', filingType: 'motion' };
+const SAC: SacContext = { caseName: 'In re Doe', filingType: 'motion' };
 
 describe('StructuredChunker', () => {
   it('delegates ENTIRELY when no page has blocks (byte-identical path)', async () => {
@@ -45,7 +45,7 @@ describe('StructuredChunker', () => {
     ])];
     const chunks = await chunker.chunkPages(pages, 'd', 'c', SAC);
     expect(chunks).toHaveLength(1);
-    expect(chunks[0].text).toBe('[Case: In re Stevens | Filing: motion]\n\nORDERS ABOUT CONDUCT\nAll parties are ordered to behave.');
+    expect(chunks[0].text).toBe('[Case: In re Doe | Filing: motion]\n\nORDERS ABOUT CONDUCT\nAll parties are ordered to behave.');
     expect(chunks[0].text).not.toContain('Velva');
     expect(chunks[0].text).not.toContain('Page 1 of 2');
   });

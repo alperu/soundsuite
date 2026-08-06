@@ -6,6 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Sound Suite (court-lens-mcp) is a local, self-hosted document intelligence platform for legal case management. It monitors directories for court PDFs, processes them through a hybrid OCR/vector pipeline, exposes data via Model Context Protocol (MCP) for AI consumption, and provides a Next.js dashboard.
 
+## Privacy — NEVER commit case-identifying data
+
+This repo processes real litigation documents. **Nothing case-identifying may be committed or
+pushed**: no cause/case numbers (e.g. `D-1-FM-…`, `03-26-…-CV`), no party or attorney names, no
+real filing titles or corpus file names, no text excerpts from real documents, and no document
+IDs paired with case context. This applies to code, tests, fixtures, docs, plans, and **commit
+messages** alike.
+
+- Test fixtures must be **synthetic** (invented names, `CAUSE NO. 00-0000-XX`-style placeholders,
+  generic filing titles like "motion.pdf").
+- Integration tests that need a real PDF take its path from an **env var** (e.g.
+  `RR_FIXTURE_PDF`) and skip when unset — never hardcode a corpus path or file name.
+- Docs/plans describe documents generically ("a 73-page RR volume", "a 230-page motion") —
+  never by their real names or cause numbers.
+- Commit messages reference documents by role ("a real RR volume"), never by name/number.
+- When debugging output containing real case data must be discussed, keep it in the
+  conversation/scratchpad — never in tracked files.
+
 ## Tooling notes for Claude
 
 **context-mode is installed in this repo.** Use its MCP helpers instead of raw shell or `WebFetch`:

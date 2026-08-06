@@ -102,7 +102,7 @@ describe('assessOcrOutput', () => {
       ],
       [
         'caption block with case number and ALL CAPS',
-        'CAUSE NO. D-1-FM-21-005611 IN THE MATTER OF THE MARRIAGE OF EKIM STEVENS IN THE DISTRICT COURT OF TRAVIS COUNTY, TEXAS 261ST JUDICIAL DISTRICT NOTICE: THIS DOCUMENT CONTAINS SENSITIVE DATA',
+        'CAUSE NO. D-0-XX-00-000000 IN THE MATTER OF THE MARRIAGE OF JANE DOE IN THE DISTRICT COURT OF EXAMPLE COUNTY, TEXAS 000TH JUDICIAL DISTRICT NOTICE: THIS DOCUMENT CONTAINS SENSITIVE DATA',
       ],
       [
         'table-like content with repeated cells',
@@ -110,7 +110,7 @@ describe('assessOcrOutput', () => {
       ],
       [
         'page with a couple of stray CJK stamp glyphs',
-        'This certified copy of the decree was filed with the district clerk of Travis County 印 on the date shown, and the parties were served pursuant to the rules of civil procedure.',
+        'This certified copy of the decree was filed with the district clerk of the county 印 on the date shown, and the parties were served pursuant to the rules of civil procedure.',
       ],
     ])('%s', (_label, text) => {
       const result = assessOcrOutput(text);

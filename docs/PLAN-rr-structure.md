@@ -9,7 +9,7 @@ RR volumes get full structure (page → speaker-turn paragraph → lines with pr
 construction** to the legacy line-aware path (citations preserved). Key separation: *producing
 structure metadata* ≠ *using structure for chunking*.
 
-Empirical inputs (probed on the real 73-page `26-586-CR 062926 RR Vol 2 of 3.pdf`):
+Empirical inputs (probed on a real 73-page RR volume from the corpus):
 - Split-brain fix confirmed independently: production chunker over `extractTextForRR` text →
   **144/145 chunks stamped** (~99%). Block-derived stamping (item 11) is a precision upgrade,
   not a repair. Mis-stamped volumes need re-ingest, not code.
