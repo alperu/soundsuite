@@ -22,6 +22,7 @@ interface PipelineConfigBody {
   ocrResize?: boolean;
   ocrMaxWidth?: number;
   ocrPngCompression?: number;
+  docparseEnabled?: boolean;
 }
 
 export async function GET() {
@@ -71,6 +72,7 @@ export async function PATCH(request: NextRequest) {
     // Image preprocessing toggles (booleans)
     const booleanKeys: (keyof PipelineConfigBody)[] = [
       'ocrUpscale', 'ocrGrayscale', 'ocrNormalize', 'ocrClahe', 'ocrSharpen', 'ocrResize',
+      'docparseEnabled',
     ];
     for (const key of booleanKeys) {
       if (body[key] !== undefined) {

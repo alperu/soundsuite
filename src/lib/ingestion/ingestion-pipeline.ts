@@ -817,6 +817,32 @@ export class IngestionPipeline {
         });
       }
 
+      // Stage: structure (hybrid docparse, PLAN-ss-docparse §0.1) — attach
+      // DocparseBlocks to pages when enabled. Failures never fail ingestion;
+      // pages simply stay unstructured (blocks consumed by StructuredChunker
+      // once it lands; counters logged for operator visibility until then).
+      try {
+        const { getConfig: getAppConfig } = await import('../db/config');
+        const appCfg = await getAppConfig();
+        if (appCfg.docparseEnabled) {
+          const { produceStructuredPages } = await import('./structure-producer');
+          const counters = await this.runStage('structure', documentId, stageTimings, () =>
+            produceStructuredPages({
+              filePath,
+              pages,
+              ocrThreshold: appCfg.ocrThreshold,
+              ocrEngine: this.ocrEngine,
+            }),
+          );
+          this.logger.info('Structure stage counters', { documentId, ...counters });
+        }
+      } catch (err) {
+        this.logger.warn('Structure stage failed — continuing unstructured', {
+          documentId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
       // Stage: text-chunking
       // Build SAC context: case name, filing type, and document summary
       // are prepended to every chunk for better embedding retrieval quality.
@@ -926,11 +952,16 @@ export class IngestionPipeline {
         if (this.config.readinessEnabled !== false) {
           try {
             const renderFailedCount = pages.filter((p) => p.renderFailed).length;
+            const docRow = await this.database.document.findUnique({
+              where: { id: documentId },
+              select: { documentType: true },
+            });
             const signals = collectSignals({
               verification,
               chunkCount: embeddedChunks.length,
               renderFailedCount,
               ocrThreshold: this.config.ocrThreshold ?? 50,
+              documentType: docRow?.documentType,
             });
             readiness = computeReadiness(signals);
             this.logger.info('Readiness scored', {

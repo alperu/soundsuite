@@ -675,6 +675,25 @@ function OCRProviderPanel({ initialConfig }: { initialConfig: AppConfig }) {
   const [perfSaved, setPerfSaved] = useState(false);
   const perfDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Structured Document Parsing (hybrid docparse — PLAN-ss-docparse §0.1)
+  const [docparseEnabled, setDocparseEnabled] = useState(!!(initialConfig as any).docparseEnabled);
+  const [docparseSaved, setDocparseSaved] = useState(false);
+  const toggleDocparse = (enabled: boolean) => {
+    setDocparseEnabled(enabled);
+    fetch('/api/config/pipeline', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ docparseEnabled: enabled }),
+    })
+      .then(res => {
+        if (res.ok) {
+          setDocparseSaved(true);
+          setTimeout(() => setDocparseSaved(false), 2000);
+        }
+      })
+      .catch(() => {});
+  };
+
   const savePerf = (updates: { ocrConcurrency?: number; ocrTimeoutMs?: number }) => {
     if (updates.ocrConcurrency !== undefined) setPerfConcurrency(updates.ocrConcurrency);
     if (updates.ocrTimeoutMs !== undefined) setPerfTimeoutMs(updates.ocrTimeoutMs);
@@ -1014,6 +1033,31 @@ function OCRProviderPanel({ initialConfig }: { initialConfig: AppConfig }) {
             </p>
           </div>
         </div>
+      </div>
+
+      {/* Structured Document Parsing (hybrid docparse) */}
+      <div className="bg-white shadow rounded-lg p-6">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-xl font-semibold text-gray-900">Structured Document Parsing</h2>
+          {docparseSaved && <span className="text-sm text-green-600">✓ Saved</span>}
+        </div>
+        <p className="text-sm text-gray-600 mb-4">
+          Derive headings, paragraphs, page furniture, and table structure during ingestion
+          (PDF geometry for born-digital pages; table regions recognized via the OCR model).
+          Applies to documents ingested after enabling — re-index existing documents to
+          upgrade them. Transcripts always keep their line-number path.
+        </p>
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={docparseEnabled}
+            onChange={e => toggleDocparse(e.target.checked)}
+            className="h-4 w-4 text-blue-600 rounded"
+          />
+          <span className="text-sm font-medium text-gray-700">
+            Enable structured parsing {docparseEnabled ? '(on — new ingests attach structure blocks)' : '(off)'}
+          </span>
+        </label>
       </div>
 
       {/* Image Preprocessing Settings */}

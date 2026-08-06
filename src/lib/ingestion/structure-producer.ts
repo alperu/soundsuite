@@ -1,0 +1,121 @@
+/**
+ * structure-producer — the hybrid two-producer orchestrator.
+ * PLAN-ss-docparse §0.1 step 3.
+ *
+ * Attaches DocparseBlock[] to each PageText:
+ *  - born-digital pages (textDensity ≥ threshold): PdfBlockExtractor
+ *    (producer 'pdf'), then table-candidate escalation — crop the region
+ *    (page-region-cropper) and ask ss-ocr `Table Recognition:`; OTSL output
+ *    is normalized into html/markdown, and the block's text becomes the
+ *    normalized cell text (§6.2 decision 5). A failed/rejected/unsupported
+ *    escalation keeps the geometry-derived plain text — region failures
+ *    NEVER zero a block.
+ *  - scanned pages (below threshold, text from OCR): one flat paragraph
+ *    block (producer 'ocr', bbox null). Scanned-side table-span escalation
+ *    is deferred pending crop-accuracy work (Phase 0: escalation IS needed,
+ *    but line-index→y-band mapping is the design's weakest link).
+ *  - transcript pages: never routed here by the caller (§6.1 carve-out);
+ *    the extractor additionally self-suppresses table detection.
+ */
+
+import { extractPageBlocks } from './pdf-block-extractor';
+import { cropRegion, type RegionCrop, type CropOptions } from './page-region-cropper';
+import { asTaskEngine, type IOCREngine } from './ocr-engine';
+import { normalizeTableOutput } from './otsl';
+import type { PageText } from './pdf-parser';
+import { createLogger } from '../logger';
+
+const logger = createLogger('StructureProducer');
+
+export interface StructureCounters {
+  pdfBlockPages: number;
+  ocrFlatPages: number;
+  tableRegionsAttempted: number;
+  tableRegionsAccepted: number;
+}
+
+export interface ProduceOptions {
+  filePath: string;
+  pages: PageText[];
+  /** Density threshold separating born-digital from scanned (pipeline's ocrThreshold). */
+  ocrThreshold: number;
+  /** Engine for table escalation; escalation is skipped when absent or when
+   * the engine does not support the 'table' task. */
+  ocrEngine?: IOCREngine | null;
+  /** Injectable for tests. */
+  cropFn?: (filePath: string, pageNum: number, bbox: [number, number, number, number], opts?: CropOptions) => Promise<RegionCrop | null>;
+  extractFn?: typeof extractPageBlocks;
+}
+
+/**
+ * Mutates pages in place (sets page.blocks) and returns counters.
+ * Never throws for per-page/per-region failures.
+ */
+export async function produceStructuredPages(opts: ProduceOptions): Promise<StructureCounters> {
+  const crop = opts.cropFn ?? cropRegion;
+  const extract = opts.extractFn ?? extractPageBlocks;
+  const counters: StructureCounters = {
+    pdfBlockPages: 0,
+    ocrFlatPages: 0,
+    tableRegionsAttempted: 0,
+    tableRegionsAccepted: 0,
+  };
+
+  const bornDigital = opts.pages.filter(p => p.textDensity >= opts.ocrThreshold && p.text.trim().length > 0);
+  const scanned = opts.pages.filter(p => p.textDensity < opts.ocrThreshold && p.text.trim().length > 0);
+
+  // Scanned pages: flat single block, no geometry.
+  for (const page of scanned) {
+    page.blocks = [{ type: 'paragraph', text: page.text, bbox: null, order: 0 }];
+    counters.ocrFlatPages++;
+  }
+
+  if (bornDigital.length === 0) return counters;
+
+  let extracted;
+  try {
+    extracted = await extract(opts.filePath, bornDigital.map(p => p.pageNumber));
+  } catch (err) {
+    logger.warn('Block extraction failed — pages stay unstructured', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return counters;
+  }
+  const byPage = new Map(extracted.map(r => [r.pageNumber, r]));
+
+  const taskEngine = opts.ocrEngine ? asTaskEngine(opts.ocrEngine) : null;
+  const canEscalate = !!taskEngine && taskEngine.supportsTask('table');
+
+  for (const page of bornDigital) {
+    const result = byPage.get(page.pageNumber);
+    if (!result || result.blocks.length === 0) continue;
+    page.blocks = result.blocks;
+    counters.pdfBlockPages++;
+
+    if (!canEscalate) continue;
+    for (const block of result.blocks) {
+      if (block.type !== 'table' || !block.bbox) continue;
+      counters.tableRegionsAttempted++;
+      try {
+        const region = await crop(opts.filePath, page.pageNumber, block.bbox);
+        if (!region) continue;
+        const ocr = await taskEngine!.recognizeTask(region.buffer, 'table');
+        if (!ocr.text) continue; // gate-rejected or empty — keep plain text
+        const normalized = normalizeTableOutput(ocr.text);
+        if (normalized.format === 'text' || normalized.rowCount < 2) continue;
+        block.html = normalized.html;
+        block.markdown = normalized.markdown;
+        if (normalized.cellText.trim().length > 0) block.text = normalized.cellText;
+        counters.tableRegionsAccepted++;
+      } catch (err) {
+        logger.warn('Table escalation failed — block keeps plain text', {
+          pageNumber: page.pageNumber,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  logger.info('Structured pages produced', { ...counters, file: opts.filePath.split('/').pop() });
+  return counters;
+}
