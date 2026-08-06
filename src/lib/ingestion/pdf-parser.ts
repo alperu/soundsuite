@@ -118,6 +118,111 @@ export interface OcrCandidate {
 }
 
 /**
+ * One reconstructed Reporter's-Record line (PLAN-rr-structure item 1).
+ * Geometry is PDF points, BOTTOM-left origin (pdfjs convention) — the RR
+ * block producer converts to top-left when building DocparseBlock bboxes.
+ */
+export interface RRLine {
+  /** Printed margin line number 1-25, or null for header/caption lines. */
+  lineNumber: number | null;
+  /** Line text WITHOUT the number prefix — exactly what today's page text
+   * puts after "N  ". Empty string is meaningful (blank numbered lines). */
+  text: string;
+  x0: number;
+  x1: number;
+  y: number;      // baseline y of the line
+  height: number; // max item height on the line (≈ font size)
+}
+
+/**
+ * Pure RR line reconstruction over pdfjs text items — the single source for
+ * BOTH the RR page text (via reconstructRRPageText's join, byte-identical to
+ * the pre-refactor output) AND the RR structure producer's blocks.
+ *
+ * Faithfully preserves the original algorithm: Y_TOLERANCE=2 y-bucketing,
+ * y-desc/x-asc sorts, line-number column detection (≥3 candidates on lines
+ * with ≥2 items, ±30pt median cluster, maxX = median+30), and the per-line
+ * numbered/plain branch — with item width/height additionally captured for
+ * geometry (they do not affect the text output).
+ */
+export function reconstructRRLines(items: any[]): RRLine[] {
+  const textItems = items.filter(
+    (item: any) => item.str && item.str.trim().length > 0 && item.transform
+  );
+  if (textItems.length === 0) return [];
+
+  const Y_TOLERANCE = 2;
+  const lines: { y: number; items: { x: number; str: string; width: number; height: number }[] }[] = [];
+  for (const item of textItems) {
+    const x = item.transform[4];
+    const y = item.transform[5];
+    let line = lines.find((l) => Math.abs(l.y - y) <= Y_TOLERANCE);
+    if (!line) {
+      line = { y, items: [] };
+      lines.push(line);
+    }
+    line.items.push({ x, str: item.str, width: item.width ?? 0, height: item.height ?? 0 });
+  }
+
+  lines.sort((a, b) => b.y - a.y);
+  for (const line of lines) {
+    line.items.sort((a, b) => a.x - b.x);
+  }
+
+  // Line-number column detection — candidacy requires ≥2 items on the line
+  // (a bare number with no text is not a candidate, but IS emitted as a
+  // blank numbered line below once the column is established).
+  const candidateXs: number[] = [];
+  for (const line of lines) {
+    if (line.items.length < 2) continue;
+    const trimmed = line.items[0].str.trim();
+    const num = parseInt(trimmed, 10);
+    if (!isNaN(num) && num >= 1 && num <= 25 && trimmed === String(num)) {
+      candidateXs.push(line.items[0].x);
+    }
+  }
+  let hasLineNumbers = false;
+  let lineNumberMaxX = 0;
+  if (candidateXs.length >= 3) {
+    const xs = [...candidateXs].sort((a, b) => a - b);
+    const medianX = xs[Math.floor(xs.length / 2)];
+    if (xs.filter((x) => Math.abs(x - medianX) < 30).length >= 3) {
+      hasLineNumbers = true;
+      lineNumberMaxX = medianX + 30;
+    }
+  }
+
+  const result: RRLine[] = [];
+  for (const line of lines) {
+    if (line.items.length === 0) continue;
+    const x0 = line.items[0].x;
+    const last = line.items[line.items.length - 1];
+    const x1 = last.x + last.width;
+    const height = Math.max(...line.items.map((i) => i.height), 0);
+
+    if (hasLineNumbers) {
+      const first = line.items[0];
+      const trimmed = first.str.trim();
+      const num = parseInt(trimmed, 10);
+      if (!isNaN(num) && num >= 1 && num <= 25 && trimmed === String(num) && first.x < lineNumberMaxX) {
+        result.push({
+          lineNumber: num,
+          text: line.items.slice(1).map((i) => i.str).join(' ').trim(),
+          x0, x1, y: line.y, height,
+        });
+        continue;
+      }
+    }
+    result.push({
+      lineNumber: null,
+      text: line.items.map((i) => i.str).join(' ').trim(),
+      x0, x1, y: line.y, height,
+    });
+  }
+  return result;
+}
+
+/**
  * PDFParser class for extracting text and images from PDF files.
  * Uses @d0paminedriven/pdfdown (native Rust via NAPI) for extraction.
  * Handles JPEG2000 natively — no browser polyfills or WASM hacks needed.
@@ -570,109 +675,16 @@ export class PDFParser {
   }
 
   /**
-   * Reconstruct a single RR page's text from pdfjs-dist text items,
-   * grouping by y-coordinate and detecting the line-number column.
+   * Reconstruct a single RR page's text from pdfjs-dist text items.
+   * BYTE-IDENTITY INVARIANT: this must produce exactly the same string as
+   * before the reconstructRRLines refactor — RR chunk text, line-number
+   * stamping, and MCP citation fallbacks all read this text
+   * (PLAN-rr-structure item 1/2; verified against a real volume).
    */
   private reconstructRRPageText(items: any[]): string {
-    // Filter to actual text items with position data
-    const textItems = items.filter(
-      (item: any) => item.str && item.str.trim().length > 0 && item.transform
-    );
-
-    if (textItems.length === 0) return '';
-
-    // Group items by y-coordinate (transform[5]) with tolerance for baseline alignment
-    const Y_TOLERANCE = 2;
-    const lines: { y: number; items: { x: number; str: string }[] }[] = [];
-
-    for (const item of textItems) {
-      const x = item.transform[4];
-      const y = item.transform[5];
-
-      let line = lines.find((l) => Math.abs(l.y - y) <= Y_TOLERANCE);
-      if (!line) {
-        line = { y, items: [] };
-        lines.push(line);
-      }
-      line.items.push({ x, str: item.str });
-    }
-
-    // Sort lines top-to-bottom (descending y in PDF coordinate space)
-    lines.sort((a, b) => b.y - a.y);
-
-    // Sort items left-to-right within each line
-    for (const line of lines) {
-      line.items.sort((a, b) => a.x - b.x);
-    }
-
-    // Detect line-number column: leftmost items that are numbers 1-25
-    // with x-position significantly left of the main text body
-    const lineNumberCandidates: { lineIdx: number; x: number; num: number }[] = [];
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (line.items.length < 2) continue;
-
-      const firstItem = line.items[0];
-      const trimmed = firstItem.str.trim();
-      const num = parseInt(trimmed, 10);
-
-      if (!isNaN(num) && num >= 1 && num <= 25 && trimmed === String(num)) {
-        lineNumberCandidates.push({ lineIdx: i, x: firstItem.x, num });
-      }
-    }
-
-    // Need at least 3 line-number candidates with consistent x-position
-    let hasLineNumbers = false;
-    let lineNumberMaxX = 0;
-
-    if (lineNumberCandidates.length >= 3) {
-      const xPositions = lineNumberCandidates.map((c) => c.x);
-      xPositions.sort((a, b) => a - b);
-      const medianX = xPositions[Math.floor(xPositions.length / 2)];
-
-      // Check that most candidates cluster near the median x
-      const nearMedian = xPositions.filter((x) => Math.abs(x - medianX) < 30);
-      if (nearMedian.length >= 3) {
-        hasLineNumbers = true;
-        lineNumberMaxX = medianX + 30;
-      }
-    }
-
-    // Build output lines
-    const resultLines: string[] = [];
-
-    for (const line of lines) {
-      if (line.items.length === 0) continue;
-
-      if (hasLineNumbers) {
-        const firstItem = line.items[0];
-        const trimmed = firstItem.str.trim();
-        const num = parseInt(trimmed, 10);
-
-        if (
-          !isNaN(num) &&
-          num >= 1 &&
-          num <= 25 &&
-          trimmed === String(num) &&
-          firstItem.x < lineNumberMaxX
-        ) {
-          // Numbered line — prepend line number with double-space separator
-          const textParts = line.items.slice(1).map((item) => item.str);
-          const lineText = textParts.join(' ').trim();
-          resultLines.push(`${num}  ${lineText}`);
-        } else {
-          // Non-numbered line (header, page info, etc.)
-          const lineText = line.items.map((item) => item.str).join(' ').trim();
-          resultLines.push(lineText);
-        }
-      } else {
-        const lineText = line.items.map((item) => item.str).join(' ').trim();
-        resultLines.push(lineText);
-      }
-    }
-
-    return resultLines.join('\n');
+    return reconstructRRLines(items)
+      .map((l) => (l.lineNumber !== null ? `${l.lineNumber}  ${l.text}` : l.text))
+      .join('\n');
   }
 
   /**
