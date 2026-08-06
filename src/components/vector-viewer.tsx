@@ -1974,6 +1974,15 @@ function ChunksModal({
 // Reads /api/documents/[id]/structure (SQLite PageCache.structuredJson).
 // ---------------------------------------------------------------------------
 
+/** RR per-line overlay: one color per parent paragraph (speaker turn),
+ * cycled by block index so adjacent turns always differ. */
+const LINE_PALETTE = [
+  { border: 'border-sky-500/70', bg: 'bg-sky-500/10', label: 'text-sky-600' },
+  { border: 'border-emerald-500/70', bg: 'bg-emerald-500/10', label: 'text-emerald-600' },
+  { border: 'border-amber-500/70', bg: 'bg-amber-500/10', label: 'text-amber-600' },
+  { border: 'border-fuchsia-500/70', bg: 'bg-fuchsia-500/10', label: 'text-fuchsia-600' },
+];
+
 const BLOCK_COLORS: Record<string, string> = {
   heading: 'border-amber-500 bg-amber-500/15',
   paragraph: 'border-blue-400 bg-blue-400/10',
@@ -2243,16 +2252,20 @@ function MetaViewContent({
                       );
                     })}
                     {/* RR per-line rects labelled with printed line numbers */}
-                    {detail.blocks.flatMap(b => (b.lines ?? [])
+                    {detail.blocks.flatMap((b, bi) => (b.lines ?? [])
                       .filter(l => l.bbox && l.lineNumber != null)
                       .map(l => {
                         const [x0, y0, x1, y1] = l.bbox!;
                         const { width: pw, height: ph } = detail.pageDims!;
+                        // one color per parent paragraph (speaker turn), cycling —
+                        // adjacent turns never share a color, so line→paragraph
+                        // membership is readable at a glance
+                        const c = LINE_PALETTE[bi % LINE_PALETTE.length];
                         return (
                           <div
                             key={`${b.order}-l${l.lineNumber}`}
-                            title={`Line ${l.lineNumber}: ${l.text.slice(0, 120)}`}
-                            className="absolute border border-dashed border-gray-400/60"
+                            title={`${b.speaker ? b.speaker + ' · ' : ''}Line ${l.lineNumber}: ${l.text.slice(0, 120)}`}
+                            className={`absolute border border-dashed ${c.border} ${c.bg}`}
                             style={{
                               left: `${(x0 / pw) * 100}%`,
                               top: `${(y0 / ph) * 100}%`,
@@ -2260,7 +2273,7 @@ function MetaViewContent({
                               height: `${((y1 - y0) / ph) * 100}%`,
                             }}
                           >
-                            <span className="absolute -left-6 top-0 text-[9px] text-gray-500 font-mono">{l.lineNumber}</span>
+                            <span className={`absolute -left-6 top-0 text-[9px] font-mono ${c.label}`}>{l.lineNumber}</span>
                           </div>
                         );
                       }))}
