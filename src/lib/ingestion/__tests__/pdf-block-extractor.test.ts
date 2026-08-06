@@ -190,6 +190,23 @@ describe('pdf-block-extractor pure core', () => {
     expect(paras[0].text).not.toContain('fair value');
   });
 
+  it('ALL-CAPS heading wrap merges (short caps continuation of caps heading)', () => {
+    const long = (s: string, y: number) => run(s, 72, y, { w: 440, h: 14 });
+    const items: PositionedItem[] = [
+      long('The trial court expunged the notice recently filed, and', 700),
+      long('signed the order the following week without any hearing.', 668),
+      run('III. THE OFFSHORE DESTINATION AND THE FOREIGN', 130, 636, { w: 352, h: 14 }),
+      run('RETALIATION', 270, 604, { w: 90, h: 14 }),
+      long('The order routes the net proceeds to opposing counsel as', 572),
+    ];
+    const blocks = buildBlocks(items, PAGE);
+    const heading = blocks.find(b => b.type === 'heading')!;
+    expect(heading.text).toBe('III. THE OFFSHORE DESTINATION AND THE FOREIGN RETALIATION');
+    const paras = blocks.filter(b => b.type === 'paragraph');
+    expect(paras[paras.length - 1].text).toContain('net proceeds');
+    expect(paras.every(p => !p.text.includes('RETALIATION'))).toBe(true);
+  });
+
   it('terminated heading followed by uppercase body does NOT merge', () => {
     const items: PositionedItem[] = [
       run('D. Appellant raises substantial questions on the merits.', 130, 700, { w: 360, h: 14 }),

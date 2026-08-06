@@ -435,8 +435,20 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       const gap = pendingHeadingLine.y - lines[i].y;
       const gapOk = haveLead ? gap <= 1.4 * modalLead : gap <= PARA_GAP_FACTOR * lines[i].fontSize;
       const startsLower = /^[a-z]/.test(lines[i].text);
+      // ALL-CAPS wrap of an ALL-CAPS heading ("…AND THE FOREIGN" ↵
+      // "RETALIATION"): tightly gated — short, caps-only, no enumerator,
+      // heading itself caps-dominant and unterminated. Body sentences and
+      // the next section heading (numbered ⇒ headingLike) can't match.
+      const capsWrap =
+        /^[A-Z][A-Z\s,'&-]{0,39}$/.test(lines[i].text.trim()) &&
+        !NUMBERED_HEADING_RE.test(lines[i].text.trim()) &&
+        !/[.!?:]$/.test(pendingHeading.text.trim()) &&
+        (() => {
+          const letters = pendingHeading.text.replace(/[^a-zA-Z]/g, '');
+          return letters.length > 0 && letters.replace(/[^A-Z]/g, '').length / letters.length >= 0.8;
+        })();
       const combined = `${pendingHeading.text} ${lines[i].text}`.trim();
-      if (gapOk && startsLower && combined.length <= 200) {
+      if (gapOk && (startsLower || capsWrap) && combined.length <= 200) {
         pendingHeading.text = combined;
         if (pendingHeading.bbox) {
           const lb = lineBBox([lines[i]], page);
