@@ -2056,8 +2056,12 @@ function MetaViewContent({
   const [summary, setSummary] = useState<{ parserVersion: string | null; structuredPages: number; pageCount: number | null; pages: MetaSummaryPage[] } | null>(null);
   const [selectedPage, setSelectedPage] = useState<number | null>(initialPage ?? null);
   const [detail, setDetail] = useState<{ blocks: MetaBlock[]; producer?: string; parseMethod?: string | null; pageDims?: { width: number; height: number } | null; structured: boolean } | null>(null);
-  const [view, setView] = useState<'blocks' | 'overlay'>('overlay');
+  const [view, setView] = useState<'blocks' | 'overlay' | 'chunks'>('overlay');
   const [showParaNums, setShowParaNums] = useState(false);
+  const [pageChunks, setPageChunks] = useState<{
+    id: string; text: string; chunkIndex: number; startLine: number | null;
+    endLine: number | null; isExhibit: boolean; readinessScore: number | null;
+  }[] | null>(null);
   // Figures whose OCR text the operator clicked away (click again to restore)
   const [hiddenFigs, setHiddenFigs] = useState<Set<number>>(new Set());
   const toggleFig = (order: number) => setHiddenFigs(prev => {
@@ -2113,9 +2117,14 @@ function MetaViewContent({
     if (!selectedDocId || selectedPage == null) { setDetail(null); return; }
     let cancelled = false;
     setHiddenFigs(new Set());
+    setPageChunks(null);
     fetch(`/api/documents/${selectedDocId}/structure?page=${selectedPage}`)
       .then(res => res.json())
       .then(data => { if (!cancelled) setDetail(data); })
+      .catch(() => {});
+    fetch(`/api/documents/${selectedDocId}/chunks?page=${selectedPage}`)
+      .then(res => res.json())
+      .then(data => { if (!cancelled) setPageChunks(data.chunks ?? []); })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [selectedDocId, selectedPage]);
@@ -2231,13 +2240,13 @@ function MetaViewContent({
                     ¶ numbers
                   </label>
                 )}
-                {(['overlay', 'blocks'] as const).map(v => (
+                {(['overlay', 'blocks', 'chunks'] as const).map(v => (
                   <button
                     key={v}
                     onClick={() => setView(v)}
                     className={`text-xs px-2.5 py-1 rounded ${view === v ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
                   >
-                    {v === 'overlay' ? 'Overlay' : 'Blocks'}
+                    {v === 'overlay' ? 'Overlay' : v === 'blocks' ? 'Blocks' : 'Chunks'}
                   </button>
                 ))}
               </div>
@@ -2367,6 +2376,74 @@ function MetaViewContent({
                     })}
                   </div>
                 )}
+              </div>
+            )}
+
+            {detail && view === 'chunks' && (
+              <div className="p-4 overflow-auto max-h-[70vh] grid grid-cols-1 xl:grid-cols-2 gap-4">
+                {/* Stored chunks (what the vector store actually holds) */}
+                <div>
+                  <div className="text-xs font-medium text-gray-500 mb-2">
+                    Stored chunks — {pageChunks?.length ?? '…'} on this page (SAC prefix included)
+                  </div>
+                  <div className="space-y-3">
+                    {(pageChunks ?? []).map(c => {
+                      const sacEnd = c.text.startsWith('[') ? c.text.indexOf(']') + 1 : 0;
+                      return (
+                        <div key={c.id} className="border border-gray-200 rounded p-2">
+                          <div className="flex flex-wrap items-center gap-2 text-[10px] mb-1">
+                            <span className="px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 font-mono">#{c.chunkIndex}</span>
+                            {c.startLine != null && (
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-mono">
+                                L{c.startLine}{c.endLine !== c.startLine ? `–${c.endLine}` : ''}
+                              </span>
+                            )}
+                            {c.isExhibit && <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800">exhibit</span>}
+                            {c.readinessScore != null && c.readinessScore >= 0 && (
+                              <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-mono">r{c.readinessScore}</span>
+                            )}
+                            <span className="text-gray-400 font-mono">{c.text.length} ch</span>
+                          </div>
+                          {sacEnd > 0 && (
+                            <div className="text-[10px] text-amber-700 bg-amber-50 rounded px-1 py-0.5 mb-1 font-mono break-words">
+                              {c.text.slice(0, sacEnd)}
+                            </div>
+                          )}
+                          <div className="text-xs text-gray-800 whitespace-pre-wrap break-words">
+                            {c.text.slice(sacEnd).trim()}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {pageChunks?.length === 0 && (
+                      <div className="text-xs text-gray-500">No chunks stored for this page.</div>
+                    )}
+                  </div>
+                </div>
+                {/* Parsed structure for comparison */}
+                <div>
+                  <div className="text-xs font-medium text-gray-500 mb-2">
+                    Page structure — {detail.blocks.length} blocks
+                  </div>
+                  <div className="space-y-2">
+                    {detail.blocks.map(b => (
+                      <div key={b.order} className="border border-gray-100 rounded p-2">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${BLOCK_CHIP[b.type] ?? BLOCK_CHIP.unknown}`}>{b.type}</span>
+                          {b.speaker && <span className="text-[10px] text-indigo-700 font-medium">{b.speaker}</span>}
+                          {b.lineStart != null && (
+                            <span className="text-[10px] text-gray-500 font-mono">
+                              L{b.lineStart}{b.lineEnd !== b.lineStart ? `–${b.lineEnd}` : ''}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-700 whitespace-pre-wrap break-words">
+                          {b.text.slice(0, 600)}{b.text.length > 600 ? '…' : ''}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             )}
 
