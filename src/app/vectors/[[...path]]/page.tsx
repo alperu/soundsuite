@@ -60,7 +60,7 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
   // Filter kinds a tool does not support are ignored (URL is normalized
   // client-side on the next interaction). Legacy pagereport query params
   // (?caseId=&documentId=&status=) are still honored.
-  let initialViewMode: 'tableview' | 'breakdown' | 'pagereport' = 'tableview';
+  let initialViewMode: 'tableview' | 'breakdown' | 'pagereport' | 'metaview' = 'tableview';
 
   if (path && path.length > 0) {
     const first = path[0].toLowerCase();
@@ -68,6 +68,8 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
       initialViewMode = 'breakdown';
     } else if (first === 'pagereport') {
       initialViewMode = 'pagereport';
+    } else if (first === 'metaview') {
+      initialViewMode = 'metaview';
     } else if (first === 'tableview') {
       initialViewMode = 'tableview';
     }
@@ -77,6 +79,7 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
     tableview: ['case', 'filing', 'doc'],
     breakdown: ['case'],
     pagereport: ['case', 'doc'],
+    metaview: ['case', 'doc'],
   };
 
   let initialFilterKind: 'all' | 'case' | 'filing' | 'doc' = 'all';
@@ -93,6 +96,7 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
   let initialChunkId: string | undefined;
   let initialModalPage: number | undefined;
   let initialViewerPage: number | undefined;
+  let initialMetaPage: number | undefined;
   const selSeg = path?.[2];
   if (selSeg) {
     const decoded = decodeURIComponent(selSeg);
@@ -102,6 +106,8 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
       initialModalPage = parseInt(decoded.slice('page-'.length), 10);
     } else if (initialViewMode === 'pagereport' && /^pageview-\d+$/.test(decoded)) {
       initialViewerPage = parseInt(decoded.slice('pageview-'.length), 10);
+    } else if (initialViewMode === 'metaview' && /^page-\d+$/.test(decoded)) {
+      initialMetaPage = parseInt(decoded.slice('page-'.length), 10);
     }
   }
 
@@ -122,6 +128,7 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
     pageMax: typeof sp.pmax === 'string' ? sp.pmax : undefined,
     sortBy: typeof sp.sort === 'string' ? sp.sort : undefined,
     sortDir: typeof sp.dir === 'string' ? sp.dir : undefined,
+    pg: typeof sp.pg === 'string' ? sp.pg : undefined,
   };
 
   return (
@@ -136,6 +143,7 @@ export default async function VectorsPage({ params, searchParams }: VectorsPageP
       initialChunkId={initialChunkId}
       initialModalPage={initialModalPage}
       initialViewerPage={initialViewerPage}
+      initialMetaPage={initialMetaPage}
       initialTableQuery={initialTableQuery}
       initialCaseId={initialCaseId}
       initialDocumentId={initialDocumentId}

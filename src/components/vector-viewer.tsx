@@ -88,7 +88,7 @@ interface PageReportData {
   summary: { indexedPages: number; unindexedPages: number; emptyPages?: number; totalChunks: number };
 }
 
-type ViewMode = 'tableview' | 'breakdown' | 'pagereport';
+type ViewMode = 'tableview' | 'breakdown' | 'pagereport' | 'metaview';
 
 // ---------------------------------------------------------------------------
 // URL scheme: /vectors/{tool}/{filter}/{selection}
@@ -110,6 +110,7 @@ const TOOL_FILTER_KINDS: Record<ViewMode, VectorFilterKind[]> = {
   tableview: ['case', 'filing', 'doc'],
   breakdown: ['case'],
   pagereport: ['case', 'doc'],
+  metaview: ['case', 'doc'],
 };
 
 function buildVectorsPath(
@@ -128,7 +129,15 @@ function buildVectorsPath(
   }
   if (selection) segs.push(encodeURIComponent(selection));
   const qs = query?.toString();
-  return segs.join('/') + (qs ? `?${qs}` : '');
+  const full = segs.join('/') + (qs ? `?${qs}` : '');
+  // Every /vectors URL write flows through here — remember the last tool and
+  // each tool's last full URL so a bare /vectors visit can restore them
+  // (soundsuite-cache → preferences, same store as home/search).
+  if (typeof window !== 'undefined') {
+    setPreference('vectors.lastTool', tool).catch(() => {});
+    setPreference(`vectors.url.${tool}`, full).catch(() => {});
+  }
+  return full;
 }
 
 /** Carry a filter to another tool, dropping it if the target can't use it. */
@@ -150,7 +159,8 @@ interface VectorViewerProps {
   initialChunkId?: string;
   initialModalPage?: number;
   initialViewerPage?: number;
-  initialTableQuery?: { isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string; sortBy?: string; sortDir?: string };
+  initialMetaPage?: number;
+  initialTableQuery?: { isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string; sortBy?: string; sortDir?: string; pg?: string };
   initialCaseId?: string;
   initialDocumentId?: string;
   initialStatusFilter?: string;
@@ -171,6 +181,7 @@ export default function VectorViewer({
   initialChunkId,
   initialModalPage,
   initialViewerPage,
+  initialMetaPage,
   initialTableQuery,
   initialCaseId,
   initialDocumentId,
@@ -201,6 +212,25 @@ export default function VectorViewer({
     setViewModeState(m);
     router.push(buildVectorsPath(m, carryFilter(currentFilterRef.current, m)), { scroll: false });
   }, [router]);
+
+  // Bare /vectors visit → restore the last tool + that tool's last settings
+  // from IndexedDB preferences. An explicit path always wins (deep links).
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (hasExplicitPath || restoredRef.current) return;
+    restoredRef.current = true;
+    (async () => {
+      try {
+        const lastTool = await getPreference<ViewMode>('vectors.lastTool');
+        if (!lastTool || !['tableview', 'breakdown', 'pagereport'].includes(lastTool)) return;
+        const lastUrl = await getPreference<string>(`vectors.url.${lastTool}`);
+        if (lastUrl && lastUrl.startsWith('/vectors')) {
+          router.replace(lastUrl, { scroll: false });
+        }
+      } catch { /* stay on defaults */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasExplicitPath]);
 
   // Fetch stats once on mount
   useEffect(() => {
@@ -245,6 +275,12 @@ export default function VectorViewer({
             onClick={() => setViewMode('pagereport')}
             icon={<ClipboardCheckIcon />}
             label="Page Report"
+          />
+          <SidebarButton
+            active={viewMode === 'metaview'}
+            onClick={() => setViewMode('metaview')}
+            icon={<LayersIcon />}
+            label="Meta View"
           />
         </nav>
       </aside>
@@ -326,6 +362,16 @@ export default function VectorViewer({
                 reportFilter={reportFilter}
               />
             )}
+            {viewMode === 'metaview' && (
+              <MetaViewContent
+                cases={cases}
+                documents={documents}
+                initialCaseId={currentFilterRef.current.kind === 'case' ? currentFilterRef.current.id : undefined}
+                initialDocumentId={currentFilterRef.current.kind === 'doc' ? currentFilterRef.current.id : undefined}
+                initialPage={initialViewMode === 'metaview' ? initialMetaPage : undefined}
+                reportFilter={reportFilter}
+              />
+            )}
           </div>
         </main>
       </div>
@@ -403,6 +449,14 @@ function ClipboardCheckIcon() {
   );
 }
 
+function LayersIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6.429 9.75L2.25 12l4.179 2.25m0-4.5l5.571 3 5.571-3m-11.142 0L2.25 7.5 12 2.25l9.75 5.25-4.179 2.25m0 0L21.75 12l-4.179 2.25m0 0l4.179 2.25L12 21.75 2.25 16.5l4.179-2.25m11.142 0l-5.571 3-5.571-3" />
+    </svg>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Table View Content
 // ---------------------------------------------------------------------------
@@ -425,7 +479,7 @@ function TableViewContent({
   statsLoading: boolean;
   initialFilter?: VectorsFilter;
   initialChunkId?: string;
-  initialQuery?: { isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string; sortBy?: string; sortDir?: string };
+  initialQuery?: { isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string; sortBy?: string; sortDir?: string; pg?: string };
   reportFilter?: (f: VectorsFilter) => void;
 }) {
   const router = useRouter();
@@ -434,8 +488,11 @@ function TableViewContent({
   const [error, setError] = useState<string | null>(null);
   const [expandedChunk, setExpandedChunk] = useState<string | null>(initialChunkId ?? null);
 
-  // Pagination
-  const [page, setPage] = useState(1);
+  // Pagination — seeded from ?pg= so a refresh stays on the same page
+  const [page, setPage] = useState(() => {
+    const n = parseInt(initialQuery?.pg ?? '', 10);
+    return Number.isFinite(n) && n > 1 ? n : 1;
+  });
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
   const limit = 50;
@@ -464,7 +521,7 @@ function TableViewContent({
     selection?: string | null;
     caseId?: string; filingId?: string; documentId?: string;
     isExhibit?: string; textSearch?: string; pageMin?: string; pageMax?: string;
-    sortBy?: string; sortDir?: string;
+    sortBy?: string; sortDir?: string; pg?: number;
   }) => {
     const c = overrides?.caseId ?? caseId;
     const f = overrides?.filingId ?? filingId;
@@ -489,17 +546,24 @@ function TableViewContent({
     const sb = overrides?.sortBy ?? sortBy;
     const sd = overrides?.sortDir ?? sortDir;
     if (sb) { qp.set('sort', sb); qp.set('dir', sd); }
+    const pg = overrides?.pg ?? page;
+    if (pg > 1) qp.set('pg', String(pg));
     const selection = overrides?.selection === undefined
       ? (expandedChunk ? `chunk-${expandedChunk}` : undefined)
       : (overrides.selection ? `chunk-${overrides.selection}` : undefined);
     router.replace(buildVectorsPath('tableview', filter, selection, qp), { scroll: false });
-  }, [router, reportFilter, caseId, filingId, documentId, isExhibit, textSearch, pageMin, pageMax, sortBy, sortDir, expandedChunk]);
+  }, [router, reportFilter, caseId, filingId, documentId, isExhibit, textSearch, pageMin, pageMax, sortBy, sortDir, expandedChunk, page]);
 
   const toggleChunk = useCallback((id: string) => {
     const next = expandedChunk === id ? null : id;
     setExpandedChunk(next);
     syncUrl({ selection: next });
   }, [expandedChunk, syncUrl]);
+
+  const handlePageChange = useCallback((p: number) => {
+    setPage(p);
+    syncUrl({ pg: p });
+  }, [syncUrl]);
 
   const filteredFilings = caseId
     ? filings.filter(f => f.caseId === caseId)
@@ -555,7 +619,7 @@ function TableViewContent({
     setSortDir(nextDir);
     setPage(1);
     setExpandedChunk(null);
-    syncUrl({ selection: null, sortBy: nextBy, sortDir: nextDir });
+    syncUrl({ selection: null, sortBy: nextBy, sortDir: nextDir, pg: 1 });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortBy, sortDir, syncUrl]);
 
@@ -564,7 +628,7 @@ function TableViewContent({
     setPage(1);
     setExpandedChunk(null);
     setFilterTrigger(t => t + 1);
-    syncUrl({ selection: null });
+    syncUrl({ selection: null, pg: 1 });
   };
 
   const handleResetFilters = () => {
@@ -579,7 +643,7 @@ function TableViewContent({
     setExpandedChunk(null);
     setFilterTrigger(t => t + 1);
     syncUrl({
-      selection: null,
+      selection: null, pg: 1,
       caseId: '', filingId: '', documentId: '',
       isExhibit: '', textSearch: '', pageMin: '', pageMax: '',
     });
@@ -740,7 +804,7 @@ function TableViewContent({
           {loading ? 'Loading\u2026' : `Showing ${chunks.length} of ${total.toLocaleString()} chunks`}
         </p>
         {totalPages > 1 && (
-          <Pagination page={page} totalPages={totalPages} loading={loading} onPageChange={setPage} />
+          <Pagination page={page} totalPages={totalPages} loading={loading} onPageChange={handlePageChange} />
         )}
       </div>
 
@@ -836,7 +900,7 @@ function TableViewContent({
       {/* Bottom Pagination */}
       {totalPages > 1 && chunks.length > 10 && (
         <div className="flex justify-center">
-          <Pagination page={page} totalPages={totalPages} loading={loading} onPageChange={setPage} full />
+          <Pagination page={page} totalPages={totalPages} loading={loading} onPageChange={handlePageChange} full />
         </div>
       )}
     </>
@@ -1902,6 +1966,316 @@ function ChunksModal({
 // ---------------------------------------------------------------------------
 // Vector Docs Panel (right sidebar)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Meta View — docparse structure inspector (blocks, headings, bbox overlay)
+// URL: /vectors/metaview/{doc-|case-}{id}/{page-n}
+// Reads /api/documents/[id]/structure (SQLite PageCache.structuredJson).
+// ---------------------------------------------------------------------------
+
+const BLOCK_COLORS: Record<string, string> = {
+  heading: 'border-amber-500 bg-amber-500/15',
+  paragraph: 'border-blue-400 bg-blue-400/10',
+  table: 'border-green-500 bg-green-500/15',
+  footnote: 'border-cyan-500 bg-cyan-500/15',
+  page_header: 'border-gray-400 bg-gray-400/20',
+  page_footer: 'border-gray-400 bg-gray-400/20',
+  page_number: 'border-gray-400 bg-gray-400/20',
+  seal: 'border-purple-500 bg-purple-500/15',
+  signature: 'border-purple-500 bg-purple-500/15',
+  figure: 'border-pink-500 bg-pink-500/15',
+  unknown: 'border-red-500 bg-red-500/15',
+};
+
+const BLOCK_CHIP: Record<string, string> = {
+  heading: 'bg-amber-100 text-amber-800',
+  paragraph: 'bg-blue-100 text-blue-800',
+  table: 'bg-green-100 text-green-800',
+  footnote: 'bg-cyan-100 text-cyan-800',
+  page_header: 'bg-gray-100 text-gray-600',
+  page_footer: 'bg-gray-100 text-gray-600',
+  page_number: 'bg-gray-100 text-gray-600',
+  seal: 'bg-purple-100 text-purple-800',
+  signature: 'bg-purple-100 text-purple-800',
+  figure: 'bg-pink-100 text-pink-800',
+  unknown: 'bg-red-100 text-red-800',
+};
+
+interface MetaBlock {
+  type: string;
+  text: string;
+  html?: string;
+  bbox: [number, number, number, number] | null;
+  order: number;
+  identifiers?: { batesNumber?: string; fileStamp?: string };
+}
+
+interface MetaSummaryPage {
+  pageNumber: number;
+  parseMethod: string | null;
+  producer: string | null;
+  counts: Record<string, number>;
+  headings: string[];
+}
+
+function MetaViewContent({
+  cases,
+  documents,
+  initialCaseId,
+  initialDocumentId,
+  initialPage,
+  reportFilter,
+}: {
+  cases: Case[];
+  documents: Document[];
+  initialCaseId?: string;
+  initialDocumentId?: string;
+  initialPage?: number;
+  reportFilter?: (f: VectorsFilter) => void;
+}) {
+  const router = useRouter();
+  const [selectedCaseId, setSelectedCaseId] = useState(
+    initialCaseId ?? (initialDocumentId ? documents.find(d => d.id === initialDocumentId)?.caseId ?? '' : ''),
+  );
+  const [selectedDocId, setSelectedDocId] = useState(initialDocumentId ?? '');
+  const [summary, setSummary] = useState<{ parserVersion: string | null; structuredPages: number; pageCount: number | null; pages: MetaSummaryPage[] } | null>(null);
+  const [selectedPage, setSelectedPage] = useState<number | null>(initialPage ?? null);
+  const [detail, setDetail] = useState<{ blocks: MetaBlock[]; producer?: string; parseMethod?: string | null; pageDims?: { width: number; height: number } | null; structured: boolean } | null>(null);
+  const [view, setView] = useState<'blocks' | 'overlay'>('overlay');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const filteredDocs = documents.filter(d => !selectedCaseId || d.caseId === selectedCaseId);
+
+  const syncUrl = useCallback((docId: string, page: number | null) => {
+    const filter: VectorsFilter = docId
+      ? { kind: 'doc', id: docId }
+      : selectedCaseId
+        ? { kind: 'case', id: selectedCaseId }
+        : { kind: 'all' };
+    reportFilter?.(filter);
+    router.replace(buildVectorsPath('metaview', filter, docId && page ? `page-${page}` : undefined), { scroll: false });
+  }, [router, reportFilter, selectedCaseId]);
+
+  // Fetch document summary
+  useEffect(() => {
+    if (!selectedDocId) { setSummary(null); setDetail(null); return; }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch(`/api/documents/${selectedDocId}/structure`)
+      .then(res => res.json())
+      .then(data => {
+        if (cancelled) return;
+        if (data.error) { setError(data.error); setSummary(null); return; }
+        setSummary(data);
+        // auto-select: URL page if valid, else first structured page
+        if (data.pages?.length) {
+          const target = data.pages.find((p: MetaSummaryPage) => p.pageNumber === selectedPage)
+            ? selectedPage
+            : data.pages[0].pageNumber;
+          setSelectedPage(target);
+        } else {
+          setSelectedPage(null);
+        }
+      })
+      .catch(e => !cancelled && setError(String(e)))
+      .finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDocId]);
+
+  // Fetch page detail
+  useEffect(() => {
+    if (!selectedDocId || selectedPage == null) { setDetail(null); return; }
+    let cancelled = false;
+    fetch(`/api/documents/${selectedDocId}/structure?page=${selectedPage}`)
+      .then(res => res.json())
+      .then(data => { if (!cancelled) setDetail(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [selectedDocId, selectedPage]);
+
+  const pickPage = (p: number) => {
+    setSelectedPage(p);
+    syncUrl(selectedDocId, p);
+  };
+
+  const countChips = (counts: Record<string, number>) => {
+    const short: Record<string, string> = { heading: 'H', paragraph: 'P', table: 'T', page_header: 'hd', page_footer: 'ft', page_number: '#', footnote: 'fn' };
+    return Object.entries(counts)
+      .filter(([, n]) => n > 0)
+      .map(([t, n]) => `${short[t] ?? t}${n}`)
+      .join(' ');
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Pickers */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Case</label>
+          <select
+            value={selectedCaseId}
+            onChange={e => { setSelectedCaseId(e.target.value); setSelectedDocId(''); setSummary(null); setDetail(null); }}
+            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+          >
+            <option value="">All Cases</option>
+            {cases.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Document</label>
+          <select
+            value={selectedDocId}
+            onChange={e => { setSelectedDocId(e.target.value); setSelectedPage(null); syncUrl(e.target.value, null); }}
+            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+          >
+            <option value="">Select a document…</option>
+            {filteredDocs.map(d => <option key={d.id} value={d.id}>{docOptionLabel(d)}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {error && <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-800">{error}</div>}
+      {loading && <div className="text-sm text-gray-500">Loading structure…</div>}
+
+      {summary && !loading && (
+        summary.pages.length === 0 ? (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
+            No structure stored for this document ({summary.structuredPages} structured pages,
+            parserVersion: {summary.parserVersion ?? 'none'}). It was likely indexed before
+            structured parsing was enabled — re-index it via clear-index to attach structure.
+          </div>
+        ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* Page list */}
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+            <div className="px-4 py-2 border-b border-gray-200 flex items-center justify-between">
+              <span className="text-sm font-medium text-gray-700">
+                {summary.structuredPages}/{summary.pageCount ?? '?'} pages structured
+              </span>
+              <span className="text-xs text-gray-400 font-mono">{summary.parserVersion}</span>
+            </div>
+            <div className="overflow-y-auto max-h-[70vh] divide-y divide-gray-100">
+              {summary.pages.map(p => (
+                <div
+                  key={p.pageNumber}
+                  onClick={() => pickPage(p.pageNumber)}
+                  className={`px-4 py-2 cursor-pointer text-sm flex items-center justify-between gap-2 ${selectedPage === p.pageNumber ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                >
+                  <span className="font-medium text-gray-800">p{p.pageNumber}</span>
+                  <span className="text-xs text-gray-500 font-mono truncate">{countChips(p.counts)}</span>
+                  {(p.counts.heading ?? 0) === 0 && <span className="text-[10px] text-amber-600" title="No headings detected on this page">⚠H0</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Detail */}
+          <div className="lg:col-span-2 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+            <div className="px-4 py-2 border-b border-gray-200 flex items-center justify-between">
+              <span className="text-sm font-medium text-gray-700">
+                Page {selectedPage} — {detail?.producer ?? '…'} / {detail?.parseMethod ?? ''}
+              </span>
+              <div className="flex gap-1">
+                {(['overlay', 'blocks'] as const).map(v => (
+                  <button
+                    key={v}
+                    onClick={() => setView(v)}
+                    className={`text-xs px-2.5 py-1 rounded ${view === v ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                  >
+                    {v === 'overlay' ? 'Overlay' : 'Blocks'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {detail && view === 'overlay' && (
+              <div className="p-4 overflow-auto max-h-[70vh]">
+                {detail.pageDims ? (
+                  <div className="relative inline-block w-full">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={`/api/documents/${selectedDocId}/page-image/${selectedPage}?scale=1.5`}
+                      alt={`Page ${selectedPage}`}
+                      className="w-full border border-gray-200"
+                    />
+                    {detail.blocks.filter(b => b.bbox).map(b => {
+                      const [x0, y0, x1, y1] = b.bbox!;
+                      const { width: pw, height: ph } = detail.pageDims!;
+                      return (
+                        <div
+                          key={b.order}
+                          title={`[${b.order}] ${b.type}: ${b.text.slice(0, 140)}`}
+                          className={`absolute border ${BLOCK_COLORS[b.type] ?? BLOCK_COLORS.unknown}`}
+                          style={{
+                            left: `${(x0 / pw) * 100}%`,
+                            top: `${(y0 / ph) * 100}%`,
+                            width: `${((x1 - x0) / pw) * 100}%`,
+                            height: `${((y1 - y0) / ph) * 100}%`,
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-500">Page dimensions unavailable — overlay disabled (blocks list still works).</p>
+                )}
+                <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+                  {Object.entries(BLOCK_CHIP).filter(([t]) => detail.blocks.some(b => b.type === t)).map(([t, cls]) => (
+                    <span key={t} className={`px-1.5 py-0.5 rounded ${cls}`}>{t}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {detail && view === 'blocks' && (
+              <div className="overflow-auto max-h-[70vh]">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 border-b border-gray-200 sticky top-0">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600 w-10">#</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600 w-28">Type</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">Text</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600 w-40 whitespace-nowrap">BBox (pt)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {detail.blocks.map(b => (
+                      <tr key={b.order} className="align-top">
+                        <td className="px-3 py-2 text-gray-400">{b.order}</td>
+                        <td className="px-3 py-2">
+                          <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${BLOCK_CHIP[b.type] ?? BLOCK_CHIP.unknown}`}>{b.type}</span>
+                          {b.identifiers?.batesNumber && <div className="text-[10px] text-purple-700 mt-0.5 font-mono">{b.identifiers.batesNumber}</div>}
+                        </td>
+                        <td className="px-3 py-2 text-gray-800 whitespace-pre-wrap break-words">
+                          {b.text.slice(0, 300)}{b.text.length > 300 ? '…' : ''}
+                          {b.html && <div className="text-[10px] text-green-700 mt-1 font-mono">has table html ({b.html.length} chars)</div>}
+                        </td>
+                        <td className="px-3 py-2 text-xs text-gray-500 font-mono whitespace-nowrap">
+                          {b.bbox ? b.bbox.map(n => Math.round(n)).join(', ') : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+        )
+      )}
+
+      {!selectedDocId && (
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8 text-center text-sm text-gray-500">
+          Select a document to inspect its parsed structure — headings, paragraphs, tables,
+          furniture, and bounding boxes as stored by the docparse structure stage.
+        </div>
+      )}
+    </div>
+  );
+}
 
 function VectorDocsPanel({ viewMode }: { viewMode: ViewMode }) {
   if (viewMode === 'tableview') {
