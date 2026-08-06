@@ -27,6 +27,14 @@ export async function POST(
     await vectorStore.initialize();
     await vectorStore.deleteByDocument(id);
 
+    // Clear ALL PageCache rows including persisted structure — a re-index is
+    // an explicit discard of the previous parse; keeping stale structuredJson
+    // would make Meta View report structure a new run never produced
+    // (observed 2026-08-06 after the transcript carve-out landed).
+    try {
+      await (prisma as any).pageCache.deleteMany({ where: { documentId: id } });
+    } catch { /* non-fatal */ }
+
     // Reset document status and clear indexed metadata
     const updated = await prisma.document.update({
       where: { id },
