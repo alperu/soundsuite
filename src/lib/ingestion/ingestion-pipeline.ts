@@ -910,6 +910,22 @@ export class IngestionPipeline {
             ? (() => { const ft = chunkFilingType.toLowerCase(); return ft.includes('reporter') || ft === 'rr'; })()
             : false;
 
+          // Block-derived stamping — COMPARISON ROLLOUT (PLAN-rr-structure
+          // item 11): map chunk→printed lines via text containment over the
+          // RR blocks' lines[] and log disagreements with the legacy
+          // detectLineNumbers stamp. Legacy stays authoritative until the
+          // disagreement review (item 12). Runs BEFORE annotation markers
+          // are prepended (below) — containment would break after.
+          const rrPageLines = new Map<number, { lineNumber: number; text: string }[]>();
+          for (const p of pages) {
+            if (!p.structureOnly || !p.blocks) continue;
+            const lines = p.blocks.flatMap(b => (b.lines ?? [])
+              .filter(l => l.lineNumber !== undefined && l.text.trim().length >= 8)
+              .map(l => ({ lineNumber: l.lineNumber!, text: l.text })));
+            if (lines.length > 0) rrPageLines.set(p.pageNumber, lines);
+          }
+          const stampCompare = { agree: 0, disagree: 0, legacyOnly: 0, blockOnly: 0 };
+
           for (const chunk of combined) {
             chunk.metadata.filingId = docWithFiling.filing?.id;
             chunk.metadata.filingType = chunkFilingType;
@@ -933,7 +949,39 @@ export class IngestionPipeline {
                 chunk.metadata.startLine = lineRange.startLine;
                 chunk.metadata.endLine = lineRange.endLine;
               }
+
+              // Comparison only — never written to metadata yet (item 11).
+              const pageLines = rrPageLines.get(chunk.metadata.pageNumber);
+              if (pageLines) {
+                const matched = pageLines.filter(l => chunk.text.includes(l.text));
+                const blockStart = matched.length ? Math.min(...matched.map(l => l.lineNumber)) : undefined;
+                const blockEnd = matched.length ? Math.max(...matched.map(l => l.lineNumber)) : undefined;
+                const legacyStart = pageEcho ? undefined : lineRange.startLine;
+                const legacyEnd = pageEcho ? undefined : lineRange.endLine;
+                if (blockStart === undefined && legacyStart === undefined) {
+                  // both unstamped — not a comparison point
+                } else if (blockStart === undefined) {
+                  stampCompare.legacyOnly++;
+                } else if (legacyStart === undefined) {
+                  stampCompare.blockOnly++;
+                } else if (blockStart === legacyStart && blockEnd === legacyEnd) {
+                  stampCompare.agree++;
+                } else {
+                  stampCompare.disagree++;
+                  this.logger.info('RR stamp disagreement (block vs legacy)', {
+                    documentId,
+                    pageNumber: chunk.metadata.pageNumber,
+                    chunkIndex: chunk.metadata.chunkIndex,
+                    legacy: `${legacyStart}-${legacyEnd}`,
+                    block: `${blockStart}-${blockEnd}`,
+                  });
+                }
+              }
             }
+          }
+
+          if (isChunkRR && rrPageLines.size > 0) {
+            this.logger.info('RR block-derived stamping comparison', { documentId, ...stampCompare });
           }
         }
 
