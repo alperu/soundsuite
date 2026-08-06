@@ -371,7 +371,12 @@ export class IngestionPipeline {
       });
     } catch { /* ignore */ }
     try {
-      await (this.database as any).pageCache.deleteMany({ where: { documentId } });
+      // Keep structured rows (structuredJson set) — PageCache doubles as the
+      // permanent structure store (PLAN-ss-docparse §5); only the plain
+      // resume-cache rows are cleaned up.
+      await (this.database as any).pageCache.deleteMany({
+        where: { documentId, structuredJson: null },
+      });
     } catch { /* ignore */ }
   }
 
@@ -835,6 +840,27 @@ export class IngestionPipeline {
             }),
           );
           this.logger.info('Structure stage counters', { documentId, ...counters });
+
+          // Persist structure (PLAN-ss-docparse §5 + §0.1 adoption 3).
+          // PageCache is normally a resume cache wiped by clearCheckpoint on
+          // success — structured rows are exempted there so structure
+          // survives ingestion (source of truth for re-chunking / section
+          // tree; consumed by chunk-preview and future re-chunks).
+          for (const p of pages) {
+            if (!p.blocks || p.blocks.length === 0) continue;
+            const producer = p.blocks.some(b => b.bbox !== null) ? 'pdf' : 'ocr';
+            await (this.database as any).pageCache.updateMany({
+              where: { documentId, pageNumber: p.pageNumber },
+              data: {
+                structuredJson: JSON.stringify({ pageNumber: p.pageNumber, producer, blocks: p.blocks }),
+                parseMethod: 'docparse',
+              },
+            }).catch(() => {});
+          }
+          await this.database.document.update({
+            where: { id: documentId },
+            data: { parserVersion: 'hybrid-docparse-1' } as any,
+          }).catch(() => {});
         }
       } catch (err) {
         this.logger.warn('Structure stage failed — continuing unstructured', {

@@ -86,6 +86,9 @@ model Document {
   detectedExhibits Int      @default(0)
   embeddingModel   String?
   ingestCheckpoint String?
+  /// Structure-parser version used at last ingestion (PLAN-ss-docparse §0.1
+  /// adoption 3) — makes staged migrations queryable. Null = pre-structure.
+  parserVersion    String?
   // AI Readiness Score — 0-100 ingestion quality gate, scored at the end of
   // ingestion before PageCache cleanup. Null = not yet scored.
   readinessScore    Int?
@@ -177,6 +180,11 @@ model PageCache {
   source      String // 'extract' or 'ocr'
   confidence  Float?
   createdAt   DateTime @default(now())
+  /// Serialized DocparsePageResult (blocks + producer) from the structure
+  /// stage — PLAN-ss-docparse §5. Null = page never structured.
+  structuredJson String?
+  /// 'pdftext' | 'ollama-ocr' | 'docparse' — which producer's text/structure
+  parseMethod    String?
 
   @@unique([documentId, pageNumber])
   @@index([documentId])

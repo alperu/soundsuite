@@ -351,6 +351,16 @@ step 1 produces measured numbers.
 
 ## 5. Structure persistence (additive, nullable — safe migration)
 
+> **Implemented 2026-08-06** with two reality corrections discovered in the code:
+> (1) `prisma db push`/migrate cannot run against this schema at all — the Jurisdiction model's
+> Json default emits invalid SQLite DDL (pre-existing; its own comment prescribes hand-edited
+> migration SQL). The three columns (`PageCache.structuredJson`, `PageCache.parseMethod`,
+> `Document.parserVersion`) were applied via direct `ALTER TABLE`, after a DB backup
+> (`sound-suite.db.bak-20260806-065628`).
+> (2) **PageCache is a resume cache wiped by `clearCheckpoint` on success** — not the permanent
+> store this section assumed. Fix: cleanup now exempts rows with `structuredJson` set, so
+> structured rows persist as the source of truth while plain cache rows are still cleaned.
+
 - `PageCache`: add nullable `structuredJson` (serialized `DocparsePageResult`), `parseMethod`
   (`'pdftext' | 'ollama-ocr' | 'docparse'`).
 - LanceDB chunk rows: add `blocks` back-reference metadata (block order indexes + heading path),
