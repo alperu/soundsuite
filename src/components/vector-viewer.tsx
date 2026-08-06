@@ -2009,6 +2009,11 @@ interface MetaBlock {
   bbox: [number, number, number, number] | null;
   order: number;
   identifiers?: { batesNumber?: string; fileStamp?: string };
+  /** RR producer (PLAN-rr-structure): speaker turns with printed line numbers */
+  speaker?: string;
+  lineStart?: number;
+  lineEnd?: number;
+  lines?: { lineNumber?: number; text: string; bbox: [number, number, number, number] | null }[];
 }
 
 interface MetaSummaryPage {
@@ -2148,9 +2153,10 @@ function MetaViewContent({
           summary.parserVersion ? (
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-800">
               The structure stage ran on this document ({summary.parserVersion}) and stored no
-              structured pages — expected for <strong>Reporter&apos;s Record / transcript volumes</strong>,
-              which deliberately bypass structural parsing to preserve line-number citations
-              (the §6.1 carve-out), and for fully scanned documents. Re-indexing will not change this.
+              structured pages — expected for fully scanned documents with no extractable text.
+              <strong> Reporter&apos;s Record / transcript volumes now DO get structure</strong> (speaker
+              turns with printed line numbers, producer <code>rr</code>) — if this is an RR indexed
+              before that landed, re-index it via clear-index to attach structure.
             </div>
           ) : (
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
@@ -2177,7 +2183,7 @@ function MetaViewContent({
                 >
                   <span className="font-medium text-gray-800">p{p.pageNumber}</span>
                   <span className="text-xs text-gray-500 font-mono truncate">{countChips(p.counts)}</span>
-                  {(p.counts.heading ?? 0) === 0 && <span className="text-[10px] text-amber-600" title="No headings detected on this page">⚠H0</span>}
+                  {p.producer !== 'rr' && (p.counts.heading ?? 0) === 0 && <span className="text-[10px] text-amber-600" title="No headings detected on this page">⚠H0</span>}
                 </div>
               ))}
             </div>
@@ -2229,6 +2235,28 @@ function MetaViewContent({
                         />
                       );
                     })}
+                    {/* RR per-line rects labelled with printed line numbers */}
+                    {detail.blocks.flatMap(b => (b.lines ?? [])
+                      .filter(l => l.bbox && l.lineNumber != null)
+                      .map(l => {
+                        const [x0, y0, x1, y1] = l.bbox!;
+                        const { width: pw, height: ph } = detail.pageDims!;
+                        return (
+                          <div
+                            key={`${b.order}-l${l.lineNumber}`}
+                            title={`Line ${l.lineNumber}: ${l.text.slice(0, 120)}`}
+                            className="absolute border border-dashed border-gray-400/60"
+                            style={{
+                              left: `${(x0 / pw) * 100}%`,
+                              top: `${(y0 / ph) * 100}%`,
+                              width: `${((x1 - x0) / pw) * 100}%`,
+                              height: `${((y1 - y0) / ph) * 100}%`,
+                            }}
+                          >
+                            <span className="absolute -left-6 top-0 text-[9px] text-gray-500 font-mono">{l.lineNumber}</span>
+                          </div>
+                        );
+                      }))}
                   </div>
                 ) : (
                   <p className="text-sm text-gray-500">Page dimensions unavailable — overlay disabled (blocks list still works).</p>
@@ -2258,6 +2286,12 @@ function MetaViewContent({
                         <td className="px-3 py-2 text-gray-400">{b.order}</td>
                         <td className="px-3 py-2">
                           <span className={`inline-block px-1.5 py-0.5 rounded text-xs ${BLOCK_CHIP[b.type] ?? BLOCK_CHIP.unknown}`}>{b.type}</span>
+                          {b.speaker && <div className="text-[10px] text-indigo-700 mt-0.5 font-medium">{b.speaker}</div>}
+                          {b.lineStart != null && (
+                            <div className="text-[10px] text-gray-500 mt-0.5 font-mono">
+                              {b.lineStart === b.lineEnd ? `L${b.lineStart}` : `L${b.lineStart}–${b.lineEnd}`}
+                            </div>
+                          )}
                           {b.identifiers?.batesNumber && <div className="text-[10px] text-purple-700 mt-0.5 font-mono">{b.identifiers.batesNumber}</div>}
                         </td>
                         <td className="px-3 py-2 text-gray-800 whitespace-pre-wrap break-words">

@@ -51,6 +51,15 @@ export interface PageText {
    * chunk text stays byte-identical while Meta View gets full structure.
    * TWIN-DECLARED in text-chunker.ts — keep both in sync. */
   structureOnly?: boolean;
+  /** RR-only: the reconstructed lines this page's text was joined from —
+   * carried so the RR block producer feeds off the SAME getTextContent pass
+   * (no second PDF open). Producer-internal: consumed only by
+   * structure-producer via THIS interface, never by the chunker, so it is
+   * deliberately NOT twin-declared in text-chunker.ts. */
+  rrLines?: RRLine[];
+  /** RR-only companion to rrLines: page height in PDF points for
+   * bottom-left → top-left bbox conversion. */
+  pageHeight?: number;
 }
 
 /**
@@ -142,7 +151,7 @@ export interface RRLine {
 
 /**
  * Pure RR line reconstruction over pdfjs text items — the single source for
- * BOTH the RR page text (via reconstructRRPageText's join, byte-identical to
+ * BOTH the RR page text (via joinRRLines, byte-identical to
  * the pre-refactor output) AND the RR structure producer's blocks.
  *
  * Faithfully preserves the original algorithm: Y_TOLERANCE=2 y-bucketing,
@@ -226,6 +235,19 @@ export function reconstructRRLines(items: any[]): RRLine[] {
     });
   }
   return result;
+}
+
+/**
+ * Join reconstructed RR lines back into page text.
+ * BYTE-IDENTITY INVARIANT: this must produce exactly the same string as
+ * before the reconstructRRLines refactor — RR chunk text, line-number
+ * stamping, and MCP citation fallbacks all read this text
+ * (PLAN-rr-structure item 1/2; verified against a real volume).
+ */
+export function joinRRLines(lines: RRLine[]): string {
+  return lines
+    .map((l) => (l.lineNumber !== null ? `${l.lineNumber}  ${l.text}` : l.text))
+    .join('\n');
 }
 
 /**
@@ -659,11 +681,14 @@ export class PDFParser {
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i);
       const textContent = await page.getTextContent();
-      const text = this.reconstructRRPageText(textContent.items);
+      const rrLines = reconstructRRLines(textContent.items);
+      const text = joinRRLines(rrLines);
       pages.push({
         pageNumber: i,
         text,
         textDensity: text.trim().length,
+        rrLines,
+        pageHeight: page.getViewport({ scale: 1 }).height,
       });
       page.cleanup();
 
@@ -678,19 +703,6 @@ export class PDFParser {
 
     await doc.destroy();
     return pages;
-  }
-
-  /**
-   * Reconstruct a single RR page's text from pdfjs-dist text items.
-   * BYTE-IDENTITY INVARIANT: this must produce exactly the same string as
-   * before the reconstructRRLines refactor — RR chunk text, line-number
-   * stamping, and MCP citation fallbacks all read this text
-   * (PLAN-rr-structure item 1/2; verified against a real volume).
-   */
-  private reconstructRRPageText(items: any[]): string {
-    return reconstructRRLines(items)
-      .map((l) => (l.lineNumber !== null ? `${l.lineNumber}  ${l.text}` : l.text))
-      .join('\n');
   }
 
   /**

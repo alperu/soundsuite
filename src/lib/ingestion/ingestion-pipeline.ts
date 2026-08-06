@@ -845,6 +845,10 @@ export class IngestionPipeline {
               pages,
               ocrThreshold: appCfg.ocrThreshold,
               ocrEngine: this.ocrEngine,
+              // Same isRR union that routed text extraction (single source
+              // of truth) — RR docs get structure metadata WITH line
+              // numbers while chunk text stays byte-identical.
+              transcriptDoc: isRR,
             }),
           );
           this.logger.info('Structure stage counters', { documentId, ...counters });
@@ -856,7 +860,10 @@ export class IngestionPipeline {
           // tree; consumed by chunk-preview and future re-chunks).
           for (const p of pages) {
             if (!p.blocks || p.blocks.length === 0) continue;
-            const producer = p.blocks.some(b => b.bbox !== null) ? 'pdf' : 'ocr';
+            // Producer carried from the same flag that gates the chunker —
+            // RR blocks have bboxes and would otherwise sniff as 'pdf'
+            // (PLAN-rr-structure item 9).
+            const producer = p.structureOnly ? 'rr' : p.blocks.some(b => b.bbox !== null) ? 'pdf' : 'ocr';
             await (this.database as any).pageCache.updateMany({
               where: { documentId, pageNumber: p.pageNumber },
               data: {

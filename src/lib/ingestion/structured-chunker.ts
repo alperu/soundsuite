@@ -72,11 +72,14 @@ export class StructuredChunker implements ITextChunker {
     caseId: string,
     sacContext?: SacContext,
   ): Promise<Chunk[]> {
-    const structured = pages.filter(p => (p.blocks?.length ?? 0) > 0);
+    // structureOnly pages (RR transcripts) carry blocks for Meta View but
+    // MUST be chunked by the legacy path — byte-identity of RR chunk text
+    // (PLAN-rr-structure item 8).
+    const structured = pages.filter(p => !p.structureOnly && (p.blocks?.length ?? 0) > 0);
     if (structured.length === 0) {
       return this.inner.chunkPages(pages, documentId, caseId, sacContext);
     }
-    const unstructured = pages.filter(p => (p.blocks?.length ?? 0) === 0);
+    const unstructured = pages.filter(p => p.structureOnly || (p.blocks?.length ?? 0) === 0);
     const innerChunks = unstructured.length > 0
       ? await this.inner.chunkPages(unstructured, documentId, caseId, sacContext)
       : [];

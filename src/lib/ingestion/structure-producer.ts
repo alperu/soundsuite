@@ -14,8 +14,10 @@
  *    block (producer 'ocr', bbox null). Scanned-side table-span escalation
  *    is deferred pending crop-accuracy work (Phase 0: escalation IS needed,
  *    but line-index→y-band mapping is the design's weakest link).
- *  - transcript pages: never routed here by the caller (§6.1 carve-out);
- *    the extractor additionally self-suppresses table detection.
+ *  - transcript documents (transcriptDoc=true, PLAN-rr-structure): RR
+ *    speaker-turn blocks from page.rrLines, all pages structureOnly — the
+ *    geometry extractor never runs (its per-page isTranscript carve-out
+ *    remains as a belt-and-suspenders guard for mislabeled docs).
  */
 
 import { extractPageBlocks } from './pdf-block-extractor';
@@ -32,6 +34,8 @@ export interface StructureCounters {
   ocrFlatPages: number;
   tableRegionsAttempted: number;
   tableRegionsAccepted: number;
+  /** Pages given RR speaker-turn blocks (transcriptDoc route). */
+  rrPages: number;
 }
 
 export interface ProduceOptions {
@@ -42,6 +46,13 @@ export interface ProduceOptions {
   /** Engine for table escalation; escalation is skipped when absent or when
    * the engine does not support the 'table' task. */
   ocrEngine?: IOCREngine | null;
+  /** Reporter's Record / transcript document (PLAN-rr-structure item 6).
+   * Fed from the pipeline's isRR union — the SAME signal that routed text
+   * extraction through extractTextForRR. When true, ALL pages get RR
+   * speaker-turn blocks from page.rrLines and structureOnly=true, so the
+   * StructuredChunker delegates the whole document to the legacy chunker
+   * (chunk text byte-identical) while Meta View gets full structure. */
+  transcriptDoc?: boolean;
   /** Injectable for tests. */
   cropFn?: (filePath: string, pageNum: number, bbox: [number, number, number, number], opts?: CropOptions) => Promise<RegionCrop | null>;
   extractFn?: typeof extractPageBlocks;
@@ -59,7 +70,26 @@ export async function produceStructuredPages(opts: ProduceOptions): Promise<Stru
     ocrFlatPages: 0,
     tableRegionsAttempted: 0,
     tableRegionsAccepted: 0,
+    rrPages: 0,
   };
+
+  // Transcript documents: RR blocks from the lines already reconstructed by
+  // extractTextForRR — never the geometry extractor, never table escalation.
+  // structureOnly is set on EVERY page (even ones without rrLines) so the
+  // chunking gate is document-level, matching the byte-identity guarantee.
+  if (opts.transcriptDoc) {
+    const { buildRRBlocks } = await import('./rr-block-producer');
+    for (const page of opts.pages) {
+      page.structureOnly = true;
+      if (!page.rrLines || page.rrLines.length === 0) continue;
+      const blocks = buildRRBlocks(page.rrLines, page.pageHeight ?? 0);
+      if (blocks.length === 0) continue;
+      page.blocks = blocks;
+      counters.rrPages++;
+    }
+    logger.info('RR structure produced', { rrPages: counters.rrPages, file: opts.filePath.split('/').pop() });
+    return counters;
+  }
 
   const bornDigital = opts.pages.filter(p => p.textDensity >= opts.ocrThreshold && p.text.trim().length > 0);
   const scanned = opts.pages.filter(p => p.textDensity < opts.ocrThreshold && p.text.trim().length > 0);

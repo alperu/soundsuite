@@ -47,7 +47,7 @@ describe('produceStructuredPages', () => {
       cropFn: crop.fn as any, extractFn: fakeExtract({ 1: [PARA_BLOCK, { ...TABLE_BLOCK }] }),
     });
 
-    expect(counters).toEqual({ pdfBlockPages: 1, ocrFlatPages: 0, tableRegionsAttempted: 1, tableRegionsAccepted: 1 });
+    expect(counters).toEqual({ pdfBlockPages: 1, ocrFlatPages: 0, tableRegionsAttempted: 1, tableRegionsAccepted: 1, rrPages: 0 });
     const table = pages[0].blocks!.find(b => b.type === 'table')!;
     expect(table.html).toContain('<table>');
     expect(table.markdown).toContain('| Date | Amount |');
@@ -107,5 +107,45 @@ describe('produceStructuredPages', () => {
     });
     expect(c2.pdfBlockPages).toBe(0);
     expect(pages2[0].blocks).toBeUndefined();
+  });
+
+  describe('transcriptDoc route (PLAN-rr-structure item 6)', () => {
+    const rrPage = (pageNumber: number, rrLines: PageText['rrLines']): PageText => ({
+      pageNumber,
+      text: 'joined rr text',
+      textDensity: 500,
+      rrLines,
+      pageHeight: 792,
+    });
+
+    it('builds RR blocks, flags ALL pages structureOnly, and never runs the extractor', async () => {
+      let extractCalled = false;
+      const pages: PageText[] = [
+        rrPage(1, [{ lineNumber: null, text: 'CAUSE NO. 00-0000-XX', x0: 72, x1: 300, y: 700, height: 10 }]),
+        rrPage(2, [
+          { lineNumber: 1, text: 'THE COURT: Be seated.', x0: 72, x1: 540, y: 720, height: 12 },
+          { lineNumber: 2, text: 'MR. DOE: Thank you.', x0: 72, x1: 540, y: 694, height: 12 },
+        ]),
+        // Page with no reconstructed lines (blank page) — still structureOnly.
+        rrPage(3, []),
+      ];
+      const engine = new FakeEngine(OTSL);
+      const counters = await produceStructuredPages({
+        filePath: '/x.pdf', pages, ocrThreshold: 50, ocrEngine: engine,
+        transcriptDoc: true,
+        extractFn: async (...args) => { extractCalled = true; return fakeExtract({})(...(args as [string, number[]])); },
+      });
+
+      expect(extractCalled).toBe(false);
+      expect(engine.tasks).toEqual([]);
+      expect(counters.rrPages).toBe(2);
+      expect(counters.pdfBlockPages).toBe(0);
+      expect(pages.every(p => p.structureOnly === true)).toBe(true);
+      expect(pages[0].blocks![0].type).toBe('page_header');
+      const turn = pages[1].blocks![0];
+      expect(turn.speaker).toBe('THE COURT');
+      expect(turn.lineStart).toBe(1);
+      expect(pages[2].blocks).toBeUndefined();
+    });
   });
 });
