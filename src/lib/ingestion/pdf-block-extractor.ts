@@ -360,7 +360,49 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
   }
   const haveLead = leadLines.length >= 3 && modalLead > 0;
 
-  const paragraphBreak = (prev: Line, cur: Line): boolean => {
+  // Body left margin = the most frequent x0 among NON-CENTERED body lines —
+  // tesseract's block-level "body indent" tab stop (paragraphs.cpp,
+  // CalculateTabStops). Centered lines excluded: on caption-heavy pages a
+  // centered-x0 collision can otherwise outvote the real margin.
+  const marginClusters: Array<{ x: number; count: number }> = [];
+  for (const l of nonCentered) {
+    const c = marginClusters.find(cl => Math.abs(cl.x - l.x0) <= 4);
+    if (c) c.count++; else marginClusters.push({ x: l.x0, count: 1 });
+  }
+  const bodyMargin = marginClusters.reduce<{ x: number; count: number } | null>(
+    (best, c) => (!best || c.count > best.count ? c : best), null)?.x
+    ?? (bodyLines.length ? Math.min(...bodyLines.map(l => l.x0)) : 0);
+  const nearMargin = (x: number) => Math.abs(x - bodyMargin) <= 4;
+  // A first-line indent is a TAB (0.5–0.75in), never a block-quote inset
+  // (~72pt) or a signature-block offset (~234pt).
+  const INDENT_MAX = Math.max(48, bodySize * 3.5);
+
+  // Singleton first-line indent (Opus research memo, task #9). The ≥2-member
+  // cluster gate below cannot see a paragraph opener that is the ONLY
+  // indented line on its page (measured: a double-spaced motion page where 19
+  // lines merged into one paragraph because the single x0=108 opener had no
+  // cluster peer). Tesseract admits exactly this case: a line whose left tab
+  // stop is infrequent survives when its OTHER edge sits on a frequent stop.
+  // Conjuncts: indent measured from the dominant body margin (not the
+  // previous line) and bounded above; prev starts AT that margin (stops the
+  // rule inside block quotes / indented lists) and is ragged; the opener is
+  // edge-corroborated (next line returns to margin, or opener runs to the
+  // right edge); prev ends an idea and cur starts one (TextSupportsBreak).
+  const firstLineIndent = (prev: Line, cur: Line, next?: Line): boolean => {
+    const dx = cur.x0 - bodyMargin;
+    if (dx < INDENT_MIN || dx > INDENT_MAX) return false;
+    if (!nearMargin(prev.x0)) return false;
+    if (prev.x1 >= maxX1 - RAGGED_MIN) return false; // prev not ragged
+    if (isCentered(cur)) return false;
+    const anchored =
+      (next !== undefined && nearMargin(next.x0)) ||
+      cur.x1 >= maxX1 - RAGGED_MIN;
+    if (!anchored) return false;
+    return /[.!?:;"'’”)\]]$/.test(prev.text.trim()) &&
+           /^["'“(\[]?[A-Z0-9]/.test(cur.text.trim());
+  };
+
+  const paragraphBreak = (prev: Line, cur: Line, next?: Line): boolean => {
     const gap = prev.y - cur.y;
     if (haveLead) {
       if (gap > 1.4 * modalLead) return true;
@@ -368,11 +410,12 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       return true; // too few lines for a stable leading mode — legacy rule
     }
     return (
-      Math.abs(cur.x0 - prev.x0) >= INDENT_MIN &&
-      prev.x1 < maxX1 - RAGGED_MIN &&
-      inCluster(cur.x0) &&
-      inCluster(prev.x0) &&
-      !isCentered(cur)
+      (Math.abs(cur.x0 - prev.x0) >= INDENT_MIN &&
+        prev.x1 < maxX1 - RAGGED_MIN &&
+        inCluster(cur.x0) &&
+        inCluster(prev.x0) &&
+        !isCentered(cur)) ||
+      firstLineIndent(prev, cur, next)
     );
   };
 
@@ -517,7 +560,10 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       // heading-adjacency backstop)
       const prev = para[para.length - 1];
       const sizeJump = Math.abs(lines[i].fontSize - prev.fontSize) > bodySize * 0.2;
-      if (paragraphBreak(prev, lines[i]) || sizeJump) {
+      // kind-guard on next: a footer line's x0 must not suppress a legitimate
+      // break by failing the return-to-margin anchor.
+      const next = i + 1 < lines.length && kind[i + 1] === 'body' ? lines[i + 1] : undefined;
+      if (paragraphBreak(prev, lines[i], next) || sizeJump) {
         flushPara();
       }
     }

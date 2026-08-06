@@ -195,6 +195,80 @@ describe('pdf-block-extractor pure core', () => {
     expect(bigBody!.text.split('\n').length).toBe(9);
   });
 
+  describe('singleton first-line indent (page-8 defect, tesseract-model rule)', () => {
+    // Body at x0=72, double-spaced 32pt leading, 14pt type. The opener at
+    // x0=108 is the ONLY indented line on the page — the ≥2-member cluster
+    // gate cannot see it; the margin-anchored singleton rule must.
+    const body = (s: string, y: number, x = 72, w = 468) => run(s, x, y, { w, h: 14 });
+
+    it('splits at a right-edge-anchored singleton indent after a ragged line', () => {
+      const items: PositionedItem[] = [
+        body('First paragraph opens with facts that continue across the', 700),
+        body('full width of the page and then conclude here shortly.', 668, 72, 300), // ragged, ends '.'
+        body('The second paragraph begins with an indented opener that', 636, 108, 432), // x1=540
+        body('returns to the margin for its continuation lines below.', 604),
+      ];
+      const paras = buildBlocks(items, PAGE).filter(b => b.type === 'paragraph');
+      expect(paras).toHaveLength(2);
+      expect(paras[0].text).toContain('conclude here');
+      expect(paras[1].text).toContain('indented opener');
+    });
+
+    it('splits at a ragged singleton indent when the NEXT line returns to the margin', () => {
+      const items: PositionedItem[] = [
+        body('The preceding paragraph reaches its natural conclusion in', 700),
+        body('a short final line here.', 668, 72, 160), // ragged, ends '.'
+        body('Next paragraph opens short.', 636, 108, 250), // ragged opener, x1=358 (not centered)
+        body('and the following line returns to the left margin again,', 604),
+        body('continuing the paragraph across the full page width now.', 572),
+      ];
+      const paras = buildBlocks(items, PAGE).filter(b => b.type === 'paragraph');
+      expect(paras).toHaveLength(2);
+      expect(paras[1].text).toContain('opens short');
+      expect(paras[1].text).toContain('full page width');
+    });
+
+    it('does NOT fire on a 72pt block-quote inset (INDENT_MAX bound)', () => {
+      const items: PositionedItem[] = [
+        body('The witness statement includes the following passage from', 700),
+        body('the underlying record below.', 668, 72, 180), // ragged, ends '.'
+        body('A single quoted line inset by a full inch appears here.', 636, 144, 300),
+        body('After the quotation the paragraph resumes at the margin', 604),
+        body('and continues to the end of the page without a new break.', 572),
+      ];
+      const paras = buildBlocks(items, PAGE).filter(b => b.type === 'paragraph');
+      // dx=72 exceeds INDENT_MAX(49): the singleton rule must not fire, and
+      // the inset line stays merged (no cluster peer either).
+      expect(paras).toHaveLength(1);
+    });
+
+    it('does NOT fire on a signature-block offset under uniform leading', () => {
+      const items: PositionedItem[] = [
+        body('The relief requested herein is warranted for the reasons', 700),
+        body('stated above and in the record.', 668, 72, 210), // ragged, ends '.'
+        body('Respectfully submitted', 636, 306, 160), // sig offset, dx=234
+      ];
+      const paras = buildBlocks(items, PAGE).filter(b => b.type === 'paragraph');
+      expect(paras).toHaveLength(1);
+    });
+
+    it('does NOT split mid-run when consecutive lines share the indent', () => {
+      const items: PositionedItem[] = [
+        body('The court considered each of the following enumerated items', 700),
+        body('in the order presented.', 668, 72, 150), // ragged, ends '.'
+        body('First indented item of the run.', 636, 108, 250),
+        body('Second indented item of the run.', 604, 108, 250),
+        body('Third indented item of the run.', 572, 108, 250),
+      ];
+      const blocks = buildBlocks(items, PAGE).filter(b => b.type === 'paragraph');
+      // The run may split from the margin paragraph (cluster rule — existing
+      // behavior), but the three indented lines must stay ONE block.
+      const runBlock = blocks.find(b => b.text.includes('First indented'));
+      expect(runBlock).toBeDefined();
+      expect(runBlock!.text).toContain('Third indented');
+    });
+  });
+
   it('full-width ALL-CAPS document title becomes ONE heading, not part of the body (page-1 title)', () => {
     // Real page-1 shape: two near-full-width caps title lines (opaque font,
     // so the bold heuristic is blind), then a caps salutation ending ':',
