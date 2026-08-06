@@ -125,6 +125,30 @@ describe('pdf-block-extractor pure core', () => {
     expect(blocks.filter(b => b.type === 'heading')).toHaveLength(0);
   });
 
+  it('double-spaced pleading lines merge into one paragraph; indent starts a new one', () => {
+    // 32pt leading at 14pt-ish type — the measured real-filing shape that
+    // used to split EVERY line into its own paragraph block.
+    const long = (s: string) => run(s, 72, 0, { w: 440, h: 14 });
+    const items: PositionedItem[] = [
+      { ...long('The Receivership Order routes the net proceeds to counsel as'), y: 700 },
+      { ...long('trustee, and Petitioner maintains that her concealed proceeds'), y: 668 },
+      { ...run('are held and managed by an attorney in Turkiye.', 72, 636, { w: 300, h: 14 }) }, // ragged last line
+      { ...run('On June 23, 2026, counsel disclosed that attorney to be a', 108, 604, { w: 404, h: 14 }) }, // indented ¶ start
+      { ...long('specialist in data-privacy law who relied on its difficulty'), y: 572 },
+      { ...run('to keep the proceeds hidden from the court.', 72, 540, { w: 280, h: 14 }) }, // ragged ¶ end
+      // second indent start to give x0=108 cluster membership (≥2 lines)
+      { ...run('As the Declaration shows, it is a legal impossibility under', 108, 508, { w: 404, h: 14 }) },
+      { ...long('Turkish law for an attorney to hold and manage such funds.'), y: 476 },
+    ];
+    const blocks = buildBlocks(items, PAGE);
+    const paras = blocks.filter(b => b.type === 'paragraph');
+    expect(paras).toHaveLength(3); // was 8 one-line "paragraphs" before the fix
+    expect(paras[0].text).toContain('Receivership Order');
+    expect(paras[0].text).toContain('Turkiye');
+    expect(paras[1].text).toContain('June 23, 2026');
+    expect(paras[2].text).toContain('legal impossibility');
+  });
+
   it('modal font size reflects body text, not headings', () => {
     const items = [
       run('BIG HEADING', 150, 700, { h: 18 }),

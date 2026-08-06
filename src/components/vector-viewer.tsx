@@ -2103,7 +2103,9 @@ function MetaViewContent({
   };
 
   const countChips = (counts: Record<string, number>) => {
-    const short: Record<string, string> = { heading: 'H', paragraph: 'P', table: 'T', page_header: 'hd', page_footer: 'ft', page_number: '#', footnote: 'fn' };
+    // '¶' not 'P': the page rows also render p{pageNumber} — 'p19 P16' read
+    // as paragraph numbering to an operator (debug finding 2026-08-06)
+    const short: Record<string, string> = { heading: 'H', paragraph: '¶', table: 'T', page_header: 'hd', page_footer: 'ft', page_number: '#', footnote: 'fn' };
     return Object.entries(counts)
       .filter(([, n]) => n > 0)
       .map(([t, n]) => `${short[t] ?? t}${n}`)
@@ -2244,7 +2246,7 @@ function MetaViewContent({
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 border-b border-gray-200 sticky top-0">
                     <tr>
-                      <th className="px-3 py-2 text-left font-medium text-gray-600 w-10">#</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600 w-10" title="Reading order (per page, resets each page)">#</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-600 w-28">Type</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-600">Text</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-600 w-40 whitespace-nowrap">BBox (pt)</th>

@@ -562,7 +562,9 @@ export class IngestionPipeline {
       // Get document from database to get caseId
       const document = await this.database.document.findUnique({
         where: { id: documentId },
-        include: { case: true },
+        // filing included for the RR routing decision (split-brain fix): the
+        // persisted filingType must inform extraction, not just stamping.
+        include: { case: true, filing: true },
       });
 
       if (!document) {
@@ -620,13 +622,19 @@ export class IngestionPipeline {
       }
 
       // Stage: text-extraction
-      // Route Reporter's Record documents to layout-aware extraction for line numbers
-      const isRR = filingDetection?.filingType
-        ? (() => {
-            const ft = filingDetection.filingType.toLowerCase();
-            return ft.includes('reporter') || ft === 'rr';
-          })()
-        : false;
+      // Route Reporter's Record documents to layout-aware extraction for line
+      // numbers. SPLIT-BRAIN FIX (2026-08-06): route by the UNION of the
+      // freshly detected type AND the persisted Filing/document type — the
+      // detector reads only the first ~5 pages (caption/appearances/index on
+      // an RR volume) and can guess 'Motion', which sent RR text through flat
+      // extraction while line stamping later used the persisted type — every
+      // stamp then failed (measured 0/143 effective on a real volume).
+      const persistedType = document.filing?.filingType || document.documentType || '';
+      const isRR = [filingDetection?.filingType, persistedType].some(t => {
+        if (!t) return false;
+        const ft = t.toLowerCase();
+        return ft.includes('reporter') || ft === 'rr';
+      });
       await this.publishProgress(documentId, 'text-extraction', isRR ? 'Extracting text (layout-aware for RR)...' : 'Extracting text...', 10);
       const pages = await this.runStage('text-extraction', documentId, stageTimings, () =>
         isRR ? this.extractTextRR(filePath, documentId) : this.extractText(filePath, documentId)
@@ -905,8 +913,19 @@ export class IngestionPipeline {
             // Extract line numbers for RR chunks from properly formatted text
             if (isChunkRR) {
               const lineRange = detectLineNumbers(chunk.text);
-              chunk.metadata.startLine = lineRange.startLine;
-              chunk.metadata.endLine = lineRange.endLine;
+              // Defense-in-depth: a single-number "range" equal to the page
+              // number is the page-number artifact of flat-extracted text
+              // masquerading as a line number — reject it rather than store
+              // a false citation (measured: all 3 stamps on a mis-routed RR
+              // were exactly this shape).
+              const pageEcho =
+                lineRange.startLine !== undefined &&
+                lineRange.startLine === lineRange.endLine &&
+                lineRange.startLine === chunk.metadata.pageNumber;
+              if (!pageEcho) {
+                chunk.metadata.startLine = lineRange.startLine;
+                chunk.metadata.endLine = lineRange.endLine;
+              }
             }
           }
         }

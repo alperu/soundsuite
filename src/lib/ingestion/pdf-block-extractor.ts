@@ -281,6 +281,65 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
     for (let i = r.start; i <= r.end; i++) if (kind[i] === 'body') inRegion[i] = ri;
   });
 
+  // ── Paragraph-split signals (measured on real double-spaced pleadings,
+  // debug 2026-08-06): body leading is ~32pt at 14pt type, so any font-size-
+  // based gap threshold splits EVERY line. Split on gap > 1.4 × the page's
+  // MODAL LEADING instead (1.4 not 1.5 — a real signature block sat at
+  // exactly 1.5× and must split), plus a symmetric first-line-indent signal
+  // (|Δx0| ≥ indent, previous line ragged-right, both x0 in left-alignment
+  // clusters, new line not centered) for paragraph breaks without extra
+  // leading. Centered caption pages are protected by the cluster gate.
+  const bodyLines = lines.filter((_, i) => kind[i] === 'body');
+  const leadCounts = new Map<number, number>();
+  for (let j = 1; j < bodyLines.length; j++) {
+    const d = Math.round(bodyLines[j - 1].y - bodyLines[j].y);
+    if (d > 0 && d < 200) leadCounts.set(d, (leadCounts.get(d) ?? 0) + 1);
+  }
+  let modalLead = 0;
+  let modalCount = 0;
+  for (const [lead, count] of leadCounts) {
+    if (count > modalCount || (count === modalCount && lead < modalLead)) {
+      modalLead = lead;
+      modalCount = count;
+    }
+  }
+  const haveLead = bodyLines.length >= 3 && modalLead > 0;
+  const INDENT_MIN = Math.max(12, bodySize * 1.2);
+  const RAGGED_MIN = bodySize * 1.5;
+  const maxX1 = bodyLines.length ? Math.max(...bodyLines.map(l => l.x1)) : page.width;
+  // left-alignment clusters: x0 values shared by ≥2 body lines (±4pt)
+  const clusters: Array<{ x: number; count: number }> = [];
+  for (const l of bodyLines) {
+    const c = clusters.find(cl => Math.abs(cl.x - l.x0) <= 4);
+    if (c) { c.count++; } else clusters.push({ x: l.x0, count: 1 });
+  }
+  const leftClusters = clusters.filter(c => c.count >= 2).map(c => c.x);
+  const inCluster = (x: number) => leftClusters.some(c => Math.abs(c - x) <= 4);
+  // Truly centered = midpoint near page center AND BOTH edges inset — a
+  // full-width line with only a first-line indent shifts its midpoint near
+  // center too, and must not be mistaken for centered (it is exactly the
+  // paragraph-start shape the indent clause exists to catch).
+  const isCentered = (l: Line) =>
+    Math.abs((l.x0 + l.x1) / 2 - page.width / 2) <= page.width * 0.08 &&
+    l.x0 > page.width * 0.15 &&
+    l.x1 < maxX1 - RAGGED_MIN;
+
+  const paragraphBreak = (prev: Line, cur: Line): boolean => {
+    const gap = prev.y - cur.y;
+    if (haveLead) {
+      if (gap > 1.4 * modalLead) return true;
+    } else if (gap > PARA_GAP_FACTOR * Math.max(prev.fontSize, cur.fontSize)) {
+      return true; // too few lines for a stable leading mode — legacy rule
+    }
+    return (
+      Math.abs(cur.x0 - prev.x0) >= INDENT_MIN &&
+      prev.x1 < maxX1 - RAGGED_MIN &&
+      inCluster(cur.x0) &&
+      inCluster(prev.x0) &&
+      !isCentered(cur)
+    );
+  };
+
   const blocks: DocparseBlock[] = [];
   let order = 0;
 
@@ -348,12 +407,13 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
       continue;
     }
     flushRegion();
-    // paragraph continuation vs break: vertical gap and heading-size change
+    // paragraph continuation vs break: modal-leading gap + indent signal
+    // (measured rule), plus the size-jump guard (rarely fires, kept as a
+    // heading-adjacency backstop)
     if (para.length > 0) {
       const prev = para[para.length - 1];
-      const gap = prev.y - lines[i].y;
       const sizeJump = Math.abs(lines[i].fontSize - prev.fontSize) > bodySize * 0.2;
-      if (gap > PARA_GAP_FACTOR * Math.max(prev.fontSize, lines[i].fontSize) || sizeJump) {
+      if (paragraphBreak(prev, lines[i]) || sizeJump) {
         flushPara();
       }
     }
