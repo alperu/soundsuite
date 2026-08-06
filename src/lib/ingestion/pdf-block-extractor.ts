@@ -253,7 +253,14 @@ function extractIdentifiers(text: string): DocparseBlock['identifiers'] {
 /**
  * Pure block builder over positioned items. Exported for tests.
  */
-export function buildBlocks(items: PositionedItem[], page: PageGeometry): DocparseBlock[] {
+export function buildBlocks(
+  items: PositionedItem[],
+  page: PageGeometry,
+  /** Ruled table regions from the operator list (PDF user space,
+   * bottom-left origin) — task #3. Lines inside become table blocks even
+   * when their text columns don't align (headerless / 2-column tables). */
+  ruledRegions: Array<[number, number, number, number]> = [],
+): DocparseBlock[] {
   const lines = groupIntoLines(items);
   if (lines.length === 0) return [];
   const bodySize = modalFontSize(lines);
@@ -276,6 +283,28 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
 
   // 2. table regions on body lines only (indices refer to `lines`)
   const regions = isTranscript ? [] : detectTableRegions(lines);
+  // Ruled regions (drawn borders) map to contiguous line-index ranges and
+  // merge with the alignment-detected ones.
+  for (const [rx0, ry0, rx1, ry1] of ruledRegions) {
+    let start = -1, end = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      const yMid = l.y + l.fontSize / 2; // Line has no height field; fontSize = max item height
+      if (yMid >= ry0 - 2 && yMid <= ry1 + 2 && l.x1 > rx0 - 2 && l.x0 < rx1 + 2) {
+        if (start === -1) start = i;
+        end = i;
+      }
+    }
+    if (start === -1) continue;
+    const overlapping = regions.find(r => r.start <= end && start <= r.end);
+    if (overlapping) {
+      overlapping.start = Math.min(overlapping.start, start);
+      overlapping.end = Math.max(overlapping.end, end);
+    } else {
+      regions.push({ start, end });
+    }
+  }
+  regions.sort((a, b) => a.start - b.start);
   const inRegion = new Array(lines.length).fill(-1);
   regions.forEach((r, ri) => {
     for (let i = r.start; i <= r.end; i++) if (kind[i] === 'body') inRegion[i] = ri;
@@ -620,6 +649,115 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
 }
 
 // ---------------------------------------------------------------------------
+// Ruled-line table detection (task #3: bordered/row-ruled tables)
+// ---------------------------------------------------------------------------
+
+export interface PathOps {
+  constructPath: number;
+  endPath: number;
+  save: number;
+  restore: number;
+  transform: number;
+}
+
+export interface RuleSegment {
+  kind: 'h' | 'v';
+  x0: number; y0: number; x1: number; y1: number; // PDF user space (bottom-left)
+}
+
+/**
+ * Extract thin painted rules from a pdfjs operator list. Modern pdfjs fuses
+ * the paint op into constructPath: args = [paintOp, [pathData], minMax].
+ * Word emits table borders as thin filled rects, so each painted path whose
+ * bbox is a thin long strip is one border segment. Clip-only paths
+ * (paintOp === endPath) are NOT painted and are ignored — caption grids are
+ * often clipped, not drawn.
+ */
+export function extractRuledSegments(
+  fnArray: number[],
+  argsArray: any[],
+  ops: PathOps,
+  opts: { minLen?: number; maxThick?: number } = {},
+): RuleSegment[] {
+  const minLen = opts.minLen ?? 20;
+  const maxThick = opts.maxThick ?? 3;
+  let ctm: number[] = [1, 0, 0, 1, 0, 0];
+  const stack: number[][] = [];
+  const mul = (m: number[], n: number[]): number[] => [
+    m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+    m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+    m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5],
+  ];
+  const segs: RuleSegment[] = [];
+  for (let i = 0; i < fnArray.length; i++) {
+    const fn = fnArray[i];
+    if (fn === ops.save) stack.push(ctm.slice());
+    else if (fn === ops.restore) ctm = stack.pop() ?? [1, 0, 0, 1, 0, 0];
+    else if (fn === ops.transform) ctm = mul(ctm, argsArray[i] as number[]);
+    else if (fn === ops.constructPath) {
+      const a = argsArray[i];
+      if (!Array.isArray(a) || a.length < 3) continue;
+      const paintOp = a[0];
+      if (paintOp === ops.endPath) continue; // clip, not painted
+      const mm = a[2];
+      if (!mm || mm.length < 4) continue;
+      // transform bbox corners through the CTM
+      const corners = [[mm[0], mm[1]], [mm[2], mm[1]], [mm[0], mm[3]], [mm[2], mm[3]]]
+        .map(([x, y]) => [ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]]);
+      const xs = corners.map(c => c[0]);
+      const ys = corners.map(c => c[1]);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs);
+      const y0 = Math.min(...ys), y1 = Math.max(...ys);
+      const w = x1 - x0, h = y1 - y0;
+      if (h <= maxThick && w >= minLen) segs.push({ kind: 'h', x0, y0, x1, y1 });
+      else if (w <= maxThick && h >= minLen) segs.push({ kind: 'v', x0, y0, x1, y1 });
+    }
+  }
+  return segs;
+}
+
+/**
+ * Cluster rule segments into table regions (PDF user space, bottom-left).
+ * A region is real when it stacks ≥3 horizontal rules with strongly
+ * overlapping x-spans at plausible row spacing (row-ruled/headerless
+ * tables), or has ≥2 horizontal AND ≥2 vertical rules intersecting
+ * (bordered grid). Single underlines/separators never qualify.
+ */
+export function detectRuledTableRegions(segs: RuleSegment[]): Array<[number, number, number, number]> {
+  const hs = segs.filter(s => s.kind === 'h').sort((a, b) => b.y0 - a.y0); // top-down
+  const vs = segs.filter(s => s.kind === 'v');
+  const used = new Set<number>();
+  const regions: Array<[number, number, number, number]> = [];
+
+  for (let i = 0; i < hs.length; i++) {
+    if (used.has(i)) continue;
+    const group = [i];
+    for (let j = i + 1; j < hs.length; j++) {
+      if (used.has(j)) continue;
+      const prev = hs[group[group.length - 1]];
+      const cand = hs[j];
+      const overlap = Math.min(prev.x1, cand.x1) - Math.max(prev.x0, cand.x0);
+      const span = Math.min(prev.x1 - prev.x0, cand.x1 - cand.x0);
+      const gap = prev.y0 - cand.y1;
+      if (overlap >= 0.6 * span && gap >= 0 && gap <= 60) group.push(j);
+      else if (cand.y1 < prev.y0 - 60) break;
+    }
+    if (group.length < 2) continue;
+    const gx0 = Math.min(...group.map(g => hs[g].x0));
+    const gx1 = Math.max(...group.map(g => hs[g].x1));
+    const gy0 = Math.min(...group.map(g => hs[g].y0));
+    const gy1 = Math.max(...group.map(g => hs[g].y1));
+    const vInside = vs.filter(v =>
+      v.x0 >= gx0 - 3 && v.x1 <= gx1 + 3 && v.y1 >= gy0 - 3 && v.y0 <= gy1 + 3).length;
+    if (group.length >= 3 || (group.length >= 2 && vInside >= 2)) {
+      group.forEach(g => used.add(g));
+      regions.push([gx0, gy0, gx1, gy1]);
+    }
+  }
+  return regions;
+}
+
+// ---------------------------------------------------------------------------
 // Embedded-image detection (task #2: figure blocks)
 // ---------------------------------------------------------------------------
 
@@ -753,7 +891,21 @@ export async function extractPageBlocks(
         height: it.height ?? Math.hypot(it.transform?.[2] ?? 0, it.transform?.[3] ?? 0) ?? 10,
         fontName: fontCache.get(it.fontName) ?? it.fontName,
       }));
-      const blocks = buildBlocks(items, { width: viewport.width, height: viewport.height });
+      // Ruled tables (task #3): drawn borders from the same operator list.
+      let ruledRegions: Array<[number, number, number, number]> = [];
+      if (opList) {
+        try {
+          const segs = extractRuledSegments(opList.fnArray, opList.argsArray, {
+            constructPath: pdfjs.OPS.constructPath,
+            endPath: pdfjs.OPS.endPath,
+            save: pdfjs.OPS.save,
+            restore: pdfjs.OPS.restore,
+            transform: pdfjs.OPS.transform,
+          });
+          ruledRegions = detectRuledTableRegions(segs);
+        } catch { /* ruled detection is best-effort */ }
+      }
+      const blocks = buildBlocks(items, { width: viewport.width, height: viewport.height }, ruledRegions);
       // Figure blocks for embedded images (task #2) — appended after the
       // text blocks; the operator list is already paid for by the font
       // resolution above. Skipped entirely on transcript pages (zero-block

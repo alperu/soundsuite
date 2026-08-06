@@ -420,6 +420,60 @@ describe('pdf-block-extractor pure core', () => {
     expect(blocks.filter(b => b.type === 'paragraph')).toHaveLength(1);
   });
 
+  describe('ruled-table detection (task #3)', () => {
+    const { extractRuledSegments, detectRuledTableRegions } = require('../pdf-block-extractor');
+    const POPS = { constructPath: 91, endPath: 28, save: 10, restore: 11, transform: 12 };
+    const hRule = (x0: number, y: number, x1: number) =>
+      [91, [22, [[0, x0, y, 1, x1, y, 1, x1, y + 0.72, 1, x0, y + 0.72]], [x0, y, x1, y + 0.72]]];
+    const vRule = (x: number, y0: number, y1: number) =>
+      [91, [22, [[0, x, y0, 1, x, y1]], [x, y0, x + 0.72, y1]]];
+
+    it('classifies thin painted strips as h/v rules and ignores clip paths', () => {
+      const entries = [
+        hRule(72, 500, 540),
+        vRule(72, 400, 500),
+        [91, [28, [[0, 0, 0, 1, 612, 792]], [0, 0, 612, 792]]], // endPath → clip, ignored
+      ];
+      const segs = extractRuledSegments(entries.map(e => e[0]) as number[], entries.map(e => e[1]), POPS);
+      expect(segs).toHaveLength(2);
+      expect(segs[0].kind).toBe('h');
+      expect(segs[1].kind).toBe('v');
+    });
+
+    it('three stacked rules form a region; a lone underline does not', () => {
+      const three = [hRule(72, 500, 540), hRule(72, 470, 540), hRule(72, 440, 540)];
+      const regions = detectRuledTableRegions(
+        extractRuledSegments(three.map(e => e[0]) as number[], three.map(e => e[1]), POPS));
+      expect(regions).toHaveLength(1);
+      expect(Math.round(regions[0][1])).toBe(440);
+
+      const lone = [hRule(72, 500, 540)];
+      expect(detectRuledTableRegions(
+        extractRuledSegments(lone.map(e => e[0]) as number[], lone.map(e => e[1]), POPS))).toHaveLength(0);
+    });
+
+    it('lines inside a ruled region become ONE table block even without column alignment', () => {
+      const items: PositionedItem[] = [
+        run('Preceding prose paragraph line at the body margin here.', 72, 600, { w: 430, h: 14 }),
+        // headerless 2-column rows — misaligned columns, no table markers
+        run('Skyspark integration', 80, 520, { w: 150, h: 12 }),
+        run('present', 380, 520, { w: 60, h: 12 }),
+        run('Tridium framework work', 80, 490, { w: 170, h: 12 }),
+        run('absent', 385, 490, { w: 55, h: 12 }),
+        run('Following prose resumes at the margin after the table.', 72, 420, { w: 420, h: 14 }),
+      ];
+      const ruled: Array<[number, number, number, number]> = [[72, 475, 540, 545]];
+      const blocks = buildBlocks(items, PAGE, ruled);
+      const tables = blocks.filter(b => b.type === 'table');
+      expect(tables).toHaveLength(1);
+      expect(tables[0].text).toContain('Skyspark integration');
+      expect(tables[0].text).toContain('absent');
+      const paras = blocks.filter(b => b.type === 'paragraph');
+      expect(paras.some(p => p.text.includes('Preceding prose'))).toBe(true);
+      expect(paras.some(p => p.text.includes('Following prose'))).toBe(true);
+    });
+  });
+
   describe('computeImageRects (figure blocks)', () => {
     const OPS = { save: 1, restore: 2, transform: 3, paintImageXObject: 4, paintInlineImageXObject: 5, paintImageMaskXObject: 6 };
 
