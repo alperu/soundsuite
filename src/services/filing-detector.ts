@@ -3,7 +3,7 @@
  * parent folder name, and header text (first 5 pages).
  *
  * Handles real legal document naming patterns:
- *   - "D-1-FM-25-004488 - MOTION FOR RECONSIDERATION.pdf"
+ *   - "D-1-FM-25-000222 - MOTION FOR RECONSIDERATION.pdf"
  *   - "PetitionOfBillofReviewFinal.pdf"
  *   - "527222.pdf" (numeric-only → falls back to folder name)
  *   - Parent folders like "Motion to Strike/" or "NOTICE OF APPEAL/"
@@ -73,10 +73,10 @@ const TYPE_PATTERNS: Array<{ type: string; patterns: RegExp[] }> = [
 ];
 
 // ── Case number prefix pattern ──────────────────────────────────────
-// Matches: "D-1-FM-25-004488 - ", "D-1-FM-25-004488-", or similar court case prefixes
+// Matches: "D-1-FM-25-000222 - ", "D-1-FM-25-000222-", or similar court case prefixes
 const CASE_NUMBER_PREFIX = /^[A-Z]-\d+-[A-Z]+-\d+-\d+\s*[-–—]\s*/i;
 
-// Also match generic docket-style prefixes: "2025-CV-1234 - ", "FM-25-004488 - "
+// Also match generic docket-style prefixes: "2025-CV-1234 - ", "FM-25-000222 - "
 const DOCKET_PREFIX = /^[A-Z]{1,4}[-_.]\d{2,6}[-_.]\d{3,8}\s*[-–—]\s*/i;
 
 // ── Patterns to strip from filenames ────────────────────────────────
@@ -169,7 +169,7 @@ const MODIFIER_WORDS = /\b(?:supplemental|amended|emergency|original|corrected|r
 
 /**
  * Party-role words that describe WHO filed, not WHAT was filed.
- * "PETITIONER Alper Uzmezler Amended BRIEF" → "PETITIONER" is a party role, "BRIEF" is the type.
+ * "PETITIONER John Doe Amended BRIEF" → "PETITIONER" is a party role, "BRIEF" is the type.
  * These should be skipped entirely during type detection.
  */
 const PARTY_ROLE_WORDS = /\b(?:petitioner'?s?|respondent'?s?|appellant'?s?|appellee'?s?|plaintiff'?s?|defendant'?s?|movant'?s?|applicant'?s?|claimant'?s?)\b/i;
@@ -193,8 +193,8 @@ function matchPosition(text: string, pattern: RegExp): number {
 
 /**
  * Strip the case number prefix from a title string to get the descriptive part.
- * "Cause No. D-1-FM-25-004488 - SUPPLEMENTAL AFFIDAVIT..." → "SUPPLEMENTAL AFFIDAVIT..."
- * "D-1-FM-25-004488 - MOTION..." → "MOTION..."
+ * "Cause No. D-1-FM-25-000222 - SUPPLEMENTAL AFFIDAVIT..." → "SUPPLEMENTAL AFFIDAVIT..."
+ * "D-1-FM-25-000222 - MOTION..." → "MOTION..."
  */
 function stripCasePrefix(text: string): string {
   return text
@@ -228,7 +228,7 @@ export function detectFilingType(
 
   // ── Step 1: Find the primary type from the filename ──────────────
   // Strip party-role words from the text so "PETITIONER" doesn't match "Petition".
-  // This handles "PETITIONER Alper Uzmezler Amended BRIEF" → finds "BRIEF" as the type.
+  // This handles "PETITIONER John Doe Amended BRIEF" → finds "BRIEF" as the type.
   const partyStripped = fileNameClean.replace(PARTY_ROLE_WORDS, '').trim() || fileNameClean;
 
   // Split the filename at subordinate boundaries. Only the part BEFORE
@@ -347,7 +347,7 @@ export function extractFilingTitle(
   // Step 1: Handle CamelCase filenames
   baseName = splitCamelCase(baseName);
 
-  // Step 2: Strip case number prefix ("D-1-FM-25-004488 - MOTION...")
+  // Step 2: Strip case number prefix ("D-1-FM-25-000222 - MOTION...")
   let title = baseName;
   if (CASE_NUMBER_PREFIX.test(title)) {
     title = title.replace(CASE_NUMBER_PREFIX, '');
@@ -544,7 +544,7 @@ export interface HeaderClassifierResult {
  */
 function stripHeaderPreamble(text: string): string {
   return text
-    // "NO. D-1-FM-25-004488" / "CAUSE NO. 12345" — strict token shape, single
+    // "NO. D-1-FM-25-000222" / "CAUSE NO. 12345" — strict token shape, single
     // line. Require `.` or whitespace after `NO` so we don't eat "NOTICE".
     .replace(/\b(?:CAUSE\s+)?NO(?:\.\s*|\s+)[A-Z0-9][A-Z0-9-]{2,}/gi, ' ')
     // "IN THE … COURT OF … TEXAS" — single line, terminates at "TEXAS" or newline.

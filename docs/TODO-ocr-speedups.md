@@ -5,7 +5,7 @@ Record with 21 exhibits takes **7–14 minutes** in the `exhibit-extraction`
 stage. Two measured runs:
 
 - `6bbbe532` — 25-905-CV ... Vol 3 of 3 → exhibit-extraction **10m 49s**
-- `e9aaa8e9` — 24-513-CV ... Vol 3 of 3 → exhibit-extraction **13m 42s**
+- `e9aaa8e9` — 00-555-CV ... Vol 3 of 3 → exhibit-extraction **13m 42s**
 
 Per-call OCR latency is wildly variable: best 4 s, median 30–40 s, worst > 115 s.
 This document enumerates the concrete bottlenecks and the fixes ranked by

@@ -160,10 +160,10 @@ primary text store for an LLM extractor anyway.
 - **Pattern A — clerk file-stamp coversheet ("FILED IN ... COURT").** Found
   on Reporter's Records and clerk-stamped briefs/orders.
   Excerpt (`f6731412`, Reporter's Record):
-  `D VOLUME 1 TRIAL COURT CAUSE NO. D-1-FM-21-005611 FILED IN APPEALS COURT CAUSE NO. 03-25-00905-CV`
+  `D VOLUME 1 TRIAL COURT CAUSE NO. D-1-FM-21-000111 FILED IN APPEALS COURT CAUSE NO. 03-25-00333-CV`
   — note: this is the appellate "filed in N-th court of appeals" stamp, not a date.
 - **Pattern B — embedded date stamp on the appellate cover.** Excerpt
-  (Brief `bbfaa6a4`): `BRIEF OF APPELLANT ALPER UZMEZLER James A. Vaught State Bar No. 20526300 VAUGHT LAW FIRM ...` — date stamp itself is often
+  (Brief `bbfaa6a4`): `BRIEF OF APPELLANT ALPER DOE James A. Vaught State Bar No. 20526300 VAUGHT LAW FIRM ...` — date stamp itself is often
   rendered as an image overlay that OCR'd as the receiving court header,
   not a date string.
 - **Pattern C — Clerk's Record index has explicit per-document filed
@@ -201,14 +201,14 @@ Document (with two exceptions), so this is purely a wiring fix.
 
 - **Pattern A — caption "Honorable X, Judge Presiding".** Excerpt
   (Clerk's Record `4740bf99`):
-  `Trial Court Cause No. D-1-FM-25-004488 In the 126th District Court of Travis County, Texas Honorable KEVIN D. HENDERSON Judge Presiding`
+  `Trial Court Cause No. D-1-FM-25-000222 In the 126th District Court of Travis County, Texas Honorable JOHN Q. JURIST Judge Presiding`
   This is gold for the case-level judge.
 - **Pattern B — signature block "SIGNED on ___, 2025 / __________ PRESIDING JUDGE".** Excerpt
   (Clerk's Record `4740bf99`):
   `SIGNED on this ____ day of __________________, 2025.        ____________________________________ PRESIDING JUDGE`
   — useful for `Order` and `Judgment` rows (signedBy slot).
 - **Pattern C — order header naming the judge.** Excerpt (Order
-  `a95acf36`): `UZMEZLER V. STEVENS PAGE 1 OF 2 NO. D-1-FM-25-004488 IN THE MATTER OF ... ORDER ON MOTION FOR WITHDRAWAL OF COUNSEL  On  this  day,  the  Court  considered ...`
+  `a95acf36`): `DOE V. ROE PAGE 1 OF 2 NO. D-1-FM-25-000222 IN THE MATTER OF ... ORDER ON MOTION FOR WITHDRAWAL OF COUNSEL  On  this  day,  the  Court  considered ...`
   — judge isn't named in the body but the case caption above usually
   carries the "Honorable …" header.
 - **Confidence**: **High** for Clerk's Records, Orders, and any document
@@ -250,9 +250,9 @@ Document (with two exceptions), so this is purely a wiring fix.
 
 ### 2.7 `reporterRef` (Reporter's Record)
 
-- **Pattern A — cover signature line "Chavela Crain, CSR 3064 - 53rd District Court Texas Certified Shorthand Reporter"** appears verbatim
+- **Pattern A — cover signature line "Casey Court, CSR 0000 - 53rd District Court Texas Certified Shorthand Reporter"** appears verbatim
   on every Reporter's Record volume 1 we sampled. Excerpt (RR
-  `032289d1`): `Chavela Crain, CSR 3064 - 53rd District Court Texas Certified Shorthand Reporter  1  REPORTER'S   RECORD VOLUME   1   OF   3   VOLUMES TRIAL   COURT   CAUSE   NO.   D-1-FM-25-004488`.
+  `032289d1`): `Casey Court, CSR 0000 - 53rd District Court Texas Certified Shorthand Reporter  1  REPORTER'S   RECORD VOLUME   1   OF   3   VOLUMES TRIAL   COURT   CAUSE   NO.   D-1-FM-25-000222`.
 - **Confidence**: **Very high** — the reporter's name + CSR number is
   the first thing on the cover of every reporter's record. Match against
   `Person.tags.courtReporter==true` rows (Person table has 0 such rows
@@ -269,12 +269,12 @@ Document (with two exceptions), so this is purely a wiring fix.
   *setting* `authoredBy` would cascade origin markers — but only 4 of 76
   sub-entity rows have it set, so origin is mostly inert too.
 - **Patterns**:
-  - **Signature block "/s/ Name".** Excerpt (Clerk's Record): `I hereby certify that a true and correct copy ... was served on Petitioner, Alper Uzmezler, on July 31, 2025 ... /s/ Ekim Stevens  Ekim Stevens`
+  - **Signature block "/s/ Name".** Excerpt (Clerk's Record): `I hereby certify that a true and correct copy ... was served on Petitioner, John Doe, on July 31, 2025 ... /s/ Jane Roe  Jane Roe`
   - **Attorney letterhead with State Bar No.** Excerpt (Brief
-    `bbfaa6a4`): `BRIEF OF APPELLANT ALPER UZMEZLER James A. Vaught State Bar No. 20526300 VAUGHT LAW FIRM, P.C. 5929 Balcones Drive, Suite 201 Austin, Texas 78731 (512) ...`
+    `bbfaa6a4`): `BRIEF OF APPELLANT ALPER DOE James A. Vaught State Bar No. 20526300 VAUGHT LAW FIRM, P.C. 5929 Balcones Drive, Suite 201 Austin, Texas 78731 (512) ...`
   - **Pro-se filer signature** — the same Vaught block but with
     "PRO SE" instead of bar number; Clerk's Record example above
-    shows pro-se Alper Uzmezler.
+    shows pro-se John Doe.
 - **Confidence**: **High** for briefs, motions, responses (signature
   block at the end is reliable). **Medium** for short notices and
   letters where the sender may be in the header only. **Low** for
@@ -287,7 +287,7 @@ Document (with two exceptions), so this is purely a wiring fix.
 ### 2.9 `hearingDate` (Reporter's Record + Transcript)
 
 - **Pattern**: explicit "ON MOTION TO … On the 24th day of September, 2025, the following proceedings came …".
-  Excerpt (RR `TRAVIS-D-1-FM-25-004488-RR-VOL002`): `HEARING ON   MOTION   TO   DISQUALIFY AND   MOTION   TO   DISMISS -------------------------------------------------- On   the   24th   day   of   September,   2025,   the   following proceedings came`.
+  Excerpt (RR `TRAVIS-D-1-FM-25-000222-RR-VOL002`): `HEARING ON   MOTION   TO   DISQUALIFY AND   MOTION   TO   DISMISS -------------------------------------------------- On   the   24th   day   of   September,   2025,   the   following proceedings came`.
 - **Confidence**: **Very high** for Reporter's Records — the date is on
   page 1 of every volume. The pattern is "On the Nth day of <Month>,
   YYYY". A small regex can pull this without an LLM.
@@ -394,7 +394,7 @@ or `CSR`):
 > - `respondentPartyRole`: the opposite role.
 > - `authoredByName`: signature-block or letterhead name; mark
 >   `"self"` if the document is signed pro se by the user
->   (`alper@basservices.net` → ALPER UZMEZLER).
+>   (`alper@basservices.net` → ALPER DOE).
 > - `reporterName` + `reporterCsrNumber`: Reporter's Record only —
 >   from the cover signature line.
 > - `hearingDate`: Reporter's Record only — ISO date from "On the Nth

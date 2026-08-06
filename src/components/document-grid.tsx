@@ -53,6 +53,10 @@ interface DocumentGridProps {
   initialDocuments: Document[];
   onDocumentsUpdate?: (documents: Document[]) => void;
   partialDocumentIds?: string[];
+  /** Deep-linked selection from /?doc=id[,id...]. */
+  initialSelectedIds?: string[];
+  /** Reports selection changes upward (URL sync). */
+  onSelectionChange?: (docIds: string[]) => void;
 }
 
 function relativeTime(dateStr: string): string {
@@ -212,9 +216,19 @@ function DocumentCard({
   );
 }
 
-export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpdate, partialDocumentIds }: DocumentGridProps) {
+export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpdate, partialDocumentIds, initialSelectedIds, onSelectionChange }: DocumentGridProps) {
   const [documents, setDocuments] = useState<Document[]>(initialDocuments);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(
+    () => new Set(initialSelectedIds ?? [])
+  );
+
+  // Report selection upward (URL sync). Ref keeps the callback identity out
+  // of the effect deps so parent re-renders don't re-fire it.
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  onSelectionChangeRef.current = onSelectionChange;
+  useEffect(() => {
+    onSelectionChangeRef.current?.(Array.from(selectedIds));
+  }, [selectedIds]);
   const [retrying, setRetrying] = useState<Set<string>>(new Set());
   const [reparseInProgress, setReparseInProgress] = useState(false);
   const [addToQueueInProgress, setAddToQueueInProgress] = useState(false);

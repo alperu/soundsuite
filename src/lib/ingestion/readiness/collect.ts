@@ -23,6 +23,8 @@ export function collectSignals(opts: {
   parseErrorCount?: number;
   /** Pipeline OCR trigger threshold (config.ocrThreshold). */
   ocrThreshold: number;
+  /** Document.documentType — record compilations get repetition leniency. */
+  documentType?: string | null;
 }): ReadinessSignals {
   const { verification, chunkCount, renderFailedCount, ocrThreshold } = opts;
   const pages: PageTextLike[] = verification.pages ?? [];
@@ -70,5 +72,6 @@ export function collectSignals(opts: {
     glyphArtifactPages: glyph.pages,
     repeatedContent: repetition.fired,
     tokenBloat: detectTokenBloat(pages),
+    isRecordCompilation: /clerk.?s?\s+record|reporter.?s?\s+record|appendix/i.test(opts.documentType ?? ''),
   };
 }

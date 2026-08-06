@@ -57,14 +57,14 @@ const cases: Case[] = [
   {
     name: 'bug: response opposing petition (the failing case)',
     header:
-      "NO. D-1-FM-21-005611\nIN THE DISTRICT COURT OF TRAVIS COUNTY, TEXAS\n" +
+      "NO. D-1-FM-21-000111\nIN THE DISTRICT COURT OF TRAVIS COUNTY, TEXAS\n" +
       "RESPONDENT'S RESPONSE IN OPPOSITION TO PETITION TO " +
       "ENFORCE PRIOR ORDER DATED JULY 7, 2025 AND APPLICATION FOR " +
       "TEMPORARY RESTRAINING ORDER AND EMERGENCY RELIEF",
     expectedKind: 'response',
     expectedConfidence: 'high',
     filename:
-      'petition-alper-uzmezler-petition-to-enforce-prior-order-dated-july-7-2025compress.pdf',
+      'petition-alper-doe-petition-to-enforce-prior-order-dated-july-7-2025compress.pdf',
     expectedFilingType: 'Response',
     expectedSource: 'header',
   },
@@ -159,7 +159,7 @@ const cases: Case[] = [
   {
     name: 'no header text (PDF parse failed)',
     header: '',
-    filename: 'D-1-FM-25-004488 - MOTION FOR RECONSIDERATION.pdf',
+    filename: 'D-1-FM-25-000222 - MOTION FOR RECONSIDERATION.pdf',
     expectedFilingType: 'Motion',
     expectedSource: 'filename',
   },

@@ -12,7 +12,7 @@ describe('segmentChipsAndIntents', () => {
 
   it('pairs each chip with the free text that follows it', () => {
     const input =
-      '{{ filingRef==@b691a563-eeef-4bae-a2e5-7731012a9016 }}  In this document we have Torrez\'s changing statement and check all of this   ' +
+      '{{ filingRef==@b691a563-eeef-4bae-a2e5-7731012a9016 }}  In this document we have Rowe\'s changing statement and check all of this   ' +
       '{{ (case==@04a8cd94 or case==@92b9ad81 or case==@1535c622 or case==@c608b81a) }}   how trust evolved over time.';
 
     const out = segmentChipsAndIntents(input);
@@ -23,7 +23,7 @@ describe('segmentChipsAndIntents', () => {
 
     const chip1 = out[0] as Extract<typeof out[number], { kind: 'chip' }>;
     expect(chip1.raw).toBe('filingRef==@b691a563-eeef-4bae-a2e5-7731012a9016');
-    expect(chip1.nextIntent).toBe("In this document we have Torrez's changing statement and check all of this");
+    expect(chip1.nextIntent).toBe("In this document we have Rowe's changing statement and check all of this");
     expect(chip1.ast).not.toBeNull();
 
     const chip2 = out[1] as Extract<typeof out[number], { kind: 'chip' }>;

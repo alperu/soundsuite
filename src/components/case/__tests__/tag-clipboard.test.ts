@@ -59,7 +59,7 @@ const UUID = '550e8400-e29b-41d4-a716-446655440000';
 describe('canonicalizeTagValue', () => {
   test('Document ref + label → copies the full filePath (not the UUID)', () => {
     const value = { _kind: 'ref', val: UUID };
-    const fullPath = '/Users/alper/Court/03-25-00905-CV/Motion/X.pdf';
+    const fullPath = '/Users/alper/Court/03-25-00333-CV/Motion/X.pdf';
     expect(canonicalizeTagValue(fileRefSpec, value, fullPath)).toBe(fullPath);
   });
 

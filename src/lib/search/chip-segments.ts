@@ -47,11 +47,11 @@ const CHIP_RE = /\{\{\s*([\s\S]*?)\s*\}\}/g;
  * Split the composer query into chip + framing segments in source order.
  *
  * Example input:
- *   `{{ filingRef==@b691 }} torrez statement {{ (case==@c1 or case==@c2) }} over time`
+ *   `{{ filingRef==@b691 }} rowe statement {{ (case==@c1 or case==@c2) }} over time`
  *
  * Returns:
  *   [
- *     { kind: 'chip', raw: 'filingRef==@b691', ast: …, nextIntent: 'torrez statement' },
+ *     { kind: 'chip', raw: 'filingRef==@b691', ast: …, nextIntent: 'rowe statement' },
  *     { kind: 'chip', raw: '(case==@c1 or case==@c2)', ast: …, nextIntent: 'over time' },
  *   ]
  */

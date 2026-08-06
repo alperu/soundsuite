@@ -13,7 +13,7 @@ const PERSONS: PersonIndexEntry[] = [
 ];
 
 const CASES: CaseIndexEntry[] = [
-  { id: 'case-005611', causeNo: 'D-1-FM-21-005611', name: 'Smith v. Smith' },
+  { id: 'case-000111', causeNo: 'D-1-FM-21-000111', name: 'Smith v. Smith' },
   { id: 'case-roberts-smith', name: 'Roberts vs Smith' },
 ];
 
@@ -72,10 +72,10 @@ describe('interpretQuery', () => {
 
   it('resolves a cause-number to caseRef', async () => {
     const r = await interpretQuery(
-      'case D-1-FM-21-005611',
+      'case D-1-FM-21-000111',
       ctxAt('2026-05-20T00:00:00Z'),
     );
-    expect(r.compiledFilter).toContain('caseRef==@case-005611');
+    expect(r.compiledFilter).toContain('caseRef==@case-000111');
   });
 
   it('returns low confidence for empty/junk', async () => {

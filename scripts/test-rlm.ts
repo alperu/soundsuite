@@ -16,7 +16,7 @@
  *
  * Usage:
  *   npx tsx scripts/test-rlm.ts "your question here"   # custom query
- *   npx tsx scripts/test-rlm.ts                        # uses Torrez default
+ *   npx tsx scripts/test-rlm.ts                        # uses Rowe default
  *
  * Environment:
  *   FLEET_URL  default http://localhost:3000
@@ -29,13 +29,13 @@ const RLM_PORT = Number(process.env.RLM_PORT ?? 8100);
 const HOST_OVERRIDE = process.env.RLM_HOST;
 
 const QUERY = process.argv.slice(2).join(' ').trim()
-  || 'Check Torrez changing statements on Trust fund specially on May 13 2026 recorders records.';
+  || 'Check Rowe changing statements on Trust fund specially on May 13 2026 recorders records.';
 
 const INITIAL_EXCERPTS = [
-  { cite: '03-25-00905-CV 1 Supp. RR 20', text: 'Torrez admitted "this fraud" existed regarding trust funds on September 10, 2025.' },
-  { cite: 'CR 1265', text: 'Successor counsel J. Scott Milner told the court "there is no fraud" on September 24, 2025.' },
-  { cite: 'FINDING 15', text: 'Torrez testified inheritance was placed in a trust fund to maintain its separate property character (June 20, 2025).' },
-  { cite: 'Exhibit P-11', text: 'Reference to Torrez false testimony about trust accounts in Turkey.' },
+  { cite: '03-25-00333-CV 1 Supp. RR 20', text: 'Rowe admitted "this fraud" existed regarding trust funds on September 10, 2025.' },
+  { cite: 'CR 1265', text: 'Successor counsel J. Scott Poe told the court "there is no fraud" on September 24, 2025.' },
+  { cite: 'FINDING 15', text: 'Rowe testified inheritance was placed in a trust fund to maintain its separate property character (June 20, 2025).' },
+  { cite: 'Exhibit P-11', text: 'Reference to Rowe false testimony about trust accounts in Turkey.' },
   { cite: 'Exhibit P-35', text: 'Additional reference to false testimony about Turkish trust accounts.' },
 ];
 
@@ -150,7 +150,7 @@ async function stubExecutor(toolName: string, args: Record<string, unknown>) {
   if (toolName !== 'query_case_knowledge') return { ok: false, content: `Unknown tool: ${toolName}`, chunkCount: 0 };
   const sub = typeof args.query === 'string' ? args.query : '(none)';
   const fakeChunks = [
-    { cite: `STUB-${stubCallCount}-A`, text: `Stub re "${sub}": Torrez identified trust origin as Turkish inheritance.` },
+    { cite: `STUB-${stubCallCount}-A`, text: `Stub re "${sub}": Rowe identified trust origin as Turkish inheritance.` },
     { cite: `STUB-${stubCallCount}-B`, text: `Stub re "${sub}": May 13 2026 cross-examination contradicts earlier deposition.` },
     { cite: `STUB-${stubCallCount}-C`, text: `Stub re "${sub}": Bank records show no inheritance transfer matching the claim.` },
   ];

@@ -32,10 +32,10 @@ const PROBES: Probe[] = [
   { label: 'just "13"',               query: '13', op: 'Or' },
   { label: 'just "2026"',             query: '2026', op: 'Or' },
   { label: 'just "trust"',            query: 'trust', op: 'Or' },
-  { label: 'just "Torrez"',           query: 'Torrez', op: 'Or' },
+  { label: 'just "Rowe"',           query: 'Rowe', op: 'Or' },
   { label: 'just "hearing"',          query: 'hearing', op: 'Or' },
   { label: 'just "Stevens"',          query: 'Stevens', op: 'Or' },
-  { label: 'just "Uzmezler"',         query: 'Uzmezler', op: 'Or' },
+  { label: 'just "Doe"',         query: 'Doe', op: 'Or' },
   { label: 'just "Cross-Examination"',query: 'Cross-Examination', op: 'Or' },
 ];
 

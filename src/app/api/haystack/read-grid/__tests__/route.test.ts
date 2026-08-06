@@ -184,14 +184,14 @@ describe('POST /api/haystack/read-grid', () => {
   })
 
   test('documentType + case->judge->displayName traversal merges into Document grid', async () => {
-    // Stub the traversal: judge "Mangrum" resolves to person → motion → caseIds.
+    // Stub the traversal: judge "Marlow" resolves to person → motion → caseIds.
     prismaMock.person.findMany.mockResolvedValueOnce([{ id: 'p1' }])
     prismaMock.motion.findMany.mockResolvedValueOnce([
       { caseId: 'c1' }, { caseId: 'c2' },
     ])
     mockRows = [{ id: 'd1', documentType: 'order', caseId: 'c1' }]
     const res = await POST(mkReq({
-      filter: 'documentType=="order" and case->judge->displayName=="Mangrum"',
+      filter: 'documentType=="order" and case->judge->displayName=="Marlow"',
     }))
     expect(res.status).toBe(200)
     const json = await res.json()

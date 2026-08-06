@@ -40,9 +40,26 @@ export const WORDLIST = new Set(
     'notice service certificate signature dated date law legal rule rules code statute claim claims relief damages ' +
     'contract agreement property herein aforementioned whereas therefore wherefore prays granted denied sustained ' +
     'overruled objection stipulation discovery subpoena summons complaint answer petition response reply brief ' +
-    'memorandum support opposition true correct copy original certified sworn signed executed witness my hand seal'
+    'memorandum support opposition true correct copy original certified sworn signed executed witness my hand seal ' +
+    // Spanish function + court-notice vocabulary — Texas filings routinely
+    // include Spanish-language notices (e.g. AVISO DE ORDEN); without these,
+    // correct Spanish text scores like CID garble (observed 2026-08-05 on a
+    // clerk-record page: "Se le notifica que se ha firmado e ingresado...").
+    'aviso orden que se le ha una un el la los las del de por para con sin este esta esto ese esa eso su sus es son ' +
+    'fue ser hay como cuando donde quien porque pero mas muy todo toda todos todas otro otra usted ustedes tribunal ' +
+    'condado corte juez causa caso audiencia demanda demandado demandada peticionario notifica notificacion firmado ' +
+    'firmada ingresado ingresada fecha derecho derechos abogado abogada peticion respuesta contra sobre entre debe ' +
+    'puede tiene tienen sido estado documento documentos numero copia original certificado sentencia decreto'
   ).split(/\s+/),
 );
+
+/**
+ * Minimum letter-tokens for the dictionary signal to be meaningful.
+ * Citation indexes, exhibit pagination strips ("Index · 1 · 2 · [3] ..."),
+ * and stamp-dominated pages are digit/symbol-heavy and yield too few word
+ * tokens to judge — the dictionary ratio on them is noise, not signal.
+ */
+const DICT_MIN_TOKENS = 30;
 
 export interface GlyphFinding {
   fired: boolean;
@@ -57,6 +74,7 @@ function pageGlyphMetrics(text: string): {
   replacementRatio: number;
   dictRatio: number;
   bigramEntropy: number;
+  letterTokens: number;
 } {
   const totalChars = text.length;
   const replacementCount =
@@ -67,6 +85,7 @@ function pageGlyphMetrics(text: string): {
   const dictHits = tokens.filter((t) => WORDLIST.has(t.toLowerCase())).length;
   // No tokens at all on a long page is itself suspicious — treat as 0.
   const dictRatio = tokens.length > 0 ? dictHits / tokens.length : 0;
+  const letterTokens = tokens.length;
 
   // Shannon entropy over adjacent lowercase-letter pairs. English prose sits
   // ~3.3–3.9 bits; scrambled output trends toward uniform (>4.3).
@@ -83,7 +102,7 @@ function pageGlyphMetrics(text: string): {
     bigramEntropy -= p * Math.log2(p);
   }
 
-  return { replacementRatio, dictRatio, bigramEntropy };
+  return { replacementRatio, dictRatio, bigramEntropy, letterTokens };
 }
 
 export function detectGlyphArtifacts(pages: PageTextLike[]): GlyphFinding {
@@ -103,14 +122,15 @@ export function detectGlyphArtifacts(pages: PageTextLike[]): GlyphFinding {
     finding.minDictRatio = Math.min(finding.minDictRatio, m.dictRatio);
     finding.maxBigramEntropy = Math.max(finding.maxBigramEntropy, m.bigramEntropy);
 
-    const signals = [
-      m.replacementRatio > REPLACEMENT_RATIO_THRESHOLD,
-      m.dictRatio < DICT_RATIO_GARBLED,
-      m.bigramEntropy > BIGRAM_ENTROPY_GARBLED,
-    ].filter(Boolean).length;
     // Replacement/CID ratio is precise enough to fire alone; the fuzzier
-    // signals need to agree with each other.
-    if (m.replacementRatio > REPLACEMENT_RATIO_THRESHOLD || signals >= 2) {
+    // dictionary + entropy signals must BOTH agree, and only on pages with
+    // enough word tokens for the dictionary ratio to mean anything (digit-
+    // heavy citation/pagination pages are exempt — their ratio is noise).
+    const fuzzyFire =
+      m.letterTokens >= DICT_MIN_TOKENS &&
+      m.dictRatio < DICT_RATIO_GARBLED &&
+      m.bigramEntropy > BIGRAM_ENTROPY_GARBLED;
+    if (m.replacementRatio > REPLACEMENT_RATIO_THRESHOLD || fuzzyFire) {
       finding.fired = true;
       finding.pages.push(page.pageNumber);
     }

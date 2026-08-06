@@ -1,8 +1,37 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { createLogger } from '@/lib/logger';
+import { getRedis, isRedisAvailable } from '@/lib/redis';
+import { PIPELINE_STAGES } from '@/lib/pipeline-stages';
 
 const logger = createLogger('reindex-pages');
+
+/**
+ * Publish stage progress to the same Redis key the main pipeline uses, so
+ * the document card shows real progress instead of a perpetual "Starting...".
+ */
+async function publishProgress(documentId: string, stage: string, detail: string, progress: number): Promise<void> {
+  try {
+    if (await isRedisAvailable()) {
+      const key = `soundsuite:doc_progress:${documentId}`;
+      const stageIndex = (PIPELINE_STAGES as readonly string[]).indexOf(stage);
+      await getRedis().hmset(key, {
+        stage,
+        detail,
+        progress: String(Math.round(progress)),
+        stageIndex: String(stageIndex >= 0 ? stageIndex : 0),
+        totalStages: String(PIPELINE_STAGES.length),
+      });
+      await getRedis().expire(key, 300);
+    }
+  } catch { /* non-critical */ }
+}
+
+async function clearProgress(documentId: string): Promise<void> {
+  try {
+    if (await isRedisAvailable()) await getRedis().del(`soundsuite:doc_progress:${documentId}`);
+  } catch { /* ignore */ }
+}
 
 /**
  * POST /api/documents/[id]/reindex-pages
@@ -19,6 +48,11 @@ export async function POST(
   try {
     const body = await request.json();
     const pages: number[] = body.pages;
+    // forceOcr: re-OCR every listed page regardless of extracted text
+    // density. Used to repair pages whose embedded text layer is garbage
+    // (e.g. clerk-scan layers with no word spacing) — dense enough to skip
+    // the normal density gate, but useless for search.
+    const forceOcr: boolean = body.forceOcr === true;
 
     if (!Array.isArray(pages) || pages.length === 0) {
       return NextResponse.json({ error: 'pages must be a non-empty array of page numbers' }, { status: 400 });
@@ -119,6 +153,7 @@ export async function POST(
       await pdfParser.loadDocument(doc.filePath);
       documentLoaded = true;
 
+      await publishProgress(id, 'text-extraction', `Re-extracting text (${pages.length} target pages)...`, 5);
       logger.info('Extracting text from PDF...');
       const allPages = await pdfParser.extractText(doc.filePath);
       const targetPages = allPages.filter(p => pages.includes(p.pageNumber));
@@ -128,6 +163,10 @@ export async function POST(
       const ocrThreshold = config.ocrThreshold || 50;
       let ocrPageCount = 0;
       const emptyPages: number[] = [];
+      // Pages whose text came from OCR this run — persisted as source='ocr'
+      // so crash-resume and readiness scoring see the true provenance
+      // (density alone mislabels successful OCR as 'extract').
+      const ocrDonePages = new Set<number>();
 
       const preprocessSettings = {
         upscale: config.ocrUpscale,
@@ -144,10 +183,13 @@ export async function POST(
         pngCompressionLevel: config.ocrPngCompression,
       };
 
+      let pageIdx = 0;
       for (const page of targetPages) {
-        logger.info(`Page ${page.pageNumber}: density=${page.textDensity}, threshold=${ocrThreshold}`);
+        pageIdx++;
+        await publishProgress(id, 'ocr-fallback', `Re-OCR page ${page.pageNumber} (${pageIdx}/${targetPages.length})`, 10 + (pageIdx / targetPages.length) * 60);
+        logger.info(`Page ${page.pageNumber}: density=${page.textDensity}, threshold=${ocrThreshold}${forceOcr ? ' (forceOcr)' : ''}`);
 
-        if (page.textDensity < ocrThreshold) {
+        if (forceOcr || page.textDensity < ocrThreshold) {
           let ocrSuccess = false;
 
           // Phase 1: Try embedded image OCR (standard path)
@@ -172,6 +214,7 @@ export async function POST(
                 page.textDensity = ocrResult.text.length;
                 page.renderFailed = false;
                 ocrPageCount++;
+                ocrDonePages.add(page.pageNumber);
                 ocrSuccess = true;
                 logger.info(`Page ${page.pageNumber}: OCR complete via candidate image, density=${page.textDensity}`);
               } else {
@@ -187,7 +230,8 @@ export async function POST(
           // Phase 2: Full-page render fallback — render the entire page to image and OCR it.
           // This catches: text-as-vector-paths, scanned pages with non-standard image formats,
           // and pages where getOcrCandidateImage filtered out images below size thresholds.
-          if (!ocrSuccess && page.text.trim().length === 0) {
+          // Under forceOcr, run it even when a (garbage) text layer exists.
+          if (!ocrSuccess && (forceOcr || page.text.trim().length === 0)) {
             logger.info(`Page ${page.pageNumber}: trying full-page render fallback for OCR`);
             try {
               const { renderPage } = await import('@/lib/pdf-page-renderer');
@@ -209,6 +253,7 @@ export async function POST(
                 page.textDensity = ocrResult.text.length;
                 page.renderFailed = false;
                 ocrPageCount++;
+                ocrDonePages.add(page.pageNumber);
                 ocrSuccess = true;
                 logger.info(`Page ${page.pageNumber}: full-page render OCR success, density=${page.textDensity}`);
               } else {
@@ -231,7 +276,7 @@ export async function POST(
       // --- Update PageCache for processed pages ---
       for (const page of targetPages) {
         const isEmpty = emptyPages.includes(page.pageNumber) || (page.text.trim().length === 0 && page.textDensity === 0);
-        const source = isEmpty ? 'empty' : (page.textDensity >= ocrThreshold ? 'extract' : 'ocr');
+        const source = isEmpty ? 'empty' : (ocrDonePages.has(page.pageNumber) ? 'ocr' : (page.textDensity >= ocrThreshold ? 'extract' : 'ocr'));
         try {
           await (prisma as any).pageCache.upsert({
             where: { documentId_pageNumber: { documentId: id, pageNumber: page.pageNumber } },
@@ -291,6 +336,7 @@ export async function POST(
       // --- Generate embeddings ---
       const batchSize = config.embeddingBatchSize || 50;
       const embeddedChunks: import('@/lib/ingestion/embedding-provider').EmbeddedChunk[] = [];
+      await publishProgress(id, 'embedding-generation', `Embedding ${allChunks.length} chunks...`, 78);
       logger.info(`Generating embeddings for ${allChunks.length} chunks (batch size ${batchSize})`);
 
       for (let i = 0; i < allChunks.length; i += batchSize) {
@@ -312,6 +358,7 @@ export async function POST(
         tableName: process.env.LANCEDB_TABLE || 'chunks',
       });
       await vectorStore.initialize();
+      await publishProgress(id, 'vector-indexing', `Reindexing ${embeddedChunks.length} vectors...`, 90);
       logger.info(`Clearing old vectors for pages [${pages.join(', ')}]`);
       await vectorStore.deleteByPages(id, pages);
 
@@ -342,6 +389,7 @@ export async function POST(
         });
       } catch {}
 
+      await clearProgress(id);
       logger.info(`Reindex complete: ${targetPages.length} pages, ${embeddedChunks.length} chunks, ${ocrPageCount} OCR, ${emptyPages.length} empty`);
 
       return NextResponse.json({
@@ -359,6 +407,7 @@ export async function POST(
     }
   } catch (error) {
     logger.error('Reindex failed', error);
+    await clearProgress(id);
 
     // Restore previous status on failure
     if (previousStatus) {

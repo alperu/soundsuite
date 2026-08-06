@@ -32,12 +32,12 @@ describe('classifyQueryComplexity', () => {
 
   describe('single-shot — exact identifiers, quoted phrases, short factual', () => {
     it('routes a cause number to single-shot', () => {
-      const d = classifyQueryComplexity('petition for cause 03-25-00905-CV');
+      const d = classifyQueryComplexity('petition for cause 03-25-00333-CV');
       expect(d.route).toBe('single-shot');
       expect(d.confidence).toBeGreaterThan(0.8);
     });
     it('routes a D-style cause number to single-shot', () => {
-      expect(classifyQueryComplexity('docs for D-1-FM-21-005611').route).toBe('single-shot');
+      expect(classifyQueryComplexity('docs for D-1-FM-21-000111').route).toBe('single-shot');
     });
     it('routes a quoted phrase to single-shot', () => {
       expect(classifyQueryComplexity('find "motion to compel"').route).toBe('single-shot');
@@ -74,7 +74,7 @@ describe('classifyQueryComplexity', () => {
   });
 
   it('always returns a known route + bounded confidence', () => {
-    for (const q of ['', 'a', 'compare X and Y', 'trace it', '"x"', '03-25-00905-CV']) {
+    for (const q of ['', 'a', 'compare X and Y', 'trace it', '"x"', '03-25-00333-CV']) {
       const d = classifyQueryComplexity(q);
       expect(['no-retrieval', 'single-shot', 'deep', 'rlm']).toContain(d.route);
       expect(d.confidence).toBeGreaterThanOrEqual(0);

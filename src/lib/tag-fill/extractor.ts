@@ -255,7 +255,7 @@ export function buildPrompt(args: {
     `indexed text excerpts. Output STRICT JSON only — no markdown, no prose. ` +
     `For each field, include a value ONLY if you can back it with a quote from ` +
     `the excerpts. When in doubt, return null. Names must be the full natural ` +
-    `name as written ("KEVIN D. HENDERSON", "James A. Vaught"), never roles ` +
+    `name as written ("JOHN Q. JURIST", "James A. Vaught"), never roles ` +
     `like "THE COURT" or "PRESIDING JUDGE".\n\n` +
     `JSON schema:\n` +
     `{\n` +

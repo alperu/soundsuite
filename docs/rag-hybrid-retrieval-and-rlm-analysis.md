@@ -50,7 +50,7 @@ Before answering, the AI runs to a "library" and pulls the most relevant pages, 
 using them. That pattern is **RAG** (Retrieval-Augmented Generation). The library lookup blends:
 
 - **Vector search** — find pages by *meaning*. Great for "documents about the trust dispute,"
-  poor at exact tokens like a cause number `03-25-00905-CV` or a person's name.
+  poor at exact tokens like a cause number `03-25-00333-CV` or a person's name.
 - **Keyword search (BM25)** — find pages by *exact words*. The mirror image: great at the cause
   number, blind to meaning.
 - **Hybrid + RRF** — run both and merge their ranked lists with a fair "voting" rule (RRF).

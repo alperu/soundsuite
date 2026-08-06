@@ -39,7 +39,7 @@ const RLM_RE =
 const DEEP_RE =
   /\b(compare|comparison|versus|vs\.?|contrast|differ(?:s|ence|ences)?|contradict|inconsisten(?:t|cies)|across (?:all|every|the|these|multiple)|every|all (?:the )?(?:motions|filings|documents|orders|exhibits|hearings)|both|each of|multiple)/i;
 
-/** Texas-style cause numbers, e.g. 03-25-00905-CV or D-1-FM-21-005611. */
+/** Texas-style cause numbers, e.g. 03-25-00333-CV or D-1-FM-21-000111. */
 const CAUSE_NUMBER_RE =
   /\b\d{2}-\d{2}-\d{4,5}-[a-z]{1,3}\b|\b[a-z]-\d-[a-z]{2}-\d{2}-\d{5,6}\b/i;
 

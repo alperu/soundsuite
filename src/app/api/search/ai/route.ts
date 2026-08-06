@@ -237,8 +237,8 @@ export async function POST(request: NextRequest) {
 
 When citing sources:
 - Use the exact citation format shown in brackets before each excerpt
-- For Clerk's Record: [CaseNumber CR Page] when single volume, [CaseNumber Vol CR Page] when multiple volumes (e.g., [03-25-00905-CV CR 140] or [03-25-00905-CV 2 CR 140])
-- For Reporter's Record: [CaseNumber RR Page:Line] when single volume, [CaseNumber Vol RR Page:Line] when multiple volumes (e.g., [03-25-00905-CV 2 RR 184:12])
+- For Clerk's Record: [CaseNumber CR Page] when single volume, [CaseNumber Vol CR Page] when multiple volumes (e.g., [03-25-00333-CV CR 140] or [03-25-00333-CV 2 CR 140])
+- For Reporter's Record: [CaseNumber RR Page:Line] when single volume, [CaseNumber Vol RR Page:Line] when multiple volumes (e.g., [03-25-00333-CV 2 RR 184:12])
 - For other documents: use the citation as provided
 - Always include the case number when available
 ${workflowContext}

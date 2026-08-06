@@ -18,6 +18,7 @@ function cleanSignals(overrides: Partial<ReadinessSignals> = {}): ReadinessSigna
     glyphArtifactPages: [],
     repeatedContent: false,
     tokenBloat: false,
+    isRecordCompilation: false,
     ...overrides,
   };
 }
@@ -58,6 +59,15 @@ describe('computeReadiness', () => {
       expect(computeReadiness(cleanSignals({ repeatedContent: true })).score).toBe(90 - 8);
     });
 
+    it('repeated content: NOT penalized for record compilations, reported as info', () => {
+      const result = computeReadiness(
+        cleanSignals({ repeatedContent: true, isRecordCompilation: true }),
+      );
+      expect(result.score).toBe(90);
+      const warning = result.warnings.find((w) => w.code === 'REPEATED_CONTENT');
+      expect(warning?.severity).toBe('info');
+    });
+
     it('token bloat: −8', () => {
       expect(computeReadiness(cleanSignals({ tokenBloat: true })).score).toBe(90 - 8);
     });
@@ -73,12 +83,29 @@ describe('computeReadiness', () => {
       expect(result.warnings.map((w) => w.code)).not.toContain('NO_HEADINGS');
     });
 
-    it('glyph artifacts: −25 with critical warning listing pages', () => {
+    it('glyph artifacts: full −25 when a large fraction is affected', () => {
       const result = computeReadiness(cleanSignals({ glyphArtifactPages: [2, 5] }));
+      // 2/10 pages = 20% → 0.2 × 250 = 50 → capped at 25
       expect(result.score).toBe(90 - 25);
       const warning = result.warnings.find((w) => w.code === 'GLYPH_ARTIFACTS');
       expect(warning?.severity).toBe('critical');
       expect(warning?.pages).toEqual([2, 5]);
+    });
+
+    it('glyph artifacts: penalty scales down when only a sliver of a large doc is affected', () => {
+      const result = computeReadiness(
+        cleanSignals({
+          pageCount: 1000,
+          pagesWithText: 1000,
+          totalChars: 2_000_000,
+          chunkCount: 3000,
+          pagesWithHeadings: 600,
+          glyphArtifactPages: [7, 8, 9], // 0.3% of pages
+        }),
+      );
+      // 3/1000 → 0.003 × 250 = 0.75 → floor 6
+      expect(result.score).toBe(90 - 6);
+      expect(result.warnings.find((w) => w.code === 'GLYPH_ARTIFACTS')?.severity).toBe('warning');
     });
 
     it('low chunk count: −10', () => {

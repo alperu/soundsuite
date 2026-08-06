@@ -30,14 +30,14 @@ describe('buildChipSpecs (chip dispatch shape)', () => {
 
   it('produces per-chip specs with hard where-clauses for the user scenario', () => {
     const q =
-      `{{ filingRef==@b691a563-eeef-4bae-a2e5-7731012a9016 }}  In this document we have Torrez's changing statement and check all of this   ` +
+      `{{ filingRef==@b691a563-eeef-4bae-a2e5-7731012a9016 }}  In this document we have Rowe's changing statement and check all of this   ` +
       `{{ (case==@04a8cd94-359c-4feb-be16-979592c3c235 or case==@92b9ad81-040a-4830-8686-7cccaad903a4 or case==@1535c622-8955-4669-8f29-884a4f2b31ea or case==@c608b81a-8479-4890-8670-0d0352c257d8) }}   how trust evolved over time.`;
     const specs = buildChipSpecs(q);
     expect(specs).not.toBeNull();
     expect(specs).toHaveLength(2);
 
     // chip 1 — filing scope
-    expect(specs![0].query).toBe("In this document we have Torrez's changing statement and check all of this");
+    expect(specs![0].query).toBe("In this document we have Rowe's changing statement and check all of this");
     expect(specs![0].whereClauses).toBeDefined();
     expect(specs![0].whereClauses!.some(w => /filing_id\s*=\s*['"]b691a563-/.test(w))).toBe(true);
 

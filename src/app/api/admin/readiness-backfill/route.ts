@@ -54,7 +54,7 @@ export async function GET(req: NextRequest) {
     const candidates = await prisma.document.count({ where });
     const preview = await prisma.document.findMany({
       where,
-      select: { id: true, fileName: true, pageCount: true },
+      select: { id: true, fileName: true, pageCount: true, documentType: true },
       take: 10,
       orderBy: { createdAt: 'desc' },
     });
@@ -71,6 +71,8 @@ export async function POST(req: NextRequest) {
       documentIds?: string[];
       force?: boolean;
       limit?: number;
+      /** Include full raw signals per result (e.g. complete glyph page list) — for repair tooling. */
+      includeSignals?: boolean;
     };
     const limit = Math.min(Math.max(1, body.limit ?? DEFAULT_LIMIT), 1000);
     const config = await getConfig();
@@ -78,7 +80,7 @@ export async function POST(req: NextRequest) {
 
     const docs = await prisma.document.findMany({
       where: candidateWhere(body),
-      select: { id: true, fileName: true, pageCount: true },
+      select: { id: true, fileName: true, pageCount: true, documentType: true },
       take: limit,
       orderBy: { createdAt: 'desc' },
     });
@@ -114,7 +116,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const results: Array<{ id: string; fileName: string; score: number; band: string; estimated: boolean }> = [];
+    const results: Array<{ id: string; fileName: string; score: number; band: string; estimated: boolean; signals?: unknown }> = [];
     const skipped: Array<{ id: string; fileName: string; reason: string }> = [];
 
     for (const doc of docs) {
@@ -133,7 +135,11 @@ export async function POST(req: NextRequest) {
           for (const row of rows) {
             const p = row.page_number as number;
             if (!Number.isFinite(p) || p < 1) continue;
-            pageText.set(p, (pageText.get(p) ?? '') + ((row.text as string) || '') + '\n');
+            // Strip the injected context header ("[Case: ... | Filing: ...]")
+            // — it's an indexing artifact repeated in every chunk and skews
+            // the repetition/entropy detectors.
+            const text = ((row.text as string) || '').replace(/^\[Case:[^\]]*\]\s*/g, '');
+            pageText.set(p, (pageText.get(p) ?? '') + text + '\n');
           }
         }
 
@@ -150,24 +156,34 @@ export async function POST(req: NextRequest) {
           continue;
         }
 
-        // Prefer PageCache when it covers a meaningful share of pages;
-        // it carries OCR provenance and raw extraction density.
+        // Merge sources per page: PageCache rows carry real provenance
+        // (source='ocr' exempts a page from the glyph detector) and raw
+        // extraction density — use them wherever they exist, and fall back
+        // to chunk-reconstructed text for the remaining pages. A doc counts
+        // as fully "accurate" only when PageCache covers at least half of it.
         const usePageCache = cacheRows.length >= Math.max(1, Math.floor(pageCount / 2));
-        const pages: VerificationResult['pages'] = usePageCache
-          ? cacheRows.map((r) => ({
-              pageNumber: r.pageNumber,
-              text: r.text,
-              textDensity: r.textDensity,
-              source: r.source === 'ocr' ? 'ocr' : 'extract',
-              confidence: r.confidence,
-            }))
-          : Array.from(pageText.entries()).map(([pageNumber, text]) => ({
-              pageNumber,
-              text,
-              textDensity: text.trim().length,
-              source: 'extract' as const,
-              confidence: null,
-            }));
+        const pages: VerificationResult['pages'] = [];
+        const seenPages = new Set<number>();
+        for (const r of cacheRows) {
+          seenPages.add(r.pageNumber);
+          pages.push({
+            pageNumber: r.pageNumber,
+            text: r.text,
+            textDensity: r.textDensity,
+            source: r.source === 'ocr' ? 'ocr' : 'extract',
+            confidence: r.confidence,
+          });
+        }
+        for (const [pageNumber, text] of pageText.entries()) {
+          if (seenPages.has(pageNumber)) continue;
+          pages.push({
+            pageNumber,
+            text,
+            textDensity: text.trim().length,
+            source: 'extract' as const,
+            confidence: null,
+          });
+        }
 
         const withText = new Set(pages.filter((p) => p.text.trim().length > 0).map((p) => p.pageNumber));
         const gapPages: number[] = [];
@@ -184,7 +200,7 @@ export async function POST(req: NextRequest) {
           pages,
         };
 
-        const signals = collectSignals({ verification, chunkCount, renderFailedCount: 0, ocrThreshold });
+        const signals = collectSignals({ verification, chunkCount, renderFailedCount: 0, ocrThreshold, documentType: doc.documentType });
         const readiness = computeReadiness(signals);
         const estimated = !usePageCache;
         if (estimated) {
@@ -218,7 +234,14 @@ export async function POST(req: NextRequest) {
             logger.warn('Chunk readiness stamp failed', { documentId: doc.id, error: (err as Error).message });
           }
         }
-        results.push({ id: doc.id, fileName: doc.fileName, score: readiness.score, band: readiness.band, estimated });
+        results.push({
+          id: doc.id,
+          fileName: doc.fileName,
+          score: readiness.score,
+          band: readiness.band,
+          estimated,
+          ...(body.includeSignals ? { signals } : {}),
+        });
       } catch (err) {
         skipped.push({ id: doc.id, fileName: doc.fileName, reason: (err as Error).message });
       }

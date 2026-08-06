@@ -26,6 +26,7 @@ const logger = createLogger('PdfPageRenderer');
 // JPX/JBIG2 wasm decoders fail to load and scanned-page bodies render blank.
 const standardFontDataUrl = path.join(process.cwd(), 'node_modules/pdfjs-dist/standard_fonts') + '/';
 const wasmUrl = path.join(process.cwd(), 'node_modules/pdfjs-dist/wasm') + '/';
+const cMapUrl = path.join(process.cwd(), 'node_modules/pdfjs-dist/cmaps') + '/';
 
 // ---------------------------------------------------------------------------
 // pdfjs-dist initialization (same pattern as pdf-parser.ts but with real DOMMatrix)
@@ -122,6 +123,12 @@ async function getPooledDocument(filePath: string): Promise<any> {
     data: new Uint8Array(fileBuffer),
     standardFontDataUrl,
     wasmUrl,
+    // CID-keyed fonts (common in court-clerk scan text layers) need the CMap
+    // tables to resolve glyphs; without cMapUrl those pages render with the
+    // body text missing (only stamps/footers visible) — OCR then transcribes
+    // just the footer. Observed on clerk-record pages 7-44, 2026-08-05.
+    cMapUrl,
+    cMapPacked: true,
     // Node has no FontFace API — without this, pdfjs skips glyph painting
     // for embedded fonts and pages render blank (graphics only). With it,
     // glyphs are drawn as vector paths from the embedded font programs.

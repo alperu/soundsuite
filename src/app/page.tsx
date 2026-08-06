@@ -173,18 +173,31 @@ async function getInitialDocuments(): Promise<Record<string, Document[]>> {
   return documentsMap;
 }
 
-export default async function Home() {
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
+  const sp = await searchParams;
   const partialIds = await getPartialDocumentIds();
   const [cases, initialDocuments] = await Promise.all([
     getCasesWithStats(partialIds),
     getInitialDocuments(),
   ]);
 
+  // URL state: /?case=<caseId>&doc=<docId>[,<docId>...] — deep-linkable
+  // case + document selection (easy to hand to an AI or a teammate).
+  const initialCaseId = typeof sp.case === 'string' ? sp.case : undefined;
+  const initialDocIds =
+    typeof sp.doc === 'string' ? sp.doc.split(',').filter(Boolean) : undefined;
+
   return (
     <CaseViewWrapper
       cases={cases}
       initialDocuments={initialDocuments}
       partialDocumentIds={Array.from(partialIds)}
+      initialCaseId={initialCaseId}
+      initialDocIds={initialDocIds}
     />
   );
 }

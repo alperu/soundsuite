@@ -186,7 +186,7 @@ const FILING_FILE_REF_SPEC: TagSpec = {
       "Prisma.<Model>.documentId (FK column on MotionAttachment / MotionEvent / ClerksRecord / ReportersRecord) ⇔ tags.fileRef (Hayson ref). Motion is tag-only — no column. The resolved label `fileRefLabel` returns Document.filePath.",
     xetoSpec: 'cc.courtlens.legal::Filing.fileRef (inherited by every filing subtype, including Motion)',
     example:
-      '@doc-stamped-petition-a31  → /Users/alper/Court/03-25-00905-CV/Motion/Stamped Petition.pdf',
+      '@doc-stamped-petition-a31  → /Users/alper/Court/03-25-00333-CV/Motion/Stamped Petition.pdf',
     relatedTags: ['caseRef', 'motionRef', 'authoredBy'],
   },
 }
@@ -513,10 +513,10 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
       valueType: 'text',
       info: {
         whatItIs: 'The cause number assigned by the court clerk when the case was filed.',
-        howItWorks: 'Texas trial: D-1-FM-21-005611 (district-court-county-year-seq). Appellate: 03-24-00513-CV (court-year-seq-type). Should match the official clerk-stamped identifier.',
+        howItWorks: 'Texas trial: D-1-FM-21-000111 (district-court-county-year-seq). Appellate: 03-24-00555-CV (court-year-seq-type). Should match the official clerk-stamped identifier.',
         mapsTo: 'Prisma.Case.caseNumber (column)',
         xetoSpec: 'cc.courtlens.legal::Case.causeNo',
-        example: 'D-1-FM-21-005611',
+        example: 'D-1-FM-21-000111',
         relatedTags: ['causeFiledStamp', 'filedOn'],
       },
     },
@@ -530,7 +530,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
         howItWorks: 'Distinct from causeNo: the cause number may be edited / corrected later, but the stamp on the petition is immutable evidence of original filing. Used to reconcile when clerks renumber cases.',
         mapsTo: "tags JSON: '$.causeFiledStamp'",
         xetoSpec: 'cc.courtlens.legal::Case.causeFiledStamp',
-        example: 'D-1-FM-21-005611 (filed 09/15/2021 at 14:32)',
+        example: 'D-1-FM-21-000111 (filed 09/15/2021 at 14:32)',
         relatedTags: ['causeNo', 'filedOn'],
       },
     },

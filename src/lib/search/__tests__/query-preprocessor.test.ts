@@ -2,14 +2,14 @@ import { QueryPreprocessor } from '../query-preprocessor';
 
 describe('QueryPreprocessor', () => {
   describe('process()', () => {
-    it('should extract keywords from "Where did Milner say there is no fraud?"', () => {
-      const result = QueryPreprocessor.process('Where did Milner say there is no fraud?');
+    it('should extract keywords from "Where did Poe say there is no fraud?"', () => {
+      const result = QueryPreprocessor.process('Where did Poe say there is no fraud?');
 
-      expect(result.original).toBe('Where did Milner say there is no fraud?');
+      expect(result.original).toBe('Where did Poe say there is no fraud?');
       expect(result.keywords).toContain('no');
       expect(result.keywords).toContain('fraud');
-      // Milner ends up as entity + keyword
-      expect(result.keywords).toContain('milner');
+      // Poe ends up as entity + keyword
+      expect(result.keywords).toContain('poe');
       // Stopwords removed
       expect(result.keywords).not.toContain('where');
       expect(result.keywords).not.toContain('did');
@@ -18,22 +18,22 @@ describe('QueryPreprocessor', () => {
       expect(result.keywords).not.toContain('is');
     });
 
-    it('should detect Milner as an entity', () => {
-      const result = QueryPreprocessor.process('Where did Milner say there is no fraud?');
-      expect(result.entities).toContain('Milner');
+    it('should detect Poe as an entity', () => {
+      const result = QueryPreprocessor.process('Where did Poe say there is no fraud?');
+      expect(result.entities).toContain('Poe');
     });
 
     it('should detect fraud as a legal term', () => {
-      const result = QueryPreprocessor.process('Where did Milner say there is no fraud?');
+      const result = QueryPreprocessor.process('Where did Poe say there is no fraud?');
       expect(result.legalTerms).toContain('fraud');
     });
 
     it('should generate query variants with entity + legal term pairs', () => {
-      const result = QueryPreprocessor.process('Where did Milner say there is no fraud?');
+      const result = QueryPreprocessor.process('Where did Poe say there is no fraud?');
       expect(result.queryVariants.length).toBeGreaterThan(0);
-      // Should include a variant with Milner + fraud
+      // Should include a variant with Poe + fraud
       expect(result.queryVariants.some(v =>
-        v.toLowerCase().includes('milner') && v.toLowerCase().includes('fraud')
+        v.toLowerCase().includes('poe') && v.toLowerCase().includes('fraud')
       )).toBe(true);
     });
   });
@@ -157,8 +157,8 @@ describe('QueryPreprocessor', () => {
 
   describe('query variants', () => {
     it('should include all keywords as a variant', () => {
-      const result = QueryPreprocessor.process('Where did Milner say there is no fraud?');
-      expect(result.queryVariants.some(v => v.includes('milner'))).toBe(true);
+      const result = QueryPreprocessor.process('Where did Poe say there is no fraud?');
+      expect(result.queryVariants.some(v => v.includes('poe'))).toBe(true);
     });
 
     it('should include entity-term pairs', () => {

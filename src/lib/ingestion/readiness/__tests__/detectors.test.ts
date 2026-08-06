@@ -72,6 +72,28 @@ describe('detectGlyphArtifacts', () => {
     expect(finding.minDictRatio).toBeGreaterThan(0.4);
   });
 
+  it('does NOT fire on Spanish court notices', () => {
+    const spanish = `
+AVISO DE ORDEN
+Se le notifica que se ha firmado e ingresado un orden en el Condado de Travis en la causa
+mencionada. Usted tiene derecho a una copia del documento. El tribunal ha ingresado esta
+sentencia con fecha firmada por el juez. Si usted no tiene abogado, puede solicitar una copia
+certificada de los documentos en la corte del condado. La respuesta debe ser presentada
+contra la demanda para proteger sus derechos. Todos los documentos originales son del caso.
+`.repeat(3);
+    const finding = detectGlyphArtifacts([page(1, spanish)]);
+    expect(finding.fired).toBe(false);
+  });
+
+  it('does NOT fire on digit-heavy citation/pagination pages (too few word tokens)', () => {
+    const pagination = (
+      'Index · 1 · 2 · [3] · 4 · 5 · 6 · 7 · 8 · 9 · 10 · 11 · 12 · 13 · 14 · 15 · 16 · 17 · 18 · 19 · 20 ' +
+      'CR 923; Supp. RR 20; 03-24-00555-CV; D-1-FM-21-000111; 9/22/2021 8:48 PM; CV-FQ1059R2 '
+    ).repeat(8);
+    const finding = detectGlyphArtifacts([page(1, pagination)]);
+    expect(finding.fired).toBe(false);
+  });
+
   it('skips OCR-sourced pages entirely', () => {
     const garbled = Array.from({ length: 80 }, (_, i) => `(cid:${i})`).join(' ');
     const finding = detectGlyphArtifacts([page(1, garbled, { source: 'ocr' })]);

@@ -89,13 +89,17 @@ export function computeReadiness(signals: ReadinessSignals): ReadinessResult {
     });
   }
 
-  // GLYPH_ARTIFACTS
+  // GLYPH_ARTIFACTS — scaled by the affected fraction: 3 garbled pages in a
+  // 1400-page record is a repair list, not a condemnation; 3 in a 10-page
+  // motion is fatal. Floor keeps any confirmed garbling visible.
   if (signals.glyphArtifactPages.length > 0) {
-    score -= GLYPH_PENALTY;
+    const glyphFraction = signals.glyphArtifactPages.length / pageCount;
+    const penalty = Math.min(GLYPH_PENALTY, Math.max(6, Math.round(glyphFraction * 250)));
+    score -= penalty;
     warnings.push({
       code: 'GLYPH_ARTIFACTS',
-      severity: 'critical',
-      detail: `${signals.glyphArtifactPages.length} page(s) contain garbled font output (CID artifacts) — text may look plausible but be wrong (−${GLYPH_PENALTY}). Re-OCR these pages.`,
+      severity: glyphFraction >= 0.1 ? 'critical' : 'warning',
+      detail: `${signals.glyphArtifactPages.length} page(s) contain garbled font output (CID artifacts) — text may look plausible but be wrong (−${penalty}). Re-OCR these pages.`,
       pages: signals.glyphArtifactPages.slice(0, 50),
     });
   }
@@ -112,14 +116,24 @@ export function computeReadiness(signals: ReadinessSignals): ReadinessResult {
     });
   }
 
-  // REPEATED_CONTENT
+  // REPEATED_CONTENT — record compilations (clerk's/reporter's record,
+  // appendix) legitimately contain the same orders and forms filed multiple
+  // times; report without penalizing them.
   if (signals.repeatedContent) {
-    score -= REPEATED_PENALTY;
-    warnings.push({
-      code: 'REPEATED_CONTENT',
-      severity: 'warning',
-      detail: `Pathological repetition detected across pages — possible stuck extractor or OCR loop (−${REPEATED_PENALTY}).`,
-    });
+    if (signals.isRecordCompilation) {
+      warnings.push({
+        code: 'REPEATED_CONTENT',
+        severity: 'info',
+        detail: 'Repeated content across pages — expected for a record compilation (same orders/forms filed multiple times); not penalized.',
+      });
+    } else {
+      score -= REPEATED_PENALTY;
+      warnings.push({
+        code: 'REPEATED_CONTENT',
+        severity: 'warning',
+        detail: `Pathological repetition detected across pages — possible stuck extractor or OCR loop (−${REPEATED_PENALTY}).`,
+      });
+    }
   }
 
   // TOKEN_BLOAT

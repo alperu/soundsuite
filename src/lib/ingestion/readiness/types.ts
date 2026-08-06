@@ -81,6 +81,12 @@ export interface ReadinessSignals {
   glyphArtifactPages: number[];
   repeatedContent: boolean;
   tokenBloat: boolean;
+  /**
+   * True for record compilations (clerk's record, reporter's record,
+   * appendix): the same orders/forms legitimately appear multiple times, so
+   * REPEATED_CONTENT is reported as info instead of penalized.
+   */
+  isRecordCompilation: boolean;
 }
 
 export interface ReadinessResult {

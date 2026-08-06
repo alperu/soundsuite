@@ -447,7 +447,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       } catch { /* filings may not exist for all cases */ }
 
       // Supplement volume counts from document filenames (for docs without Filing records)
-      // e.g. TRAVIS-D-1-FM-25-004488-RR-VOL002.pdf → "Reporter's Record" vol 2
+      // e.g. TRAVIS-D-1-FM-25-000222-RR-VOL002.pdf → "Reporter's Record" vol 2
       try {
         const caseDocs = await context.database.document.findMany({
           where: { caseId },

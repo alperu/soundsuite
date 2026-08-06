@@ -21,7 +21,7 @@ export interface CitationInput {
   volumeNumber?: number;
   /** Total distinct volumes for this filing type in the case. When 1, volume number is omitted. */
   totalVolumes?: number;
-  /** Case number in appellate format (e.g. "03-25-00905-CV") */
+  /** Case number in appellate format (e.g. "03-25-00333-CV") */
   caseNumber?: string;
   /** Page number within the filing */
   pageNumber: number;
@@ -38,7 +38,7 @@ export interface CitationInput {
 }
 
 export interface FormattedCitation {
-  /** Full citation string (e.g. "D-1-FM-25-004488 2 CR 140") */
+  /** Full citation string (e.g. "D-1-FM-25-000222 2 CR 140") */
   full: string;
   /** Short citation string (e.g. "2 CR 140") */
   short: string;

@@ -138,7 +138,7 @@ async function main() {
         content: [
           {
             type: 'text',
-            text: 'Furthermore, the evidence of post-judgment conspiracy with Adam Wallen demonstrates that the fraud was not isolated perjury but an ongoing coordinated scheme extending beyond the courtroom.',
+            text: 'Furthermore, the evidence of post-judgment conspiracy with Adam Wren demonstrates that the fraud was not isolated perjury but an ongoing coordinated scheme extending beyond the courtroom.',
           },
         ],
       },

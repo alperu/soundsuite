@@ -3715,7 +3715,7 @@ function SearchDocsPanel({ mode, embeddingInfo, directMode }: { mode: SearchMode
 
           <p className="text-[10px] text-gray-400 font-medium mt-3 mb-1">Sample</p>
           <pre className="text-[10px] bg-gray-50 border border-gray-200 rounded p-2 text-gray-700 whitespace-pre-wrap leading-relaxed">{
-`{{ filingRef==@<vol2-uuid> }}  In this document we have Torrez's changing statement
+`{{ filingRef==@<vol2-uuid> }}  In this document we have Rowe's changing statement
 {{ (case==@A or case==@B or case==@C or case==@D) }}  how trust evolved over time`
           }</pre>
 
@@ -3725,7 +3725,7 @@ function SearchDocsPanel({ mode, embeddingInfo, directMode }: { mode: SearchMode
           <ul className="mt-1 space-y-1">
             <li className="text-[10px] text-gray-600 flex gap-1.5 leading-relaxed">
               <span className="text-gray-400 shrink-0">1.</span>
-              <span><em>&quot;Torrez&apos;s changing statement&quot;</em> retrieved
+              <span><em>&quot;Rowe&apos;s changing statement&quot;</em> retrieved
               only from the named filing (Lance: <code className="font-mono text-[9px] bg-gray-100 px-0.5 rounded">filing_id = &apos;…&apos;</code>).</span>
             </li>
             <li className="text-[10px] text-gray-600 flex gap-1.5 leading-relaxed">

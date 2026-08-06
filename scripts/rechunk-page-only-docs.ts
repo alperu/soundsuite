@@ -21,10 +21,10 @@ interface TargetDoc {
 // Identified via: chunks/page ratio == 1.0 in LanceDB chunks table
 const TARGETS: TargetDoc[] = [
   { id: 'f6731412-4a14-4ad7-8774-6ec20f266e36', fileName: '25-905-CV 031026 Supp RR Vol 1 of 1.pdf',            pageCount: 31 },
-  { id: 'c2256da8-9c8a-4631-a2e1-0379cfe8b5e9', fileName: 'TRAVIS-D-1-FM-25-004488-RR-VOL002.pdf',              pageCount: 49 },
+  { id: 'c2256da8-9c8a-4631-a2e1-0379cfe8b5e9', fileName: 'TRAVIS-D-1-FM-25-000222-RR-VOL002.pdf',              pageCount: 49 },
   { id: '18f5d01a-50f2-4f38-b4d9-7d85b3aab4fd', fileName: '25-905-CV 051826 2nd Supp RR Vol 2 of 3.pdf',         pageCount: 73 },
-  { id: 'fc099544-6a0b-4fdd-aec8-4bd770cdc1a9', fileName: '24-513-CV 051826 2nd Supp RR Vol 2 of 3.pdf',         pageCount: 73 },
-  { id: 'b9fea35f-c0f1-4bd4-a780-23660527cc98', fileName: 'Travis-RR-D-1-FM-25-004488-VOL2.pdf',                 pageCount: 73 },
+  { id: 'fc099544-6a0b-4fdd-aec8-4bd770cdc1a9', fileName: '00-555-CV 051826 2nd Supp RR Vol 2 of 3.pdf',         pageCount: 73 },
+  { id: 'b9fea35f-c0f1-4bd4-a780-23660527cc98', fileName: 'Travis-RR-D-1-FM-25-000222-VOL2.pdf',                 pageCount: 73 },
 ];
 
 const BASE_URL = process.env.BASE_URL ?? 'http://localhost:3000';

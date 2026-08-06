@@ -77,12 +77,12 @@ describe('ChipEditor.getComposerString — submit serialization', () => {
   it('preserves source order: chip pairs with the prose that follows it', () => {
     const { handle, unmount } = mount(
       [{ kind: 'expression', raw: 'filingRef==@b691' }],
-      'torrez statement',
+      'rowe statement',
     );
     const segs = segmentChipsAndIntents(handle.getComposerString());
     const chip = segs.find((s) => s.kind === 'chip') as { raw: string; nextIntent: string };
     expect(chip.raw).toBe('filingRef==@b691');
-    expect(chip.nextIntent).toBe('torrez statement');
+    expect(chip.nextIntent).toBe('rowe statement');
     unmount();
   });
 

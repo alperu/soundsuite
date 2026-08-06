@@ -6,7 +6,7 @@ import { commitEntity } from '../haystack/[op]/route';
 /**
  * Parse case metadata from a folder name.
  * Expected pattern: "Case Title - Case-Number"
- * e.g. "Bill of Review - D-1-FM-25-004488"
+ * e.g. "Bill of Review - D-1-FM-25-000222"
  */
 function parseCaseFolder(folderPath: string): { name: string; caseNumber: string | null; jurisdiction: string | null } {
   const folderName = path.basename(folderPath).trim();
@@ -15,7 +15,7 @@ function parseCaseFolder(folderPath: string): { name: string; caseNumber: string
   if (dashMatch) {
     const name = dashMatch[1].trim();
     const caseNumber = dashMatch[2].trim();
-    // Extract jurisdiction from case number prefix (e.g. "D-1-FM" from "D-1-FM-25-004488")
+    // Extract jurisdiction from case number prefix (e.g. "D-1-FM" from "D-1-FM-25-000222")
     const jurisdictionMatch = caseNumber.match(/^([A-Z](?:-\d+)?-[A-Z]+)/i);
     const jurisdiction = jurisdictionMatch ? jurisdictionMatch[1] : null;
     return { name, caseNumber, jurisdiction };
@@ -26,7 +26,7 @@ function parseCaseFolder(folderPath: string): { name: string; caseNumber: string
 
 /**
  * GET /api/cases - List all cases, or look up a single case by caseNumber
- * Query params: ?caseNumber=D-1-FM-25-004488
+ * Query params: ?caseNumber=D-1-FM-25-000222
  */
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
