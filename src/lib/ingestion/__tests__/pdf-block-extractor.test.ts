@@ -149,6 +149,59 @@ describe('pdf-block-extractor pure core', () => {
     expect(paras[2].text).toContain('legal impossibility');
   });
 
+  it('heading mid-flow on a double-spaced page still splits out (absorption regression)', () => {
+    // Uniform 32pt leading: no gap ever exceeds 1.4×lead, so only the
+    // heading-like signal can break the paragraph before the heading line.
+    const long = (s: string, y: number) => run(s, 72, y, { w: 440, h: 14 });
+    const items: PositionedItem[] = [
+      long('The trial court expunged the notice on a Wednesday, and', 700),
+      long('signed the order the following week without a hearing set.', 668),
+      run('III. THE OFFSHORE DESTINATION', 190, 636, { w: 232, h: 14 }), // centered, caps, numbered
+      long('When the concealment was exposed with public land records,', 604),
+      long('the petitioner changed course and moved for sanctions there.', 572),
+    ];
+    const blocks = buildBlocks(items, PAGE);
+    const heading = blocks.find(b => b.type === 'heading');
+    expect(heading).toBeDefined();
+    expect(heading!.text).toBe('III. THE OFFSHORE DESTINATION');
+    const paras = blocks.filter(b => b.type === 'paragraph');
+    expect(paras).toHaveLength(2);
+    expect(paras[0].text).toContain('expunged');
+    expect(paras[1].text).toContain('changed course');
+  });
+
+  it('wrapped heading continuation merges into the heading block (page-12 shape)', () => {
+    const long = (s: string, y: number) => run(s, 72, y, { w: 440, h: 14 });
+    const items: PositionedItem[] = [
+      // heading wraps: first line unterminated, continuation starts lowercase,
+      // both at NORMAL 32pt body leading (the real measured shape)
+      run('C. The sale is a concealed transaction that cannot yield', 130, 700, { w: 352, h: 14 }),
+      run('fair value.', 130, 668, { w: 80, h: 14 }),
+      long('The agent marketing the property is, on information and', 636),
+      long('belief, associated with the petitioner in the proceeding.', 604),
+    ];
+    const blocks = buildBlocks(items, PAGE);
+    const heading = blocks.find(b => b.type === 'heading');
+    expect(heading).toBeDefined();
+    expect(heading!.text).toBe('C. The sale is a concealed transaction that cannot yield fair value.');
+    const paras = blocks.filter(b => b.type === 'paragraph');
+    expect(paras).toHaveLength(1);
+    expect(paras[0].text).toContain('agent marketing');
+    expect(paras[0].text).not.toContain('fair value');
+  });
+
+  it('terminated heading followed by uppercase body does NOT merge', () => {
+    const items: PositionedItem[] = [
+      run('D. Appellant raises substantial questions on the merits.', 130, 700, { w: 360, h: 14 }),
+      run('The trial court erred in several respects described below,', 72, 668, { w: 440, h: 14 }),
+      run('each of which independently supports reversal on appeal.', 72, 636, { w: 440, h: 14 }),
+    ];
+    const blocks = buildBlocks(items, PAGE);
+    const heading = blocks.find(b => b.type === 'heading')!;
+    expect(heading.text).toBe('D. Appellant raises substantial questions on the merits.');
+    expect(blocks.filter(b => b.type === 'paragraph')).toHaveLength(1);
+  });
+
   it('modal font size reflects body text, not headings', () => {
     const items = [
       run('BIG HEADING', 150, 700, { h: 18 }),

@@ -391,26 +391,75 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
     currentRegion = -1;
   };
 
+  // Multi-line heading merge state: the heading block just emitted and the
+  // line it came from, so a wrapped continuation can be folded in.
+  let pendingHeading: DocparseBlock | null = null;
+  let pendingHeadingLine: Line | null = null;
+
   for (let i = 0; i < lines.length; i++) {
     if (kind[i] !== 'body') {
       // furniture does not break a paragraph run mid-page, but top/bottom
       // bands only ever occur before/after body content in practice
       flushPara(); flushRegion();
+      pendingHeading = null;
       pushFurniture(i);
       continue;
     }
     if (inRegion[i] >= 0) {
       flushPara();
+      pendingHeading = null;
       if (currentRegion !== inRegion[i]) flushRegion();
       currentRegion = inRegion[i];
       regionLines.push(lines[i]);
       continue;
     }
     flushRegion();
-    // paragraph continuation vs break: modal-leading gap + indent signal
-    // (measured rule), plus the size-jump guard (rarely fires, kept as a
-    // heading-adjacency backstop)
-    if (para.length > 0) {
+    // A heading-like line FORCES a paragraph break before it is appended —
+    // on uniformly double-spaced pages no gap exceeds 1.4×leading, so
+    // without this the heading gets absorbed mid-paragraph (regression
+    // observed on a real motion page the same day the leading rule landed).
+    const headingLike =
+      lines[i].text.length <= HEADING_MAX_CHARS &&
+      (lines[i].fontSize >= bodySize * HEADING_SIZE_RATIO ||
+        isBoldFont(lines[i].items[0]?.fontName) ||
+        isNumberedHeadingLine(lines[i], page));
+
+    // Wrapped-heading continuation (observed on a real motion: heading line
+    // ends "…cannot yield" and the wrap "fair value." sits at NORMAL body
+    // leading, so geometry cannot distinguish it). Merge the immediately
+    // following line into the just-emitted heading ONLY when it starts
+    // lowercase — a sentence can't start lowercase, so it must be a wrap.
+    // ("heading lacks terminal punctuation" was tried and rejected: all-caps
+    // headings legitimately end unpunctuated and it cascaded body lines in.)
+    if (pendingHeading && pendingHeadingLine && !headingLike) {
+      const gap = pendingHeadingLine.y - lines[i].y;
+      const gapOk = haveLead ? gap <= 1.4 * modalLead : gap <= PARA_GAP_FACTOR * lines[i].fontSize;
+      const startsLower = /^[a-z]/.test(lines[i].text);
+      const combined = `${pendingHeading.text} ${lines[i].text}`.trim();
+      if (gapOk && startsLower && combined.length <= 200) {
+        pendingHeading.text = combined;
+        if (pendingHeading.bbox) {
+          const lb = lineBBox([lines[i]], page);
+          pendingHeading.bbox = [
+            Math.min(pendingHeading.bbox[0], lb[0]),
+            Math.min(pendingHeading.bbox[1], lb[1]),
+            Math.max(pendingHeading.bbox[2], lb[2]),
+            Math.max(pendingHeading.bbox[3], lb[3]),
+          ];
+        }
+        pendingHeadingLine = lines[i]; // allow one more wrap line
+        continue;
+      }
+      pendingHeading = null;
+      pendingHeadingLine = null;
+    }
+
+    if (headingLike) {
+      flushPara();
+    } else if (para.length > 0) {
+      // paragraph continuation vs break: modal-leading gap + indent signal
+      // (measured rule), plus the size-jump guard (rarely fires, kept as a
+      // heading-adjacency backstop)
       const prev = para[para.length - 1];
       const sizeJump = Math.abs(lines[i].fontSize - prev.fontSize) > bodySize * 0.2;
       if (paragraphBreak(prev, lines[i]) || sizeJump) {
@@ -419,14 +468,13 @@ export function buildBlocks(items: PositionedItem[], page: PageGeometry): Docpar
     }
     para.push(lines[i]);
     // headings are short — flush immediately so the next line starts a body block
-    if (
-      para.length === 1 &&
-      lines[i].text.length <= HEADING_MAX_CHARS &&
-      (lines[i].fontSize >= bodySize * HEADING_SIZE_RATIO ||
-        isBoldFont(lines[i].items[0]?.fontName) ||
-        isNumberedHeadingLine(lines[i], page))
-    ) {
+    if (para.length === 1 && headingLike) {
       flushPara();
+      pendingHeading = blocks[blocks.length - 1]?.type === 'heading' ? blocks[blocks.length - 1] : null;
+      pendingHeadingLine = pendingHeading ? lines[i] : null;
+    } else if (!headingLike) {
+      pendingHeading = null;
+      pendingHeadingLine = null;
     }
   }
   flushPara();
