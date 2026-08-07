@@ -64,8 +64,11 @@ export class ScanForPatternTool extends BaseMCPTool<
     return {
       name: 'scan_for_pattern',
       displayName: 'Scan for Pattern',
-      description: 'Search for exact patterns in legal documents using regex',
-      version: '1.1.0',
+      description:
+        'Search for exact patterns in legal documents using regex. Results carry the ' +
+        'same structure metadata as query_case_knowledge when available (documentId, ' +
+        'blockType, headingPath, speakers, tableMarkdown).',
+      version: '1.2.0',
       category: 'search',
       inputSchema: {
         type: 'object',
@@ -326,6 +329,13 @@ export class ScanForPatternTool extends BaseMCPTool<
           volumeNumber,
           caseNumber: caseNumber || undefined,
           filingSlug: (document as any)?.filing?.slug || undefined,
+          // ChunkProvenance parity with query_case_knowledge (task #13
+          // phase 3c) — optional until backfilled
+          documentId: result.metadata.documentId || undefined,
+          blockType: result.metadata.blockType || undefined,
+          headingPath: result.metadata.headingPath || undefined,
+          speakers: result.metadata.speakers || undefined,
+          tableMarkdown: result.metadata.tableMarkdown || undefined,
         };
       }),
     );

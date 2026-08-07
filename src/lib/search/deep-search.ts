@@ -20,6 +20,7 @@ import { extractFieldFilters } from './boolean-to-fts';
 import { sourceDedupKey } from './source-dedup';
 import { buildCiteContext, citeOf, truncateBlock } from './context-builder';
 import { pickProvenance, type ChunkProvenance } from './chunk-provenance';
+import { extractStructureHint, speakersInclude } from './structure-hints';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -748,9 +749,21 @@ export async function deduplicateAndMerge(
   const wantsTable = TABLE_INTENT_RE.test(originalQuery);
   const TABLE_BOOST = 1.2;   // numeric/tabular intent → surface real tables
   const FIGURE_DEMOTE = 0.85; // figure OCR is the noisiest text in the corpus
+  // Structure hints (phase 3b): explicit structural asks get HARD boosts —
+  // "the table on page 12" pins that page's table; "what did THE COURT
+  // say" pins chunks where that speaker actually speaks.
+  const hint = extractStructureHint(originalQuery);
+  const TABLE_PAGE_BOOST = 2.0;
+  const SPEAKER_BOOST = 1.5;
   for (const source of merged) {
     if (source.blockType === 'table' && wantsTable) source.score *= TABLE_BOOST;
     else if (source.blockType === 'figure') source.score *= FIGURE_DEMOTE;
+    if (hint.tablePage !== undefined && source.blockType === 'table' && source.page === hint.tablePage) {
+      source.score *= TABLE_PAGE_BOOST;
+    }
+    if (hint.speaker && speakersInclude(source.speakers, hint.speaker)) {
+      source.score *= SPEAKER_BOOST;
+    }
   }
 
   // Sort by score descending — needed before the diversity cap below.

@@ -66,8 +66,12 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       name: 'query_case_knowledge',
       displayName: 'Query Case Knowledge',
       description:
-        'Perform semantic search on legal documents using natural language queries',
-      version: '1.1.0',
+        'Perform semantic search on legal documents using natural language queries. ' +
+        'Each result carries citation fields plus structure metadata when available: ' +
+        'documentId, blockType (paragraph|table|footnote|figure), headingPath (section ' +
+        'the text sits under), speakers (|-delimited transcript speakers), and ' +
+        'tableMarkdown (structured form of table chunks).',
+      version: '1.2.0',
       category: 'search',
       inputSchema: {
         type: 'object',

@@ -124,6 +124,33 @@ describe('StructuredChunker', () => {
     expect(() => chunker.dispose()).not.toThrow();
   });
 
+  it('emits clean-OCR figures as their own gated chunks (phase 3a)', async () => {
+    const chunker = new StructuredChunker(new FakeInner());
+    const cleanText = 'Discovery was impossible during trial because the account records were sealed by the lower court.';
+    const noisyText = '1!£ ..%% 3« »| 0x0 §§ 12 34 56 78 90 ---- ==== ####';
+    const chunks = await chunker.chunkPages([
+      page(1, [
+        block('paragraph', 'Prose before the figure appears on the page here.', 0),
+        block('figure', cleanText, 1),
+        block('figure', noisyText, 2),   // fails alpha-ratio gate
+        block('figure', 'too short', 3), // fails length gate
+      ]),
+    ], 'd', 'c', SAC);
+    const figs = chunks.filter(c => c.metadata.blockType === 'figure');
+    expect(figs).toHaveLength(1);
+    expect(figs[0].text).toContain('Figure: ' + cleanText);
+    expect(figs[0].metadata.blockOrders).toEqual([1]);
+    expect(chunks.some(c => c.text.includes('0x0'))).toBe(false);
+  });
+
+  it('table chunks carry tableMarkdown metadata (phase 2)', async () => {
+    const chunker = new StructuredChunker(new FakeInner());
+    const t: DocparseBlock = { ...block('table', 'A | B\n1 | 2', 0), markdown: '| A | B |\n| --- | --- |\n| 1 | 2 |' };
+    const chunks = await chunker.chunkPages([page(1, [t])], 'd', 'c', SAC);
+    const table = chunks.find(c => c.metadata.blockType === 'table')!;
+    expect(table.metadata.tableMarkdown).toContain('| A | B |');
+  });
+
   it('truncateMiddle keeps both ends on word boundaries', () => {
     const long = 'ORDERS ABOUT PROPERTY AND USE OF MONEY DURING DIVORCE CASES FILED IN THE DISTRICT COURTS OF TRAVIS COUNTY TEXAS UNDER THE STANDING ORDER PROVISIONS APPLICABLE TO FAMILY LAW MATTERS GENERALLY';
     const t = truncateMiddle(long, 96);

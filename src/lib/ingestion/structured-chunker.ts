@@ -33,6 +33,20 @@ const HEADING_MAX_CHARS = 192;     // ≈ 48 tokens
 const SUMMARY_MAX_CHARS = 160;     // ≈ 40 tokens
 const MIN_BODY_BUDGET = 300;       // floor so a huge prefix can't starve the body
 
+// Figure-chunk gate (task #13 phase 3a): figure OCR is the noisiest text in
+// the corpus — a garbled caption must not become a searchable chunk. Both
+// thresholds must pass; gated chunks stay Meta-View-only.
+const FIGURE_MIN_CHARS = 40;
+const FIGURE_MIN_ALPHA_RATIO = 0.55;
+
+/** True when figure OCR text is clean enough to embed as its own chunk. */
+export function figureTextEmbeddable(text: string): boolean {
+  const t = text.trim();
+  if (t.length < FIGURE_MIN_CHARS) return false;
+  const alpha = t.replace(/[^a-zA-ZÀ-ɏ]/g, '').length;
+  return alpha / t.length >= FIGURE_MIN_ALPHA_RATIO;
+}
+
 /** Word-boundary middle truncation: keeps both ends of a long heading. */
 export function truncateMiddle(s: string, max: number): string {
   if (s.length <= max) return s;
@@ -250,13 +264,26 @@ export class StructuredChunker implements ITextChunker {
             paraBuf.push({ text: block.text.trim(), order: block.order, bbox: block.bbox, type: block.type });
           }
           break;
+        case 'figure':
+          // Figures with CLEAN OCR text become their own searchable chunks
+          // (phase 3a) — separate rows, never merged into prose (merging
+          // would rewrite neighbouring chunk text and invalidate its
+          // embedding). block_type='figure' is demoted post-rerank.
+          if (figureTextEmbeddable(block.text)) {
+            flushParas();
+            const body = truncateMiddle(block.text.trim(), TABLE_MAX_CHARS);
+            chunks.push({
+              text: prefixFor(heading) + 'Figure: ' + body,
+              metadata: meta({ blockType: 'figure', orders: [block.order], bboxes: [block.bbox] }),
+            });
+          }
+          break;
         // furniture and marks are excluded from chunk text (§6.2 decision 6)
         case 'page_header':
         case 'page_footer':
         case 'page_number':
         case 'seal':
         case 'signature':
-        case 'figure':
           break;
       }
     }
