@@ -121,9 +121,52 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
     return this.ollamaClient;
   }
 
+  /** Per-attempt timeout on the embed call itself — a dead socket previously
+   * hung ~72s before undici noticed and there was NO application timeout.
+   * Covers cold model loads (30-60s) with margin. */
+  private static EMBED_TIMEOUT_MS = 120_000;
+  private static EMBED_MAX_ATTEMPTS = 3;
+  private static EMBED_BASE_DELAY_MS = 3_000;
+
+  /**
+   * Embed with per-batch retry + fleet host exclusion (plan:
+   * docs/PLAN-pipeline-resume-and-speed.md §3.1). A host that fails an
+   * attempt is excluded from the next resolution, so one disconnected GPU
+   * costs a retry, not the document. The final attempt drops exclusions —
+   * on a single-host fleet the failed host may be the only host, and it may
+   * have recovered.
+   */
   async embed(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
+    const failedHosts: string[] = [];
+    let lastError: Error | undefined;
 
+    for (let attempt = 1; attempt <= OllamaEmbeddingProvider.EMBED_MAX_ATTEMPTS; attempt++) {
+      const isFinal = attempt === OllamaEmbeddingProvider.EMBED_MAX_ATTEMPTS;
+      try {
+        return await this.embedOnce(texts, isFinal ? [] : failedHosts);
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        const host = (err as { failedHost?: string }).failedHost;
+        if (host && !failedHosts.includes(host)) failedHosts.push(host);
+        // Drop the cached preflight verdict so a recovered host is re-probed.
+        this.lastPreflight = null;
+        if (!isFinal) {
+          const delay = OllamaEmbeddingProvider.EMBED_BASE_DELAY_MS * 2 ** (attempt - 1) + Math.random() * 1_000;
+          logger.warn(`Embed attempt ${attempt}/${OllamaEmbeddingProvider.EMBED_MAX_ATTEMPTS} failed — retrying`, {
+            model: this.model,
+            failedHosts,
+            delayMs: Math.round(delay),
+            error: lastError.message,
+          });
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  private async embedOnce(texts: string[], excludeHosts: string[]): Promise<number[][]> {
     // Dynamic fleet routing: resolve host per-request when orchestrator is enabled
     let activeHost = this.host;
     let sidecarUrl: string | undefined;
@@ -131,10 +174,10 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
     if (this.useOrchestrator) {
       try {
         const { resolveEndpoint } = await import('@/lib/gpu/fleet-router');
-        const ep = await resolveEndpoint('embedding');
+        const ep = await resolveEndpoint('embedding', excludeHosts.length ? { excludeHosts } : undefined);
         activeHost = ep.host;
         sidecarUrl = ep.sidecarUrl;
-        logger.info('Embedding route (orchestrator)', { host: activeHost, sidecar: sidecarUrl, model: this.model });
+        logger.info('Embedding route (orchestrator)', { host: activeHost, sidecar: sidecarUrl, model: this.model, excluded: excludeHosts });
       } catch (err) {
         logger.warn('Fleet router embedding resolve failed, using configured host', {
           error: (err as Error).message, host: this.host,
@@ -149,7 +192,9 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
         model: this.model,
         error: pf.error,
       });
-      throw new Error(`Ollama unavailable (${activeHost}, model=${this.model}): ${pf.error}. Ensure Ollama is running and the model is pulled.`);
+      const err = new Error(`Ollama unavailable (${activeHost}, model=${this.model}): ${pf.error}. Ensure Ollama is running and the model is pulled.`);
+      (err as unknown as { failedHost: string }).failedHost = activeHost;
+      throw err;
     }
 
     const embedStart = Date.now();
@@ -171,10 +216,17 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
     }
 
     try {
-      const response = await client.embed({
-        model: this.model,
-        input: texts,
-      });
+      // Promise.race timeout: the underlying request may linger, but the
+      // caller moves on to a retry instead of hanging on a dead socket.
+      const response = await Promise.race([
+        client.embed({ model: this.model, input: texts }),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`embed timeout after ${OllamaEmbeddingProvider.EMBED_TIMEOUT_MS}ms (host may be down or cold-loading)`)),
+            OllamaEmbeddingProvider.EMBED_TIMEOUT_MS,
+          ).unref?.(),
+        ),
+      ]);
 
       if (!response.embeddings || response.embeddings.length !== texts.length) {
         const mismatch = `expected ${texts.length}, got ${response.embeddings?.length ?? 0}`;
@@ -208,7 +260,9 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
         errorMessage: msg,
         errorStack: stack,
       });
-      throw new Error(`Ollama embedding failed (${activeHost}, model=${this.model}): ${msg}`);
+      const wrapped = new Error(`Ollama embedding failed (${activeHost}, model=${this.model}): ${msg}`);
+      (wrapped as unknown as { failedHost: string }).failedHost = activeHost;
+      throw wrapped;
     } finally {
       if (sidecarUrl) {
         const { releaseEndpoint } = await import('@/lib/gpu/fleet-router');
