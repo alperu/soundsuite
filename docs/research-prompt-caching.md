@@ -4,11 +4,10 @@
 **Trigger:** Anthropic console insight — *"Your prompt cache hit rate is low. Caching repeated
 content like system prompts could save up to 48% of direct API spend."* Observed most on
 searches. (Claude Code traffic is excluded — it manages caching automatically.)
-**Method:** codebase audit agent (every direct LLM call site, code-verified file:line) with
-the caching rules cross-checked against the Anthropic prompt-caching reference
-(docs.anthropic.com → Build with Claude → Prompt caching). A second mechanics agent
-stalled and was not waited on; the rules table below reflects the audit agent's verified
-numbers.
+**Method:** two agents — a codebase audit (every direct LLM call site, code-verified
+file:line) and a mechanics reference pass against the official docs
+(platform.claude.com/docs/en/build-with-claude/prompt-caching). The two cross-checked:
+every number agreed, with one omission fixed below (Opus 5 shares the 512 floor).
 
 ## Headline findings
 
@@ -37,10 +36,24 @@ numbers.
 | Opt-in | per content block: `{ type: 'text', text, cache_control: { type: 'ephemeral' } }` |
 | Breakpoints | up to 4 per request; prefix up to each breakpoint is cached |
 | Prefix order | `tools` → `system` → `messages`; ANY change upstream of a breakpoint invalidates (incl. tool defs, model, jsonMode-forced tools) |
-| Minimum prefix | model-dependent: 512 (Fable 5) / 1024 (Opus 4.8, Sonnet 4.x) / 2048 (Opus 4.7) / 4096 (Opus 4.6/4.5, Haiku 4.5) tokens — below it, marking is a silent no-op |
-| TTL | 5 min default (write 1.25×), `ttl: '1h'` extended (write 2×); reads 0.1×; TTL refreshes on hit |
+| Minimum prefix | model-dependent: 512 (Opus 5, Fable 5, Mythos 5) / 1024 (Opus 4.8, Sonnet 5/4.6/4.5) / 2048 (Opus 4.7) / 4096 (Opus 4.6/4.5, Haiku 4.5) tokens — below it, marking is a silent no-op |
+| TTL | 5 min default (write 1.25×), `ttl: '1h'` extended (write 2×); reads 0.1×; refreshes free on hit. **Measured from request START** — a 4-minute streamed generation leaves ~1 min of 5m TTL for the follow-up |
+| TTL ordering | all 1h breakpoints must come BEFORE any 5m breakpoints in a request |
+| Break-even | 5m: 2 requests (1.25+0.1 vs 2.0); 1h: 3 requests (2.0+0.2 vs 3.0) |
+| Lookback | 20 blocks per breakpoint — growing conversations need an intermediate breakpoint placed in advance |
 | Beta header | none — prompt caching is GA |
-| Verification | `usage.cache_creation_input_tokens` / `usage.cache_read_input_tokens` (in `message_start`); `input_tokens` is the UNCACHED remainder only |
+| Verification | `usage.cache_creation_input_tokens` / `cache_read_input_tokens` (+ `cache_creation.ephemeral_5m/1h_input_tokens`); `input_tokens` is the UNCACHED remainder only. Beta `cache-diagnosis-2026-04-07` reports exactly where consecutive prefixes diverged — enable while tuning |
+
+**Invalidation triggers beyond text changes** (each invalidates its level and everything
+after): tool definitions/order, `tool_choice`, thinking config / `output_config.effort`
+(effort MUST match across calls meant to share a prefix — explicit-default equals omitted),
+images present vs absent, `speed` setting. Model switch = separate cache namespace AND a
+different minimum.
+
+**Parallel fan-out warning:** a cache entry exists only after the first response BEGINS
+streaming. Concurrent calls sharing a prefix all pay full writes and read nothing — send
+one call, wait for its first streamed token, then fire the rest. (Deep-search's section
+loop is sequential today — keep it that way; any future parallelization must stagger.)
 
 **When caching is NOT worth it:** prompts under the minimum floor; true one-shot calls with
 unique content (summarizer per-document previews, tag-fill per-filing pairs, the ten MCP
@@ -86,8 +99,11 @@ analysis tools' few-hundred-token schemas — all audited, all below the floor o
 | 4 | Unify outline+section prompts (common system, pass-specific instructions in the suffix; drop jsonMode on outline or accept the split) → N+1-way sharing | `deep-search.ts:1137` | M | one more full-prefix read per search |
 | 5 | Cross-turn caching for AI mode / single-pass — requires stabilizing retrieval so the excerpt block is byte-identical across follow-ups | product change | M/L | measure before building |
 
-**TTL choice:** the section loop completes in seconds → default 5-minute TTL; the 1-hour
-TTL's 2× write premium buys nothing here.
+**TTL choice:** the section loop's calls start seconds apart → default 5-minute TTL
+suffices for item 1. Caveat from the mechanics pass: TTL runs from request START, so if a
+section stream ever runs multi-minute, the tail sections may find the entry expired —
+if measurement shows that, move the shared-prefix breakpoint to `ttl: '1h'` (write 2×,
+still repaid by the 3rd call).
 
 **Cost-dashboard caveat:** after enabling, `input_tokens` reports only the uncached
 remainder — dashboards keyed on it alone will overstate the savings; total prompt size is
