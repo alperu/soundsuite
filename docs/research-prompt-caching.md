@@ -16,18 +16,29 @@ every number agreed, with one omission fixed below (Opus 5 shares the 512 floor)
 2. **The intuitive fix is wrong.** "Cache the system prompts" buys nothing: every static
    system prompt measures ~250–380 tokens (DECOMPOSE 1302 chars, OUTLINE 1385, REPORT 1143,
    SECTION 944, RLM 1314) — all far below the model-dependent minimum cacheable prefix
-   (512 tokens on Fable 5; 1024 on Opus 4.8/Sonnet 4.x; 2048 on Opus 4.7; 4096 on
-   Opus 4.6/4.5 and Haiku 4.5). Marking them silently does nothing.
+   (512 tokens on Opus 5/Fable 5/Mythos 5; 1024 on Opus 4.8 and Sonnet 5/4.6/4.5; 2048 on
+   Opus 4.7; 4096 on Opus 4.6/4.5 and Haiku 4.5). Marking them silently does nothing.
 3. **RLM mode is not Anthropic traffic.** `stream-rlm.ts` POSTs to a locally-resolved vLLM
    host (`/v1/chat/completions`, rlm-qwen3-8b) — it cannot affect the console metric and
    `cache_control` does not apply. (vLLM has its own automatic prefix caching server-side.)
 4. **The real win is the deep-search multi-pass section loop.** `baseUserContent`
    (deep-search.ts:1120) — history → question → intent → sub-queries → up to 120K chars of
    document excerpts (~32K tokens) — is a byte-stable prefix of every per-section call
-   (`sectionUserContent` at :1218 is a pure append). A 4-section report currently pays for
-   that prefix 5 times at full price; with one cache breakpoint it becomes 1 write (1.25×)
-   + N reads (0.1×) ≈ **~49% input-token reduction for that stage** — matching the
-   console's ~48% estimate almost exactly.
+   (`sectionUserContent` at :1218 is a pure append). An N-section report pays that prefix
+   N times at full price today (the outline call does NOT share the prefix — see
+   inventory). With one breakpoint the prefix costs 1 write (1.25×) + N−1 reads (0.1×):
+
+   | Sections N | Prefix-token reduction |
+   | --- | --- |
+   | 2 | ~33% |
+   | 3 | ~52% |
+   | 4 | ~61% |
+   | 6 | ~71% |
+
+   Note this is the reduction on the SHARED-PREFIX tokens of one stage — a different
+   denominator from the console's ~48% estimate, which covers all direct API spend. Do
+   not treat the two as corroborating; measure the account-level effect with the usage
+   logging (plan item 2) after implementation.
 
 ## Mechanics reference (rules that matter here)
 
@@ -93,7 +104,7 @@ analysis tools' few-hundred-token schemas — all audited, all below the floor o
 | # | Change | Where | Effort | Expected effect |
 | --- | --- | --- | --- | --- |
 | 0 | **Prerequisite:** let `AIMessage.content` carry content blocks and forward them (system + messages) in `streamWithAnthropic` | `ai-provider.ts:12`, `:631-637`, `:686`, `:770` | S | none alone; unlocks all |
-| 1 | **Breakpoint after `baseUserContent` in the section loop** — split the user message into `[shared prefix + cache_control][per-section suffix]`, 5-min TTL | `deep-search.ts:1218` → `:1231` | S | **~49% of multi-pass input tokens** — the console's estimate |
+| 1 | **Breakpoint after `baseUserContent` in the section loop** — split the user message into `[shared prefix + cache_control][per-section suffix]`, 5-min TTL | `deep-search.ts:1218` → `:1231` | S | 33–71% of the stage's shared-prefix tokens (N-dependent, table above) |
 | 2 | Log `cache_creation_input_tokens` / `cache_read_input_tokens` next to existing counters (message_start/delta) so hits are verifiable | `ai-provider.ts:611` area | S | measurement; catches silent invalidators |
 | 3 | Fix retry-path prefix drift (JSON_REINFORCEMENT as a SUFFIX message, not a system mutation) + pin model resolution | `ai-helper.ts:144`, `:38` | S | protects hit rate |
 | 4 | Unify outline+section prompts (common system, pass-specific instructions in the suffix; drop jsonMode on outline or accept the split) → N+1-way sharing | `deep-search.ts:1137` | M | one more full-prefix read per search |
