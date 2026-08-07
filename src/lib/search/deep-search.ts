@@ -19,12 +19,15 @@ import { segmentChipsAndIntents, type Segment as ChipQuerySegment } from './chip
 import { extractFieldFilters } from './boolean-to-fts';
 import { sourceDedupKey } from './source-dedup';
 import { buildCiteContext, citeOf, truncateBlock } from './context-builder';
+import { pickProvenance, type ChunkProvenance } from './chunk-provenance';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export interface DeepSearchSource {
+// ChunkProvenance fields (documentId/blockType/headingPath/speakers/
+// tableMarkdown) ride on every source — optional until backfilled.
+export interface DeepSearchSource extends ChunkProvenance {
   text: string;
   document: string;
   page: number;
@@ -35,11 +38,6 @@ export interface DeepSearchSource {
   volumeNumber?: number;
   caseNumber?: string;
   filingSlug?: string;
-  /** Structure metadata (task #13 phase 1) — optional until backfilled */
-  blockType?: string;
-  headingPath?: string;
-  /** Delimited '|SPEAKER|…|' RR speakers overlapping this chunk */
-  speakers?: string;
   /** Which sub-queries found this chunk */
   matchedSubQueries: string[];
 }
@@ -470,9 +468,7 @@ export async function executeParallelSearches(
           volumeNumber: r.volumeNumber,
           caseNumber: r.caseNumber,
           filingSlug: r.filingSlug,
-          blockType: r.blockType,
-          headingPath: r.headingPath,
-          speakers: r.speakers,
+          ...pickProvenance(r),
           matchedSubQueries: [subQuery],
         }),
       );
@@ -879,11 +875,12 @@ export async function generateReport(
     pageNumber: s.page,
     citation: s.citation || s.citationShort || `${s.document}, p.${s.page}`,
     speakers: s.speakers,
+    tableMarkdown: s.tableMarkdown,
   }));
 
   // Unified builder: skip-not-break on budget overflow + per-block cap
   const { contextBlock, totalChars } = buildCiteContext(
-    contextChunks.map(c => ({ text: c.text, document: '', page: c.pageNumber, citation: c.citation, speakers: c.speakers })),
+    contextChunks.map(c => ({ text: c.text, document: '', page: c.pageNumber, citation: c.citation, speakers: c.speakers, tableMarkdown: c.tableMarkdown })),
     { maxTotalChars: 120000 },
   );
 

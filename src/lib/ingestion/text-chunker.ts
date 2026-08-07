@@ -42,6 +42,9 @@ export interface ChunkMetadata {
   /** Distinct RR speaker labels overlapping this chunk, delimited
    * '|THE COURT|MR. DOE|' so LIKE '%|X|%' cannot prefix-match. */
   speakers?: string;
+  /** Structured markdown for table chunks (from OTSL normalization) —
+   * stored alongside the embedded cellText for synthesis/rendering. */
+  tableMarkdown?: string;
   /** Page-block orders that contributed to this chunk (deep-links/dedup). */
   blockOrders?: number[];
   /** Union bbox of contributing blocks (page pts, top-left origin). */

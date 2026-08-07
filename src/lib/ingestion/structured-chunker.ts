@@ -201,7 +201,12 @@ export class StructuredChunker implements ITextChunker {
       const prefix = prefixFor(heading);
       const text = block.text.trim();
       if (!text) return;
-      const tableMeta = () => meta({ blockType: 'table', orders: [block.order], bboxes: [block.bbox] });
+      const tableMeta = () => ({
+        ...meta({ blockType: 'table', orders: [block.order], bboxes: [block.bbox] }),
+        // Markdown rides as metadata (synthesis/rendering form, §6.3 item 7
+        // amended) — the embedded text stays the normalized cellText.
+        ...(block.markdown ? { tableMarkdown: block.markdown } : {}),
+      });
       if (text.length <= TABLE_MAX_CHARS) {
         chunks.push({ text: prefix + text, metadata: tableMeta() });
         return;

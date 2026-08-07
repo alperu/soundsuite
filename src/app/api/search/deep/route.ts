@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { AIProviderKey, AI_PROVIDERS, AI_PROVIDER_KEYS } from '@/lib/ai/models';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 import { deepSearch, DeepSearchProgress, ConversationTurn } from '@/lib/search/deep-search';
+import { pickProvenance } from '@/lib/search/chunk-provenance';
 import { prisma } from '@/lib/db/prisma';
 
 /**
@@ -122,6 +123,7 @@ export async function POST(request: NextRequest) {
                 filingType: s.filingType,
                 volumeNumber: s.volumeNumber,
                 caseNumber: s.caseNumber,
+                ...pickProvenance(s),
                 matchedSubQueries: s.matchedSubQueries,
               })),
               subQueries: result.subQueries,

@@ -89,6 +89,8 @@ export interface SearchResult {
     headingPath?: string;
     /** Delimited '|SPEAKER|…|' RR speakers overlapping this chunk */
     speakers?: string;
+    /** Structured markdown for table chunks (synthesis/rendering form) */
+    tableMarkdown?: string;
   };
   /** Similarity score (lower is better for L2 distance, higher for RRF) */
   score: number;
@@ -123,6 +125,8 @@ interface LanceDBRow {
   heading_path: string;
   /** Delimited '|SPEAKER|SPEAKER|' so LIKE '%|X|%' cannot prefix-match. */
   speakers: string;
+  /** Structured markdown for table chunks (synthesis/rendering form). */
+  table_markdown: string;
   /** JSON number[] of contributing page-block orders. */
   block_orders: string;
   /** JSON [x0,y0,x1,y1] union bbox (page pts, top-left). */
@@ -272,6 +276,7 @@ export class VectorStore {
       block_type: chunk.metadata.blockType || '',
       heading_path: chunk.metadata.headingPath || '',
       speakers: chunk.metadata.speakers || '',
+      table_markdown: chunk.metadata.tableMarkdown || '',
       block_orders: chunk.metadata.blockOrders?.length ? JSON.stringify(chunk.metadata.blockOrders) : '',
       block_bbox: chunk.metadata.blockBbox ? JSON.stringify(chunk.metadata.blockBbox) : '',
     }));
@@ -800,6 +805,7 @@ export class VectorStore {
         blockType: row.block_type && row.block_type !== '' ? row.block_type : undefined,
         headingPath: row.heading_path && row.heading_path !== '' ? row.heading_path : undefined,
         speakers: row.speakers && row.speakers !== '' ? row.speakers : undefined,
+        tableMarkdown: row.table_markdown && row.table_markdown !== '' ? row.table_markdown : undefined,
       },
       score: row._distance !== undefined ? row._distance : 0,
     };

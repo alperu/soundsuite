@@ -26,6 +26,10 @@ export interface CiteContextSource {
   /** Delimited '|SPEAKER|…|' RR speakers — rendered as an attribution
    * suffix on the cite line (task #13 phase 1d). */
   speakers?: string;
+  /** Table chunks: structured markdown injected IN PLACE of the flattened
+   * cell text (§6.3 item 7) — the per-block cap bounds it, so a large
+   * table truncates instead of dropping later sources. */
+  tableMarkdown?: string;
 }
 
 /** '|THE COURT|MR. DOE|' → 'THE COURT, MR. DOE' */
@@ -80,7 +84,7 @@ export function buildCiteContext(
   let skippedCount = 0;
 
   for (const s of sources) {
-    const { text, truncated } = truncateBlock(s.text, perBlockCap);
+    const { text, truncated } = truncateBlock(s.tableMarkdown || s.text, perBlockCap);
     const attrib = speakerList(s.speakers);
     const block = `[${citeOf(s)}]${attrib ? ` (speakers: ${attrib})` : ''}\n${text}${nl}`;
     const cost = block.length + (parts.length > 0 ? separator.length : 0);

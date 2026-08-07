@@ -6,6 +6,7 @@ import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 import { extractPatternKeywords } from '@/lib/search/deep-search';
 import { sourceDedupKey } from '@/lib/search/source-dedup';
 import { buildCiteContext } from '@/lib/search/context-builder';
+import { pickProvenance } from '@/lib/search/chunk-provenance';
 import { prisma } from '@/lib/db/prisma';
 
 /**
@@ -132,6 +133,12 @@ export async function POST(request: NextRequest) {
             caseNumber?: string;
             filingSlug?: string;
             annotations?: string;
+            // ChunkProvenance (task #13) — optional until backfilled
+            documentId?: string;
+            blockType?: string;
+            headingPath?: string;
+            speakers?: string;
+            tableMarkdown?: string;
           }> = searchResult.data?.results ?? [];
 
           send({ type: 'progress', step: 'searching', message: `Found ${sources.length} matches`, detail: { vectorHits: sources.length, searchMode } });
@@ -292,6 +299,7 @@ ${contextChunks || '(No relevant documents found)'}`;
                       caseNumber: s.caseNumber,
                       filingSlug: s.filingSlug,
                       annotations: s.annotations,
+                      ...pickProvenance(s),
                     })),
                     model: event.model,
                     provider: event.provider,

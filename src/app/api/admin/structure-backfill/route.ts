@@ -23,7 +23,7 @@ import { prisma } from '@/lib/db/prisma';
 const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
 const TABLE_NAME = 'chunks';
 
-const STRUCTURE_COLUMNS = ['block_type', 'heading_path', 'speakers', 'block_orders', 'block_bbox'] as const;
+const STRUCTURE_COLUMNS = ['block_type', 'heading_path', 'speakers', 'block_orders', 'block_bbox', 'table_markdown'] as const;
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -34,6 +34,7 @@ interface RowUpdate {
   speakers?: string;
   block_orders?: string;
   block_bbox?: string;
+  table_markdown?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -177,6 +178,7 @@ async function backfillDocument(table: any, doc: any) {
           ...(m.headingPath ? { heading_path: m.headingPath } : {}),
           ...(m.blockOrders?.length ? { block_orders: JSON.stringify(m.blockOrders) } : {}),
           ...(m.blockBbox ? { block_bbox: JSON.stringify(m.blockBbox) } : {}),
+          ...(m.tableMarkdown ? { table_markdown: m.tableMarkdown } : {}),
         });
         aligned++;
       }

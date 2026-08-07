@@ -564,11 +564,13 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
           caseNumber: caseNumber || undefined,
           filingSlug: (document as any)?.filing?.slug || undefined,
           annotations: result.metadata.annotations || undefined,
-          // Structure metadata (task #13 phase 1) — optional, absent on
+          // Structure metadata (task #13 phases 1-2) — optional, absent on
           // chunks indexed before the columns existed and not yet backfilled
+          documentId: result.metadata.documentId || undefined,
           blockType: result.metadata.blockType || undefined,
           headingPath: result.metadata.headingPath || undefined,
           speakers: result.metadata.speakers || undefined,
+          tableMarkdown: result.metadata.tableMarkdown || undefined,
         };
       }),
     );

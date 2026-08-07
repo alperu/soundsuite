@@ -90,6 +90,11 @@ interface AISearchResult {
     caseNumber?: string;
     filingSlug?: string;
     annotations?: string;
+    documentId?: string;
+    blockType?: string;
+    headingPath?: string;
+    speakers?: string;
+    tableMarkdown?: string;
   }>;
   model: string;
   provider: string;
@@ -127,6 +132,11 @@ interface DeepSearchResult {
     caseNumber?: string;
     filingSlug?: string;
     annotations?: string;
+    documentId?: string;
+    blockType?: string;
+    headingPath?: string;
+    speakers?: string;
+    tableMarkdown?: string;
     matchedSubQueries: string[];
   }>;
   subQueries: string[];
@@ -256,6 +266,74 @@ function getProviderName(providerKey: string) {
 function getExplorerUrl(source: { caseNumber?: string; filingType?: string; filingSlug?: string; page: number }): string | null {
   if (!source.caseNumber || !source.filingType || !source.filingSlug) return null;
   return `/case-explorer/${encodeURIComponent(source.caseNumber)}/${encodeURIComponent(source.filingType)}/${source.filingSlug}?pageNum=${source.page}`;
+}
+
+/** Meta View deep-link — structure inspector for the source's exact page. */
+function getMetaViewUrl(source: { documentId?: string; page: number }): string | null {
+  if (!source.documentId) return null;
+  return `/vectors/metaview/doc-${source.documentId}/page-${source.page}`;
+}
+
+/** Render pipe-markdown as a real table (§6.3 item 11 — never raw HTML). */
+function MarkdownTable({ markdown }: { markdown: string }) {
+  const rows = markdown
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.startsWith('|'))
+    .filter(l => !/^\|[\s:|-]+\|$/.test(l)) // drop the |---|---| separator
+    .map(l => l.slice(1, l.endsWith('|') ? -1 : undefined).split('|').map(c => c.trim()));
+  if (rows.length === 0) return null;
+  const [head, ...body] = rows;
+  return (
+    <div className="overflow-x-auto my-1">
+      <table className="text-[10px] border-collapse">
+        <thead>
+          <tr>{head.map((c, i) => <th key={i} className="border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-left font-medium text-gray-600">{c}</th>)}</tr>
+        </thead>
+        <tbody>
+          {body.map((r, ri) => (
+            <tr key={ri}>{r.map((c, ci) => <td key={ci} className="border border-gray-100 px-1.5 py-0.5 text-gray-700">{c}</td>)}</tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Structure chips + table rendering shared by BOTH result-card blocks —
+ * heading breadcrumb, RR speakers, block-type tag, Meta View deep-link. */
+function SourceStructure({ s }: {
+  s: { documentId?: string; blockType?: string; headingPath?: string; speakers?: string; tableMarkdown?: string; page: number };
+}) {
+  const metaUrl = getMetaViewUrl(s);
+  const speakers = s.speakers ? s.speakers.split('|').filter(Boolean) : [];
+  if (!s.headingPath && speakers.length === 0 && !s.tableMarkdown && !metaUrl) return null;
+  return (
+    <>
+      {(s.headingPath || speakers.length > 0 || metaUrl) && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-1 text-[10px]">
+          {s.headingPath && (
+            <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 truncate max-w-[60%]" title={s.headingPath}>
+              § {s.headingPath}
+            </span>
+          )}
+          {speakers.map(sp => (
+            <span key={sp} className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-medium">{sp}</span>
+          ))}
+          {s.blockType === 'table' && (
+            <span className="px-1.5 py-0.5 rounded bg-green-50 text-green-700">table</span>
+          )}
+          {metaUrl && (
+            <a href={metaUrl} target="_blank" rel="noopener noreferrer"
+              className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 hover:text-blue-700 hover:underline ml-auto">
+              structure ↗
+            </a>
+          )}
+        </div>
+      )}
+      {s.tableMarkdown && <MarkdownTable markdown={s.tableMarkdown} />}
+    </>
+  );
 }
 
 function formatEmbeddingLabel(info: EmbeddingInfo) {
@@ -4008,6 +4086,7 @@ const AIResultCard = React.memo(function AIResultCard({ result, compact = false,
                     <span className="text-gray-400 ml-auto">{(s.score * 100).toFixed(0)}%</span>
                   </div>
                   <p className="text-[10px] text-gray-400 mb-1">{s.document}</p>
+                  <SourceStructure s={s} />
                   {s.annotations && (() => {
                     try {
                       const anns = JSON.parse(s.annotations) as Array<{ type: string; author?: string; comment?: string; coveredText?: string }>;
@@ -4377,6 +4456,7 @@ const DeepSearchResultCard = React.memo(function DeepSearchResultCard({ result, 
                     <span className="text-gray-400 ml-auto">{(s.score * 100).toFixed(0)}%</span>
                   </div>
                   <p className="text-[10px] text-gray-400 mb-1">{s.document}</p>
+                  <SourceStructure s={s} />
                   {s.annotations && (() => {
                     try {
                       const anns = JSON.parse(s.annotations) as Array<{ type: string; author?: string; comment?: string; coveredText?: string }>;
