@@ -59,6 +59,13 @@ export interface ProduceOptions {
   /** Injectable for tests. */
   cropFn?: (filePath: string, pageNum: number, bbox: [number, number, number, number], opts?: CropOptions) => Promise<RegionCrop | null>;
   extractFn?: typeof extractPageBlocks;
+  /**
+   * Progress feedback for long runs (escalation OCR on exhibit-heavy pages
+   * can take minutes) — called after each processed page with a live detail
+   * string. Consumers publish it to the doc-progress channel so the UI
+   * never shows a stale "Starting...".
+   */
+  onProgress?: (done: number, total: number, detail: string) => void;
 }
 
 /**
@@ -84,8 +91,13 @@ export async function produceStructuredPages(opts: ProduceOptions): Promise<Stru
   // chunking gate is document-level, matching the byte-identity guarantee.
   if (opts.transcriptDoc) {
     const { buildRRBlocks } = await import('./rr-block-producer');
+    let rrDone = 0;
     for (const page of opts.pages) {
       page.structureOnly = true;
+      rrDone++;
+      if (rrDone % 50 === 0) {
+        opts.onProgress?.(rrDone, opts.pages.length, `Structuring transcript page ${page.pageNumber}`);
+      }
       if (!page.rrLines || page.rrLines.length === 0) continue;
       const blocks = buildRRBlocks(page.rrLines, page.pageHeight ?? 0);
       if (blocks.length === 0) continue;
@@ -107,6 +119,7 @@ export async function produceStructuredPages(opts: ProduceOptions): Promise<Stru
 
   if (bornDigital.length === 0) return counters;
 
+  opts.onProgress?.(scanned.length, scanned.length + bornDigital.length, `Extracting geometry for ${bornDigital.length} page(s)...`);
   let extracted;
   try {
     extracted = await extract(opts.filePath, bornDigital.map(p => p.pageNumber));
@@ -121,7 +134,14 @@ export async function produceStructuredPages(opts: ProduceOptions): Promise<Stru
   const taskEngine = opts.ocrEngine ? asTaskEngine(opts.ocrEngine) : null;
   const canEscalate = !!taskEngine && taskEngine.supportsTask('table');
 
+  let structuredDone = 0;
   for (const page of bornDigital) {
+    structuredDone++;
+    opts.onProgress?.(
+      scanned.length + structuredDone,
+      scanned.length + bornDigital.length,
+      `Structuring page ${page.pageNumber} (tables ${counters.tableRegionsAccepted}/${counters.tableRegionsAttempted}, figures ${counters.figuresOcrAccepted}/${counters.figuresOcrAttempted})`,
+    );
     const result = byPage.get(page.pageNumber);
     if (!result || result.blocks.length === 0) continue;
     page.blocks = result.blocks;

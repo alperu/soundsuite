@@ -902,18 +902,33 @@ export class IngestionPipeline {
         const appCfg = await getAppConfig();
         if (appCfg.docparseEnabled) {
           const { produceStructuredPages } = await import('./structure-producer');
-          const counters = await this.runStage('structure', documentId, stageTimings, () =>
-            produceStructuredPages({
-              filePath,
-              pages,
-              ocrThreshold: appCfg.ocrThreshold,
-              ocrEngine: this.ocrEngine,
-              // Same isRR union that routed text extraction (single source
-              // of truth) — RR docs get structure metadata WITH line
-              // numbers while chunk text stays byte-identical.
-              transcriptDoc: isRR,
-            }),
-          );
+          // Table/figure escalation OCR makes this stage minutes-long on
+          // exhibit-heavy documents. Publish live per-page detail and keep a
+          // heartbeat so the 5-min Redis TTL never lapses into "Starting...".
+          await this.publishProgress(documentId, 'structure', 'Analyzing document structure...', 59);
+          const structureHb = this.startHeartbeat(documentId, 'structure', 'Analyzing document structure...', 59);
+          let counters;
+          try {
+            counters = await this.runStage('structure', documentId, stageTimings, () =>
+              produceStructuredPages({
+                filePath,
+                pages,
+                ocrThreshold: appCfg.ocrThreshold,
+                ocrEngine: this.ocrEngine,
+                // Same isRR union that routed text extraction (single source
+                // of truth) — RR docs get structure metadata WITH line
+                // numbers while chunk text stays byte-identical.
+                transcriptDoc: isRR,
+                onProgress: (done, total, detail) => {
+                  const pct = 59 + (done / Math.max(1, total)) * 5; // 59-64%
+                  this.updateHeartbeat(structureHb, detail, pct);
+                  this.publishProgress(documentId, 'structure', detail, pct).catch(() => {});
+                },
+              }),
+            );
+          } finally {
+            clearInterval(structureHb);
+          }
           this.logger.info('Structure stage counters', { documentId, ...counters });
 
           // Persist structure (PLAN-ss-docparse §5 + §0.1 adoption 3).

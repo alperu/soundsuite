@@ -15,6 +15,7 @@ export const PIPELINE_STAGES = [
   'exhibit-extraction',
   'ocr-fallback',
   'annotation-extraction',
+  'structure',
   'text-chunking',
   'embedding-generation',
   'vector-indexing',
@@ -31,7 +32,7 @@ export const VISUAL_STAGES = [
   { label: 'Scan', stages: ['image-scan', 'exhibit-boundary-detection', 'toc-extraction'] },
   { label: 'Exhibits', stages: ['exhibit-extraction'] },
   { label: 'OCR', stages: ['ocr-fallback', 'annotation-extraction'] },
-  { label: 'Embed', stages: ['text-chunking', 'embedding-generation', 'vector-indexing', 'verification', 'complete'] },
+  { label: 'Embed', stages: ['structure', 'text-chunking', 'embedding-generation', 'vector-indexing', 'verification', 'complete'] },
 ] as const;
 
 /**
