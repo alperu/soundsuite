@@ -12,7 +12,56 @@ import {
   detectRepeatedContent,
   detectTokenBloat,
 } from './detectors';
-import type { PageTextLike, ReadinessSignals } from './types';
+import type { PageClassCounts, PageQualityClass, PageTextLike, ReadinessSignals } from './types';
+
+/** Density below which a native-text page counts as thin (chars/page). */
+const THIN_TEXT_DENSITY = 150;
+
+/**
+ * Classify one page into the v2 quality ladder ('blank' = excluded).
+ * Shared by the document histogram and the per-page scorer (Phase 3) so a
+ * page can never carry different classes on the two surfaces.
+ */
+export function classifyPageQuality(
+  p: PageTextLike,
+  glyphPages: Set<number>,
+): PageQualityClass | 'blank' {
+  if (p.source === 'empty') return 'blank';
+  if (!p.text || p.text.trim().length === 0) return 'missing';
+  if (glyphPages.has(p.pageNumber)) return 'glyph';
+  if (p.source === 'ocr') {
+    const conf = typeof p.confidence === 'number' && Number.isFinite(p.confidence)
+      ? (p.confidence <= 1 ? p.confidence * 100 : p.confidence)
+      : null;
+    if (conf === null || conf >= 90) return 'ocrHigh';
+    if (conf >= 75) return 'ocrMid';
+    return 'ocrLow';
+  }
+  return p.textDensity < THIN_TEXT_DENSITY ? 'textThin' : 'text';
+}
+
+/**
+ * Classify every non-blank page into the v2 quality ladder. Pages absent
+ * from PageCache (never extracted) surface via gapPages as 'missing'.
+ */
+function buildPageClassCounts(
+  pages: PageTextLike[],
+  gapPages: number[],
+  glyphPages: Set<number>,
+): PageClassCounts {
+  const counts: PageClassCounts = {
+    text: 0, textThin: 0, ocrHigh: 0, ocrMid: 0, ocrLow: 0, glyph: 0, missing: 0,
+  };
+  const gapSet = new Set(gapPages);
+  for (const p of pages) {
+    const cls = classifyPageQuality(p, glyphPages);
+    if (cls === 'blank') continue;               // excluded entirely
+    if (gapSet.has(p.pageNumber)) continue;      // counted below from gapPages
+    counts[cls]++;
+  }
+  counts.missing = gapPages.length;
+  return counts;
+}
 
 export function collectSignals(opts: {
   verification: VerificationResult;
@@ -56,11 +105,18 @@ export function collectSignals(opts: {
 
   const glyph = detectGlyphArtifacts(pages);
   const repetition = detectRepeatedContent(pages);
+  const pageClassCounts = buildPageClassCounts(
+    pages,
+    verification.gapPages,
+    new Set(glyph.pages),
+  );
 
   return {
+    pageClassCounts,
     pageCount: verification.totalPages,
     pagesWithText: verification.pagesWithText,
     gapPages: verification.gapPages,
+    blankPages: verification.blankPages ?? [],
     ocrPages: verification.ocrPages,
     imageOnlyPages,
     parseErrorCount: (opts.parseErrorCount ?? 0) + renderFailedCount,

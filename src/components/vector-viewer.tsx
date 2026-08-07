@@ -18,7 +18,7 @@ interface VectorChunk {
   isExhibit: boolean;
   exhibitPath: string | null;
   createdAt: number;
-  /** Document readiness score stamped on the chunk (null = not scored). */
+  /** Chunk readiness score — inherits its page's v2 ladder score (null = not scored). */
   readinessScore?: number | null;
 }
 
@@ -84,8 +84,16 @@ interface PageReportData {
     chunkCount: number;
     hasExhibit: boolean;
     status: 'indexed' | 'unindexed' | 'empty';
+    /** Per-page readiness score (readiness v2 Phase 3); null = not scored. */
+    score?: number | null;
+    band?: string | null;
+    pageClass?: string | null;
+    flags?: string[];
   }>;
-  summary: { indexedPages: number; unindexedPages: number; emptyPages?: number; totalChunks: number };
+  summary: {
+    indexedPages: number; unindexedPages: number; emptyPages?: number; totalChunks: number;
+    meanPageScore?: number | null; riskyPages?: number; poorPages?: number;
+  };
 }
 
 type ViewMode = 'tableview' | 'breakdown' | 'pagereport' | 'metaview';
@@ -1058,7 +1066,7 @@ function BreakdownContent({
 // Page Report Content
 // ---------------------------------------------------------------------------
 
-type PageSortField = 'pageNumber' | 'textPreview' | 'source' | 'chunkCount' | 'status';
+type PageSortField = 'pageNumber' | 'textPreview' | 'source' | 'chunkCount' | 'status' | 'score';
 type SortDir = 'asc' | 'desc';
 type StatusFilter = 'all' | 'indexed' | 'unindexed' | 'empty';
 
@@ -1283,6 +1291,15 @@ function PageReportContent({
         case 'source': return (a.source || '').localeCompare(b.source || '') * dir;
         case 'chunkCount': return (a.chunkCount - b.chunkCount) * dir;
         case 'status': return a.status.localeCompare(b.status) * dir;
+        case 'score': {
+          // Unscored/blank pages sort last regardless of direction.
+          const av = a.pageClass === 'blank' ? null : a.score ?? null;
+          const bv = b.pageClass === 'blank' ? null : b.score ?? null;
+          if (av == null && bv == null) return 0;
+          if (av == null) return 1;
+          if (bv == null) return -1;
+          return (av - bv) * dir;
+        }
         default: return 0;
       }
     });
@@ -1545,6 +1562,7 @@ function PageReportContent({
                     <SortableHeader field="textPreview" label="Text Preview" current={sortField} dir={sortDir} onClick={handleSort} />
                     <SortableHeader field="source" label="Source" current={sortField} dir={sortDir} onClick={handleSort} className="w-20" />
                     <SortableHeader field="chunkCount" label="Chunks" current={sortField} dir={sortDir} onClick={handleSort} className="w-20" />
+                    <SortableHeader field="score" label="Score" current={sortField} dir={sortDir} onClick={handleSort} className="w-20" />
                     <SortableHeader field="status" label="Status" current={sortField} dir={sortDir} onClick={handleSort} className="w-24" />
                   </tr>
                 </thead>
@@ -1613,6 +1631,20 @@ function PageReportContent({
                           </button>
                         ) : (
                           <span className="text-gray-400">0</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 whitespace-nowrap">
+                        {p.pageClass === 'blank' ? (
+                          <span className="text-gray-400 text-xs italic" title="Blank page — excluded from scoring">blank</span>
+                        ) : p.score != null ? (
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${chunkScoreBadge(p.score)}`}
+                            title={`${p.pageClass ?? ''}${p.flags && p.flags.length ? ` — ${p.flags.join(', ')}` : ''}`}
+                          >
+                            {p.score}
+                          </span>
+                        ) : (
+                          <span className="text-gray-300">&mdash;</span>
                         )}
                       </td>
                       <td className="px-4 py-2.5 whitespace-nowrap">

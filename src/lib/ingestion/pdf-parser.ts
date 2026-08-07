@@ -448,6 +448,17 @@ export class PDFParser {
   }
 
   /**
+   * Targeted per-page extraction for the reindex path — avoids the full-
+   * document pass (~90s on a 1400-page record) when only a handful of pages
+   * are needed. Uses the per-page pdfjs extractor with a single document
+   * load; pdfjs is the same engine the full pass already trusts as its
+   * quality fallback for exactly the pages that tend to get reindexed.
+   */
+  async extractTextForPages(filePath: string, pageNumbers: number[]): Promise<PageText[]> {
+    return this.extractTextWithPdfjsPages(filePath, pageNumbers);
+  }
+
+  /**
    * Fallback text extraction using pdfjs-dist when pdfdown returns empty text.
    */
   private async extractTextWithPdfjs(filePath: string): Promise<PageText[]> {

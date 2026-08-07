@@ -50,6 +50,16 @@ export async function GET(request: NextRequest) {
       },
     });
 
+    // 2b. PageScore rows (readiness v2 Phase 3) — persisted at scoring time,
+    // they outlive the PageCache wipe and snapshot density/source, which
+    // fixes the all-zeros provenance display for INDEXED documents.
+    const pageScoreRows: Array<{ pageNumber: number; score: number; band: string; pageClass: string; flags: string; textDensity: number; source: string }> =
+      await (prisma as any).pageScore.findMany({
+        where: { documentId },
+        select: { pageNumber: true, score: true, band: true, pageClass: true, flags: true, textDensity: true, source: true },
+      }).catch(() => []);
+    const pageScoreMap = new Map(pageScoreRows.map((r) => [r.pageNumber, r]));
+
     const pageCacheMap = new Map<number, { text: string; textDensity: number; source: string }>();
     for (const entry of pageCacheEntries) {
       pageCacheMap.set(entry.pageNumber, {
@@ -128,23 +138,44 @@ export async function GET(request: NextRequest) {
         textPreview = chunks.firstText.substring(0, 200);
       }
 
+      const ps = pageScoreMap.get(pageNum);
+      let flags: string[] = [];
+      try { flags = ps ? JSON.parse(ps.flags) : []; } catch { /* keep [] */ }
       pages.push({
         pageNumber: pageNum,
         textPreview,
-        textDensity: cache?.textDensity || 0,
-        source: cache?.source || null,
+        // PageCache wins when present (fresher, mid-ingest); the PageScore
+        // snapshot fills in after the cache is wiped.
+        textDensity: cache?.textDensity ?? ps?.textDensity ?? 0,
+        source: cache?.source ?? ps?.source ?? null,
         chunkCount,
         hasExhibit,
         status,
+        score: ps?.score ?? null,
+        band: ps?.band ?? null,
+        pageClass: ps?.pageClass ?? null,
+        flags,
       });
     }
 
+    const scored = pages.filter((p: any) => p.score !== null && p.pageClass !== 'blank');
+    const meanPageScore = scored.length > 0
+      ? Math.round(scored.reduce((s: number, p: any) => s + p.score, 0) / scored.length)
+      : null;
     return NextResponse.json({
       documentId: document.id,
       fileName: document.fileName,
       totalPages,
       pages,
-      summary: { indexedPages, unindexedPages, emptyPages: emptyPageCount, totalChunks },
+      summary: {
+        indexedPages,
+        unindexedPages,
+        emptyPages: emptyPageCount,
+        totalChunks,
+        meanPageScore,
+        riskyPages: scored.filter((p: any) => p.score < 70 && p.score >= 50).length,
+        poorPages: scored.filter((p: any) => p.score < 50).length,
+      },
     });
   } catch (error) {
     console.error('Page report error:', error);

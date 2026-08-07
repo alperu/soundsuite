@@ -53,6 +53,13 @@ export async function POST(
     // (e.g. clerk-scan layers with no word spacing) — dense enough to skip
     // the normal density gate, but useless for search.
     const forceOcr: boolean = body.forceOcr === true;
+    // Optional overall-job context from batch runners: shows "page X of the
+    // WHOLE repair" on the document card instead of per-batch progress that
+    // resets every request (task #6).
+    const overall: { done: number; total: number } | null =
+      body.progress && Number.isFinite(body.progress.done) && Number.isFinite(body.progress.total)
+        ? { done: Number(body.progress.done), total: Number(body.progress.total) }
+        : null;
 
     if (!Array.isArray(pages) || pages.length === 0) {
       return NextResponse.json({ error: 'pages must be a non-empty array of page numbers' }, { status: 400 });
@@ -158,11 +165,12 @@ export async function POST(
       await pdfParser.loadDocument(doc.filePath);
       documentLoaded = true;
 
-      await publishProgress(id, 'text-extraction', `Re-extracting text (${pages.length} target pages)...`, 5);
-      logger.info('Extracting text from PDF...');
-      const allPages = await pdfParser.extractText(doc.filePath);
-      const targetPages = allPages.filter(p => pages.includes(p.pageNumber));
-      logger.info(`Extracted text for ${targetPages.length} target pages out of ${allPages.length} total`);
+      await publishProgress(id, 'text-extraction', `Extracting ${pages.length} target page(s)...`, 5);
+      logger.info('Extracting target pages from PDF...');
+      // Targeted per-page extraction — the previous whole-document pass cost
+      // ~90s per batch on large records just to discard all but N pages.
+      const targetPages = await pdfParser.extractTextForPages(doc.filePath, pages);
+      logger.info(`Extracted text for ${targetPages.length} target pages`);
 
       // --- OCR fallback for low-density pages ---
       const ocrThreshold = config.ocrThreshold || 50;
@@ -194,7 +202,13 @@ export async function POST(
       let pageIdx = 0;
       for (const page of targetPages) {
         pageIdx++;
-        await publishProgress(id, 'ocr-fallback', `Re-OCR page ${page.pageNumber} (${pageIdx}/${targetPages.length})`, 10 + (pageIdx / targetPages.length) * 60);
+        const progressDetail = overall
+          ? `Re-OCR page ${page.pageNumber} (${overall.done + pageIdx}/${overall.total} overall)`
+          : `Re-OCR page ${page.pageNumber} (${pageIdx}/${targetPages.length})`;
+        const progressPct = overall
+          ? 10 + ((overall.done + pageIdx) / Math.max(1, overall.total)) * 60
+          : 10 + (pageIdx / targetPages.length) * 60;
+        await publishProgress(id, 'ocr-fallback', progressDetail, progressPct);
         logger.info(`Page ${page.pageNumber}: density=${page.textDensity}, threshold=${ocrThreshold}${forceOcr ? ' (forceOcr)' : ''}`);
 
         if (forceOcr || page.textDensity < ocrThreshold) {
@@ -295,6 +309,31 @@ export async function POST(
         }
       }
 
+      // --- Structure parity with the main pipeline (docparse hybrid) ---
+      // Without this, reindexed pages carried legacy chunk shapes and a
+      // stale Meta View. Transcript docs are skipped: RR structure needs
+      // rrLines from the full extraction path, and overwriting their
+      // existing structuredJson here would degrade it.
+      const isTranscriptDoc = /reporter.?s?\s+record/i.test(doc.documentType ?? '');
+      if (config.docparseEnabled && !isTranscriptDoc) {
+        try {
+          await publishProgress(id, 'text-extraction', 'Extracting page structure...', 72);
+          const { produceStructuredPages } = await import('@/lib/ingestion/structure-producer');
+          const counters = await produceStructuredPages({
+            filePath: doc.filePath,
+            pages: targetPages,
+            ocrThreshold,
+            ocrEngine,
+            transcriptDoc: false,
+          });
+          logger.info('Reindex structure counters', counters as any);
+        } catch (err) {
+          logger.warn('Reindex structure stage failed (non-fatal)', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
       // --- Update PageCache for processed pages ---
       // source='empty' is reserved for ink-verified blanks; an OCR-empty page
       // that failed the ink check (or never got a faithful render) stays a
@@ -313,11 +352,25 @@ export async function POST(
               : page.textDensity >= ocrThreshold
                 ? 'extract'
                 : 'ocr';
+        // Persist structure alongside text (same shape as the pipeline's
+        // structure stage) so Meta View reflects the reindexed content.
+        const structured = page.blocks && page.blocks.length > 0
+          ? {
+              structuredJson: JSON.stringify({
+                pageNumber: page.pageNumber,
+                producer: page.blocks.some((b: any) => b.bbox !== null) ? 'pdf' : 'ocr',
+                pageWidth: (page as any).pageWidth,
+                pageHeight: (page as any).pageHeight,
+                blocks: page.blocks,
+              }),
+              parseMethod: 'docparse',
+            }
+          : {};
         try {
           await (prisma as any).pageCache.upsert({
             where: { documentId_pageNumber: { documentId: id, pageNumber: page.pageNumber } },
-            create: { documentId: id, pageNumber: page.pageNumber, text: page.text, textDensity: page.textDensity, source },
-            update: { text: page.text, textDensity: page.textDensity, source },
+            create: { documentId: id, pageNumber: page.pageNumber, text: page.text, textDensity: page.textDensity, source, ...structured },
+            update: { text: page.text, textDensity: page.textDensity, source, ...structured },
           });
         } catch {
           // Non-critical — continue

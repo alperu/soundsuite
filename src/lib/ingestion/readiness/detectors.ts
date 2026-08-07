@@ -70,7 +70,7 @@ export interface GlyphFinding {
   maxBigramEntropy: number;
 }
 
-function pageGlyphMetrics(text: string): {
+export function pageGlyphMetrics(text: string): {
   replacementRatio: number;
   dictRatio: number;
   bigramEntropy: number;
@@ -268,9 +268,12 @@ export function classifyBaseline(signals: {
   imageOnlyPages: number;
   pagesWithText: number;
   meanOcrConfidence: number | null;
+  /** Blank-by-design pages — excluded from the fraction denominator. */
+  blankPages?: number[];
 }): { baseline: number; formatClass: FormatClass } {
   const { pageCount, ocrPages, imageOnlyPages, pagesWithText, meanOcrConfidence } = signals;
-  const imageFraction = pageCount > 0 ? imageOnlyPages / pageCount : 0;
+  const effectivePages = Math.max(0, pageCount - (signals.blankPages?.length ?? 0));
+  const imageFraction = effectivePages > 0 ? imageOnlyPages / effectivePages : 0;
 
   let formatClass: FormatClass;
   if (pagesWithText === 0) {

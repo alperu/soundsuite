@@ -23,6 +23,7 @@ import { getConfig } from '@/lib/db/config';
 import { createLogger } from '@/lib/logger';
 import { collectSignals } from '@/lib/ingestion/readiness/collect';
 import { computeReadiness } from '@/lib/ingestion/readiness/score';
+import { READINESS_MODEL_VERSION } from '@/lib/ingestion/readiness/types';
 import type { VerificationResult } from '@/lib/ingestion/indexing-verifier';
 
 const logger = createLogger('ReadinessBackfill');
@@ -33,14 +34,22 @@ const DEFAULT_LIMIT = 200;
 
 interface CandidateWhere {
   status: string;
-  readinessScore?: null;
+  OR?: Array<Record<string, unknown>>;
   caseId?: string;
   id?: { in: string[] };
 }
 
 function candidateWhere(opts: { caseId?: string; documentIds?: string[]; force?: boolean }): CandidateWhere {
   const where: CandidateWhere = { status: 'INDEXED' };
-  if (!opts.force) where.readinessScore = null;
+  // Without force, select documents that are unscored OR scored by an older
+  // model version — the model-version bump drives the migration.
+  if (!opts.force) {
+    where.OR = [
+      { readinessScore: null },
+      { readinessModelVersion: null },
+      { readinessModelVersion: { not: READINESS_MODEL_VERSION } },
+    ];
+  }
   if (opts.caseId) where.caseId = opts.caseId;
   if (opts.documentIds?.length) where.id = { in: opts.documentIds };
   return where;
@@ -123,6 +132,7 @@ export async function POST(req: NextRequest) {
       try {
         // Per-page chunk data from LanceDB.
         const pageText = new Map<number, string>();
+        const chunkCountByPage = new Map<number, number>();
         let chunkCount = 0;
         if (table) {
           const escapedDocId = doc.id.replace(/'/g, "''");
@@ -135,6 +145,7 @@ export async function POST(req: NextRequest) {
           for (const row of rows) {
             const p = row.page_number as number;
             if (!Number.isFinite(p) || p < 1) continue;
+            chunkCountByPage.set(p, (chunkCountByPage.get(p) ?? 0) + 1);
             // Strip the injected context header ("[Case: ... | Filing: ...]")
             // — it's an indexing artifact repeated in every chunk and skews
             // the repetition/entropy detectors.
@@ -170,7 +181,9 @@ export async function POST(req: NextRequest) {
             pageNumber: r.pageNumber,
             text: r.text,
             textDensity: r.textDensity,
-            source: r.source === 'ocr' ? 'ocr' : 'extract',
+            // 'empty' (ink-verified blank) must survive the merge — mapping
+            // it to 'extract' would turn a blank into a penalized gap.
+            source: r.source === 'ocr' ? 'ocr' : r.source === 'empty' ? 'empty' : 'extract',
             confidence: r.confidence,
           });
         }
@@ -186,8 +199,11 @@ export async function POST(req: NextRequest) {
         }
 
         const withText = new Set(pages.filter((p) => p.text.trim().length > 0).map((p) => p.pageNumber));
+        const blankSet = new Set(pages.filter((p) => p.source === 'empty').map((p) => p.pageNumber));
         const gapPages: number[] = [];
-        for (let p = 1; p <= pageCount; p++) if (!withText.has(p)) gapPages.push(p);
+        for (let p = 1; p <= pageCount; p++) {
+          if (!withText.has(p) && !blankSet.has(p)) gapPages.push(p);
+        }
 
         const verification: VerificationResult = {
           totalPages: pageCount,
@@ -195,14 +211,18 @@ export async function POST(req: NextRequest) {
           pagesWithoutText: gapPages.length,
           ocrPages: pages.filter((p) => p.source === 'ocr').length,
           gapPages,
+          blankPages: Array.from(blankSet).sort((a, b) => a - b),
           totalChunksIndexed: chunkCount,
           warnings: [],
           pages,
         };
 
-        const signals = collectSignals({ verification, chunkCount, renderFailedCount: 0, ocrThreshold, documentType: doc.documentType });
-        const readiness = computeReadiness(signals);
         const estimated = !usePageCache;
+        const signals = collectSignals({ verification, chunkCount, renderFailedCount: 0, ocrThreshold, documentType: doc.documentType });
+        // Chunk-derived gaps are unverifiable — suppress the missing-page
+        // penalty on the estimate path (warning retained).
+        signals.estimatedGaps = estimated;
+        const readiness = computeReadiness(signals);
         if (estimated) {
           readiness.warnings.unshift({
             code: 'BACKFILL_ESTIMATE',
@@ -219,20 +239,59 @@ export async function POST(req: NextRequest) {
             readinessBand: readiness.band,
             readinessWarnings: JSON.stringify(readiness.warnings),
             readinessScoredAt: new Date(),
+            readinessModelVersion: READINESS_MODEL_VERSION,
           },
         });
 
-        // Stamp the score onto the chunk rows too (shown on /vectors).
-        if (table && hasScoreColumn) {
-          try {
+        // Per-page scores: persist PageScore rows and stamp each chunk with
+        // its page's score (bucketed by score value — a handful of updates
+        // per document instead of one per page).
+        try {
+          const { computePageScores } = await import('@/lib/ingestion/readiness/page-score');
+          const pageScores = computePageScores({
+            pages,
+            totalPages: pageCount,
+            glyphPages: new Set(signals.glyphArtifactPages),
+            chunkCountByPage,
+            estimated,
+          });
+          await (prisma as any).pageScore.deleteMany({ where: { documentId: doc.id } });
+          await (prisma as any).pageScore.createMany({
+            data: pageScores.map((p) => ({
+              documentId: doc.id,
+              pageNumber: p.pageNumber,
+              score: p.score,
+              band: p.band,
+              pageClass: p.pageClass,
+              flags: JSON.stringify(p.flags),
+              textDensity: p.textDensity,
+              source: p.source,
+              confidence: p.confidence,
+              chunkCount: p.chunkCount,
+            })),
+          });
+
+          if (table && hasScoreColumn) {
             const escapedDocId = doc.id.replace(/'/g, "''");
-            await table.update({
-              where: `document_id = '${escapedDocId}'`,
-              values: { readiness_score: readiness.score },
-            });
-          } catch (err) {
-            logger.warn('Chunk readiness stamp failed', { documentId: doc.id, error: (err as Error).message });
+            const byScore = new Map<number, number[]>();
+            for (const p of pageScores) {
+              if (p.pageClass === 'blank') continue;
+              const list = byScore.get(p.score) ?? [];
+              list.push(p.pageNumber);
+              byScore.set(p.score, list);
+            }
+            const IN_CHUNK = 500;
+            for (const [score, nums] of byScore) {
+              for (let i = 0; i < nums.length; i += IN_CHUNK) {
+                await table.update({
+                  where: `document_id = '${escapedDocId}' AND page_number IN (${nums.slice(i, i + IN_CHUNK).join(', ')})`,
+                  values: { readiness_score: score },
+                });
+              }
+            }
           }
+        } catch (err) {
+          logger.warn('Per-page scoring/stamp failed', { documentId: doc.id, error: (err as Error).message });
         }
         results.push({
           id: doc.id,

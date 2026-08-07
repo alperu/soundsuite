@@ -715,6 +715,57 @@ export class VectorStore {
   }
 
   /**
+   * Stamp PER-PAGE readiness scores onto a document's chunk rows (readiness
+   * v2 Phase 3): every chunk inherits its page's score. Bucketed by score
+   * value — most documents collapse to a handful of updates (e.g. 95 for
+   * text pages, 80 for OCR pages, 0 for gaps) instead of one update per
+   * page. IN-lists are chunked to keep the SQL bounded. Non-fatal.
+   */
+  async stampPageScores(
+    documentId: string,
+    pageScores: Array<{ pageNumber: number; score: number }>,
+  ): Promise<void> {
+    if (!this.db || !this.table || pageScores.length === 0) return;
+    try {
+      const schema = await this.table.schema();
+      const hasColumn = schema.fields.some((f: { name: string }) => f.name === 'readiness_score');
+      if (!hasColumn) {
+        logger.info('Adding readiness_score column to LanceDB table');
+        await this.table.addColumns([{ name: 'readiness_score', valueSql: '-1' }]);
+      }
+      const escaped = documentId.replace(/'/g, "''");
+
+      const byScore = new Map<number, number[]>();
+      for (const p of pageScores) {
+        const list = byScore.get(p.score) ?? [];
+        list.push(p.pageNumber);
+        byScore.set(p.score, list);
+      }
+
+      const IN_CHUNK = 500;
+      for (const [score, pageNums] of byScore) {
+        for (let i = 0; i < pageNums.length; i += IN_CHUNK) {
+          const slice = pageNums.slice(i, i + IN_CHUNK);
+          await this.table.update({
+            where: `document_id = '${escaped}' AND page_number IN (${slice.join(', ')})`,
+            values: { readiness_score: score },
+          });
+        }
+      }
+      logger.info('Stamped per-page chunk scores', {
+        documentId,
+        pages: pageScores.length,
+        buckets: byScore.size,
+      });
+    } catch (error) {
+      logger.warn('Failed to stamp per-page chunk scores', {
+        documentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
    * Delete chunks for specific pages of a document.
    * Used for selective page reindexing without clearing the entire document.
    */

@@ -17,8 +17,10 @@ export interface VerificationResult {
   pagesWithoutText: number;
   /** Pages processed via OCR */
   ocrPages: number;
-  /** Page numbers that have no text (gaps) */
+  /** Page numbers that have no text (genuine gaps — blanks excluded) */
   gapPages: number[];
+  /** Page numbers verified blank-by-design (PageCache source='empty') */
+  blankPages: number[];
   /** Total chunks inserted into LanceDB */
   totalChunksIndexed: number;
   /** Informational warnings */
@@ -32,7 +34,7 @@ export interface VerificationResult {
     pageNumber: number;
     text: string;
     textDensity: number;
-    source: 'extract' | 'ocr';
+    source: 'extract' | 'ocr' | 'empty';
     confidence: number | null;
   }>;
 }
@@ -56,6 +58,7 @@ export async function verifyIndexing(
 ): Promise<VerificationResult> {
   const warnings: string[] = [];
   const gapPages: number[] = [];
+  const blankPages: number[] = [];
   let pagesWithText = 0;
   let pagesWithoutText = 0;
   let ocrPages = 0;
@@ -74,10 +77,14 @@ export async function verifyIndexing(
       pageMap.set(page.pageNumber, page);
     }
 
-    // Check each page
+    // Check each page. A page explicitly classified blank-by-design
+    // (source='empty': render ok + OCR empty + ink below threshold) is NOT a
+    // gap — it has no content to be missing.
     for (let p = 1; p <= totalPages; p++) {
       const cached = pageMap.get(p);
-      if (!cached || !cached.text || cached.text.trim().length === 0) {
+      if (cached && cached.source === 'empty') {
+        blankPages.push(p);
+      } else if (!cached || !cached.text || cached.text.trim().length === 0) {
         pagesWithoutText++;
         gapPages.push(p);
       } else {
@@ -120,6 +127,7 @@ export async function verifyIndexing(
     pagesWithoutText,
     ocrPages,
     gapPages,
+    blankPages,
     totalChunksIndexed: totalChunks,
     warnings,
     pages: loadedPages,

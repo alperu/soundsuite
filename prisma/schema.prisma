@@ -95,6 +95,9 @@ model Document {
   readinessBand     String?   // 'HIGH' | 'OK' | 'RISKY' | 'POOR'
   readinessWarnings Json?     // ReadinessWarning[] (src/lib/ingestion/readiness/types.ts)
   readinessScoredAt DateTime?
+  // Scoring model version (READINESS_MODEL_VERSION) — v1 baseline-minus-
+  // penalties vs v2 page-average scores are not comparable; null = v1-era.
+  readinessModelVersion Int?
   // XETO v1 — generic tag bag
   tags             Json     @default("{}")
   createdAt        DateTime @default(now())
@@ -189,6 +192,28 @@ model PageCache {
   @@unique([documentId, pageNumber])
   @@index([documentId])
   @@index([source])
+}
+
+/// Per-page readiness score, computed in the verification window and
+/// persisted here because PageCache resume rows are wiped on successful
+/// ingest. Snapshots density/source/confidence so the page report can show
+/// real provenance for INDEXED documents (readiness v2 Phase 3).
+model PageScore {
+  id          String   @id @default(uuid())
+  documentId  String
+  pageNumber  Int
+  score       Int
+  band        String   // 'HIGH' | 'OK' | 'RISKY' | 'POOR'
+  pageClass   String   // PageQualityClass, plus 'blank'
+  flags       String   @default("[]") // JSON WarningCode[]
+  textDensity Int      @default(0)
+  source      String   @default("extract") // 'extract' | 'ocr' | 'empty'
+  confidence  Float?
+  chunkCount  Int      @default(0)
+  scoredAt    DateTime @default(now())
+
+  @@unique([documentId, pageNumber])
+  @@index([documentId])
 }
 
 model ActionLog {

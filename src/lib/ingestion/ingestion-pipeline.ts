@@ -25,6 +25,7 @@ import { verifyIndexing, VerificationResult } from './indexing-verifier';
 import { collectSignals } from './readiness/collect';
 import { computeReadiness } from './readiness/score';
 import type { ReadinessResult } from './readiness/types';
+import { READINESS_MODEL_VERSION } from './readiness/types';
 import { extractAnnotationsForDocument, PageAnnotation, buildAnnotationMarkers } from './annotation-extractor';
 import { detectLineNumbers } from '../citations/line-number-detector';
 import * as fs from 'fs/promises';
@@ -372,12 +373,74 @@ export class IngestionPipeline {
     } catch { /* ignore */ }
     try {
       // Keep structured rows (structuredJson set) — PageCache doubles as the
-      // permanent structure store (PLAN-ss-docparse §5); only the plain
+      // permanent structure store (PLAN-ss-docparse §5) — and keep
+      // blank-verified rows (source='empty'), which are permanent page
+      // metadata the readiness scorer needs on rescore; only the plain
       // resume-cache rows are cleaned up.
       await (this.database as any).pageCache.deleteMany({
-        where: { documentId, structuredJson: null },
+        where: { documentId, structuredJson: null, source: { not: 'empty' } },
       });
     } catch { /* ignore */ }
+  }
+
+  /**
+   * Classify gap pages (no extracted text) as blank-by-design when all
+   * evidence agrees: faithful (non-placeholder) render, ink coverage below
+   * the blank threshold, and OCR of the render returning empty. Verified
+   * blanks are persisted as PageCache source='empty' and moved from
+   * verification.gapPages to verification.blankPages so the readiness
+   * scorer excludes them instead of penalizing them. Any conflicting signal
+   * leaves the page classified as missing.
+   */
+  private async classifyBlankGapPages(
+    documentId: string,
+    filePath: string,
+    verification: VerificationResult,
+  ): Promise<void> {
+    const { renderPage } = await import('@/lib/pdf-page-renderer');
+    const { withSemaphore } = await import('@/lib/render-semaphore');
+    const { checkInkCoverage } = await import('./readiness/blank-page');
+
+    const stillGaps: number[] = [];
+    for (const pageNum of verification.gapPages) {
+      let blank = false;
+      try {
+        const rendered = await withSemaphore(() => renderPage(filePath, pageNum, 1.5));
+        if (!rendered.placeholder) {
+          const ink = await checkInkCoverage(rendered.buffer);
+          if (ink.blank) {
+            // Ink says blank — confirm nothing machine-readable remains.
+            const ocr = await this.ocrEngine.recognizeImage(rendered.buffer);
+            blank = !ocr.text || ocr.text.trim().length === 0;
+            if (!blank) {
+              this.logger.info(`Page ${pageNum}: low ink but OCR found text — keeping as gap`, { documentId });
+            }
+          }
+        }
+      } catch (err) {
+        // Render/OCR failure = no evidence = missing, not blank.
+        this.logger.warn(`Blank check failed for page ${pageNum} — keeping as gap`, {
+          documentId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      if (blank) {
+        verification.blankPages.push(pageNum);
+        try {
+          await (this.database as any).pageCache.upsert({
+            where: { documentId_pageNumber: { documentId, pageNumber: pageNum } },
+            create: { documentId, pageNumber: pageNum, text: '', textDensity: 0, source: 'empty' },
+            update: { text: '', textDensity: 0, source: 'empty' },
+          });
+        } catch { /* non-critical */ }
+        this.logger.info(`Page ${pageNum}: verified blank-by-design`, { documentId });
+      } else {
+        stillGaps.push(pageNum);
+      }
+    }
+    verification.pagesWithoutText -= verification.gapPages.length - stillGaps.length;
+    verification.gapPages = stillGaps;
   }
 
   /**
@@ -1080,6 +1143,21 @@ export class IngestionPipeline {
         await this.publishProgress(documentId, 'verification', 'Verifying indexing...', 93);
         verification = await verifyIndexing(documentId, pageCount, embeddedChunks.length, this.database);
 
+        // Blank-by-design classification for gap pages: a page with no text
+        // whose render is faithful, OCRs to empty, and carries no ink is a
+        // separator/back page, not an extraction failure. Bounded to a small
+        // gap count — this renders + OCRs each candidate.
+        if (verification.gapPages.length > 0 && verification.gapPages.length <= 25) {
+          try {
+            await this.classifyBlankGapPages(documentId, filePath, verification);
+          } catch (blankErr) {
+            this.logger.warn('Blank-page classification failed (non-fatal)', {
+              documentId,
+              error: blankErr instanceof Error ? blankErr.message : String(blankErr),
+            });
+          }
+        }
+
         // AI Readiness Score — must run HERE, before clearCheckpoint wipes
         // PageCache (the per-page signals are destroyed on success). Result
         // is persisted to Document columns in the final status update below.
@@ -1105,9 +1183,50 @@ export class IngestionPipeline {
               formatClass: readiness.formatClass,
               warnings: readiness.warnings.map((w) => w.code),
             });
-            // Propagate onto the chunk rows so search/vectors surfaces can
-            // display per-chunk quality. Non-fatal by design.
-            await this.vectorStore.stampReadinessScore(documentId, readiness.score);
+
+            // Per-page scores (readiness v2 Phase 3): persist to PageScore
+            // (outlives the PageCache wipe) and stamp each chunk with its
+            // page's score. Non-fatal by design.
+            try {
+              const { computePageScores } = await import('./readiness/page-score');
+              const chunkCountByPage = new Map<number, number>();
+              for (const c of embeddedChunks) {
+                const p = c.metadata.pageNumber;
+                chunkCountByPage.set(p, (chunkCountByPage.get(p) ?? 0) + 1);
+              }
+              const pageScores = computePageScores({
+                pages: verification.pages,
+                totalPages: pageCount,
+                glyphPages: new Set(signals.glyphArtifactPages),
+                chunkCountByPage,
+              });
+              await (this.database as any).pageScore.deleteMany({ where: { documentId } });
+              await (this.database as any).pageScore.createMany({
+                data: pageScores.map((p) => ({
+                  documentId,
+                  pageNumber: p.pageNumber,
+                  score: p.score,
+                  band: p.band,
+                  pageClass: p.pageClass,
+                  flags: JSON.stringify(p.flags),
+                  textDensity: p.textDensity,
+                  source: p.source,
+                  confidence: p.confidence,
+                  chunkCount: p.chunkCount,
+                })),
+              });
+              await this.vectorStore.stampPageScores(
+                documentId,
+                pageScores
+                  .filter((p) => p.pageClass !== 'blank')
+                  .map((p) => ({ pageNumber: p.pageNumber, score: p.score })),
+              );
+            } catch (pageScoreErr) {
+              this.logger.warn('Per-page scoring failed (non-fatal)', {
+                documentId,
+                error: pageScoreErr instanceof Error ? pageScoreErr.message : String(pageScoreErr),
+              });
+            }
           } catch (scoreError) {
             this.logger.warn('Readiness scoring failed (non-fatal)', {
               documentId,
@@ -1183,6 +1302,7 @@ export class IngestionPipeline {
                 readinessBand: readiness.band,
                 readinessWarnings: JSON.stringify(readiness.warnings),
                 readinessScoredAt: new Date(),
+                readinessModelVersion: READINESS_MODEL_VERSION,
               }
             : {}),
         },
