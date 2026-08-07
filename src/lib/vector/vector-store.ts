@@ -182,9 +182,12 @@ export class VectorStore {
     try {
       // Check if FTS index already exists
       const indices = await this.table.listIndices();
-      const hasFts = indices.some(
-        (idx: any) => idx.indexType === 'INVERTED' || idx.columns?.includes('text')
-      );
+      // NOTE: columns check only — the reported indexType on this LanceDB
+      // version is 'FTS' (verified live), so an indexType === 'INVERTED'
+      // disjunct is inert today and would FALSE-POSITIVE on any future
+      // scalar inverted index, silently skipping text-FTS creation and
+      // degrading every search to LIKE.
+      const hasFts = indices.some((idx: any) => idx.columns?.includes('text'));
 
       if (hasFts) {
         this._hasFtsIndex = true;

@@ -1,0 +1,57 @@
+import { buildCiteContext, citeOf, truncateBlock } from '../context-builder';
+import { sourceDedupKey } from '../source-dedup';
+
+const src = (text: string, page = 1, citation?: string) =>
+  ({ text, document: 'doc-a', page, citation });
+
+describe('buildCiteContext', () => {
+  it('skips an oversized block and keeps later smaller ones (break→continue fix)', () => {
+    const big = src('X'.repeat(900), 1);
+    const small = src('small enough', 2);
+    // perBlockCap large so the big block is NOT truncated, only over-budget
+    const r = buildCiteContext([src('lead', 0), big, small], {
+      maxTotalChars: 120,
+      perBlockCap: 5000,
+    });
+    expect(r.contextBlock).toContain('lead');
+    expect(r.contextBlock).toContain('small enough'); // old loops dropped this
+    expect(r.contextBlock).not.toContain('XXXX');
+    expect(r.skippedCount).toBe(1);
+  });
+
+  it('truncates blocks over the per-block cap into budget instead of losing them', () => {
+    const r = buildCiteContext([src('A'.repeat(500))], {
+      maxTotalChars: 400,
+      perBlockCap: 100,
+    });
+    expect(r.usedCount).toBe(1);
+    expect(r.truncatedCount).toBe(1);
+    expect(r.contextBlock).toContain('…[truncated]');
+  });
+
+  it('reproduces the legacy block shape: [cite]\\ntext with separators', () => {
+    const r = buildCiteContext([src('one', 1, 'C1'), src('two', 2, 'C2')], { maxTotalChars: 10_000 });
+    expect(r.contextBlock).toBe('[C1]\none\n\n---\n[C2]\ntwo\n');
+  });
+
+  it('citeOf falls back citation → citationShort → document/page', () => {
+    expect(citeOf({ text: '', document: 'D', page: 3 })).toBe('D, p.3');
+    expect(citeOf({ text: '', document: 'D', page: 3, citationShort: 'S' })).toBe('S');
+    expect(citeOf({ text: '', document: 'D', page: 3, citation: 'C', citationShort: 'S' })).toBe('C');
+  });
+
+  it('truncateBlock marks the cut', () => {
+    expect(truncateBlock('abcdef', 3)).toEqual({ text: 'abc…[truncated]', truncated: true });
+    expect(truncateBlock('ab', 3)).toEqual({ text: 'ab', truncated: false });
+  });
+});
+
+describe('sourceDedupKey', () => {
+  it('distinguishes table fragments that share their first 100 chars', () => {
+    const header = 'No. | Date | From | To | Snippet\n'.repeat(4); // >100 chars shared prefix
+    const a = header + 'row group one';
+    const b = header + 'row group two';
+    expect(sourceDedupKey('d', 5, a)).not.toBe(sourceDedupKey('d', 5, b));
+    expect(sourceDedupKey('d', 5, a)).toBe(sourceDedupKey('d', 5, a));
+  });
+});

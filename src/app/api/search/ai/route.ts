@@ -4,6 +4,8 @@ import { streamRlm } from '@/lib/ai/stream-rlm';
 import { AIProviderKey, AI_PROVIDERS, AI_PROVIDER_KEYS } from '@/lib/ai/models';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 import { extractPatternKeywords } from '@/lib/search/deep-search';
+import { sourceDedupKey } from '@/lib/search/source-dedup';
+import { buildCiteContext } from '@/lib/search/context-builder';
 import { prisma } from '@/lib/db/prisma';
 
 /**
@@ -150,11 +152,11 @@ export async function POST(request: NextRequest) {
               let added = 0;
               if (patternResult.success && patternResult.data?.results) {
                 const existingKeys = new Set(
-                  sources.map((s) => `${s.document}::${s.page}::${s.text.slice(0, 100)}`),
+                  sources.map((s) => sourceDedupKey(s.document, s.page, s.text)),
                 );
 
                 for (const r of patternResult.data.results) {
-                  const key = `${r.document}::${r.page}::${r.text.slice(0, 100)}`;
+                  const key = sourceDedupKey(r.document, r.page, r.text);
                   if (!existingKeys.has(key)) {
                     sources.push({
                       text: r.text,
@@ -189,18 +191,15 @@ export async function POST(request: NextRequest) {
           // for system prompt, history, and generation within the context window.
 
           const CONTEXT_CHAR_BUDGET = 12_000;
-          let contextChunks = '';
-          let usedSources = 0;
-          for (const s of sources) {
-            const cite = s.citation || s.citationShort || `${s.document}, p.${s.page}`;
-            const chunk = `[${cite}]\n${s.text}`;
-            const separator = contextChunks ? '\n\n---\n\n' : '';
-            if (contextChunks.length + separator.length + chunk.length > CONTEXT_CHAR_BUDGET && usedSources > 0) break;
-            contextChunks += separator + chunk;
-            usedSources++;
-          }
+          const ctx = buildCiteContext(sources, {
+            maxTotalChars: CONTEXT_CHAR_BUDGET,
+            separator: '\n\n---\n\n',
+            trailingNewline: false,
+          });
+          const contextChunks = ctx.contextBlock;
+          const usedSources = ctx.usedCount;
           if (usedSources < sources.length) {
-            console.log(`[AI Search] Context budget: using ${usedSources}/${sources.length} sources (${contextChunks.length} chars)`);
+            console.log(`[AI Search] Context budget: using ${usedSources}/${sources.length} sources (${ctx.totalChars} chars, ${ctx.skippedCount} skipped, ${ctx.truncatedCount} truncated)`);
           }
 
           send({

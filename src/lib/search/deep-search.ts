@@ -17,6 +17,8 @@ import { parseBooleanQuery, astSerialize } from './boolean-query';
 import { runRlmWithTools, type RlmToolSpec, RLM_MODEL_ID } from '../ai/stream-rlm';
 import { segmentChipsAndIntents, type Segment as ChipQuerySegment } from './chip-segments';
 import { extractFieldFilters } from './boolean-to-fts';
+import { sourceDedupKey } from './source-dedup';
+import { buildCiteContext, citeOf, truncateBlock } from './context-builder';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -637,7 +639,7 @@ export async function executePerChipPatternSearches(
 // ---------------------------------------------------------------------------
 
 function makeDeduplicationKey(source: DeepSearchSource): string {
-  return `${source.document}::${source.page}::${source.text.slice(0, 100)}`;
+  return sourceDedupKey(source.document, source.page, source.text);
 }
 
 export async function deduplicateAndMerge(
@@ -855,20 +857,11 @@ export async function generateReport(
     citation: s.citation || s.citationShort || `${s.document}, p.${s.page}`,
   }));
 
-  // Use buildContext with citation-enriched format
-  const contextParts: string[] = [];
-  let totalChars = 0;
-  const maxChars = 120000;
-
-  for (const chunk of contextChunks) {
-    const cite = chunk.citation;
-    const block = `[${cite}]\n${chunk.text}\n`;
-    if (totalChars + block.length > maxChars) break;
-    contextParts.push(block);
-    totalChars += block.length;
-  }
-
-  const contextBlock = contextParts.join('\n---\n');
+  // Unified builder: skip-not-break on budget overflow + per-block cap
+  const { contextBlock, totalChars } = buildCiteContext(
+    contextChunks.map(c => ({ text: c.text, document: '', page: c.pageNumber, citation: c.citation })),
+    { maxTotalChars: 120000 },
+  );
 
   // Build conversation history section if follow-up
   let historySection = '';
@@ -1061,16 +1054,8 @@ Rules:
 - Base your analysis ONLY on the provided excerpts`;
 
 function buildSourceContext(sources: DeepSearchSource[], maxChars = 120000): { contextBlock: string; chars: number } {
-  const parts: string[] = [];
-  let total = 0;
-  for (const s of sources) {
-    const cite = s.citation || s.citationShort || `${s.document}, p.${s.page}`;
-    const block = `[${cite}]\n${s.text}\n`;
-    if (total + block.length > maxChars) break;
-    parts.push(block);
-    total += block.length;
-  }
-  return { contextBlock: parts.join('\n---\n'), chars: total };
+  const ctx = buildCiteContext(sources, { maxTotalChars: maxChars });
+  return { contextBlock: ctx.contextBlock, chars: ctx.totalChars };
 }
 
 export async function generateReportMultiPass(
@@ -1362,11 +1347,12 @@ export async function generateReportWithRlm(
 ): Promise<{ report: string; extraSources: DeepSearchSource[]; host: string | null; model: string }> {
   const emit = options.onProgress || (() => {});
   const extraSources: DeepSearchSource[] = [];
-  const seenKeys = new Set(initialSources.map(s => `${s.document}::${s.page}::${s.text.slice(0, 60)}`));
+  // Full-text keys — a slice(0,60) key collided on header-repeated table
+  // fragments exactly like the main dedup bug (task #13 phase 0a).
+  const seenKeys = new Set(initialSources.map(s => sourceDedupKey(s.document, s.page, s.text)));
 
   // Initial context (same shape as generateReport but smaller — leave room
   // for recursive fetches).
-  const contextParts: string[] = [];
   let totalChars = 0;
   // The RLM is an evidence GATHERER — it fetches more excerpts via tools, so
   // the seed must leave room inside the model's context window for those tool
@@ -1377,17 +1363,12 @@ export async function generateReportWithRlm(
   // have room.
   const maxChars = 30000;
   const RLM_SEED_CHUNK_CHAR_CAP = 1500;
-  for (const s of initialSources) {
-    const cite = s.citation || s.citationShort || `${s.document}, p.${s.page}`;
-    const text = s.text.length > RLM_SEED_CHUNK_CHAR_CAP
-      ? s.text.slice(0, RLM_SEED_CHUNK_CHAR_CAP) + '…[truncated]'
-      : s.text;
-    const block = `[${cite}]\n${text}\n`;
-    if (totalChars + block.length > maxChars) break;
-    contextParts.push(block);
-    totalChars += block.length;
-  }
-  const contextBlock = contextParts.join('\n---\n');
+  const seedCtx = buildCiteContext(initialSources, {
+    maxTotalChars: maxChars,
+    perBlockCap: RLM_SEED_CHUNK_CHAR_CAP,
+  });
+  const contextBlock = seedCtx.contextBlock;
+  totalChars = seedCtx.totalChars;
 
   // Cap prior-conversation context so it can't crowd out the user's question
   // (incl. long pasted text) and the seed excerpts in the 40K RLM window. The
@@ -1502,7 +1483,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
       // Accumulate any new sources into the returned report's source list.
       const newSources: DeepSearchSource[] = [];
       for (const r of results) {
-        const key = `${r.document}::${r.page}::${(r.text || '').slice(0, 60)}`;
+        const key = sourceDedupKey(r.document, r.page, r.text || '');
         if (seenKeys.has(key)) continue;
         seenKeys.add(key);
         const src: DeepSearchSource = {
@@ -1527,14 +1508,10 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
       // the panel/citations — this only constrains the RLM-facing string.
       let truncatedCount = 0;
       const content = results.slice(0, limit).map((r: any) => {
-        const cite = r.citation || r.citationShort || `${r.document}, p.${r.page}`;
         const rawText: string = typeof r.text === 'string' ? r.text : '';
-        let text = rawText;
-        if (text.length > RLM_TOOL_CHUNK_CHAR_CAP) {
-          text = text.slice(0, RLM_TOOL_CHUNK_CHAR_CAP) + '…[truncated]';
-          truncatedCount++;
-        }
-        return `[${cite}]\n${text}`;
+        const t = truncateBlock(rawText, RLM_TOOL_CHUNK_CHAR_CAP);
+        if (t.truncated) truncatedCount++;
+        return `[${citeOf(r)}]\n${t.text}`;
       }).join('\n\n---\n\n') || 'No matches.';
       if (truncatedCount > 0) {
         console.log(`[RLM tool] query_case_knowledge truncated ${truncatedCount}/${results.length} chunks to ${RLM_TOOL_CHUNK_CHAR_CAP} chars`);

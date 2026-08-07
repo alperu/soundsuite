@@ -79,7 +79,11 @@ export async function POST(
 
     // 6. Chunk the draft text
     // Treat the entire draft as a single "page 1" so chunkPages can handle it
-    const textChunker = new LangChainTextChunker();
+    // Same wrapper as production (worker-init) — draft pages carry no
+    // blocks so this delegates wholesale today, but keeps the corpus from
+    // drifting if drafts ever gain structure (task #13 phase 0c).
+    const { StructuredChunker } = await import('@/lib/ingestion/structured-chunker');
+    const textChunker = new StructuredChunker(new LangChainTextChunker());
     const pages = [{ pageNumber: 1, text, textDensity: text.length }];
     const chunks = await textChunker.chunkPages(pages, draft.id, draft.caseId);
 

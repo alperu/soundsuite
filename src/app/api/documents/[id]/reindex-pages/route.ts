@@ -133,7 +133,12 @@ export async function POST(
 
     // --- Extract text for target pages ---
     const pdfParser = new PDFParser();
-    const textChunker = new LangChainTextChunker();
+    // StructuredChunker wrapper matches worker-init's production chunker —
+    // a bare LangChainTextChunker here silently drifted re-indexed pages
+    // back to legacy chunking (task #13 phase 0c). Pages without blocks
+    // delegate wholesale, so this is byte-identical when structure is off.
+    const { StructuredChunker } = await import('@/lib/ingestion/structured-chunker');
+    const textChunker = new StructuredChunker(new LangChainTextChunker());
 
     // Instantiate OCR engine based on config, wrapped in cache so
     // exhibit extraction reuses OCR results from the page fallback pass.
@@ -167,6 +172,9 @@ export async function POST(
       // so crash-resume and readiness scoring see the true provenance
       // (density alone mislabels successful OCR as 'extract').
       const ocrDonePages = new Set<number>();
+      // Pages verified blank-by-design (render ok + OCR empty + ink below
+      // threshold) — the ONLY pages allowed to persist as source='empty'.
+      const blankVerifiedPages = new Set<number>();
 
       const preprocessSettings = {
         upscale: config.ocrUpscale,
@@ -258,6 +266,20 @@ export async function POST(
                 logger.info(`Page ${page.pageNumber}: full-page render OCR success, density=${page.textDensity}`);
               } else {
                 logger.info(`Page ${page.pageNumber}: full-page render OCR returned no text`);
+                // Blank-by-design classification: OCR-empty alone is NOT
+                // sufficient (unreadable photos/handwriting also OCR empty).
+                // Require a faithful (non-placeholder) render with ink
+                // coverage below the blank threshold; conflicts → missing.
+                if (!rendered.placeholder && page.text.trim().length === 0) {
+                  const { checkInkCoverage } = await import('@/lib/ingestion/readiness/blank-page');
+                  const ink = await checkInkCoverage(rendered.buffer);
+                  if (ink.blank) {
+                    blankVerifiedPages.add(page.pageNumber);
+                    logger.info(`Page ${page.pageNumber}: verified blank (inkRatio=${ink.inkRatio.toFixed(5)})`);
+                  } else {
+                    logger.info(`Page ${page.pageNumber}: NOT blank (inkRatio=${ink.inkRatio.toFixed(5)}) — remains a gap`);
+                  }
+                }
               }
             } catch (err) {
               logger.warn(`Page ${page.pageNumber}: full-page render fallback failed`, {
@@ -274,9 +296,23 @@ export async function POST(
       }
 
       // --- Update PageCache for processed pages ---
+      // source='empty' is reserved for ink-verified blanks; an OCR-empty page
+      // that failed the ink check (or never got a faithful render) stays a
+      // gap ('extract' with empty text) so it keeps drawing attention.
       for (const page of targetPages) {
-        const isEmpty = emptyPages.includes(page.pageNumber) || (page.text.trim().length === 0 && page.textDensity === 0);
-        const source = isEmpty ? 'empty' : (ocrDonePages.has(page.pageNumber) ? 'ocr' : (page.textDensity >= ocrThreshold ? 'extract' : 'ocr'));
+        const isEmpty = blankVerifiedPages.has(page.pageNumber);
+        // Empty-text pages that aren't verified blanks are gaps with
+        // 'extract' provenance — never claim OCR produced nothing when OCR
+        // simply failed to read the page.
+        const source = isEmpty
+          ? 'empty'
+          : ocrDonePages.has(page.pageNumber)
+            ? 'ocr'
+            : page.text.trim().length === 0
+              ? 'extract'
+              : page.textDensity >= ocrThreshold
+                ? 'extract'
+                : 'ocr';
         try {
           await (prisma as any).pageCache.upsert({
             where: { documentId_pageNumber: { documentId: id, pageNumber: page.pageNumber } },
