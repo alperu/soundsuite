@@ -33,6 +33,19 @@ export interface ChunkMetadata {
   endLine?: number;
   /** JSON-encoded PageAnnotation[] for annotations overlapping this chunk */
   annotations?: string;
+  /** Dominant block type this chunk was built from ('paragraph' | 'table' |
+   * 'footnote' | 'figure') — task #13 phase 1 structure metadata. */
+  blockType?: string;
+  /** Heading context the chunk was emitted under (already inside the chunk
+   * text per §6.2 — stored separately for filters/breadcrumbs). */
+  headingPath?: string;
+  /** Distinct RR speaker labels overlapping this chunk, delimited
+   * '|THE COURT|MR. DOE|' so LIKE '%|X|%' cannot prefix-match. */
+  speakers?: string;
+  /** Page-block orders that contributed to this chunk (deep-links/dedup). */
+  blockOrders?: number[];
+  /** Union bbox of contributing blocks (page pts, top-left origin). */
+  blockBbox?: [number, number, number, number];
 }
 
 /**

@@ -84,6 +84,11 @@ export interface SearchResult {
     endLine?: number;
     /** JSON-encoded PageAnnotation[] for annotations overlapping this chunk */
     annotations?: string;
+    /** Structure metadata (task #13 phase 1) */
+    blockType?: string;
+    headingPath?: string;
+    /** Delimited '|SPEAKER|…|' RR speakers overlapping this chunk */
+    speakers?: string;
   };
   /** Similarity score (lower is better for L2 distance, higher for RRF) */
   score: number;
@@ -111,6 +116,17 @@ interface LanceDBRow {
   end_line: number;
   annotations: string;
   created_at: number;
+  /** -1 = not yet scored (stamped by stampReadinessScore). */
+  readiness_score: number;
+  // Structure metadata (task #13 phase 1) — empty string = absent
+  block_type: string;
+  heading_path: string;
+  /** Delimited '|SPEAKER|SPEAKER|' so LIKE '%|X|%' cannot prefix-match. */
+  speakers: string;
+  /** JSON number[] of contributing page-block orders. */
+  block_orders: string;
+  /** JSON [x0,y0,x1,y1] union bbox (page pts, top-left). */
+  block_bbox: string;
   [key: string]: any; // Index signature for LanceDB compatibility
 }
 
@@ -253,6 +269,11 @@ export class VectorStore {
       // Document readiness score stamped after verification via
       // stampReadinessScore(); -1 = not yet scored.
       readiness_score: -1,
+      block_type: chunk.metadata.blockType || '',
+      heading_path: chunk.metadata.headingPath || '',
+      speakers: chunk.metadata.speakers || '',
+      block_orders: chunk.metadata.blockOrders?.length ? JSON.stringify(chunk.metadata.blockOrders) : '',
+      block_bbox: chunk.metadata.blockBbox ? JSON.stringify(chunk.metadata.blockBbox) : '',
     }));
 
     try {
@@ -776,6 +797,9 @@ export class VectorStore {
         startLine: row.start_line && row.start_line !== 0 ? row.start_line : undefined,
         endLine: row.end_line && row.end_line !== 0 ? row.end_line : undefined,
         annotations: row.annotations && row.annotations !== '' ? row.annotations : undefined,
+        blockType: row.block_type && row.block_type !== '' ? row.block_type : undefined,
+        headingPath: row.heading_path && row.heading_path !== '' ? row.heading_path : undefined,
+        speakers: row.speakers && row.speakers !== '' ? row.speakers : undefined,
       },
       score: row._distance !== undefined ? row._distance : 0,
     };

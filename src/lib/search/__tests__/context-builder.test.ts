@@ -46,6 +46,21 @@ describe('buildCiteContext', () => {
   });
 });
 
+describe('speaker attribution (phase 1d)', () => {
+  it('renders delimited speakers as a cite-line suffix', () => {
+    const r = buildCiteContext(
+      [{ text: 'Q. And then?', document: 'vol2', page: 8, citation: 'C', speakers: '|THE COURT|MR. DOE|' }],
+      { maxTotalChars: 10_000 },
+    );
+    expect(r.contextBlock).toBe('[C] (speakers: THE COURT, MR. DOE)\nQ. And then?\n');
+  });
+
+  it('omits the suffix when speakers is absent', () => {
+    const r = buildCiteContext([src('plain', 1, 'C')], { maxTotalChars: 10_000 });
+    expect(r.contextBlock).toBe('[C]\nplain\n');
+  });
+});
+
 describe('sourceDedupKey', () => {
   it('distinguishes table fragments that share their first 100 chars', () => {
     const header = 'No. | Date | From | To | Snippet\n'.repeat(4); // >100 chars shared prefix

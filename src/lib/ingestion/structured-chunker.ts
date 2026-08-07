@@ -129,14 +129,33 @@ export class StructuredChunker implements ITextChunker {
   ): Chunk[] {
     const chunks: Chunk[] = [];
     let heading = '';
-    let paraBuf: string[] = [];
+    let paraBuf: { text: string; order: number; bbox: DocparseBlock['bbox']; type: string }[] = [];
 
-    const meta = (): ChunkMetadata => ({
+    const unionBbox = (boxes: DocparseBlock['bbox'][]): [number, number, number, number] | undefined => {
+      const real = boxes.filter((b): b is [number, number, number, number] => b !== null && b !== undefined);
+      if (real.length === 0) return undefined;
+      return [
+        Math.min(...real.map(b => b[0])),
+        Math.min(...real.map(b => b[1])),
+        Math.max(...real.map(b => b[2])),
+        Math.max(...real.map(b => b[3])),
+      ];
+    };
+
+    // Structure metadata rides on every chunk (task #13 phase 1): the
+    // dominant block type, the heading context (also inside the text —
+    // stored separately for filters/breadcrumbs), and the contributing
+    // block orders + union bbox for deep-links.
+    const meta = (m?: { blockType?: string; orders?: number[]; bboxes?: DocparseBlock['bbox'][] }): ChunkMetadata => ({
       documentId,
       caseId,
       pageNumber: page.pageNumber,
       chunkIndex: 0, // renumbered by caller
       isExhibit: false,
+      ...(m?.blockType ? { blockType: m.blockType } : {}),
+      ...(heading ? { headingPath: heading } : {}),
+      ...(m?.orders?.length ? { blockOrders: m.orders } : {}),
+      ...(m?.bboxes ? (() => { const u = unionBbox(m.bboxes); return u ? { blockBbox: u } : {}; })() : {}),
     });
 
     const prefixFor = (h: string) => sacPrefix + (h ? `${h}\n` : '');
@@ -147,18 +166,30 @@ export class StructuredChunker implements ITextChunker {
       if (paraBuf.length === 0) return;
       const budget = bodyBudget(heading);
       let cur = '';
+      // Provenance of the blocks contributing to `cur` — reset per emit.
+      let contrib: typeof paraBuf = [];
       const emit = (body: string) => {
         if (!body.trim()) return;
-        chunks.push({ text: prefixFor(heading) + body, metadata: meta() });
+        const types = new Set(contrib.map(c => c.type));
+        chunks.push({
+          text: prefixFor(heading) + body,
+          metadata: meta({
+            blockType: types.has('footnote') && types.size === 1 ? 'footnote' : 'paragraph',
+            orders: contrib.map(c => c.order),
+            bboxes: contrib.map(c => c.bbox),
+          }),
+        });
       };
       for (const para of paraBuf) {
-        const pieces = para.length > budget ? sentenceSplit(para, budget) : [para];
+        const pieces = para.text.length > budget ? sentenceSplit(para.text, budget) : [para.text];
         for (const piece of pieces) {
           if (cur && cur.length + piece.length + 1 > budget) {
             emit(cur);
             cur = piece;
+            contrib = [para];
           } else {
             cur = cur ? `${cur}\n${piece}` : piece;
+            if (!contrib.includes(para)) contrib.push(para);
           }
         }
       }
@@ -170,8 +201,9 @@ export class StructuredChunker implements ITextChunker {
       const prefix = prefixFor(heading);
       const text = block.text.trim();
       if (!text) return;
+      const tableMeta = () => meta({ blockType: 'table', orders: [block.order], bboxes: [block.bbox] });
       if (text.length <= TABLE_MAX_CHARS) {
-        chunks.push({ text: prefix + text, metadata: meta() });
+        chunks.push({ text: prefix + text, metadata: tableMeta() });
         return;
       }
       // Split on row boundaries, repeating the header row per fragment so
@@ -181,7 +213,7 @@ export class StructuredChunker implements ITextChunker {
       let rows: string[] = [];
       const flushRows = () => {
         if (rows.length === 0) return;
-        chunks.push({ text: prefix + [header, ...rows].join('\n'), metadata: meta() });
+        chunks.push({ text: prefix + [header, ...rows].join('\n'), metadata: tableMeta() });
         rows = [];
       };
       let size = header.length;
@@ -209,7 +241,9 @@ export class StructuredChunker implements ITextChunker {
         case 'paragraph':
         case 'footnote': // footnotes carry citations — included (§6.2 decision 6)
         case 'unknown':
-          if (block.text.trim()) paraBuf.push(block.text.trim());
+          if (block.text.trim()) {
+            paraBuf.push({ text: block.text.trim(), order: block.order, bbox: block.bbox, type: block.type });
+          }
           break;
         // furniture and marks are excluded from chunk text (§6.2 decision 6)
         case 'page_header':

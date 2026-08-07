@@ -23,6 +23,15 @@ export interface CiteContextSource {
   page: number;
   citation?: string;
   citationShort?: string;
+  /** Delimited '|SPEAKER|…|' RR speakers — rendered as an attribution
+   * suffix on the cite line (task #13 phase 1d). */
+  speakers?: string;
+}
+
+/** '|THE COURT|MR. DOE|' → 'THE COURT, MR. DOE' */
+export function speakerList(speakers: string | undefined): string {
+  if (!speakers) return '';
+  return speakers.split('|').filter(Boolean).join(', ');
 }
 
 /** Citation label fallback chain — identical across every call site. */
@@ -72,7 +81,8 @@ export function buildCiteContext(
 
   for (const s of sources) {
     const { text, truncated } = truncateBlock(s.text, perBlockCap);
-    const block = `[${citeOf(s)}]\n${text}${nl}`;
+    const attrib = speakerList(s.speakers);
+    const block = `[${citeOf(s)}]${attrib ? ` (speakers: ${attrib})` : ''}\n${text}${nl}`;
     const cost = block.length + (parts.length > 0 ? separator.length : 0);
     if (total + cost > opts.maxTotalChars) {
       // Skip THIS block and keep going — a later, smaller block may still

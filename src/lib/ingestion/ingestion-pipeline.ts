@@ -925,12 +925,20 @@ export class IngestionPipeline {
           // disagreement review (item 12). Runs BEFORE annotation markers
           // are prepended (below) — containment would break after.
           const rrPageLines = new Map<number, { lineNumber: number; text: string }[]>();
+          // Speaker turns per page for speaker stamping (task #13 phase 1):
+          // exact printed-line interval overlap against the chunk's
+          // startLine/endLine — never touches chunk text.
+          const rrPageTurns = new Map<number, { speaker: string; lineStart: number; lineEnd: number }[]>();
           for (const p of pages) {
             if (!p.structureOnly || !p.blocks) continue;
             const lines = p.blocks.flatMap(b => (b.lines ?? [])
               .filter(l => l.lineNumber !== undefined && l.text.trim().length >= 8)
               .map(l => ({ lineNumber: l.lineNumber!, text: l.text })));
             if (lines.length > 0) rrPageLines.set(p.pageNumber, lines);
+            const turns = p.blocks
+              .filter(b => b.speaker && b.lineStart !== undefined && b.lineEnd !== undefined)
+              .map(b => ({ speaker: b.speaker!, lineStart: b.lineStart!, lineEnd: b.lineEnd! }));
+            if (turns.length > 0) rrPageTurns.set(p.pageNumber, turns);
           }
           const stampCompare = { agree: 0, disagree: 0, legacyOnly: 0, blockOnly: 0 };
 
@@ -956,6 +964,24 @@ export class IngestionPipeline {
               if (!pageEcho) {
                 chunk.metadata.startLine = lineRange.startLine;
                 chunk.metadata.endLine = lineRange.endLine;
+              }
+
+              // Speaker stamping (task #13 phase 1): distinct speaker turns
+              // whose printed-line interval overlaps the chunk's stamped
+              // range. Delimited '|A|B|' so LIKE '%|X|%' is exact-label.
+              // Metadata only — chunk text untouched (byte-identity).
+              if (chunk.metadata.startLine !== undefined && chunk.metadata.endLine !== undefined) {
+                const turns = rrPageTurns.get(chunk.metadata.pageNumber);
+                if (turns) {
+                  const s = chunk.metadata.startLine;
+                  const e = chunk.metadata.endLine;
+                  const speakers = [...new Set(
+                    turns.filter(t => t.lineStart <= e && t.lineEnd >= s).map(t => t.speaker),
+                  )];
+                  if (speakers.length > 0) {
+                    chunk.metadata.speakers = `|${speakers.join('|')}|`;
+                  }
+                }
               }
 
               // Comparison only — never written to metadata yet (item 11).

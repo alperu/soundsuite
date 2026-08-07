@@ -35,6 +35,11 @@ export interface DeepSearchSource {
   volumeNumber?: number;
   caseNumber?: string;
   filingSlug?: string;
+  /** Structure metadata (task #13 phase 1) — optional until backfilled */
+  blockType?: string;
+  headingPath?: string;
+  /** Delimited '|SPEAKER|…|' RR speakers overlapping this chunk */
+  speakers?: string;
   /** Which sub-queries found this chunk */
   matchedSubQueries: string[];
 }
@@ -465,6 +470,9 @@ export async function executeParallelSearches(
           volumeNumber: r.volumeNumber,
           caseNumber: r.caseNumber,
           filingSlug: r.filingSlug,
+          blockType: r.blockType,
+          headingPath: r.headingPath,
+          speakers: r.speakers,
           matchedSubQueries: [subQuery],
         }),
       );
@@ -728,10 +736,25 @@ export async function deduplicateAndMerge(
                                    // pages can't outrank a strong hit.
     for (const source of merged) {
       const isTranscript =
-        (source.document && TRANSCRIPT_FILENAME_RE.test(source.document))
+        // Non-empty speakers is the structural signal — stamped from RR
+        // speaker-turn overlap, far more reliable than the filename regex
+        // (documentType has been observed misclassified upstream).
+        !!source.speakers
+        || (source.document && TRANSCRIPT_FILENAME_RE.test(source.document))
         || (source.filingType && TRANSCRIPT_FILING_RE.test(source.filingType));
       if (isTranscript) source.score *= TRANSCRIPT_BOOST;
     }
+  }
+
+  // Block-type multipliers (task #13 phase 1c) — applied POST-rerank like
+  // the transcript boost above; the reranker itself sees bare text only.
+  const TABLE_INTENT_RE = /\b(table|column|row|total|amount|sum|schedule|itemi[sz]ed|list of|index of|how (?:much|many)|\$\s?\d)/i;
+  const wantsTable = TABLE_INTENT_RE.test(originalQuery);
+  const TABLE_BOOST = 1.2;   // numeric/tabular intent → surface real tables
+  const FIGURE_DEMOTE = 0.85; // figure OCR is the noisiest text in the corpus
+  for (const source of merged) {
+    if (source.blockType === 'table' && wantsTable) source.score *= TABLE_BOOST;
+    else if (source.blockType === 'figure') source.score *= FIGURE_DEMOTE;
   }
 
   // Sort by score descending — needed before the diversity cap below.
@@ -855,11 +878,12 @@ export async function generateReport(
     documentName: s.document,
     pageNumber: s.page,
     citation: s.citation || s.citationShort || `${s.document}, p.${s.page}`,
+    speakers: s.speakers,
   }));
 
   // Unified builder: skip-not-break on budget overflow + per-block cap
   const { contextBlock, totalChars } = buildCiteContext(
-    contextChunks.map(c => ({ text: c.text, document: '', page: c.pageNumber, citation: c.citation })),
+    contextChunks.map(c => ({ text: c.text, document: '', page: c.pageNumber, citation: c.citation, speakers: c.speakers })),
     { maxTotalChars: 120000 },
   );
 
