@@ -48,12 +48,24 @@ export async function GET(
 
     const result = await withSemaphore(() => renderPage(doc.filePath, pageNum, scale));
 
+    // Warm adjacent pages into the renderer's LRU in the background so
+    // next/prev navigation in the page viewer is near-instant. Fire-and-
+    // forget; the render semaphore keeps concurrency bounded.
+    for (const adj of [pageNum + 1, pageNum - 1, pageNum + 2]) {
+      if (adj >= 1) {
+        withSemaphore(() => renderPage(doc.filePath, adj, scale)).catch(() => {});
+      }
+    }
+
     return new NextResponse(new Uint8Array(result.buffer), {
       status: 200,
       headers: {
         'Content-Type': 'image/jpeg',
         'Content-Length': result.buffer.length.toString(),
-        'Cache-Control': 'private, max-age=3600',
+        // A render is immutable for a given (document, page, scale) — the
+        // file on disk doesn't change under a stable document id. Cache
+        // hard for a day; never cache failure placeholders.
+        'Cache-Control': result.placeholder ? 'no-store' : 'private, max-age=86400, immutable',
         'X-Page-Width': result.width.toString(),
         'X-Page-Height': result.height.toString(),
       },
