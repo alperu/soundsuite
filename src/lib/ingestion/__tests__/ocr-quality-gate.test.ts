@@ -37,6 +37,36 @@ describe('assessOcrOutput', () => {
     });
   });
 
+  describe('run-together ratio (regression: one long token must not zero a page)', () => {
+    const PROSE =
+      'The Court considered the motion and the response of the parties and finds that the relief ' +
+      'requested should be granted in part. Defendant shall produce the documents described in the ' +
+      'request within fourteen days of the date of this order. All other relief is denied. ';
+
+    it('passes a normal page containing one long URL', () => {
+      const text = `${PROSE} Filed electronically at https://efile.txcourts.gov/CaseManagement/Filing/Details/123456789 on the date below. ${PROSE}`;
+      expect(assessOcrOutput(text).ok).toBe(true);
+    });
+
+    it('passes a page with a long email address and a filename', () => {
+      const text = `${PROSE} Service copy sent to appellate.clerk.thirddistrict@txcourts.gov attaching Response_to_Motion_Final_Version.pdf as required. ${PROSE}`;
+      expect(assessOcrOutput(text).ok).toBe(true);
+    });
+
+    it('passes prose with a single concatenated-cell artifact (below ratio)', () => {
+      const text = `${PROSE} TotalAmountDueUnderThePromissoryNoteAsOfTheDateOfJudgment was disputed. ${PROSE}${PROSE}`;
+      expect(assessOcrOutput(text).ok).toBe(true);
+    });
+
+    it('still rejects a page dominated by run-together text', () => {
+      const run = 'thepartiesagreedthatthepropertyshallbesoldandtheproceedsdividedequallybetweenthemafterpaymentofallliens';
+      const text = `${run} ${run} ${run} short tail`;
+      const result = assessOcrOutput(text);
+      expect(result.ok).toBe(false);
+      expect(result.reasons).toContain('run-together-text');
+    });
+  });
+
   describe('table task profile', () => {
     const VALID_TABLE =
       '<table><tr><th>Date</th><th>Description</th><th>Amount</th></tr>' +

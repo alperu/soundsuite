@@ -51,6 +51,15 @@ const SOUP_MIN_TOKENS = 8;
 const SOUP_DICT_RATIO = 0.08;
 const SOUP_WORDLIKE_RATIO = 0.5;
 const RUN_TOGETHER_TOKEN_LEN = 30;
+/** Fraction of characters living inside run-together tokens above which the
+ * output is rejected. One URL/email/concatenated table cell in a page of
+ * normal prose must pass; a page where a third of the characters sit in
+ * unspaced runs is the defect this check exists for. Measured 2026-08-07:
+ * the previous any-single-token rule discarded 192 valid pages/regions
+ * (median 1,023 chars — one a fully correct affidavit page) in one run. */
+const RUN_TOGETHER_CHAR_RATIO = 0.3;
+/** Legitimately long unspaced tokens — never counted against the ratio. */
+const RUN_TOGETHER_WHITELIST_RE = /^(?:https?:\/\/|www\.)|@[a-z0-9.-]+\.[a-z]{2,}$|^[a-z]:?[\\/][\w\\/.\-]+$|\.(?:pdf|docx?|xlsx?|html?|txt|jpe?g|png)$/i;
 
 /** Pronounceable-looking token: has a vowel, no 5+ consonant run. Separates
  * domain nouns absent from the wordlist ("Mortgage", "payment") from OCR
@@ -161,7 +170,18 @@ export function assessOcrOutput(
   // 'seal' (too short to judge).
   if (task !== 'table' && task !== 'seal' && t.length >= SOUP_MIN_CHARS) {
     const tokens = t.split(/\s+/).filter(Boolean);
-    if (tokens.some(tok => tok.length >= RUN_TOGETHER_TOKEN_LEN && /[a-z]/i.test(tok))) {
+    // Run-together: RATIO test, not any-single-token. Reject only when a
+    // meaningful share of the page's characters sit inside long unspaced
+    // alpha runs — after excluding URL/email/path/filename-shaped tokens,
+    // which are legitimately long. (The old `some()` quantifier zeroed
+    // whole valid pages over one URL or concatenated cell.)
+    const runTogetherChars = tokens
+      .filter(tok =>
+        tok.length >= RUN_TOGETHER_TOKEN_LEN &&
+        /[a-z]/i.test(tok) &&
+        !RUN_TOGETHER_WHITELIST_RE.test(tok))
+      .reduce((sum, tok) => sum + tok.length, 0);
+    if (runTogetherChars / t.length > RUN_TOGETHER_CHAR_RATIO) {
       reasons.push('run-together-text');
     }
     if (tokens.length >= SOUP_MIN_TOKENS) {
