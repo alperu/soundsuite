@@ -866,8 +866,39 @@ export class IngestionPipeline {
       let ocrHb = this.startHeartbeat(documentId, 'ocr-fallback', 'Checking for OCR pages...', 50);
       let ocrFallbackCount: number;
       try {
+        // Durable glyph fix: pages whose EXTRACTED text is CID-garbled
+        // (plausible-looking junk, usually dense enough to dodge the
+        // density gate) are force-OCR'd here. Without this, every full
+        // reprocess resurrects the garbage text layer and reverts any
+        // reindex-path repairs (observed twice on a large clerk's record).
+        let glyphSet: Set<number> | undefined;
+        try {
+          const { detectGlyphArtifacts } = await import('./readiness/detectors');
+          const finding = detectGlyphArtifacts(pages.map((p) => ({
+            pageNumber: p.pageNumber,
+            text: p.text,
+            textDensity: p.textDensity,
+            source: 'extract' as const,
+            confidence: null,
+          })));
+          if (finding.pages.length > 0) {
+            const GLYPH_FORCE_OCR_CAP = 500;
+            let glyphPages = finding.pages;
+            if (glyphPages.length > GLYPH_FORCE_OCR_CAP) {
+              this.logger.warn(`Glyph force-OCR capped at ${GLYPH_FORCE_OCR_CAP} of ${glyphPages.length} garbled pages`, { documentId });
+              glyphPages = glyphPages.slice(0, GLYPH_FORCE_OCR_CAP);
+            }
+            glyphSet = new Set(glyphPages);
+            this.logger.info(`Glyph detector flagged ${glyphSet.size} garbled-text page(s) for force-OCR`, { documentId });
+          }
+        } catch (glyphErr) {
+          this.logger.warn('Glyph pre-OCR detection failed (non-fatal)', {
+            documentId,
+            error: glyphErr instanceof Error ? glyphErr.message : String(glyphErr),
+          });
+        }
         ocrFallbackCount = await this.runStage('ocr-fallback', documentId, stageTimings, () =>
-          this.applyOcrFallback(pages, filePath, documentId, ocrHb, exhibitPageSet)
+          this.applyOcrFallback(pages, filePath, documentId, ocrHb, exhibitPageSet, glyphSet)
         );
       } finally {
         clearInterval(ocrHb);
@@ -1602,12 +1633,15 @@ export class IngestionPipeline {
    * @param filePath - Path to the PDF file (for rendering)
    * @returns Number of pages where OCR fallback was applied
    */
-  private async applyOcrFallback(pages: PageText[], filePath: string, documentId?: string, heartbeat?: NodeJS.Timeout, exhibitPageSet?: Set<number>): Promise<number> {
+  private async applyOcrFallback(pages: PageText[], filePath: string, documentId?: string, heartbeat?: NodeJS.Timeout, exhibitPageSet?: Set<number>, glyphPages?: Set<number>): Promise<number> {
     let exhibitSkipCount = 0;
     const allPagesToOcr = pages.filter((p) => {
-      if (!(p.renderFailed || p.textDensity < this.config.ocrThreshold!)) return false;
-      // Skip pages already handled by exhibit extraction
-      if (exhibitPageSet?.has(p.pageNumber)) {
+      const isGlyph = glyphPages?.has(p.pageNumber) ?? false;
+      if (!(p.renderFailed || p.textDensity < this.config.ocrThreshold! || isGlyph)) return false;
+      // Skip pages already handled by exhibit extraction — EXCEPT glyph
+      // pages: exhibit extraction stores exhibit chunks separately and
+      // never repairs the page's garbled body text.
+      if (!isGlyph && exhibitPageSet?.has(p.pageNumber)) {
         exhibitSkipCount++;
         return false;
       }
@@ -1697,30 +1731,49 @@ export class IngestionPipeline {
         await this.publishProgress(documentId, 'ocr-fallback', detail, pct);
       }
 
-      // Skip text-only pages (no embedded images)
-      const hasImages = await this.pdfParser.pageHasImages(filePath, page.pageNumber);
-      if (!hasImages) {
+      const isGlyphPage = glyphPages?.has(page.pageNumber) ?? false;
+
+      // Choose the OCR input. Glyph pages ALWAYS use a full-page render —
+      // their embedded text layer is garbled (broken fonts) and any
+      // embedded images are irrelevant to repairing the body text. Pages
+      // with no usable embedded image fall back to a full-page render too
+      // (previously they were skipped outright, which is how image-less
+      // scanned/vector pages ended up permanently invisible to search).
+      let sourceBuffer: Buffer | null = null;
+      if (!isGlyphPage) {
+        const hasImages = await this.pdfParser.pageHasImages(filePath, page.pageNumber);
+        if (hasImages) {
+          const candidate = await this.pdfParser.getOcrCandidateImage(filePath, page.pageNumber);
+          if (candidate) sourceBuffer = candidate.buffer;
+        }
+      }
+      if (!sourceBuffer) {
+        try {
+          const { renderPage } = await import('@/lib/pdf-page-renderer');
+          const { withSemaphore } = await import('@/lib/render-semaphore');
+          const rendered = await withSemaphore(() => renderPage(filePath, page.pageNumber, 2.0));
+          if (!rendered.placeholder) {
+            sourceBuffer = rendered.buffer;
+            this.logger.info(`Page ${page.pageNumber}: using full-page render for OCR${isGlyphPage ? ' (garbled text layer)' : ' (no embedded image)'}`);
+          }
+        } catch (renderErr) {
+          this.logger.warn(`Page ${page.pageNumber}: full-page render failed`, {
+            error: renderErr instanceof Error ? renderErr.message : String(renderErr),
+          });
+        }
+      }
+      if (!sourceBuffer) {
         skippedCount++;
-        this.logger.info(`Skipping OCR for text-only page ${page.pageNumber} (no embedded images)`, {
+        this.logger.info(`No OCR input obtainable for page ${page.pageNumber}, skipping`, {
           pageNumber: page.pageNumber,
           textDensity: page.textDensity,
         });
         continue;
       }
 
-      // Extract best candidate image
-      const candidate = await this.pdfParser.getOcrCandidateImage(filePath, page.pageNumber);
-      if (!candidate) {
-        skippedCount++;
-        this.logger.info(`No OCR-worthy images on page ${page.pageNumber}, skipping`, {
-          pageNumber: page.pageNumber,
-        });
-        continue;
-      }
-
       // Preprocess image through sharp pipeline
-      const originalSizeKB = Math.round(candidate.buffer.length / 1024);
-      const preprocessedBuffer = await preprocessImage(candidate.buffer, this.config.preprocessSettings);
+      const originalSizeKB = Math.round(sourceBuffer.length / 1024);
+      const preprocessedBuffer = await preprocessImage(sourceBuffer, this.config.preprocessSettings);
       const optimizedSizeKB = Math.round(preprocessedBuffer.length / 1024);
 
       this.logger.info(`Image prepared for page ${page.pageNumber}`, {
