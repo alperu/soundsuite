@@ -1119,6 +1119,24 @@ function PageReportContent({
     initialStatusFilter === 'indexed' || initialStatusFilter === 'unindexed' || initialStatusFilter === 'empty' ? initialStatusFilter : 'all'
   );
 
+  // Soft navigations (link click / URL edit on an already-mounted viewer)
+  // update the initial* props WITHOUT remounting, so useState seeds are
+  // stale. Re-sync explicit URL params into state when they change —
+  // otherwise ?status=unindexed can render under a leftover filter (e.g.
+  // 'empty' → empty list) from the previous interaction.
+  useEffect(() => {
+    if (initialStatusFilter === 'indexed' || initialStatusFilter === 'unindexed' || initialStatusFilter === 'empty') {
+      setStatusFilter(initialStatusFilter);
+      setReportPage(1);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialStatusFilter]);
+  useEffect(() => {
+    if (initialDocumentId) setSelectedDocId(initialDocumentId);
+    if (initialCaseId) setSelectedCaseId(initialCaseId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialDocumentId, initialCaseId]);
+
   // Modals — both URL-addressable: page-{n} (chunks) / pageview-{n} (image viewer)
   const [pageViewerPage, setPageViewerPage] = useState<number | null>(
     initialDocumentId && initialViewerPage ? initialViewerPage : null,
