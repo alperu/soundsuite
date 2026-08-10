@@ -35,7 +35,7 @@ export async function GET(
     const rows = await table
       .query()
       .where(`document_id = '${id.replace(/'/g, "''")}' AND page_number = ${pageNumber}`)
-      .select(['id', 'text', 'chunk_index', 'page_number', 'start_line', 'end_line', 'is_exhibit', 'readiness_score'])
+      .select(['id', 'text', 'chunk_index', 'page_number', 'start_line', 'end_line', 'is_exhibit', 'readiness_score', 'block_type', 'heading_path', 'speakers', 'table_markdown'])
       .limit(500)
       .toArray();
 
@@ -50,6 +50,12 @@ export async function GET(
         endLine: (num(r.end_line) ?? 0) > 0 ? num(r.end_line) : null,
         isExhibit: !!r.is_exhibit,
         readinessScore: num(r.readiness_score),
+        // Structural provenance (docparse §6.3) — operator views must show
+        // what search sees. Empty string = column default = absent.
+        blockType: r.block_type || null,
+        headingPath: r.heading_path || null,
+        speakers: r.speakers || null,
+        tableMarkdown: r.table_markdown || null,
       }))
       .sort((a: any, b: any) => a.chunkIndex - b.chunkIndex);
 

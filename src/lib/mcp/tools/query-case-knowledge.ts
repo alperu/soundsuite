@@ -502,6 +502,13 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
             volumeNumber: undefined,
             caseNumber: undefined,
             annotations: result.metadata.annotations || undefined,
+            // Structural fields — same projection as document hits below.
+            // This hand-built branch previously dropped all four (the exact
+            // easy-to-miss spot PLAN-ss-docparse §6.3 flagged).
+            blockType: result.metadata.blockType || undefined,
+            headingPath: result.metadata.headingPath || undefined,
+            speakers: result.metadata.speakers || undefined,
+            tableMarkdown: result.metadata.tableMarkdown || undefined,
             source: 'chat' as const,
             chatAttachmentId: attachment?.id || result.metadata.documentId,
           };

@@ -103,6 +103,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         document_type: r.document_type,
         filing_type: r.filing_type,
         text: typeof r.text === 'string' ? r.text.slice(0, 400) : undefined,
+        // Structural provenance (docparse §6.3) — the operator preview must
+        // show what search sees. Empty string = column default = absent.
+        block_type: r.block_type || null,
+        heading_path: r.heading_path || null,
+        speakers: r.speakers || null,
+        table_markdown: typeof r.table_markdown === 'string' && r.table_markdown ? r.table_markdown.slice(0, 400) : null,
+        readiness_score: (typeof r.readiness_score === 'number' || typeof r.readiness_score === 'bigint') && Number(r.readiness_score) >= 0
+          ? Number(r.readiness_score)
+          : null,
       };
       return out;
     });
