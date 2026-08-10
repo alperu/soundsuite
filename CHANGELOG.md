@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.3.0](https://github.com/alperu/soundsuite/compare/v1.2.0...v1.3.0) (2026-08-10)
+
+### Features
+
+* **docparse:** hybrid structured document parsing — pdfjs block extraction (headings, paragraphs, tables, figures, page furniture) + OCR task escalation with OTSL table output, block-aware StructuredChunker, persisted page structure ([06ea50a](https://github.com/alperu/soundsuite/commit/06ea50a), [f556a4f](https://github.com/alperu/soundsuite/commit/f556a4f), [5efaa14](https://github.com/alperu/soundsuite/commit/5efaa14), [5ccd934](https://github.com/alperu/soundsuite/commit/5ccd934), [e66684b](https://github.com/alperu/soundsuite/commit/e66684b))
+* **metaview:** Meta View structure inspector at /vectors/metaview — bounding-box overlays, RR speaker coloring + legend, figure-OCR overlay, stored-chunk view ([eb9de9a](https://github.com/alperu/soundsuite/commit/eb9de9a), [69a51f5](https://github.com/alperu/soundsuite/commit/69a51f5), [8ced971](https://github.com/alperu/soundsuite/commit/8ced971))
+* **rr:** Reporter's Record transcript structure with line numbers — chunk text byte-identical, block-derived line stamping ([2aba21f](https://github.com/alperu/soundsuite/commit/2aba21f), [1cafb52](https://github.com/alperu/soundsuite/commit/1cafb52))
+* **search:** structural metadata end-to-end — block type / heading path / speakers / table markdown columns, ranking boosts + structure hints, table markdown in synthesis, result breadcrumbs, MCP + operator-view parity ([1880d15](https://github.com/alperu/soundsuite/commit/1880d15), [2d35013](https://github.com/alperu/soundsuite/commit/2d35013), [0f388d7](https://github.com/alperu/soundsuite/commit/0f388d7), [9dd9073](https://github.com/alperu/soundsuite/commit/9dd9073))
+* **readiness:** AI readiness scoring — v2 page-average model with integrity floor, per-page PageScore + per-chunk scores, blank-page classification, backfill endpoint, score surfaces on documents/vectors/pagereport ([aa874fe](https://github.com/alperu/soundsuite/commit/aa874fe), [6a6525f](https://github.com/alperu/soundsuite/commit/6a6525f))
+* **ocr:** PaddleOCR-VL-1.6 vision model option with fixed-task prompts and model-aware fleet eligibility (Docker-only models excluded from Mac hosts at catalog, assignment, push, and routing layers) ([b450a5e](https://github.com/alperu/soundsuite/commit/b450a5e))
+* **vectors:** URL-addressable tools (/vectors/{tool}/{filter}/{selection}), persisted per-tool settings, sortable headers, page-image viewer segment ([d2831d3](https://github.com/alperu/soundsuite/commit/d2831d3), [00061da](https://github.com/alperu/soundsuite/commit/00061da), [2d3c8ac](https://github.com/alperu/soundsuite/commit/2d3c8ac))
+* **render:** pdftoppm-first page rendering with immutable browser caching and adjacent-page warming ([15c4355](https://github.com/alperu/soundsuite/commit/15c4355), [64b509d](https://github.com/alperu/soundsuite/commit/64b509d))
+
+
+### Bug Fixes
+
+* **ingestion:** garbled (CID) text layers are detected and force-OCR'd at ingest; image-less pages get a full-page render fallback instead of being skipped — repairs survive reprocessing ([ca2663b](https://github.com/alperu/soundsuite/commit/ca2663b))
+* **ocr:** quality gate for observed garbage classes (repetition loops, unexpected script, LaTeX recitation, letter soup); run-together rejection is a character-ratio test with URL/email/path whitelisting instead of any-single-token ([04e43b4](https://github.com/alperu/soundsuite/commit/04e43b4), [d56a23b](https://github.com/alperu/soundsuite/commit/d56a23b))
+* **embedding:** per-batch retry with exponential backoff, failed-host exclusion via fleet re-resolution, and a request timeout — one host disconnect no longer fails the document ([84d107d](https://github.com/alperu/soundsuite/commit/84d107d))
+* **reindex:** targeted per-page extraction (whole-document pass eliminated), docparse structure parity, ink-verified blank classification, overall-progress display for batch repairs ([6a6525f](https://github.com/alperu/soundsuite/commit/6a6525f))
+* **render:** CID-keyed font CMaps load correctly — pages with damaged embedded fonts no longer render body-less ([15c4355](https://github.com/alperu/soundsuite/commit/15c4355))
+* **pipeline:** structure stage publishes live per-page progress with a heartbeat — long runs no longer display "Starting…" ([3316d8c](https://github.com/alperu/soundsuite/commit/3316d8c))
+* **vectors:** pagereport re-syncs URL params on soft navigation (?status= filters apply without a fresh load) ([c7d2bc2](https://github.com/alperu/soundsuite/commit/c7d2bc2))
+* **privacy:** repository rule + scrub — no case-identifying data in tracked files or commit messages; synthetic test fixtures ([dc829f5](https://github.com/alperu/soundsuite/commit/dc829f5), [fcf2103](https://github.com/alperu/soundsuite/commit/fcf2103))
+
 ## [1.2.0](https://github.com/alperu/soundsuite/compare/v1.1.0...v1.2.0) (2026-06-22)
 
 
