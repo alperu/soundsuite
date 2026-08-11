@@ -123,6 +123,7 @@ export async function POST(request: NextRequest) {
       // AI Services — primary/fallback selection
       aiPrimaryProvider: body.aiPrimaryProvider,
       aiPrimaryModel: body.aiPrimaryModel,
+      cacheTtl: body.cacheTtl,
       aiFallbackEnabled: body.aiFallbackEnabled,
       aiFallbackProvider: body.aiFallbackProvider,
       aiFallbackModel: body.aiFallbackModel,

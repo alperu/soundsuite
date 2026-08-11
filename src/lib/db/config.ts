@@ -14,6 +14,7 @@ export interface AppConfig {
   embeddingModel: string;
   openaiApiKey?: string;
   claudeApiKey?: string;
+  geminiApiKey?: string;
   groqApiKey?: string;
   grokApiKey?: string;
   ollamaHost?: string;
@@ -33,6 +34,10 @@ export interface AppConfig {
   // document summarization, analysis, and the tag-fill feature.
   aiPrimaryProvider?: string;
   aiPrimaryModel?: string;
+  /** Anthropic prompt-cache TTL for the deep-search shared-prefix
+   * breakpoint ('5m' | '1h'; default '1h' — TTL runs from request START,
+   * so long streamed sections eat a 5m window). Task #15. */
+  cacheTtl?: '5m' | '1h';
   aiFallbackEnabled?: boolean;
   aiFallbackProvider?: string;
   aiFallbackModel?: string;
@@ -194,6 +199,7 @@ export async function getConfig(): Promise<AppConfig> {
     embeddingModel: configMap.get('embedding.model') || 'Xenova/all-MiniLM-L6-v2',
     openaiApiKey: configMap.get('embedding.openaiApiKey'),
     claudeApiKey: configMap.get('embedding.claudeApiKey'),
+    geminiApiKey: configMap.get('ai.geminiApiKey'),
     groqApiKey: configMap.get('ai.groqApiKey'),
     grokApiKey: configMap.get('ai.grokApiKey'),
     ollamaHost: configMap.get('embedding.ollamaHost'),
@@ -209,6 +215,7 @@ export async function getConfig(): Promise<AppConfig> {
     // AI Services selection
     aiPrimaryProvider: configMap.get('ai.primaryProvider'),
     aiPrimaryModel: configMap.get('ai.primaryModel'),
+    cacheTtl: (configMap.get('ai.cacheTtl') as '5m' | '1h' | undefined) || '1h',
     aiFallbackEnabled: configMap.get('ai.fallbackEnabled') === 'true',
     aiFallbackProvider: configMap.get('ai.fallbackProvider'),
     aiFallbackModel: configMap.get('ai.fallbackModel'),
@@ -417,6 +424,10 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
     updates.push({ key: 'embedding.claudeApiKey', value: config.claudeApiKey });
   }
 
+  if (config.geminiApiKey !== undefined) {
+    updates.push({ key: 'ai.geminiApiKey', value: config.geminiApiKey });
+  }
+
   if (config.groqApiKey !== undefined) {
     updates.push({ key: 'ai.groqApiKey', value: config.groqApiKey });
   }
@@ -461,6 +472,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.aiPrimaryModel !== undefined) {
     updates.push({ key: 'ai.primaryModel', value: config.aiPrimaryModel });
+  }
+  if (config.cacheTtl !== undefined) {
+    updates.push({ key: 'ai.cacheTtl', value: config.cacheTtl });
   }
   if (config.aiFallbackEnabled !== undefined) {
     updates.push({ key: 'ai.fallbackEnabled', value: String(config.aiFallbackEnabled) });

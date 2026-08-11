@@ -1327,7 +1327,12 @@ The excerpts above are your evidence — do not repeat or quote them back in bul
     });
     append(`### ${section.heading}\n\n`);
 
-    const sectionUserContent = `${baseUserContent}
+    // Split the user content at the shared/varying boundary: baseUserContent
+    // is byte-identical across ALL section calls, so a cache breakpoint on
+    // it (task #15) writes the ~32K-token excerpt prefix once and re-reads
+    // it per section at 0.1×. The per-section suffix stays outside the
+    // breakpoint. Non-Anthropic providers use the joined string unchanged.
+    const sectionSuffix = `
 
 ## Full Report Outline (for context — do NOT duplicate other subsections)
 ${outlineSummary}
@@ -1338,6 +1343,7 @@ ${outlineSummary}
 ${section.keyCitations && section.keyCitations.length > 0 ? `**Suggested citations to focus on:** ${section.keyCitations.join(', ')}` : ''}
 
 Write the body of this subsection now. Do not include the heading.`;
+    const sectionUserContent = `${baseUserContent}${sectionSuffix}`;
 
     try {
       let sectionContent = '';
@@ -1346,7 +1352,14 @@ Write the body of this subsection now. Do not include the heading.`;
         model: resolved.model,
         messages: [
           { role: 'system', content: SECTION_SYSTEM_PROMPT },
-          { role: 'user', content: sectionUserContent },
+          {
+            role: 'user',
+            content: sectionUserContent,
+            cacheBlocks: [
+              { text: baseUserContent, cache: true },
+              { text: sectionSuffix },
+            ],
+          },
         ],
         maxTokens: perSectionMaxTokens,
         temperature: 0.3,

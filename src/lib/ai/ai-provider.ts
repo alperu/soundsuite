@@ -6,12 +6,20 @@
  * Reads API keys from the Config table via getConfig().
  */
 
-import { AIProviderKey, AI_PROVIDERS } from './models';
+import { AIProviderKey, AI_PROVIDERS, supportsAdaptiveEffort, shapeOpenAICompatParams } from './models';
 import { getConfig, AppConfig } from '../db/config';
 
 export interface AIMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  /** Optional content-block split for prompt caching (task #15). When set,
+   * the ANTHROPIC path renders this message as text blocks and attaches
+   * cache_control (with the configured TTL) to blocks marked cache:true —
+   * putting a cache breakpoint after a stable shared prefix. All other
+   * providers ignore this and use `content` (which callers must keep equal
+   * to the joined block texts) — additive by design so block arrays never
+   * leak into the OpenAI-compat/Ollama paths. */
+  cacheBlocks?: Array<{ text: string; cache?: boolean }>;
 }
 
 /** Anthropic adaptive-thinking effort level — controls how much of `max_tokens`
@@ -67,17 +75,23 @@ async function completeWithOpenAICompatible(
   temperature: number,
   provider: AIProviderKey,
   jsonMode?: boolean,
+  effort?: AnthropicEffort,
 ): Promise<AICompletionResponse> {
   const OpenAI = (await import('openai')).default;
   const client = new OpenAI({ apiKey, baseURL });
 
-  const response = await client.chat.completions.create({
+  // Reasoning models (GPT-5.x) reject `max_tokens` ("use
+  // 'max_completion_tokens' instead") and any non-default temperature —
+  // shapeOpenAICompatParams picks the right param names per model.
+  const params = {
     model,
     messages,
-    max_tokens: maxTokens,
-    temperature,
+    ...shapeOpenAICompatParams(provider, model, { maxTokens, temperature, effort }),
     ...(jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
-  });
+  };
+  const response = await client.chat.completions.create(
+    params as import('openai').default.Chat.ChatCompletionCreateParamsNonStreaming,
+  );
 
   const choice = response.choices[0];
   return {
@@ -102,6 +116,7 @@ async function completeWithAnthropic(
   effort?: AnthropicEffort,
   jsonSchema?: AICompletionRequest['jsonSchema'],
   signal?: AbortSignal,
+  cacheTtl?: '5m' | '1h',
 ): Promise<AICompletionResponse> {
   // Anthropic's SDK rejects non-streaming requests it estimates may exceed
   // 10 minutes — common for large max_tokens + adaptive thinking (e.g. the
@@ -120,6 +135,7 @@ async function completeWithAnthropic(
     effort,
     jsonSchema,
     signal,
+    cacheTtl,
   )) {
     if (event.type === 'done') {
       return {
@@ -317,10 +333,8 @@ function anthropicThinkingParam(model: string, thinking: boolean | undefined, ef
   // value 400s — force 1), adaptive thinking only, effort supported. Its one
   // extra quirk — an explicit `thinking:{type:'disabled'}` 400s — is moot here
   // because the non-thinking branch omits `thinking` entirely.
-  const isAdaptiveOpus =
-    model.startsWith('claude-opus-4-7') ||
-    model.startsWith('claude-opus-4-8') ||
-    model.startsWith('claude-fable-5');
+  // Opus 5 / Sonnet 5 share the same surface — see supportsAdaptiveEffort.
+  const isAdaptiveOpus = supportsAdaptiveEffort(model);
   if (thinking === true && !jsonMode && isAdaptiveOpus) {
     // Cast effort to the SDK's narrower union — 'xhigh' is accepted by the
     // API but not yet in the SDK 0.74.0 type. Runtime-safe.
@@ -366,14 +380,14 @@ export async function* streamAI(req: AICompletionRequest): AsyncGenerator<Stream
 
     if (req.provider === 'anthropic') {
       const apiKey = getApiKey(config, 'anthropic');
-      yield* streamWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.effort, req.jsonSchema, req.signal);
+      yield* streamWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.effort, req.jsonSchema, req.signal, config.cacheTtl);
       return;
     }
 
     const baseURL = OPENAI_COMPATIBLE_BASE_URLS[req.provider];
     if (baseURL) {
       const apiKey = getApiKey(config, req.provider);
-      yield* streamWithOpenAICompatible(apiKey, baseURL, req.model, req.messages, maxTokens, temperature, req.provider, req.jsonMode);
+      yield* streamWithOpenAICompatible(apiKey, baseURL, req.model, req.messages, maxTokens, temperature, req.provider, req.jsonMode, req.effort);
       return;
     }
   } catch (err) {
@@ -563,6 +577,7 @@ async function* streamWithOpenAICompatible(
   temperature: number,
   provider: AIProviderKey,
   jsonMode?: boolean,
+  effort?: AnthropicEffort,
 ): AsyncGenerator<StreamEvent> {
   const OpenAI = (await import('openai')).default;
   const client = new OpenAI({ apiKey, baseURL });
@@ -571,17 +586,21 @@ async function* streamWithOpenAICompatible(
     console.log(`[streamWithOpenAICompatible] jsonMode=true, setting response_format for ${provider}/${model}`);
   }
 
-  const stream = await client.chat.completions.create({
+  // Reasoning models (GPT-5.x) reject `max_tokens` and non-default
+  // temperature — shapeOpenAICompatParams picks the right params per model.
+  const params = {
     model,
     messages,
-    max_tokens: maxTokens,
-    temperature,
-    stream: true,
+    ...shapeOpenAICompatParams(provider, model, { maxTokens, temperature, effort }),
+    stream: true as const,
     // Force strict JSON output at the API level. OpenAI, Groq, and Grok all
     // honor response_format: { type: 'json_object' } when the prompt also
     // contains the word "JSON" (which getAutoSuggestPrompt does).
     ...(jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
-  });
+  };
+  const stream = await client.chat.completions.create(
+    params as import('openai').default.Chat.ChatCompletionCreateParamsStreaming,
+  );
 
   let fullContent = '';
   let batchBuffer = '';
@@ -624,6 +643,7 @@ async function* streamWithAnthropic(
   effort?: AnthropicEffort,
   jsonSchema?: AICompletionRequest['jsonSchema'],
   signal?: AbortSignal,
+  cacheTtl?: '5m' | '1h',
 ): AsyncGenerator<StreamEvent> {
   const Anthropic = (await import('@anthropic-ai/sdk')).default;
   const client = new Anthropic({ apiKey });
@@ -631,9 +651,27 @@ async function* streamWithAnthropic(
   const systemMsg = messages.find(m => m.role === 'system');
   const nonSystem = messages.filter(m => m.role !== 'system');
 
-  const outgoingMessages: Array<{ role: 'user' | 'assistant'; content: string }> = nonSystem.map(m => ({
+  // Prompt caching (task #15): messages carrying cacheBlocks render as text
+  // blocks with cache_control on the marked ones. The prefix up to the
+  // marked block — tools, system, and everything before it — is cached.
+  type OutgoingContent =
+    | string
+    | Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' } }>;
+  const toContent = (m: AIMessage): OutgoingContent => {
+    if (!m.cacheBlocks?.length) return m.content;
+    return m.cacheBlocks
+      .filter(b => b.text.length > 0)
+      .map(b => ({
+        type: 'text' as const,
+        text: b.text,
+        ...(b.cache
+          ? { cache_control: { type: 'ephemeral' as const, ...(cacheTtl ? { ttl: cacheTtl } : {}) } }
+          : {}),
+      }));
+  };
+  const outgoingMessages: Array<{ role: 'user' | 'assistant'; content: OutgoingContent }> = nonSystem.map(m => ({
     role: m.role as 'user' | 'assistant',
-    content: m.content,
+    content: toContent(m),
   }));
 
   // Adaptive thinking is Opus-4.7-only; otherwise empty so 4.6 requests
@@ -735,7 +773,20 @@ async function* streamWithAnthropic(
       } else if (event.type === 'message_delta') {
         outputTokens = (event as any).usage?.output_tokens ?? outputTokens;
       } else if (event.type === 'message_start') {
-        inputTokens = (event as any).message?.usage?.input_tokens ?? 0;
+        const u = (event as any).message?.usage;
+        inputTokens = u?.input_tokens ?? 0;
+        // Cache verification (task #15 item 2): input_tokens is only the
+        // UNCACHED remainder — total prompt = input + creation + read.
+        if (u && (u.cache_creation_input_tokens || u.cache_read_input_tokens)) {
+          console.log('[streamWithAnthropic] cache usage (tool-use path)', {
+            model,
+            cacheCreation: u.cache_creation_input_tokens ?? 0,
+            cacheRead: u.cache_read_input_tokens ?? 0,
+            uncachedInput: u.input_tokens ?? 0,
+            creation5m: u.cache_creation?.ephemeral_5m_input_tokens,
+            creation1h: u.cache_creation?.ephemeral_1h_input_tokens,
+          });
+        }
       }
     }
 
@@ -811,7 +862,21 @@ async function* streamWithAnthropic(
     } else if (event.type === 'message_delta') {
       outputTokens = (event as any).usage?.output_tokens ?? outputTokens;
     } else if (event.type === 'message_start') {
-      inputTokens = (event as any).message?.usage?.input_tokens ?? 0;
+      const u = (event as any).message?.usage;
+      inputTokens = u?.input_tokens ?? 0;
+      // Cache verification (task #15 item 2): input_tokens is only the
+      // UNCACHED remainder — total prompt = input + creation + read. Zero
+      // cacheRead across a multi-section report means a prefix invalidator.
+      if (u && (u.cache_creation_input_tokens || u.cache_read_input_tokens)) {
+        console.log('[streamWithAnthropic] cache usage', {
+          model,
+          cacheCreation: u.cache_creation_input_tokens ?? 0,
+          cacheRead: u.cache_read_input_tokens ?? 0,
+          uncachedInput: u.input_tokens ?? 0,
+          creation5m: u.cache_creation?.ephemeral_5m_input_tokens,
+          creation1h: u.cache_creation?.ephemeral_1h_input_tokens,
+        });
+      }
     }
   }
 
@@ -837,6 +902,7 @@ async function* streamWithAnthropic(
 
 const OPENAI_COMPATIBLE_BASE_URLS: Partial<Record<AIProviderKey, string>> = {
   openai: 'https://api.openai.com/v1',
+  gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/',
   groq: 'https://api.groq.com/openai/v1',
   grok: 'https://api.x.ai/v1',
 };
@@ -886,7 +952,7 @@ export async function completeAI(req: AICompletionRequest): Promise<AICompletion
   const apiKey = getApiKey(config, req.provider);
 
   if (req.provider === 'anthropic') {
-    return completeWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.effort, req.jsonSchema, req.signal);
+    return completeWithAnthropic(apiKey, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.effort, req.jsonSchema, req.signal, config.cacheTtl);
   }
 
   const baseURL = OPENAI_COMPATIBLE_BASE_URLS[req.provider];
@@ -895,7 +961,7 @@ export async function completeAI(req: AICompletionRequest): Promise<AICompletion
   }
 
   return completeWithOpenAICompatible(
-    apiKey, baseURL, req.model, req.messages, maxTokens, temperature, req.provider, req.jsonMode,
+    apiKey, baseURL, req.model, req.messages, maxTokens, temperature, req.provider, req.jsonMode, req.effort,
   );
 }
 
@@ -930,16 +996,10 @@ export async function testApiKey(provider: AIProviderKey, apiKey: string): Promi
     const OpenAI = (await import('openai')).default;
     const client = new OpenAI({ apiKey, baseURL });
 
-    // Use the cheapest/fastest model available for each provider
-    const testModel = provider === 'openai' ? 'gpt-4o-mini'
-      : provider === 'groq' ? 'llama-3.1-8b-instant'
-      : 'grok-3-mini';
-
-    await client.chat.completions.create({
-      model: testModel,
-      max_tokens: 5,
-      messages: [{ role: 'user', content: 'hi' }],
-    });
+    // Validate auth without a completion: models.list() works on OpenAI,
+    // Groq, and xAI, and is immune to catalog drift (the previous per-provider
+    // test models kept going stale — grok-3-mini no longer exists).
+    await client.models.list();
     return { valid: true };
   } catch (err: any) {
     const msg = err?.message || String(err);

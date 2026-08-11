@@ -59,6 +59,10 @@ export default function AdminAIServices() {
 
   // Cloud fallback
   const [fallbackEnabled, setFallbackEnabled] = useState<boolean>(false);
+  // Anthropic prompt-cache TTL for the deep-search shared-prefix breakpoint
+  // (task #15). '1h' default — TTL runs from request start, so long streamed
+  // sections can outlive a 5m window.
+  const [cacheTtl, setCacheTtl] = useState<'5m' | '1h'>('1h');
   const [fallbackProvider, setFallbackProvider] = useState<string>('openai');
   const [fallbackModel, setFallbackModel] = useState<string>('');
 
@@ -82,6 +86,7 @@ export default function AdminAIServices() {
         if (typeof cfg.aiFallbackEnabled === 'boolean') setFallbackEnabled(cfg.aiFallbackEnabled);
         if (typeof cfg.aiFallbackProvider === 'string') setFallbackProvider(cfg.aiFallbackProvider);
         if (typeof cfg.aiFallbackModel === 'string') setFallbackModel(cfg.aiFallbackModel);
+        if (cfg.cacheTtl === '5m' || cfg.cacheTtl === '1h') setCacheTtl(cfg.cacheTtl);
       }
     } catch {
       /* silent */
@@ -131,6 +136,7 @@ export default function AdminAIServices() {
       patch: Partial<{
         aiPrimaryProvider: string;
         aiPrimaryModel: string;
+        cacheTtl: '5m' | '1h';
         aiFallbackEnabled: boolean;
         aiFallbackProvider: string;
         aiFallbackModel: string;
@@ -238,6 +244,7 @@ export default function AdminAIServices() {
       const keyByProvider: Record<string, string | undefined> = {
         openai: typeof cfg.openaiApiKey === 'string' ? cfg.openaiApiKey : undefined,
         anthropic: typeof cfg.claudeApiKey === 'string' ? cfg.claudeApiKey : undefined,
+        gemini: typeof cfg.geminiApiKey === 'string' ? cfg.geminiApiKey : undefined,
         groq: typeof cfg.groqApiKey === 'string' ? cfg.groqApiKey : undefined,
         grok: typeof cfg.grokApiKey === 'string' ? cfg.grokApiKey : undefined,
       };
@@ -394,6 +401,41 @@ export default function AdminAIServices() {
             )}
           </div>
         )}
+      </section>
+
+      {/* Prompt caching (Anthropic direct API) */}
+      <section className="bg-white shadow rounded-lg p-5">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-semibold text-gray-900">Prompt caching</h3>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-50 text-green-700 font-medium">
+              Saves cost
+            </span>
+          </div>
+          {savedAt.cache && (
+            <span className="text-xs text-green-700 font-medium">Saved</span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="text-sm font-medium text-gray-700 w-24">Cache TTL</label>
+          <select
+            value={cacheTtl}
+            onChange={e => {
+              const v = e.target.value === '5m' ? '5m' : '1h';
+              setCacheTtl(v);
+              void persist({ cacheTtl: v }, 'cache');
+            }}
+            className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+          >
+            <option value="1h">1 hour (default — best for long streamed reports; 2× write, 0.1× reads)</option>
+            <option value="5m">5 minutes (1.25× write, 0.1× reads; TTL runs from request start)</option>
+          </select>
+        </div>
+        <p className="text-xs text-gray-500 mt-2">
+          Applies to Anthropic deep-search calls: the shared document-excerpt prefix is cached
+          once and re-read by each report section at 10% of input price. Verify hits via
+          the <code className="px-1 py-0.5 bg-gray-100 rounded">cache usage</code> lines in the dashboard log.
+        </p>
       </section>
 
       {/* 2. Cloud fallback */}
