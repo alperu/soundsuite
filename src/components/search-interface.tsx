@@ -1614,8 +1614,20 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
             text: s.text,
             document: s.document,
             page: s.page,
+            score: s.score,
             citation: s.citation,
             citationShort: s.citationShort,
+            filingType: s.filingType,
+            caseNumber: s.caseNumber,
+            filingSlug: s.filingSlug,
+            // ChunkProvenance — history replay must show the same structure
+            // chips/links as the live result (task #13; this save path was a
+            // projection the audit missed)
+            documentId: s.documentId,
+            blockType: s.blockType,
+            headingPath: s.headingPath,
+            speakers: s.speakers,
+            tableMarkdown: s.tableMarkdown,
           })),
           searchStats: t.result.searchStats,
           subQueries: t.result.subQueries,
@@ -1635,8 +1647,17 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
             text: s.text || s.content || '',
             document: s.document || s.fileName || '',
             page: s.page || s.pageNumber || 0,
+            score: s.score,
             citation: s.citation,
             citationShort: s.citationShort,
+            filingType: s.filingType,
+            caseNumber: s.caseNumber,
+            filingSlug: s.filingSlug,
+            documentId: s.documentId,
+            blockType: s.blockType,
+            headingPath: s.headingPath,
+            speakers: s.speakers,
+            tableMarkdown: s.tableMarkdown,
           })),
         });
       }
