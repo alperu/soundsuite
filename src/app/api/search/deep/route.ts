@@ -98,6 +98,7 @@ export async function POST(request: NextRequest) {
             onProgress,
             onToken: (text) => send({ type: 'token', text }),
             onThinking: (text) => send({ type: 'thinking', text }),
+            onThoughts: (text) => send({ type: 'thoughts', text }),
             history: history || undefined,
             ...(workflowContext ? { workflowContext } : {}),
             thinking,
@@ -131,6 +132,10 @@ export async function POST(request: NextRequest) {
               searchStats: result.searchStats,
               model: result.model,
               provider: result.provider,
+              rlmAssisted: result.rlmAssisted,
+              rlmHost: result.rlmHost,
+              rlmExtraSourceCount: result.rlmExtraSourceCount,
+              thoughts: result.thoughts,
             },
           });
         } catch (error) {

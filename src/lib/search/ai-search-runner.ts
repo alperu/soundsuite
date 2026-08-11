@@ -86,10 +86,18 @@ const initialState: AISearchRunnerState = {
   turns: [],
 };
 
+/** Coalescing window for token/thinking notifications. Streaming emits per
+ *  token; every emit re-renders SearchInterface and re-parses the whole
+ *  accumulated answer through react-markdown (O(N²) over a long report), which
+ *  is what froze the UI during active searches. State still updates per event —
+ *  only listener notification is batched. */
+const STREAM_EMIT_INTERVAL_MS = 80;
+
 class AISearchRunner {
   private state: AISearchRunnerState = { ...initialState };
   private listeners = new Set<() => void>();
   private abortCtrl: AbortController | null = null;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   getSnapshot = (): AISearchRunnerState => this.state;
 
@@ -102,16 +110,46 @@ class AISearchRunner {
     for (const l of this.listeners) l();
   }
 
+  /** Emit now and cancel any pending coalesced flush (state is already current). */
+  private flushNow() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.emit();
+  }
+
   private set(patch: Partial<AISearchRunnerState>) {
     this.state = { ...this.state, ...patch };
-    this.emit();
+    this.flushNow();
+  }
+
+  /** Apply the patch immediately but defer listener notification to the next
+   *  coalescing window. For high-frequency stream events only. */
+  private setThrottled(patch: Partial<AISearchRunnerState>) {
+    this.state = { ...this.state, ...patch };
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.emit();
+    }, STREAM_EMIT_INTERVAL_MS);
   }
 
   /** Wipe completed turns + error. Used by "New chat". */
   reset(sessionId: string) {
     if (this.state.loading) return; // never wipe an active run
     this.state = { ...initialState, sessionId };
-    this.emit();
+    this.flushNow();
+  }
+
+  /** Seed completed turns from persisted history when a saved chat is opened,
+   *  so follow-up searches append instead of replacing, and so a component
+   *  remount (Deep/Compare route toggle) can rehydrate the conversation from
+   *  this snapshot. Mirrors DeepSearchRunner.hydrate. */
+  hydrate(sessionId: string, turns: AISearchTurnSnapshot[]) {
+    if (this.state.loading) return; // never disturb an active run
+    this.state = { ...initialState, sessionId, turns };
+    this.flushNow();
   }
 
   abort() {
@@ -257,7 +295,7 @@ class AISearchRunner {
         progressLog: [...this.state.progressLog, entry],
       });
     } else if (event.type === 'token') {
-      this.set({
+      this.setThrottled({
         streamingAnswer: (this.state.streamingAnswer ?? '') + event.text,
         streamTokenCount:
           this.state.streamTokenCount +
@@ -270,7 +308,7 @@ class AISearchRunner {
         message: event.text,
         timestamp: Date.now(),
       };
-      this.set({
+      this.setThrottled({
         progressLog: [...this.state.progressLog, entry],
       });
     }

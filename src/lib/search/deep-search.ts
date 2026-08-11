@@ -9,7 +9,7 @@
 
 import { callLLM, callLLMJson, buildContext, getAvailableProvider } from '../mcp/tools/ai-helper';
 import { streamAI } from '../ai/ai-provider';
-import type { AIProviderKey } from '../ai/models';
+import { supportsAdaptiveEffort, type AIProviderKey } from '../ai/models';
 import { rerank, RerankableResult } from './reranker';
 import { getConfig } from '../db/config';
 import type { ToolRegistry } from '../mcp/tool-registry';
@@ -19,6 +19,7 @@ import { segmentChipsAndIntents, type Segment as ChipQuerySegment } from './chip
 import { extractFieldFilters } from './boolean-to-fts';
 import { sourceDedupKey } from './source-dedup';
 import { buildCiteContext, citeOf, truncateBlock } from './context-builder';
+import { capThoughts, createPreambleSplitter, splitReportPreamble } from './report-preamble';
 import { pickProvenance, type ChunkProvenance } from './chunk-provenance';
 import { extractStructureHint, speakersInclude } from './structure-hints';
 
@@ -111,6 +112,12 @@ export interface DeepSearchOptions {
   /** Streamed thinking tokens (Anthropic adaptive thinking). */
   onThinking?: (text: string) => void;
   /**
+   * Streamed research trace: RLM evidence-gathering narration, plus anything
+   * the preamble splitter diverts off the front of the synthesis output.
+   * Everything here is intermediate work, never the answer.
+   */
+  onThoughts?: (text: string) => void;
+  /**
    * Multi-pass report generation: stage 1 drafts outline + short sections
    * (summary/gaps/significance/next steps), stage 2 streams each findings
    * subsection as its own LLM call. Avoids mid-report truncation when the
@@ -150,6 +157,12 @@ export interface DeepSearchResult {
   rlmHost?: string;
   /** Number of extra sources RLM discovered via recursive tool calls. */
   rlmExtraSourceCount?: number;
+  /**
+   * Research trace for this turn — the same text streamed via `onThoughts`,
+   * accumulated so a reopened session can replay it. Absent when the run
+   * produced no intermediate output. Never rendered as markdown.
+   */
+  thoughts?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -840,6 +853,69 @@ const REPORT_SYSTEM_PROMPT = `You are an expert legal research analyst. Generate
 - Use markdown formatting for readability`;
 
 /**
+ * Closing instruction block. The synthesis prompt must NOT end on the raw
+ * excerpt text: with ~150 excerpts in front of it, a model whose final input
+ * token is document prose continues the *document* instead of answering it —
+ * it emits more excerpt-shaped text, then reconstructs the instruction it
+ * expected to find here, then finally writes the report (all of it on the
+ * normal text channel, which is how 22K of raw transcript reached a saved
+ * answer). Restating the task after the excerpts is what keeps the completion
+ * an answer. `report-preamble.ts` is the safety net for when it isn't.
+ */
+const CONTEXT_CLOSING_INSTRUCTIONS = `## Instructions
+
+The document excerpts above are your evidence — do not repeat, re-list, or quote them back in bulk.
+
+Write the research report now, answering the research question. Start immediately with the "## Summary" heading. Follow the report structure from the system prompt, and cite every factual claim using the exact bracketed citation format shown above each excerpt.`;
+
+/**
+ * Prior turns are the easiest thing to crowd a synthesis prompt with: each
+ * saved deep-search answer runs tens of thousands of characters and the client
+ * replays every one of them. Past this budget the excerpt block loses room and
+ * the total input balloons (a 173K-token synthesis call was what produced the
+ * prompt-echo above). `generateReportWithRlm` has always capped its own
+ * history; the cloud-synthesis paths did not.
+ */
+const SYNTHESIS_HISTORY_CHAR_CAP = 24000;
+
+/** Shown instead of the answer when synthesis emitted no report at all. The
+ *  diverted text is still available in the turn's thoughts trace. */
+const NO_REPORT_MESSAGE = `## Synthesis produced no report
+
+The synthesis model returned only echoed context and planning text — no report was written. Nothing was lost: the raw output is in the **Thoughts** section above, and the retrieved sources are listed below.
+
+Re-run the search, or lower the number of sources / shorten the conversation history if this repeats.`;
+
+/** Memory bound while accumulating the trace; the persisted copy is trimmed
+ *  further by `capThoughts`. */
+const THOUGHTS_TRACE_CAP = 200000;
+
+/** Most-recent-first history section, bounded by {@link SYNTHESIS_HISTORY_CHAR_CAP}. */
+function buildHistorySection(
+  history: ConversationTurn[] | undefined,
+  followUpNote: string,
+): string {
+  if (!history || history.length === 0) return '';
+  const lines: string[] = [];
+  let used = 0;
+  let dropped = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const t = history[i];
+    const line = `**${t.role === 'user' ? 'User' : 'Assistant'}:** ${t.content}`;
+    if (used + line.length > SYNTHESIS_HISTORY_CHAR_CAP && lines.length > 0) {
+      dropped = i + 1;
+      break;
+    }
+    lines.unshift(line);
+    used += line.length;
+  }
+  const elision = dropped > 0
+    ? `_(${dropped} earlier turn${dropped === 1 ? '' : 's'} omitted to stay within the context budget.)_\n\n`
+    : '';
+  return `## Previous Conversation\n${elision}${lines.join('\n\n')}\n\n---\n\n${followUpNote}\n\n`;
+}
+
+/**
  * Anthropic models that run adaptive thinking with the thinking stream
  * *omitted* by default (Fable 5 / Opus 4.7 / 4.8). At high effort these can
  * spend the entire `max_tokens` budget on invisible reasoning and emit no
@@ -849,10 +925,7 @@ const REPORT_SYSTEM_PROMPT = `You are an expert legal research analyst. Generate
  * and output caps are unchanged.
  */
 function isAdaptiveThinkingModel(model: string | undefined): boolean {
-  if (!model) return false;
-  return model.startsWith('claude-fable-5')
-    || model.startsWith('claude-opus-4-7')
-    || model.startsWith('claude-opus-4-8');
+  return supportsAdaptiveEffort(model);
 }
 
 /** Token budget for synthesis. Adaptive-thinking models get a floor scaled by
@@ -875,7 +948,7 @@ export async function generateReport(
   query: string,
   decomposition: DecompositionResult,
   sources: DeepSearchSource[],
-  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal; onToken?: (text: string) => void; onThinking?: (text: string) => void; onProgress?: (p: DeepSearchProgress) => void },
+  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal; onToken?: (text: string) => void; onThinking?: (text: string) => void; onThoughts?: (text: string) => void; onProgress?: (p: DeepSearchProgress) => void },
 ): Promise<string> {
   if (sources.length === 0) {
     return '## No Results Found\n\nThe deep search did not find any relevant document excerpts for your query. Try rephrasing your question or broadening the search scope.';
@@ -898,20 +971,10 @@ export async function generateReport(
   );
 
   // Build conversation history section if follow-up
-  let historySection = '';
-  if (options?.history && options.history.length > 0) {
-    const historyLines = options.history.map((t) =>
-      t.role === 'user' ? `**User:** ${t.content}` : `**Assistant:** ${t.content}`,
-    );
-    historySection = `## Previous Conversation
-${historyLines.join('\n\n')}
-
----
-
-The user is now asking a follow-up question. Use the conversation above as context — build on what was already discussed, don't repeat prior findings, and focus on answering the new question. If the new query references specific documents or pages, focus your analysis there.
-
-`;
-  }
+  const historySection = buildHistorySection(
+    options?.history,
+    'The user is now asking a follow-up question. Use the conversation above as context — build on what was already discussed, don\'t repeat prior findings, and focus on answering the new question. If the new query references specific documents or pages, focus your analysis there.',
+  );
 
   const workflowSection = options?.workflowContext
     ? `## Active Workflow Context\n\n${options.workflowContext}\n\n`
@@ -928,7 +991,11 @@ ${decomposition.intent}
 
 ## Document Excerpts (${sources.length} sources)
 
-${contextBlock}`;
+${contextBlock}
+
+---
+
+${CONTEXT_CLOSING_INSTRUCTIONS}`;
 
   try {
     // When the caller wants live tokens (deep-search route does), bypass the
@@ -939,7 +1006,16 @@ ${contextBlock}`;
         ? { provider: options.provider as AIProviderKey, model: options.model }
         : await getAvailableProvider();
       const runStream = async (over: { thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; maxTokens?: number }): Promise<string> => {
-        let content = '';
+        // Everything the model emits on the text channel goes through the
+        // preamble splitter: `onToken` (the answer channel) must only ever
+        // receive report prose, and any echoed context / out-loud planning in
+        // front of it is diverted to the thoughts channel instead of being
+        // stranded in the saved answer.
+        const splitter = createPreambleSplitter({
+          onToken: options.onToken,
+          onThoughts: options.onThoughts,
+        });
+        let raw = '';
         for await (const event of streamAI({
           provider: resolved.provider,
           model: resolved.model,
@@ -953,18 +1029,21 @@ ${contextBlock}`;
           effort: over.effort ?? options?.effort,
           signal: options?.signal,
         })) {
-          if (event.type === 'token' && options.onToken) {
-            options.onToken(event.text);
-            content += event.text;
+          if (event.type === 'token') {
+            raw += event.text;
+            splitter.push(event.text);
           } else if (event.type === 'thinking' && options.onThinking) {
             options.onThinking(event.text);
           } else if (event.type === 'done') {
             // streamAI's done event carries the full content as a fallback for
             // providers that don't yield per-token (e.g. error fallback).
-            if (!content && event.content) content = event.content;
+            if (!raw && event.content) {
+              raw = event.content;
+              splitter.push(event.content);
+            }
           }
         }
-        return content;
+        return splitter.finish();
       };
 
       // Adaptive thinking (Fable 5 / Opus 4.7+) spends max_tokens on *omitted*
@@ -975,19 +1054,38 @@ ${contextBlock}`;
       // ceiling is safe.)
       const effMax = thinkingBudget(options?.maxTokens, options?.thinking, options?.effort, resolved.model);
 
-      let fullContent = await runStream({ thinking: options?.thinking, maxTokens: effMax });
-      // Safety net: if it still emits zero visible text, retry once with even
-      // more headroom — keeping thinking and the user's effort on (we don't
-      // silently downgrade the requested reasoning depth).
-      if (!fullContent.trim() && options?.thinking && isAdaptiveThinkingModel(resolved.model)) {
+      let split = await runStream({ thinking: options?.thinking, maxTokens: effMax });
+      // Safety net: if it emits NOTHING AT ALL, the model spent its whole
+      // budget on omitted reasoning — retry once with more headroom, keeping
+      // thinking and the user's effort on (we don't silently downgrade the
+      // requested reasoning depth). An empty report with a non-empty trace is
+      // a different failure (the model wrote, but wrote preamble instead of a
+      // report) and a second identical call would only burn another few
+      // minutes on the same prompt.
+      if (
+        !split.report.trim() && !split.thoughts.trim()
+        && options?.thinking && isAdaptiveThinkingModel(resolved.model)
+      ) {
         console.warn('[Deep Search] synthesis returned empty content — retrying with more headroom (thinking kept on)', {
           provider: resolved.provider,
           model: resolved.model,
           effort: options?.effort,
         });
-        fullContent = await runStream({ thinking: options?.thinking, maxTokens: Math.max(effMax, 64000) });
+        split = await runStream({ thinking: options?.thinking, maxTokens: Math.max(effMax, 64000) });
       }
-      return fullContent;
+      if (!split.report.trim()) {
+        // The model produced text but none of it was a report (it echoed the
+        // context and never got to the answer). Say so — a context dump on
+        // screen was the old behavior and it read like a rendering bug.
+        console.error('[Deep Search] synthesis produced no report', {
+          provider: resolved.provider,
+          model: resolved.model,
+          sources: sources.length,
+          traceChars: split.thoughts.length,
+        });
+        return NO_REPORT_MESSAGE;
+      }
+      return split.report;
     }
     const effMaxBuf = thinkingBudget(options?.maxTokens, options?.thinking, options?.effort, options?.model);
     const bufferedOpts = {
@@ -1008,7 +1106,19 @@ ${contextBlock}`;
       });
       result = await callLLM(REPORT_SYSTEM_PROMPT, userContent, { ...bufferedOpts, maxTokens: Math.max(effMaxBuf, 64000), thinking: options?.thinking });
     }
-    return result;
+    // Same preamble split as the streaming branch — a buffered completion can
+    // carry the identical echo, it just arrives all at once.
+    const split = splitReportPreamble(result);
+    if (split.thoughts) options?.onThoughts?.(split.thoughts);
+    if (!split.report.trim()) {
+      console.error('[Deep Search] synthesis (buffered) produced no report — output was prompt echo / planning only', {
+        provider: options?.provider,
+        model: options?.model,
+        sources: sources.length,
+      });
+      return NO_REPORT_MESSAGE;
+    }
+    return split.report;
   } catch (err) {
     // Surface the real error — the old bare catch hid it and only returned
     // the "Report generation failed" fallback, making every such failure
@@ -1096,7 +1206,7 @@ export async function generateReportMultiPass(
   query: string,
   decomposition: DecompositionResult,
   sources: DeepSearchSource[],
-  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal; onToken?: (text: string) => void; onThinking?: (text: string) => void; onProgress?: (p: DeepSearchProgress) => void },
+  options?: { provider?: string; model?: string; history?: ConversationTurn[]; workflowContext?: string; thinking?: boolean; maxTokens?: number; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; signal?: AbortSignal; onToken?: (text: string) => void; onThinking?: (text: string) => void; onThoughts?: (text: string) => void; onProgress?: (p: DeepSearchProgress) => void },
 ): Promise<string> {
   const progress = options?.onProgress || (() => {});
   if (sources.length === 0) {
@@ -1105,18 +1215,17 @@ export async function generateReportMultiPass(
 
   const { contextBlock } = buildSourceContext(sources);
 
-  let historySection = '';
-  if (options?.history && options.history.length > 0) {
-    const historyLines = options.history.map((t) =>
-      t.role === 'user' ? `**User:** ${t.content}` : `**Assistant:** ${t.content}`,
-    );
-    historySection = `## Previous Conversation\n${historyLines.join('\n\n')}\n\n---\n\nThe user is now asking a follow-up question. Build on the conversation above.\n\n`;
-  }
+  const historySection = buildHistorySection(
+    options?.history,
+    'The user is now asking a follow-up question. Build on the conversation above.',
+  );
 
   const workflowSection = options?.workflowContext
     ? `## Active Workflow Context\n\n${options.workflowContext}\n\n`
     : '';
 
+  // Same closing-instruction rule as the single-pass path: never end the
+  // prompt on raw excerpt text (see CONTEXT_CLOSING_INSTRUCTIONS).
   const baseUserContent = `${historySection}${workflowSection}## Research Question
 ${query}
 
@@ -1128,7 +1237,11 @@ ${decomposition.intent}
 
 ## Document Excerpts (${sources.length} sources)
 
-${contextBlock}`;
+${contextBlock}
+
+---
+
+The excerpts above are your evidence — do not repeat or quote them back in bulk. Work from them to produce what is asked for below.`;
 
   // Stage 1: outline + short sections
   progress({ step: 'generating', message: 'Stage 1/2: drafting outline + summary + gaps + significance...' });
@@ -1644,6 +1757,15 @@ export async function deepSearch(
 ): Promise<DeepSearchResult> {
   const { provider, model, caseId, chatId, onProgress, history, workflowContext, thinking, maxTokens, effort, signal, onToken, onThinking, multiPass, useRlm, rlmMaxRounds } = options;
   const emit = onProgress || (() => {});
+
+  // Accumulate the research trace alongside streaming it, so the completed
+  // result carries it for persistence/replay.
+  let thoughtsTrace = '';
+  const onThoughts = (text: string) => {
+    if (!text) return;
+    if (thoughtsTrace.length < THOUGHTS_TRACE_CAP) thoughtsTrace += text;
+    options.onThoughts?.(text);
+  };
   const checkAbort = () => {
     if (signal?.aborted) {
       const err = new Error('Deep search aborted by client');
@@ -1832,16 +1954,19 @@ export async function deepSearch(
     // report (Stage 2 does). If it's down/unreachable/timing out/erroring, skip
     // it and synthesize from the already-reranked sources rather than failing
     // the whole search. A real user-abort is still propagated.
-    // Cap the RLM's streamed "thinking". The RLM is instructed to emit a brief
-    // confirmation, but when it instead dumps raw excerpts (tens of thousands of
-    // chars), that flood lands on the answer channel and — if Stage 2 then fails
-    // — gets stranded on screen (the "doesn't render right" 71K raw-excerpt
-    // bug). Its streamed text is discarded anyway (Stage 2 writes the report),
-    // so bounding it is lossless.
+    // The RLM's streamed text is evidence-gathering narration, never the
+    // report (Stage 2 writes that), so it belongs on the thoughts channel —
+    // the answer channel must only ever carry synthesis output. Still capped:
+    // when the RLM ignores its brief-confirmation instruction and dumps raw
+    // excerpts, there is no reason to keep tens of thousands of chars of it.
     let rlmStreamedChars = 0;
     const RLM_STREAM_CAP = 3000;
-    const cappedOnToken = onToken
-      ? (t: string) => { if (rlmStreamedChars >= RLM_STREAM_CAP) return; rlmStreamedChars += t.length; onToken(t); }
+    const rlmOnToken = onThoughts
+      ? (t: string) => {
+          if (rlmStreamedChars >= RLM_STREAM_CAP) return;
+          rlmStreamedChars += t.length;
+          onThoughts(t);
+        }
       : undefined;
     try {
       const rlmOut = await generateReportWithRlm(query, decomposition, sources, registry, {
@@ -1851,9 +1976,9 @@ export async function deepSearch(
         workflowContext,
         maxTokens,
         signal,
-        // Capped (see above) — the operator still sees the model start to
-        // "think"/ask for excerpts, but a runaway dump can't flood the answer.
-        onToken: cappedOnToken,
+        // Thoughts channel, capped (see above) — the operator still sees the
+        // model ask for excerpts, but none of it can reach the answer.
+        onToken: rlmOnToken,
         onProgress: emit,
         pushWarning,
         maxRounds: rlmMaxRounds,
@@ -1914,6 +2039,7 @@ export async function deepSearch(
       signal,
       onToken,
       onThinking,
+      onThoughts,
       onProgress: emit,
     });
     // Provider/model reflect the FINAL stage (who wrote the report), not RLM.
@@ -1931,6 +2057,7 @@ export async function deepSearch(
       signal,
       onToken,
       onThinking,
+      onThoughts,
       onProgress: emit,
     });
   }
@@ -1953,5 +2080,6 @@ export async function deepSearch(
     rlmAssisted: rlmAssisted || undefined,
     rlmHost,
     rlmExtraSourceCount: rlmAssisted ? rlmExtraSourceCount : undefined,
+    thoughts: thoughtsTrace ? capThoughts(thoughtsTrace) : undefined,
   };
 }

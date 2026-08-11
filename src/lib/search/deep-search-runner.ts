@@ -14,6 +14,7 @@ import type {
   DeepSearchProgress,
   DeepSearchResult,
 } from '@/lib/search/deep-search';
+import { capThoughts } from '@/lib/search/report-preamble';
 
 export interface DeepSearchWarning {
   source: string;
@@ -47,6 +48,9 @@ export interface DeepSearchRunnerState {
   startTime: number;
   progress: DeepSearchProgress | null;
   streamingAnswer: string | null;
+  /** Live research trace for the in-flight turn. Plain text, never markdown —
+   *  it can contain raw retrieved excerpts. */
+  streamingThoughts: string | null;
   streamTokenCount: number;
   progressLog: DeepProgressEntry[];
   warnings: DeepSearchWarning[];
@@ -79,6 +83,7 @@ const initialState: DeepSearchRunnerState = {
   startTime: 0,
   progress: null,
   streamingAnswer: null,
+  streamingThoughts: null,
   streamTokenCount: 0,
   progressLog: [],
   warnings: [],
@@ -87,10 +92,18 @@ const initialState: DeepSearchRunnerState = {
   turns: [],
 };
 
+/** Coalescing window for token/thinking notifications. Streaming emits per
+ *  token; every emit re-renders SearchInterface and re-parses the whole
+ *  accumulated answer through react-markdown (O(N²) over a long report), which
+ *  is what froze the UI during active searches. State still updates per event —
+ *  only listener notification is batched. */
+const STREAM_EMIT_INTERVAL_MS = 80;
+
 class DeepSearchRunner {
   private state: DeepSearchRunnerState = { ...initialState };
   private listeners = new Set<() => void>();
   private abortCtrl: AbortController | null = null;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   getSnapshot = (): DeepSearchRunnerState => this.state;
 
@@ -103,16 +116,36 @@ class DeepSearchRunner {
     for (const l of this.listeners) l();
   }
 
+  /** Emit now and cancel any pending coalesced flush (state is already current). */
+  private flushNow() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.emit();
+  }
+
   private set(patch: Partial<DeepSearchRunnerState>) {
     this.state = { ...this.state, ...patch };
-    this.emit();
+    this.flushNow();
+  }
+
+  /** Apply the patch immediately but defer listener notification to the next
+   *  coalescing window. For high-frequency stream events only. */
+  private setThrottled(patch: Partial<DeepSearchRunnerState>) {
+    this.state = { ...this.state, ...patch };
+    if (this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.emit();
+    }, STREAM_EMIT_INTERVAL_MS);
   }
 
   /** Wipe completed turns + error. Used by "New chat". */
   reset(sessionId: string) {
     if (this.state.loading) return; // never wipe an active run
     this.state = { ...initialState, sessionId };
-    this.emit();
+    this.flushNow();
   }
 
   /** Seed completed turns from persisted history when a saved deep-search chat
@@ -123,7 +156,7 @@ class DeepSearchRunner {
   hydrate(sessionId: string, turns: DeepSearchTurnSnapshot[]) {
     if (this.state.loading) return; // never disturb an active run
     this.state = { ...initialState, sessionId, turns };
-    this.emit();
+    this.flushNow();
   }
 
   abort() {
@@ -149,6 +182,7 @@ class DeepSearchRunner {
       startTime: Date.now(),
       progress: null,
       streamingAnswer: null,
+      streamingThoughts: null,
       streamTokenCount: 0,
       progressLog: [],
       warnings: [],
@@ -236,6 +270,17 @@ class DeepSearchRunner {
       }
     } finally {
       const completedAt = Date.now();
+      // The server's trace covers the research passes; the client also folds in
+      // provider thinking deltas. Prefer whichever is longer so the persisted
+      // turn keeps the fuller picture — but cap the client copy the same way
+      // the server caps its own, or the comparison silently picks the uncapped
+      // one *because* the server's was trimmed, and the cap never applies.
+      const clientTrace = this.state.streamingThoughts
+        ? capThoughts(this.state.streamingThoughts)
+        : null;
+      if (finalResult && clientTrace && clientTrace.length > (finalResult.thoughts?.length ?? 0)) {
+        finalResult = { ...finalResult, thoughts: clientTrace };
+      }
       const turn: DeepSearchTurnSnapshot = {
         query: this.state.query,
         sessionId: this.state.sessionId || params.sessionId,
@@ -250,6 +295,7 @@ class DeepSearchRunner {
         loading: false,
         progress: null,
         streamingAnswer: null,
+        streamingThoughts: null,
         progressLog: [],
         lastResult: finalResult,
         lastError: errMsg,
@@ -286,37 +332,23 @@ class DeepSearchRunner {
           ],
         });
       }
-      // Handoff transition: the orchestrator emits a 'generating' step after
-      // RLM finishes its loop with a message containing "now drafting" — at
-      // that point inject a visual separator so RLM's preamble stays visible
-      // and the cloud LLM's tokens append below it as a distinct section.
-      // We deliberately do NOT clear streamingAnswer: clearing made the user
-      // think the system froze, since the next Anthropic call may take
-      // 5–30 s to produce its first token.
-      if (
-        p.step === 'generating'
-        && typeof p.message === 'string'
-        && /now drafting/i.test(p.message)
-        && this.state.streamingAnswer
-        && !this.state.streamingAnswer.includes('\n\n---\n\n## Final Report')
-      ) {
-        this.set({
-          streamingAnswer: `${this.state.streamingAnswer.trimEnd()}\n\n---\n\n## Final Report (${p.message.match(/handing off to (\S+)/i)?.[1] ?? 'cloud LLM'})\n\n`,
-        });
-      }
+      // (The RLM handoff used to inject a "## Final Report" separator into the
+      // streaming answer, because RLM narration and the report shared the
+      // answer channel. RLM narration now streams to `streamingThoughts`, so
+      // the answer holds nothing but synthesis output and needs no separator.)
     } else if (event.type === 'token') {
-      this.set({
+      this.setThrottled({
         streamingAnswer: (this.state.streamingAnswer ?? '') + event.text,
         streamTokenCount:
           this.state.streamTokenCount +
           Math.max(1, Math.round((event.text as string).length / 4)),
       });
-    } else if (event.type === 'thinking') {
-      this.set({
-        progressLog: [
-          ...this.state.progressLog,
-          { step: 'thinking', message: event.text, timestamp: Date.now() },
-        ],
+    } else if (event.type === 'thoughts' || event.type === 'thinking') {
+      // One accumulating string, not an array push per token: appending to an
+      // array on a per-token channel copies the whole log every time (O(N²)),
+      // which is what the coalescing window above exists to hide.
+      this.setThrottled({
+        streamingThoughts: (this.state.streamingThoughts ?? '') + event.text,
       });
     }
   }

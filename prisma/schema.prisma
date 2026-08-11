@@ -746,3 +746,12 @@ model ReportersRecord {
   @@index([reporterId])
   @@index([documentId])
 }
+
+model SearchPreset {
+  id        String   @id
+  name      String
+  version   Int      @default(1)
+  settings  Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

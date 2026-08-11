@@ -6,8 +6,9 @@ import { classifyQueryComplexity } from '@/lib/search/query-router';
 import { segmentChipsAndIntents } from '@/lib/search/chip-segments';
 import { aiSearchRunner } from '@/lib/search/ai-search-runner';
 import { useRouter } from 'next/navigation';
-import { AI_PROVIDERS, AI_PROVIDER_KEYS, AIProviderKey, AIModelDef } from '@/lib/ai/models';
+import { AI_PROVIDERS, AI_PROVIDER_KEYS, AIProviderKey, AIModelDef, getModelCaps, clampEffort, type EffortLevel } from '@/lib/ai/models';
 import { getPreference, setPreference } from '@/lib/indexed-db';
+import { usePersistedState } from '@/hooks/use-persisted-state';
 import { SearchableCombo } from './searchable-combo';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -23,6 +24,7 @@ import { MCPHealthIndicator } from './mcp/mcp-health-indicator';
 import { ResizableDivider } from './search/resizable-divider';
 import { useResizableColumns } from '@/hooks/use-resizable-columns';
 import { AIThinkingLog, type AIProgressEntry } from './search/ai-thinking-log';
+import { ThoughtsPanel } from './search/thoughts-panel';
 import { WorkflowsPanel } from './search/workflows-panel';
 import { HistoryPanel } from './search/history-panel';
 import { ChatAttachmentsStrip } from './chat-attachments';
@@ -105,17 +107,53 @@ interface AISearchResult {
 // alongside DeepSearchResult import) so the rlm-synthesis/rlm-subcall steps
 // and rlm-* fields stay in sync with the orchestrator.
 import type { DeepSearchProgress } from '@/lib/search/deep-search';
+import { getChatSessionId, setChatSessionId } from '@/lib/search/chat-session';
 
 interface AIConversationTurn {
   query: string;
   result: AISearchResult;
   searchTime: number | null;
+  /** Epoch ms for live turns; small ordinals (1..n) for history-loaded turns.
+   *  Only used to interleave single-shot and deep turns into one ordered
+   *  conversation — absolute values don't matter, relative order does. */
+  completedAt?: number;
 }
 
 interface DeepSearchTurn {
   query: string;
   result: DeepSearchResult;
   searchTime: number | null;
+  completedAt?: number;
+}
+
+/** A named, saved combination of every search setting. Persisted server-side
+ *  in SQLite via /api/search/presets (with a one-time migration from the old
+ *  IndexedDB `search.presets` key); applying one mid-chat never resets the
+ *  conversation. */
+interface SearchPreset {
+  id: string;
+  name: string;
+  version: 1;
+  createdAt: string;
+  updatedAt: string;
+  settings: {
+    provider: string;
+    model: string;
+    auto: boolean;
+    deep: boolean;
+    rlm: boolean;
+    compare: boolean;
+    thinking: boolean;
+    multiPass: boolean;
+    maxTokens: number;
+    effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+    /** Case scope is opt-in per preset — it's the one setting users usually
+     *  want to keep independent of the model/mode combo. */
+    includeCaseScope: boolean;
+    caseId?: string;
+    /** Required when compare is true — submit errors on an empty map. */
+    compareSelections?: [string, string][];
+  };
 }
 
 interface DeepSearchResult {
@@ -152,6 +190,9 @@ interface DeepSearchResult {
   rlmAssisted?: boolean;
   rlmHost?: string;
   rlmExtraSourceCount?: number;
+  /** Research trace: intermediate work, never the answer. Rendered as plain
+   *  text in the Thoughts panel. Absent on pre-thoughts saved sessions. */
+  thoughts?: string;
 }
 
 interface ToolInfo {
@@ -191,32 +232,6 @@ interface SearchInterfaceProps {
   toolSlugMap?: Record<string, string>;
   initialChatId?: string | null;
   hasExplicitPath?: boolean;
-}
-
-// ---------------------------------------------------------------------------
-// usePersistedState — useState backed by IndexedDB preferences
-// ---------------------------------------------------------------------------
-
-function usePersistedState<T>(key: string, initialValue: T): [T, (v: T | ((prev: T) => T)) => void] {
-  const [value, setValue] = useState<T>(initialValue);
-  const initialized = useRef(false);
-
-  useEffect(() => {
-    getPreference<T>(key).then(stored => {
-      if (stored !== null) setValue(stored);
-      initialized.current = true;
-    }).catch(() => { initialized.current = true; });
-  }, [key]);
-
-  const setAndPersist = useCallback((v: T | ((prev: T) => T)) => {
-    setValue(prev => {
-      const next = typeof v === 'function' ? (v as (p: T) => T)(prev) : v;
-      if (initialized.current) setPreference(key, next).catch(() => {});
-      return next;
-    });
-  }, [key]);
-
-  return [value, setAndPersist];
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +551,47 @@ export default function SearchInterface({
   const [maxTokens, setMaxTokens] = usePersistedState<number>('search.maxTokens', 2048);
   const [effort, setEffort] = usePersistedState<'low' | 'medium' | 'high' | 'xhigh' | 'max'>('search.effort', 'medium');
   const [multiPass, setMultiPass] = usePersistedState<boolean>('search.multiPass', false);
+  // Search presets — named setting combos, listed in the right-panel Presets
+  // tab. Server-persisted in SQLite via /api/search/presets so they survive
+  // across browsers; the active selection stays per-browser in IndexedDB.
+  const [presets, setPresets] = useState<SearchPreset[]>([]);
+  const [activePresetId, setActivePresetId] = usePersistedState<string>('search.activePresetId', '');
+
+  // Load presets from the server. One-time migration: presets saved by older
+  // builds live in IndexedDB under 'search.presets' — if the server has none
+  // and IndexedDB does, upload them, then leave the local copy as a fallback.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/search/presets');
+        if (!res.ok) throw new Error(`presets fetch ${res.status}`);
+        const data = await res.json();
+        let serverPresets: SearchPreset[] = data.presets || [];
+        if (serverPresets.length === 0) {
+          const legacy = await getPreference<SearchPreset[]>('search.presets').catch(() => null);
+          if (legacy && legacy.length > 0) {
+            const up = await fetch('/api/search/presets', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ presets: legacy }),
+            });
+            if (up.ok) serverPresets = (await up.json()).presets || legacy;
+            else serverPresets = legacy;
+          }
+        }
+        if (!cancelled) setPresets(serverPresets);
+      } catch {
+        // Server unreachable — fall back to any IndexedDB copy so the
+        // dropdown still works offline.
+        const legacy = await getPreference<SearchPreset[]>('search.presets').catch(() => null);
+        if (!cancelled && legacy) setPresets(legacy);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  const [presetNameDraft, setPresetNameDraft] = useState('');
+  const [presetIncludeCase, setPresetIncludeCase] = useState(false);
   // Composer baseline height. Doubled from the previous 72 → 192 so the
   // box has room for a paragraph-sized query by default. Operator can drag
   // the resize handle above the composer to make it taller (or shorter).
@@ -555,13 +611,20 @@ export default function SearchInterface({
   }, []);
   const [aiTurns, setAiTurns] = useState<AIConversationTurn[]>([]);
   const [deepTurns, setDeepTurns] = useState<DeepSearchTurn[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState<string>(() => `session-${Date.now()}`);
+  // Session id lives at MODULE scope (chat-session.ts) and is only mirrored
+  // into state here. The Deep/Compare toggles remount this component via
+  // router.push; minting a fresh id per mount orphaned the runners' turns
+  // (their mirror guards match on session id) and blanked the conversation.
+  const [currentSessionId, setCurrentSessionId] = useState<string>(() => getChatSessionId());
   const [deepProgress, setDeepProgress] = useState<DeepSearchProgress | null>(null);
   const [searchWarnings, setSearchWarnings] = useState<Array<{ source: string; host?: string; message: string; count?: number }>>([]);
   const [aiProgressLog, setAiProgressLog] = useState<AIProgressEntry[]>([]);
   const [thinkingExpanded, setThinkingExpanded] = useState(true);
   const [searchStartTime, setSearchStartTime] = useState(0);
   const [streamingAnswer, setStreamingAnswer] = useState<string | null>(null);
+  /** Live research trace for the in-flight deep turn. Plain text — it can hold
+   *  raw retrieved excerpts, so it is never run through react-markdown. */
+  const [streamingThoughts, setStreamingThoughts] = useState<string | null>(null);
   const [streamTokenCount, setStreamTokenCount] = useState(0);
   const [compareSelections, setCompareSelections] = useState<Map<string, string>>(new Map());
   const chatScrollRef = useRef<HTMLDivElement>(null);
@@ -985,6 +1048,7 @@ export default function SearchInterface({
       if (!aiSnap.loading) {
         setDeepProgress(s.progress);
         setStreamingAnswer(s.streamingAnswer);
+        setStreamingThoughts(s.streamingThoughts);
         setStreamTokenCount(s.streamTokenCount);
         setSearchWarnings(s.warnings);
         setAiProgressLog(s.progressLog.map(p => ({
@@ -1001,10 +1065,13 @@ export default function SearchInterface({
       if (s.sessionId === currentSessionId) {
         const turns = s.turns
           .filter(t => t.sessionId === currentSessionId && t.result)
-          .map(t => ({
+          .map((t, idx) => ({
             query: t.query,
             result: t.result!,
             searchTime: t.searchTime ?? Math.max(0, t.completedAt - s.startTime),
+            // History-hydrated turns carry completedAt 0 — give them small
+            // ordinals so the merged conversation keeps their order.
+            completedAt: t.completedAt || idx + 1,
           }));
         if (turns.length > 0) setDeepTurns(turns);
       }
@@ -1036,10 +1103,11 @@ export default function SearchInterface({
       if (s.sessionId === currentSessionId) {
         const turns = s.turns
           .filter(t => t.sessionId === currentSessionId && t.result)
-          .map(t => ({
+          .map((t, idx) => ({
             query: t.query,
             result: t.result!,
             searchTime: Math.max(0, t.completedAt - s.startTime),
+            completedAt: t.completedAt || idx + 1,
           }));
         if (turns.length > 0) {
           // Merge: prefer the runner's turns if it has more than local state.
@@ -1157,7 +1225,7 @@ export default function SearchInterface({
   const [toolResult, setToolResult] = useState<{ toolName: string; data: any; executionTimeMs: number; resultCount: number; error?: string } | null>(null);
   const [toolLoading, setToolLoading] = useState(false);
   const [collapsedCats, setCollapsedCatsState] = useState<Set<string>>(new Set());
-  const [infoTab, setInfoTab] = usePersistedState<'workflows' | 'history' | 'bookmarks' | 'docs' | 'haystack'>('search.infoTab', 'workflows');
+  const [infoTab, setInfoTab] = usePersistedState<'settings' | 'workflows' | 'history' | 'bookmarks' | 'docs' | 'haystack'>('search.infoTab', 'settings');
   const [selectedWorkflowIds, setSelectedWorkflowIds] = usePersistedState<string[]>('search.selectedWorkflowIds', []);
 
   // Persist collapsed categories as array
@@ -1318,6 +1386,27 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
       .finally(() => setOllamaModelsLoading(false));
   }, [configuredProviders.ollama]);
 
+  // Auto-adjust settings to the selected model. Two jobs:
+  // 1. A persisted model that fell out of the catalog (e.g. gpt-5 after the
+  //    5.6 refresh) would fail the server allow-list — fall back to the
+  //    provider's first model. Ollama has its own availability check above.
+  // 2. Clamp effort to what the model supports (e.g. persisted 'max' on a
+  //    model that tops out at 'xhigh' → 'xhigh') so a stale persisted setting
+  //    never produces an invalid request or a dead selector.
+  useEffect(() => {
+    if (aiProvider !== 'ollama') {
+      const models = AI_PROVIDERS[aiProvider as AIProviderKey]?.models ?? [];
+      if (models.length > 0 && aiModel && !models.some(m => m.id === aiModel)) {
+        setAiModel(models[0].id);
+        return; // effect re-runs with the corrected model
+      }
+    }
+    const caps = getModelCaps(aiProvider as AIProviderKey, aiModel);
+    if (caps.effort && !caps.effort.includes(effort as EffortLevel)) {
+      setEffort(clampEffort(effort as EffortLevel, caps.effort));
+    }
+  }, [aiProvider, aiModel, effort, setAiModel, setEffort]);
+
   // ---------------------------------------------------------------------------
   // Handlers
   // ---------------------------------------------------------------------------
@@ -1333,16 +1422,13 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
     }
   };
 
+  // Case scope is per-turn metadata now — changing it applies to the NEXT
+  // question and no longer wipes the conversation. (persistSession relocates
+  // the saved file to the new case directory and saveSession removes the
+  // stale copy, so history shows no duplicates.)
   const handleCaseFilterChange = useCallback((newCaseId: string) => {
     if (newCaseId === aiCaseId) return;
     setAiCaseId(newCaseId);
-    setAiTurns([]);
-    setDeepTurns([]);
-    setAiResults([]);
-    setAiError(null);
-    setDeepProgress(null);
-    setStreamingAnswer(null);
-    setCurrentSessionId(`session-${Date.now()}`);
   }, [aiCaseId, setAiCaseId]);
 
   const toggleCompareProvider = (key: string) => {
@@ -1499,15 +1585,30 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
     sessionId: string,
   ) => {
     const mode = deepSearchMode ? 'deep' : compareMode ? 'compare' : 'ai';
-    const turns: Array<{ role: 'user' | 'assistant'; content: string; mode?: string; searchTime?: number | null; sources?: any[]; searchStats?: any; subQueries?: string[] }> = [];
+    const turns: Array<{ role: 'user' | 'assistant'; content: string; mode?: string; provider?: string; model?: string; searchTime?: number | null; sources?: any[]; searchStats?: any; subQueries?: string[] }> = [];
 
-    if (mode === 'deep') {
-      for (const t of sessionDeepTurns) {
+    // Serialize BOTH turn arrays interleaved by completion order — a
+    // conversation can mix single-shot and deep turns (and models) turn by
+    // turn. Per-turn provider/model come from the RESULT (what actually
+    // produced the turn), never from the currently selected toolbar state:
+    // stamping selection-at-persist-time silently relabeled every earlier
+    // turn whenever the user switched models mid-chat.
+    const merged = [
+      ...sessionAiTurns.map(t => ({ kind: 'ai' as const, t: t as AIConversationTurn | DeepSearchTurn })),
+      ...sessionDeepTurns.map(t => ({ kind: 'deep' as const, t: t as AIConversationTurn | DeepSearchTurn })),
+    ].sort((a, b) => (a.t.completedAt ?? 0) - (b.t.completedAt ?? 0));
+
+    for (const item of merged) {
+      const turnMode = item.kind === 'deep' ? 'deep' : mode === 'compare' ? 'compare' : 'ai';
+      if (item.kind === 'deep') {
+        const t = item.t as DeepSearchTurn;
         turns.push({ role: 'user', content: t.query, mode: 'deep' });
         turns.push({
           role: 'assistant',
           content: t.result.report,
           mode: 'deep',
+          provider: t.result.provider || aiProvider,
+          model: t.result.model || aiModel,
           searchTime: t.searchTime,
           sources: t.result.sources?.map(s => ({
             text: s.text,
@@ -1518,15 +1619,17 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
           })),
           searchStats: t.result.searchStats,
           subQueries: t.result.subQueries,
+          thoughts: t.result.thoughts,
         } as any);
-      }
-    } else {
-      for (const t of sessionAiTurns) {
-        turns.push({ role: 'user', content: t.query, mode });
+      } else {
+        const t = item.t as AIConversationTurn;
+        turns.push({ role: 'user', content: t.query, mode: turnMode });
         turns.push({
           role: 'assistant',
           content: t.result.answer,
-          mode,
+          mode: turnMode,
+          provider: t.result.provider || aiProvider,
+          model: t.result.model || aiModel,
           searchTime: t.searchTime,
           sources: t.result.sources?.map((s: any) => ({
             text: s.text || s.content || '',
@@ -1785,6 +1888,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
     setStreamingAnswer(null);
     setAiQuery('');
     const nextSession = `session-${Date.now()}`;
+    setChatSessionId(nextSession);
     setCurrentSessionId(nextSession);
     deepSearchRunner.reset(nextSession);
     aiSearchRunner.reset(nextSession);
@@ -1793,6 +1897,93 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
     // old chat over this fresh one.
     if (initialChatId) router.push('/search/ai', { scroll: false });
   }, [initialChatId, router]);
+
+  // ---------------------------------------------------------------------------
+  // Presets — save/apply/delete named setting combos
+  // ---------------------------------------------------------------------------
+
+  const saveCurrentAsPreset = useCallback(() => {
+    const name = presetNameDraft.trim();
+    if (!name) return;
+    const now = new Date().toISOString();
+    const preset: SearchPreset = {
+      id: `preset-${Date.now()}`,
+      name,
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+      settings: {
+        provider: aiProvider,
+        model: aiModel,
+        auto: searchAuto,
+        deep: deepSearchMode,
+        rlm: useRlm,
+        compare: compareMode,
+        thinking: thinkingMode,
+        multiPass,
+        maxTokens,
+        effort: effort as SearchPreset['settings']['effort'],
+        includeCaseScope: presetIncludeCase,
+        ...(presetIncludeCase && aiCaseId ? { caseId: aiCaseId } : {}),
+        ...(compareMode ? { compareSelections: Array.from(compareSelections.entries()) } : {}),
+      },
+    };
+    setPresets([...presets, preset]);
+    setActivePresetId(preset.id);
+    setPresetNameDraft('');
+    setPresetIncludeCase(false);
+    fetch('/api/search/presets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preset }),
+    }).catch(() => {});
+  }, [presetNameDraft, presetIncludeCase, presets, setPresets, setActivePresetId, aiProvider, aiModel, searchAuto, deepSearchMode, useRlm, compareMode, thinkingMode, multiPass, maxTokens, effort, aiCaseId, compareSelections]);
+
+  const applyPreset = useCallback((p: SearchPreset) => {
+    const s = p.settings;
+    // NEVER route through handleProviderChange — it overwrites the model with
+    // the provider's first entry, silently discarding the preset's model.
+    setAiProvider(s.provider);
+    setAiModel(s.model);
+    setSearchAuto(s.auto);
+    setUseRlm(s.rlm);
+    setThinkingMode(s.thinking);
+    setMultiPass(s.multiPass);
+    setMaxTokens(s.maxTokens);
+    const caps = getModelCaps(s.provider as AIProviderKey, s.model);
+    setEffort(caps.effort && !caps.effort.includes(s.effort) ? clampEffort(s.effort, caps.effort) : s.effort);
+    if (s.compare && s.compareSelections) setCompareSelections(new Map(s.compareSelections));
+    // Deep/Compare navigate like the toggles do — the conversation survives
+    // the remount (module-scoped session id + runner rehydration).
+    if (s.deep !== deepSearchMode || s.compare !== compareMode) {
+      setDeepSearchMode(s.deep);
+      setCompareMode(s.compare);
+      router.push(getAiUrl(s.deep, s.compare), { scroll: false });
+    }
+    // Case scope only when the preset explicitly carries it (opt-in). Scope is
+    // non-destructive now — it applies to the next question.
+    if (s.includeCaseScope && s.caseId !== undefined && s.caseId !== aiCaseId) {
+      handleCaseFilterChange(s.caseId);
+    }
+    setActivePresetId(p.id);
+  }, [deepSearchMode, compareMode, aiCaseId, setAiProvider, setAiModel, setSearchAuto, setUseRlm, setThinkingMode, setMultiPass, setMaxTokens, setEffort, setDeepSearchMode, setCompareMode, setActivePresetId, router, getAiUrl, handleCaseFilterChange]);
+
+  const deletePreset = useCallback((id: string) => {
+    setPresets(presets.filter(p => p.id !== id));
+    if (activePresetId === id) setActivePresetId('');
+    fetch(`/api/search/presets/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
+  }, [presets, activePresetId, setPresets, setActivePresetId]);
+
+  // Active preset + dirty flag for the toolbar dropdown: "dirty" = live
+  // settings have diverged from the selected preset since it was applied.
+  const activePreset = presets.find(p => p.id === activePresetId) || null;
+  const activePresetDirty = !!activePreset && (() => {
+    const s = activePreset.settings;
+    return s.provider !== aiProvider || s.model !== aiModel || s.auto !== searchAuto
+      || s.deep !== deepSearchMode || s.rlm !== useRlm || s.compare !== compareMode
+      || s.thinking !== thinkingMode || s.multiPass !== multiPass
+      || s.maxTokens !== maxTokens || s.effort !== effort;
+  })();
 
   // Monotonic token so a slow in-flight load can't clobber a newer one when the
   // user clicks through several history items quickly (the "messes up the data
@@ -1819,6 +2010,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
       setDeepProgress(null);
       setAiProgressLog([]);
       setStreamingAnswer(null);
+      setStreamingThoughts(null);
       setAiQuery('');
 
       // Set mode
@@ -1839,69 +2031,93 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
       if (session.caseId) setAiCaseId(session.caseId);
 
       // Hydrate turns
+      setChatSessionId(session.id);
       setCurrentSessionId(session.id);
       setAiTurns([]);
       setDeepTurns([]);
       setAiResults([]);
       setAiError(null);
 
-      if (session.mode === 'deep') {
-        // Reconstruct deep turns from pairs
-        const newDeepTurns: DeepSearchTurn[] = [];
-        for (let i = 0; i < session.turns.length - 1; i += 2) {
-          const userTurn = session.turns[i];
-          const assistantTurn = session.turns[i + 1];
-          if (userTurn?.role === 'user' && assistantTurn?.role === 'assistant') {
-            newDeepTurns.push({
-              query: userTurn.content,
-              result: {
-                report: assistantTurn.content,
-                sources: assistantTurn.sources || [],
-                subQueries: assistantTurn.subQueries || [],
-                intent: '',
-                searchStats: assistantTurn.searchStats || { totalRetrieved: 0, uniqueAfterDedup: 0, finalAfterRerank: 0, subQueryCount: 0 },
-                model: session.model,
-                provider: session.provider,
-              },
-              searchTime: assistantTurn.searchTime ?? null,
-            });
-          }
+      // Reconstruct turns from pairs, routing each PAIR by its per-turn mode
+      // — a saved conversation can interleave single-shot and deep turns.
+      // Files written before per-turn metadata existed fall back to the
+      // session-level mode/provider/model. `ordinal` preserves the on-disk
+      // order when the merged conversation view re-sorts by completedAt.
+      const newDeepTurns: DeepSearchTurn[] = [];
+      const newAiTurns: AIConversationTurn[] = [];
+      let ordinal = 0;
+      for (let i = 0; i < session.turns.length - 1; i += 2) {
+        const userTurn = session.turns[i];
+        const assistantTurn = session.turns[i + 1];
+        if (userTurn?.role !== 'user' || assistantTurn?.role !== 'assistant') continue;
+        ordinal += 1;
+        const turnModel = assistantTurn.model || session.model;
+        const turnProvider = assistantTurn.provider || session.provider;
+        const turnMode = assistantTurn.mode || session.mode;
+        if (turnMode === 'deep') {
+          newDeepTurns.push({
+            query: userTurn.content,
+            result: {
+              report: assistantTurn.content,
+              sources: assistantTurn.sources || [],
+              subQueries: assistantTurn.subQueries || [],
+              intent: '',
+              searchStats: assistantTurn.searchStats || { totalRetrieved: 0, uniqueAfterDedup: 0, finalAfterRerank: 0, subQueryCount: 0 },
+              model: turnModel,
+              provider: turnProvider,
+              // Absent on sessions saved before the thoughts trace existed.
+              ...(assistantTurn.thoughts ? { thoughts: assistantTurn.thoughts } : {}),
+            },
+            searchTime: assistantTurn.searchTime ?? null,
+            completedAt: ordinal,
+          });
+        } else {
+          newAiTurns.push({
+            query: userTurn.content,
+            result: {
+              answer: assistantTurn.content,
+              // Sources are on disk — restore them (replays previously
+              // dropped citations for regular-AI turns).
+              sources: (assistantTurn.sources || []).map((s: any) => ({
+                text: s.text || '',
+                document: s.document || '',
+                page: s.page || 0,
+                score: 0,
+                citation: s.citation,
+                citationShort: s.citationShort,
+              })),
+              model: turnModel,
+              provider: turnProvider,
+              usage: { inputTokens: 0, outputTokens: 0 },
+            },
+            searchTime: assistantTurn.searchTime ?? null,
+            completedAt: ordinal,
+          });
         }
-        setDeepTurns(newDeepTurns);
-        // Seed the singleton runner with the loaded history so a follow-up
-        // deep search APPENDS to these turns instead of replacing them (and
-        // overwriting the saved file with a single turn pair). Synchronous tail
-        // of loadSession — the cancellation guards above already ensure a
-        // superseded load never reaches this point.
-        deepSearchRunner.hydrate(session.id, newDeepTurns.map(t => ({
-          query: t.query,
-          sessionId: session.id,
-          result: t.result,
-          completedAt: 0,
-          searchTime: t.searchTime ?? undefined,
-        })));
-      } else {
-        // Reconstruct AI turns from pairs
-        const newAiTurns: AIConversationTurn[] = [];
-        for (let i = 0; i < session.turns.length - 1; i += 2) {
-          const userTurn = session.turns[i];
-          const assistantTurn = session.turns[i + 1];
-          if (userTurn?.role === 'user' && assistantTurn?.role === 'assistant') {
-            newAiTurns.push({
-              query: userTurn.content,
-              result: {
-                answer: assistantTurn.content,
-                sources: [],
-                model: session.model,
-                provider: session.provider,
-                usage: { inputTokens: 0, outputTokens: 0 },
-              },
-              searchTime: assistantTurn.searchTime ?? null,
-            });
-          }
-        }
-        setAiTurns(newAiTurns);
       }
+      setDeepTurns(newDeepTurns);
+      setAiTurns(newAiTurns);
+      // Seed BOTH singleton runners with the loaded history so follow-up
+      // searches APPEND to these turns instead of replacing them (and
+      // overwriting the saved file with a single turn pair), and so a
+      // Deep/Compare remount rehydrates the conversation from the runner
+      // snapshots. Synchronous tail of loadSession — the cancellation guards
+      // above already ensure a superseded load never reaches this point.
+      deepSearchRunner.hydrate(session.id, newDeepTurns.map(t => ({
+        query: t.query,
+        sessionId: session.id,
+        result: t.result,
+        // Global ordinal, not 0 — keeps the interleaved order stable when the
+        // mirror effect later rebuilds component state from this snapshot.
+        completedAt: t.completedAt ?? 0,
+        searchTime: t.searchTime ?? undefined,
+      })));
+      aiSearchRunner.hydrate(session.id, newAiTurns.map(t => ({
+        query: t.query,
+        sessionId: session.id,
+        result: t.result,
+        completedAt: t.completedAt ?? 0,
+      })));
 
       scrollChatToBottom();
     } catch (err) {
@@ -2086,34 +2302,29 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
           <div className="flex items-center gap-4">
             {/* Left side — mode-specific controls */}
             {mode === 'ai' && !compareMode && (
-              <div className="flex items-center gap-3">
-                <select value={aiProvider} onChange={e => handleProviderChange(e.target.value)}
-                  className="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-                >
-                  <option value="">Provider...</option>
-                  {PROVIDERS.map(p => (
-                    <option key={p.key} value={p.key} disabled={!configuredProviders[p.key]}>
-                      {p.name}{!configuredProviders[p.key] ? ' (no key)' : ''}
-                    </option>
-                  ))}
-                </select>
-                <select value={aiModel} onChange={e => setAiModel(e.target.value)} disabled={!aiProvider}
-                  className="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white disabled:bg-gray-50"
-                >
-                  {!aiProvider && <option value="">Model...</option>}
-                  {aiProvider === 'ollama' && ollamaModelsLoading && <option value="">Loading...</option>}
-                  {getModels(aiProvider, ollamaCompletionModel, ollamaModels).map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-                </select>
-                <div className="w-px h-6 bg-gray-200" />
-                <select
-                  value={aiCaseId}
-                  onChange={e => handleCaseFilterChange(e.target.value)}
-                  className="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white max-w-[300px]"
-                >
-                  <option value="">All Cases</option>
-                  {cases.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </div>
+              <button
+                type="button"
+                onClick={() => setInfoTab('settings')}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-gray-200 bg-gray-50 hover:bg-gray-100 transition-colors text-sm text-gray-700 max-w-[420px]"
+                title="Search settings moved to the right panel — click to open"
+              >
+                <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.142-.854-.108-1.204l-.526-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                <span className="truncate font-medium">
+                  {getModels(aiProvider, ollamaCompletionModel, ollamaModels).find(m => m.id === aiModel)?.label || aiModel || 'Choose model'}
+                </span>
+                <span className="text-gray-300">·</span>
+                <span className="truncate text-gray-500">
+                  {cases.find(c => c.id === aiCaseId)?.name || 'All Cases'}
+                </span>
+                {(deepSearchMode || useRlm || searchAuto || multiPass) && (
+                  <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">
+                    {[searchAuto && 'Auto', deepSearchMode && 'Deep', useRlm && 'RLM', multiPass && 'Multi-Pass'].filter(Boolean).join(' · ')}
+                  </span>
+                )}
+              </button>
             )}
             {mode === 'ai' && compareMode && (
               <div className="flex items-center gap-3">
@@ -2183,10 +2394,31 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
               </div>
             )}
 
-            {/* Right side — new chat + toggles + embedding badge */}
+            {/* Right side — preset + new chat + toggles + embedding badge */}
             <div className="ml-auto flex items-center gap-3">
+              {mode === 'ai' && !compareMode && (
+                <select
+                  value={activePreset && !activePresetDirty ? activePreset.id : ''}
+                  onChange={(e) => {
+                    const p = presets.find(x => x.id === e.target.value);
+                    if (p) applyPreset(p);
+                  }}
+                  className="px-2.5 py-1.5 border border-gray-200 rounded-md text-sm bg-gray-50 hover:bg-gray-100 text-gray-700 font-medium focus:ring-2 focus:ring-blue-500 focus:border-transparent max-w-[220px] truncate"
+                  title="Apply a saved search preset. Create presets in the Settings tab (right panel)."
+                >
+                  <option value="" disabled={presets.length > 0}>
+                    {activePreset && activePresetDirty
+                      ? `${activePreset.name} (modified)`
+                      : presets.length === 0 ? 'No presets yet' : 'Custom'}
+                  </option>
+                  {presets.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              )}
               {mode === 'ai' && (
                 <div className="flex items-center gap-4">
+                  {/* Settings controls moved to the right-panel Settings tab
+                      (first tab, left of Workflows). The toolbar keeps only
+                      New Chat + the summary chip on the left. */}
                   {hasConversation && (
                     <button type="button" onClick={handleNewChat}
                       className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium text-gray-600 hover:bg-gray-100 transition-colors"
@@ -2197,97 +2429,6 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                       </svg>
                       New Chat
                     </button>
-                  )}
-                  <div className="flex items-center gap-2" title="Adaptive routing (Auto): the system picks single-shot / deep / RLM per query from a cheap heuristic. When off, the manual Deep/RLM toggles apply.">
-                    <label className="text-xs font-medium text-gray-500">Auto</label>
-                    <button type="button" onClick={() => setSearchAuto(!searchAuto)}
-                      className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${searchAuto ? 'bg-purple-600' : 'bg-gray-200'}`}
-                    >
-                      <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${searchAuto ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
-                    </button>
-                  </div>
-                  <div className={`flex items-center gap-2 ${searchAuto ? 'opacity-40' : ''}`} title={searchAuto ? 'Auto routing is on — manual Deep is ignored until Auto is off.' : undefined}>
-                    <label className="text-xs font-medium text-gray-500">Deep</label>
-                    <button type="button" onClick={() => {
-                      const newDeep = !deepSearchMode;
-                      setDeepSearchMode(newDeep);
-                      if (newDeep) setCompareMode(false);
-                      router.push(getAiUrl(newDeep, false), { scroll: false });
-                    }}
-                      className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${deepSearchMode ? 'bg-indigo-600' : 'bg-gray-200'}`}
-                    >
-                      <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${deepSearchMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
-                    </button>
-                  </div>
-                  <div className={`flex items-center gap-2 ${searchAuto ? 'opacity-40' : ''}`} title={searchAuto ? 'Auto routing is on — manual RLM is ignored until Auto is off.' : 'Route the answer through ss-rlm (Recursive Language Model). Higher latency (30s–3min), much higher recall for deep multi-document questions.'}>
-                    <label className="text-xs font-medium text-gray-500">RLM</label>
-                    <button type="button" onClick={() => setUseRlm(!useRlm)}
-                      className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${useRlm ? 'bg-emerald-600' : 'bg-gray-200'}`}
-                    >
-                      <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${useRlm ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
-                    </button>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs font-medium text-gray-500">Compare</label>
-                    <button type="button" onClick={() => {
-                      const newCompare = !compareMode;
-                      setCompareMode(newCompare);
-                      if (newCompare) setDeepSearchMode(false);
-                      router.push(getAiUrl(false, newCompare), { scroll: false });
-                    }}
-                      className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${compareMode ? 'bg-blue-600' : 'bg-gray-200'}`}
-                    >
-                      <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${compareMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs font-medium text-gray-500">Thinking</label>
-                    <button type="button" onClick={() => setThinkingMode(!thinkingMode)}
-                      className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${thinkingMode ? 'bg-purple-600' : 'bg-gray-200'}`}
-                    >
-                      <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${thinkingMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-2" title="Multi-Pass: outline first, then stream each findings subsection as its own LLM call. Avoids mid-report truncation and improves quality on long answers.">
-                    <label className="text-xs font-medium text-gray-500">Multi-Pass</label>
-                    <button type="button" onClick={() => setMultiPass(!multiPass)}
-                      className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${multiPass ? 'bg-emerald-600' : 'bg-gray-200'}`}
-                    >
-                      <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${multiPass ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs font-medium text-gray-500">Tokens</label>
-                    <select
-                      value={maxTokens}
-                      onChange={(e) => setMaxTokens(Number(e.target.value))}
-                      className="text-xs border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-400"
-                    >
-                      <option value={512}>512</option>
-                      <option value={1024}>1k</option>
-                      <option value={2048}>2k</option>
-                      <option value={4096}>4k</option>
-                      <option value={8192}>8k</option>
-                      <option value={16384}>16k</option>
-                      <option value={32768}>32k</option>
-                    </select>
-                  </div>
-                  {aiProvider === 'anthropic' && (aiModel === 'claude-fable-5' || aiModel === 'claude-opus-4-7' || aiModel === 'claude-opus-4-8') && thinkingMode && (
-                    <div className="flex items-center gap-2" title="Adaptive-thinking effort. Lower = more visible response, higher = deeper reasoning.">
-                      <label className="text-xs font-medium text-gray-500">Effort</label>
-                      <select
-                        value={effort}
-                        onChange={(e) => setEffort(e.target.value as 'low' | 'medium' | 'high' | 'xhigh' | 'max')}
-                        className="text-xs border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-purple-400"
-                      >
-                        <option value="low">Low</option>
-                        <option value="medium">Medium</option>
-                        <option value="high">High</option>
-                        <option value="xhigh">xHigh</option>
-                        <option value="max">Max</option>
-                      </select>
-                    </div>
                   )}
                 </div>
               )}
@@ -2432,9 +2573,18 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                     </div>
                   )}
 
-                  {/* Regular AI conversation turns */}
-                  {!deepSearchMode && !compareMode && aiTurns.map((turn, i) => (
-                    <div key={i} className="space-y-3">
+                  {/* Conversation turns — ONE ordered list interleaving
+                      single-shot and deep turns by completion time. Toggling
+                      Deep changes what the NEXT turn does, not which history
+                      is visible (the old per-mode branches made a mode switch
+                      look like a wiped chat). Compare keeps its block below. */}
+                  {!compareMode && [
+                    ...aiTurns.map((turn, i) => ({ kind: 'ai' as const, turn, i })),
+                    ...deepTurns.map((turn, i) => ({ kind: 'deep' as const, turn, i })),
+                  ]
+                    .sort((a, b) => (a.turn.completedAt ?? 0) - (b.turn.completedAt ?? 0))
+                    .map((item) => (
+                    <div key={`${item.kind}-${item.i}`} className="space-y-3">
                       {/* User bubble */}
                       <div className="flex items-start gap-2 group/turn">
                         <div className="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center shrink-0 mt-0.5">
@@ -2443,10 +2593,10 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                           </svg>
                         </div>
                         <div className="bg-gray-100 rounded-lg px-4 py-2.5 max-w-[80%]">
-                          <p className="text-sm text-gray-800">{turn.query}</p>
+                          <p className="text-sm text-gray-800">{item.turn.query}</p>
                         </div>
                         <button
-                          onClick={() => deleteTurn('ai', i)}
+                          onClick={() => deleteTurn(item.kind, item.i)}
                           className="opacity-0 group-hover/turn:opacity-100 transition-opacity p-1 rounded hover:bg-red-100 shrink-0 mt-0.5"
                           title="Delete this turn"
                         >
@@ -2455,35 +2605,10 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                           </svg>
                         </button>
                       </div>
-                      {/* AI response */}
-                      <AIResultCard result={turn.result} searchTime={turn.searchTime} />
-                    </div>
-                  ))}
-
-                  {/* Deep search conversation turns */}
-                  {deepSearchMode && deepTurns.map((turn, i) => (
-                    <div key={i} className="space-y-3">
-                      {/* User bubble */}
-                      <div className="flex items-start gap-2 group/turn">
-                        <div className="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center shrink-0 mt-0.5">
-                          <svg className="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
-                          </svg>
-                        </div>
-                        <div className="bg-gray-100 rounded-lg px-4 py-2.5 max-w-[80%]">
-                          <p className="text-sm text-gray-800">{turn.query}</p>
-                        </div>
-                        <button
-                          onClick={() => deleteTurn('deep', i)}
-                          className="opacity-0 group-hover/turn:opacity-100 transition-opacity p-1 rounded hover:bg-red-100 shrink-0 mt-0.5"
-                          title="Delete this turn"
-                        >
-                          <svg className="w-3.5 h-3.5 text-red-400 hover:text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-                          </svg>
-                        </button>
-                      </div>
-                      <DeepSearchResultCard result={turn.result} searchTime={turn.searchTime} />
+                      {/* Response card by turn kind */}
+                      {item.kind === 'ai'
+                        ? <AIResultCard result={item.turn.result} searchTime={item.turn.searchTime} />
+                        : <DeepSearchResultCard result={item.turn.result} searchTime={item.turn.searchTime} />}
                     </div>
                   ))}
 
@@ -2561,6 +2686,16 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                       onToggle={() => setThinkingExpanded(e => !e)}
                       startTime={searchStartTime}
                       loading={aiLoading}
+                    />
+                  )}
+
+                  {/* Live research trace — opens while the run is thinking and
+                      collapses once report tokens start arriving. */}
+                  {streamingThoughts && aiLoading && !aiStopping && deepSearchMode && (
+                    <ThoughtsPanel
+                      text={streamingThoughts}
+                      streaming
+                      answerStarted={!!streamingAnswer}
                     />
                   )}
 
@@ -3589,23 +3724,188 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
       <aside className="flex-shrink-0 border-l border-gray-200 bg-white flex flex-col overflow-hidden" style={{ width: columnWidths.right }}>
         {/* Tabs */}
         <div className="flex border-b border-gray-200">
-          {(['workflows', 'history', 'bookmarks', 'docs', 'haystack'] as const).map(tab => (
+          {(['settings', 'workflows', 'history', 'bookmarks', 'docs', 'haystack'] as const).map(tab => (
             <button
               key={tab}
               onClick={() => setInfoTab(tab)}
-              className={`flex-1 px-2 py-2.5 text-[11px] font-medium transition-colors ${
+              className={`flex-1 px-1.5 py-2.5 text-[11px] font-medium transition-colors ${
                 infoTab === tab
                   ? 'text-blue-700 border-b-2 border-blue-600 bg-blue-50/50'
                   : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
               }`}
             >
-              {tab === 'workflows' ? 'Workflows' : tab === 'history' ? 'History' : tab === 'bookmarks' ? 'Bookmarks' : tab === 'docs' ? 'Docs' : 'Haystack'}
+              {tab === 'settings' ? 'Settings' : tab === 'workflows' ? 'Workflows' : tab === 'history' ? 'History' : tab === 'bookmarks' ? 'Presets' : tab === 'docs' ? 'Docs' : 'Haystack'}
             </button>
           ))}
         </div>
 
         {/* Tab content */}
         <div className="flex-1 overflow-y-auto">
+          {infoTab === 'settings' && (
+            <div className="p-3 space-y-4">
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Provider</label>
+                <select value={aiProvider} onChange={e => handleProviderChange(e.target.value)}
+                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-md text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="">Provider...</option>
+                  {PROVIDERS.map(p => (
+                    <option key={p.key} value={p.key} disabled={!configuredProviders[p.key]}>
+                      {p.name}{!configuredProviders[p.key] ? ' (no key)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Model</label>
+                <select value={aiModel} onChange={e => setAiModel(e.target.value)} disabled={!aiProvider}
+                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-md text-sm bg-white disabled:bg-gray-50 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  {!aiProvider && <option value="">Model...</option>}
+                  {aiProvider === 'ollama' && ollamaModelsLoading && <option value="">Loading...</option>}
+                  {getModels(aiProvider, ollamaCompletionModel, ollamaModels).map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Case Scope</label>
+                <select value={aiCaseId} onChange={e => handleCaseFilterChange(e.target.value)}
+                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-md text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="">All Cases</option>
+                  {cases.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                <p className="text-[10px] text-gray-400 mt-1">Applies to your next question — the conversation continues.</p>
+              </div>
+              <div className="space-y-2.5">
+                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Search Modes</label>
+                <div className="flex items-center justify-between" title="Adaptive routing (Auto): the system picks single-shot / deep / RLM per query from a cheap heuristic. When off, the manual Deep/RLM toggles apply.">
+                  <span className="text-xs font-medium text-gray-600">Auto</span>
+                  <button type="button" onClick={() => setSearchAuto(!searchAuto)}
+                    className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${searchAuto ? 'bg-purple-600' : 'bg-gray-200'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${searchAuto ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                  </button>
+                </div>
+                <div className={`flex items-center justify-between ${searchAuto ? 'opacity-40' : ''}`} title={searchAuto ? 'Auto routing is on — manual Deep is ignored until Auto is off.' : 'Deep Search: multi-sub-query research pass.'}>
+                  <span className="text-xs font-medium text-gray-600">Deep</span>
+                  <button type="button" onClick={() => {
+                    const newDeep = !deepSearchMode;
+                    setDeepSearchMode(newDeep);
+                    if (newDeep) setCompareMode(false);
+                    router.push(getAiUrl(newDeep, false), { scroll: false });
+                  }}
+                    className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${deepSearchMode ? 'bg-indigo-600' : 'bg-gray-200'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${deepSearchMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                  </button>
+                </div>
+                <div className={`flex items-center justify-between ${searchAuto ? 'opacity-40' : ''}`} title={searchAuto ? 'Auto routing is on — manual RLM is ignored until Auto is off.' : 'Route the answer through ss-rlm (Recursive Language Model). Higher latency (30s–3min), much higher recall for deep multi-document questions.'}>
+                  <span className="text-xs font-medium text-gray-600">RLM</span>
+                  <button type="button" onClick={() => setUseRlm(!useRlm)}
+                    className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${useRlm ? 'bg-emerald-600' : 'bg-gray-200'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${useRlm ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between" title="Compare answers from multiple AI providers side by side.">
+                  <span className="text-xs font-medium text-gray-600">Compare</span>
+                  <button type="button" onClick={() => {
+                    const newCompare = !compareMode;
+                    setCompareMode(newCompare);
+                    if (newCompare) setDeepSearchMode(false);
+                    router.push(getAiUrl(false, newCompare), { scroll: false });
+                  }}
+                    className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${compareMode ? 'bg-blue-600' : 'bg-gray-200'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${compareMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between" title="Show the model's reasoning stream while it thinks.">
+                  <span className="text-xs font-medium text-gray-600">Thinking</span>
+                  <button type="button" onClick={() => setThinkingMode(!thinkingMode)}
+                    className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${thinkingMode ? 'bg-purple-600' : 'bg-gray-200'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${thinkingMode ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between" title="Multi-Pass: outline first, then stream each findings subsection as its own LLM call. Avoids mid-report truncation and improves quality on long answers.">
+                  <span className="text-xs font-medium text-gray-600">Multi-Pass</span>
+                  <button type="button" onClick={() => setMultiPass(!multiPass)}
+                    className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${multiPass ? 'bg-emerald-600' : 'bg-gray-200'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${multiPass ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Tokens</label>
+                  <select
+                    value={maxTokens}
+                    onChange={(e) => setMaxTokens(Number(e.target.value))}
+                    className="w-full text-xs border border-gray-200 rounded px-1.5 py-1 bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  >
+                    <option value={512}>512</option>
+                    <option value={1024}>1k</option>
+                    <option value={2048}>2k</option>
+                    <option value={4096}>4k</option>
+                    <option value={8192}>8k</option>
+                    <option value={16384}>16k</option>
+                    <option value={32768}>32k</option>
+                  </select>
+                </div>
+                {(() => {
+                  const effortLevels = getModelCaps(aiProvider as AIProviderKey, aiModel).effort;
+                  if (!effortLevels || (aiProvider === 'anthropic' && !thinkingMode)) return null;
+                  return (
+                    <div title="Reasoning effort. Lower = more visible response, higher = deeper reasoning.">
+                      <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Effort</label>
+                      <select
+                        value={effort}
+                        onChange={(e) => setEffort(e.target.value as EffortLevel)}
+                        className="w-full text-xs border border-gray-200 rounded px-1.5 py-1 bg-white text-gray-700 focus:outline-none focus:ring-1 focus:ring-purple-400"
+                      >
+                        {effortLevels.map((lvl) => (
+                          <option key={lvl} value={lvl}>{lvl === 'xhigh' ? 'xHigh' : lvl.charAt(0).toUpperCase() + lvl.slice(1)}</option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })()}
+              </div>
+              {/* Save the current settings as a named preset. The preset
+                  DROPDOWN (apply) lives in the top-left toolbar; the list is
+                  in the Presets tab. */}
+              <div className="border-t border-gray-100 pt-3 space-y-2">
+                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Save as Preset</label>
+                <input
+                  type="text"
+                  value={presetNameDraft}
+                  onChange={(e) => setPresetNameDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') saveCurrentAsPreset(); }}
+                  placeholder="Preset name…"
+                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-md text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+                <label className="flex items-center gap-1.5 text-[11px] text-gray-500 cursor-pointer" title="Off by default — most presets are model/mode combos independent of which case you're in.">
+                  <input
+                    type="checkbox"
+                    checked={presetIncludeCase}
+                    onChange={(e) => setPresetIncludeCase(e.target.checked)}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  Include case scope ({aiCaseId ? cases.find(c => c.id === aiCaseId)?.name || 'selected case' : 'All Cases'})
+                </label>
+                <button
+                  type="button"
+                  onClick={saveCurrentAsPreset}
+                  disabled={!presetNameDraft.trim()}
+                  className="w-full px-2.5 py-1.5 rounded-md text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400 transition-colors"
+                >
+                  Save current settings as preset
+                </button>
+              </div>
+            </div>
+          )}
           {infoTab === 'workflows' && (
             <WorkflowsPanel
               caseId={aiCaseId}
@@ -3620,13 +3920,59 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
             />
           )}
           {infoTab === 'bookmarks' && (
-            <div className="p-4 text-center py-12">
-              <svg className="w-10 h-10 text-gray-200 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0111.186 0z" />
-              </svg>
-              <p className="text-sm text-gray-400 font-medium">No bookmarks yet</p>
-              <p className="text-xs text-gray-400 mt-1">Saved presets will appear here</p>
-            </div>
+            presets.length === 0 ? (
+              <div className="p-4 text-center py-12">
+                <svg className="w-10 h-10 text-gray-200 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0111.186 0z" />
+                </svg>
+                <p className="text-sm text-gray-400 font-medium">No presets yet</p>
+                <p className="text-xs text-gray-400 mt-1">Save the current settings from the Settings tab</p>
+              </div>
+            ) : (
+              <div className="p-2 space-y-1.5">
+                {presets.map(p => {
+                  const s = p.settings;
+                  const modelLabel = getModels(s.provider, ollamaCompletionModel, ollamaModels).find(m => m.id === s.model)?.label || s.model;
+                  const badges = [s.auto && 'Auto', s.deep && 'Deep', s.rlm && 'RLM', s.compare && 'Compare', s.multiPass && 'Multi-Pass'].filter(Boolean) as string[];
+                  const isActive = activePresetId === p.id;
+                  return (
+                    <div
+                      key={p.id}
+                      onClick={() => applyPreset(p)}
+                      className={`group/preset px-2.5 py-2 rounded-md border cursor-pointer transition-colors ${
+                        isActive ? 'border-blue-300 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'
+                      }`}
+                      title="Click to apply — the conversation continues"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-medium text-gray-800 truncate">{p.name}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); deletePreset(p.id); }}
+                          className="opacity-0 group-hover/preset:opacity-100 transition-opacity p-0.5 rounded hover:bg-red-100 shrink-0"
+                          title="Delete preset"
+                        >
+                          <svg className="w-3.5 h-3.5 text-red-400 hover:text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                        <span className="text-[10px] text-gray-500 font-mono truncate max-w-[140px]">{modelLabel}</span>
+                        {badges.map(b => (
+                          <span key={b} className="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">{b}</span>
+                        ))}
+                        {s.includeCaseScope && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium" title="Applying this preset also changes the case scope">
+                            {cases.find(c => c.id === s.caseId)?.name || 'All Cases'}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )
           )}
           {infoTab === 'docs' && (
             mode === 'analysis' && selectedTool
@@ -4368,6 +4714,9 @@ const DeepSearchResultCard = React.memo(function DeepSearchResultCard({ result, 
           </div>
         )}
       </div>
+
+      {/* Research trace, above the answer. Older sessions have none. */}
+      {result.thoughts && <ThoughtsPanel text={result.thoughts} />}
 
       {/* Report */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200">

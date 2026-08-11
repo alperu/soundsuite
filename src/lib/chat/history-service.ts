@@ -9,6 +9,11 @@ export interface ChatTurn {
   role: 'user' | 'assistant';
   content: string;
   mode?: 'ai' | 'deep' | 'compare';
+  /** Provider/model that produced THIS turn, stamped at submit time. The
+   *  session-level fields are only a "most recent" hint — a conversation can
+   *  mix models and modes turn by turn. */
+  provider?: string;
+  model?: string;
   searchTime?: number | null;
   sources?: Array<{
     text: string;
@@ -24,6 +29,14 @@ export interface ChatTurn {
     subQueryCount?: number;
   };
   subQueries?: string[];
+  /**
+   * Research trace for this turn (evidence-gathering narration, model
+   * reasoning, anything split off the front of the answer). Stored as plain
+   * text inside a fenced block — it can contain raw excerpt text with its own
+   * `---`, `##` and `<details>` lookalikes, so it must never be re-parsed as
+   * markdown on the way back in.
+   */
+  thoughts?: string;
 }
 
 export interface ChatSessionMeta {
@@ -64,7 +77,24 @@ function sessionFilePath(id: string, caseNumber?: string): string {
 // Markdown serialization
 // ---------------------------------------------------------------------------
 
-function toMarkdown(session: ChatSession): string {
+/**
+ * Fence for the persisted thoughts trace. Six tildes rather than the usual
+ * three: the payload is raw retrieved text and model reasoning, which routinely
+ * contains code fences, `---` rules and `##` headings of its own. Only a line
+ * that is *nothing but* four-or-more tildes could close it early, and
+ * {@link escapeThoughts} indents those out of the way.
+ */
+const THOUGHTS_FENCE = '~~~~~~';
+
+function escapeThoughts(text: string): string {
+  return text.replace(/^(~{4,})[ \t]*$/gm, ' $1');
+}
+
+function unescapeThoughts(text: string): string {
+  return text.replace(/^ (~{4,})[ \t]*$/gm, '$1');
+}
+
+export function toMarkdown(session: ChatSession): string {
   const frontmatter = [
     '---',
     `id: ${session.id}`,
@@ -83,10 +113,16 @@ function toMarkdown(session: ChatSession): string {
     const heading = turn.role === 'user' ? `## User` : `## Assistant`;
     const meta: string[] = [];
     if (turn.mode) meta.push(`mode: ${turn.mode}`);
+    if (turn.provider) meta.push(`provider: ${turn.provider}`);
+    if (turn.model) meta.push(`model: ${turn.model}`);
     if (turn.searchTime != null) meta.push(`searchTime: ${turn.searchTime}ms`);
 
     let content = `${heading}\n\n${turn.content}`;
     if (meta.length > 0) content += `\n\n<!-- ${meta.join(' | ')} -->`;
+
+    if (turn.thoughts && turn.thoughts.trim()) {
+      content += `\n\n<details><summary>Thoughts</summary>\n\n${THOUGHTS_FENCE}\n${escapeThoughts(turn.thoughts)}\n${THOUGHTS_FENCE}\n\n</details>`;
+    }
 
     if (turn.searchStats) {
       const st = turn.searchStats;
@@ -136,7 +172,7 @@ function parseFrontmatter(content: string): { meta: Record<string, string>; body
   return { meta, body: match[2] };
 }
 
-function fromMarkdown(content: string, fileName: string): ChatSession {
+export function fromMarkdown(content: string, fileName: string): ChatSession {
   const { meta, body } = parseFrontmatter(content);
 
   const turns: ChatTurn[] = [];
@@ -156,12 +192,16 @@ function fromMarkdown(content: string, fileName: string): ChatSession {
 
     // Extract metadata comment
     let mode: string | undefined;
+    let provider: string | undefined;
+    let model: string | undefined;
     let searchTime: number | undefined;
     const metaMatch = text.match(/<!-- (.+?) -->/);
     if (metaMatch) {
       text = text.replace(/\n*<!-- .+? -->/, '').trim();
       for (const part of metaMatch[1].split('|').map(s => s.trim())) {
         if (part.startsWith('mode:')) mode = part.slice(5).trim();
+        if (part.startsWith('provider:')) provider = part.slice(9).trim();
+        if (part.startsWith('model:')) model = part.slice(6).trim();
         if (part.startsWith('searchTime:')) searchTime = parseInt(part.slice(11).trim());
       }
     }
@@ -171,8 +211,24 @@ function fromMarkdown(content: string, fileName: string): ChatSession {
     let sources: ChatTurn['sources'];
     let subQueries: ChatTurn['subQueries'];
     let searchStats: ChatTurn['searchStats'];
+    let thoughts: ChatTurn['thoughts'];
 
     if (isAssistant) {
+      // Thoughts: fenced, so the trace's own markdown can't terminate it early.
+      // Sessions written before thoughts existed simply have no block here.
+      const thoughtsBlock = new RegExp(
+        `\\n*<details><summary>Thoughts</summary>\\s*\\n${THOUGHTS_FENCE}\\n([\\s\\S]*?)\\n${THOUGHTS_FENCE}\\n\\s*</details>`,
+      );
+      const thoughtsMatch = text.match(thoughtsBlock);
+      if (thoughtsMatch) {
+        thoughts = unescapeThoughts(thoughtsMatch[1]);
+        // Take the block out of `text` before anything else reads it. The trace
+        // is arbitrary retrieved content and routinely contains stats-comment
+        // and <details> lookalikes that would otherwise be picked up as this
+        // turn's real metadata.
+        text = text.replace(thoughtsBlock, '');
+      }
+
       // Stats comment: <!-- stats: 4 sub-queries, 100 retrieved, 75 unique, 75 after rerank -->
       const statsMatch = text.match(/<!-- stats: (\d+) sub-queries?, (\d+) retrieved, (\d+) unique, (\d+) after rerank -->/);
       if (statsMatch) {
@@ -214,6 +270,10 @@ function fromMarkdown(content: string, fileName: string): ChatSession {
     // dump back into the visible message (the bug this replaces). Anchoring on
     // the specific <summary> labels also avoids eating a legitimate bare
     // <details> the model may have written inside its answer.
+    // Thoughts is serialized first among the trailing blocks, so stripping from
+    // it also removes everything after — all of which has already been
+    // extracted above.
+    text = text.replace(/\n*<details><summary>Thoughts<\/summary>[\s\S]*$/, '').trim();
     text = text.replace(/\n*<!-- stats:[\s\S]*$/, '').trim();
     text = text.replace(/\n*<details><summary>(?:Sub-queries|Sources)<\/summary>[\s\S]*$/, '').trim();
 
@@ -221,10 +281,13 @@ function fromMarkdown(content: string, fileName: string): ChatSession {
       role: isUser ? 'user' : 'assistant',
       content: text,
       ...(mode ? { mode: mode as ChatTurn['mode'] } : {}),
+      ...(provider ? { provider } : {}),
+      ...(model ? { model } : {}),
       ...(searchTime != null ? { searchTime } : {}),
       ...(sources ? { sources } : {}),
       ...(subQueries ? { subQueries } : {}),
       ...(searchStats ? { searchStats } : {}),
+      ...(thoughts ? { thoughts } : {}),
     });
   }
 
@@ -252,6 +315,23 @@ export async function saveSession(session: ChatSession): Promise<void> {
   await fs.mkdir(dir, { recursive: true });
   const filePath = sessionFilePath(session.id, session.caseNumber);
   await fs.writeFile(filePath, toMarkdown(session), 'utf-8');
+
+  // Case scope no longer resets the chat, so a session's caseNumber can change
+  // mid-conversation — which changes its directory. Remove any stale copy of
+  // the same id in another directory or the history list shows duplicates.
+  async function removeStale(dir: string): Promise<void> {
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) await removeStale(full);
+        else if (entry.name === `${session.id}.md` && full !== filePath) {
+          await fs.unlink(full).catch(() => {});
+        }
+      }
+    } catch { /* dir doesn't exist */ }
+  }
+  await removeStale(DATA_DIR);
 }
 
 export async function listSessions(caseNumber?: string): Promise<ChatSessionMeta[]> {
