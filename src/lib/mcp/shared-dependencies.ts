@@ -19,13 +19,13 @@ export function llmProviderDependency(): ToolDependency {
     required: true,
     check: async () => {
       // Check env vars first
-      if (process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.OLLAMA_HOST) return true;
+      if (process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.GEMINI_API_KEY || process.env.OLLAMA_HOST) return true;
       try {
         const { prisma } = await import('../db/prisma');
         const keys = await prisma.config.findMany({
           where: {
             key: {
-              in: ['ai.groqApiKey', 'embedding.openaiApiKey', 'embedding.claudeApiKey', 'ai.grokApiKey', 'ai.ollamaHost'],
+              in: ['ai.groqApiKey', 'embedding.openaiApiKey', 'embedding.claudeApiKey', 'ai.geminiApiKey', 'ai.grokApiKey', 'ai.ollamaHost'],
             },
           },
         });

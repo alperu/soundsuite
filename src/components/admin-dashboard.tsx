@@ -1874,6 +1874,7 @@ function RLMPanel() {
 const AI_PROVIDERS_UI = [
   { key: 'openai', name: 'OpenAI', placeholder: 'sk-...' },
   { key: 'anthropic', name: 'Anthropic', placeholder: 'sk-ant-...' },
+  { key: 'gemini', name: 'Google Gemini', placeholder: 'AIza...' },
   { key: 'groq', name: 'Groq', placeholder: 'gsk_...' },
   { key: 'grok', name: 'Grok (xAI)', placeholder: 'xai-...' },
 ] as const;

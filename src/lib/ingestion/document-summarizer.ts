@@ -23,14 +23,15 @@ interface SummarizeParams {
  * For Ollama, the model is read from config.ollamaCompletionModel at runtime.
  */
 const PROVIDER_PREFERENCE: Array<{
-  provider: 'ollama' | 'groq' | 'openai' | 'grok' | 'anthropic';
+  provider: 'ollama' | 'groq' | 'gemini' | 'openai' | 'grok' | 'anthropic';
   configKey: string;
   model: string; // default model; Ollama overridden by config.ollamaCompletionModel
 }> = [
   { provider: 'ollama', configKey: 'ollamaHost', model: 'qwen3.5:14b' },
   { provider: 'groq', configKey: 'groqApiKey', model: 'llama-3.1-8b-instant' },
-  { provider: 'openai', configKey: 'openaiApiKey', model: 'gpt-4o-mini' },
-  { provider: 'grok', configKey: 'grokApiKey', model: 'grok-3-mini' },
+  { provider: 'gemini', configKey: 'geminiApiKey', model: 'gemini-3.5-flash' },
+  { provider: 'openai', configKey: 'openaiApiKey', model: 'gpt-5.6-luna' },
+  { provider: 'grok', configKey: 'grokApiKey', model: 'grok-4.5' },
   { provider: 'anthropic', configKey: 'claudeApiKey', model: 'claude-haiku-4-5-20251001' },
 ];
 

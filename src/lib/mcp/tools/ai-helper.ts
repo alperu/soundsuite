@@ -26,9 +26,10 @@ let _providerOverride: { provider: AIProviderKey; model: string } | null = null;
 const DEFAULT_MODELS: Record<AIProviderKey, string> = {
   ollama: 'qwen2.5:14b',
   groq: 'llama-3.3-70b-versatile',
-  openai: 'gpt-4o',
-  anthropic: 'claude-sonnet-4-5-20250929',
-  grok: 'grok-3-mini',
+  openai: 'gpt-5.6-terra',
+  anthropic: 'claude-sonnet-5',
+  gemini: 'gemini-3.5-flash',
+  grok: 'grok-4.5',
 };
 
 /**
@@ -45,7 +46,7 @@ export async function getAvailableProvider(): Promise<{ provider: AIProviderKey;
     return { provider: 'ollama', model };
   }
 
-  const providerOrder: AIProviderKey[] = ['anthropic', 'openai', 'groq', 'grok'];
+  const providerOrder: AIProviderKey[] = ['anthropic', 'openai', 'gemini', 'groq', 'grok'];
 
   for (const provider of providerOrder) {
     const configKey = AI_PROVIDERS[provider].configKey;
@@ -58,6 +59,7 @@ export async function getAvailableProvider(): Promise<{ provider: AIProviderKey;
   // Also check env vars
   if (process.env.ANTHROPIC_API_KEY) return { provider: 'anthropic', model: DEFAULT_MODELS.anthropic };
   if (process.env.OPENAI_API_KEY) return { provider: 'openai', model: DEFAULT_MODELS.openai };
+  if (process.env.GEMINI_API_KEY) return { provider: 'gemini', model: DEFAULT_MODELS.gemini };
   if (process.env.GROQ_API_KEY) return { provider: 'groq', model: DEFAULT_MODELS.groq };
 
   throw new Error('No AI provider configured. Add an API key in Admin > AI Keys, or configure an Ollama host.');

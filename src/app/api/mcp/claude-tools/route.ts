@@ -77,7 +77,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       beta: 'advanced-tool-use-2025-11-20',
-      model: 'claude-opus-4-6',
+      model: 'claude-opus-5',
       tools,
       tool_count: allTools.length,
       eager_count: tools.filter(t => !t.defer_loading && !t.type?.startsWith('tool_search')).length,

@@ -33,6 +33,7 @@ export async function GET() {
 const PROVIDER_CONFIG_KEYS: Record<AIProviderKey, string> = {
   openai: 'embedding.openaiApiKey',
   anthropic: 'embedding.claudeApiKey',
+  gemini: 'ai.geminiApiKey',
   groq: 'ai.groqApiKey',
   grok: 'ai.grokApiKey',
   ollama: 'embedding.ollamaHost', // Ollama stores host URL, not API key

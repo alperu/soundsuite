@@ -10,7 +10,7 @@ import remarkGfm from 'remark-gfm';
 const REMARK_PLUGINS = [remarkGfm];
 import { useDraftStream } from '@/hooks/use-draft-stream';
 import { useDraftSuggestions } from '@/hooks/use-draft-suggestions';
-import { AI_PROVIDERS, AI_PROVIDER_KEYS, type AIProviderKey, type AIModelDef } from '@/lib/ai/models';
+import { AI_PROVIDERS, AI_PROVIDER_KEYS, getModelCaps, type AIProviderKey, type AIModelDef, type EffortLevel } from '@/lib/ai/models';
 import { AIThinkingLog, type AIProgressEntry } from '@/components/search/ai-thinking-log';
 import DraftVersionHistory from '@/components/draft/draft-version-history';
 import { DraftChatHistory } from '@/components/draft/draft-chat-history';
@@ -1130,23 +1130,25 @@ export default function DraftChatPanel({
                 >
                   <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5 ${vectorSearch ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`} />
                 </button>
-                {/* Opus 4.7/4.8 adaptive-thinking effort — shown whenever an adaptive Opus is selected. */}
-                {provider === 'anthropic' && (effectiveModel.startsWith('claude-fable-5') || effectiveModel.startsWith('claude-opus-4-7') || effectiveModel.startsWith('claude-opus-4-8')) && (
-                  <div className="flex items-center gap-1 ml-1" title="Claude Opus adaptive-thinking effort. Lower = more visible response, higher = deeper reasoning.">
-                    <label className="text-[10px] font-medium text-gray-500">Adaptive</label>
-                    <select
-                      value={effort}
-                      onChange={(e) => setEffort(e.target.value as 'low' | 'medium' | 'high' | 'xhigh' | 'max')}
-                      className="text-[10px] text-gray-600 font-medium bg-transparent hover:bg-gray-100 rounded px-1 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-400"
-                    >
-                      <option value="low">low</option>
-                      <option value="medium">medium</option>
-                      <option value="high">high</option>
-                      <option value="xhigh">xhigh</option>
-                      <option value="max">max</option>
-                    </select>
-                  </div>
-                )}
+                {/* Reasoning effort — shown whenever the selected model has an effort knob. */}
+                {(() => {
+                  const effortLevels = getModelCaps(provider as AIProviderKey, effectiveModel).effort;
+                  if (!effortLevels) return null;
+                  return (
+                    <div className="flex items-center gap-1 ml-1" title="Reasoning effort. Lower = more visible response, higher = deeper reasoning.">
+                      <label className="text-[10px] font-medium text-gray-500">Adaptive</label>
+                      <select
+                        value={effortLevels.includes(effort as EffortLevel) ? effort : effortLevels[effortLevels.length - 1]}
+                        onChange={(e) => setEffort(e.target.value as EffortLevel)}
+                        className="text-[10px] text-gray-600 font-medium bg-transparent hover:bg-gray-100 rounded px-1 py-0.5 cursor-pointer focus:outline-none focus:ring-1 focus:ring-purple-400"
+                      >
+                        {effortLevels.map((lvl) => (
+                          <option key={lvl} value={lvl}>{lvl}</option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })()}
                 {/* Speed settings gear */}
                 <button
                   type="button"
