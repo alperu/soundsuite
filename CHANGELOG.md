@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.3.1](https://github.com/alperu/soundsuite/compare/v1.3.0...v1.3.1) (2026-08-12)
+
+### Features
+
+* **search:** server-persisted search presets — SearchPreset table + /api/search/presets CRUD, one-time IndexedDB migration, preset dropdown right-aligned in the top bar ([6edfa6e](https://github.com/alperu/soundsuite/commit/6edfa6e))
+* **search:** deep-search research trace streams into a collapsible Thoughts panel (plain-text rendering, auto-open while streaming) and persists on the turn for history replay ([6edfa6e](https://github.com/alperu/soundsuite/commit/6edfa6e))
+* **ai:** per-model capability registry (effort tiers + request-param routing, output-token param, temperature tolerance, thinking applicability) driving the draft panel, MCP ai-helper, and summarizer; model list refresh with Gemini in the provider fallback order ([57278b0](https://github.com/alperu/soundsuite/commit/57278b0))
+* **ai:** prompt caching — cacheTtl setting (default 1h) for deep search ([9df1f04](https://github.com/alperu/soundsuite/commit/9df1f04))
+
+
+### Bug Fixes
+
+* **search:** synthesis no longer leaks raw retrieved evidence into the answer — closing instruction after the excerpt block, 24K shared history cap, preamble splitter safety net, and a clear error instead of a context dump when synthesis produces nothing ([6edfa6e](https://github.com/alperu/soundsuite/commit/6edfa6e))
+* **search:** module-scoped chat session id — conversations survive the Deep/Compare route-segment remount ([9ab4a37](https://github.com/alperu/soundsuite/commit/9ab4a37))
+* **search:** history sessions keep source provenance across save/reload ([95f8ce5](https://github.com/alperu/soundsuite/commit/95f8ce5))
+* **search:** per-token thoughts accumulation was O(N²); now a single accumulating string ([6edfa6e](https://github.com/alperu/soundsuite/commit/6edfa6e))
+
 ## [1.3.0](https://github.com/alperu/soundsuite/compare/v1.2.0...v1.3.0) (2026-08-10)
 
 ### Features
