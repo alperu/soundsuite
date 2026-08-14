@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { SLOT_PITCH } from './block-metrics';
 
 /**
  * The canvas zoom, published so blocks can decide what is worth drawing.
@@ -19,12 +20,13 @@ import { useSyncExternalStore } from 'react';
  * units so that, once the canvas scale is applied, it never renders smaller
  * than `LABEL_MIN_SCREEN_PX` on the user's screen.
  *
- * Below `LABEL_MIN_ZOOM` even that stops being worth it. The floor is derived,
- * not guessed: the capped font is 11.5 editor px, so at 0.39 it renders at
- * ~4.5px on screen, and below that a label is a grey smudge that costs more
- * attention than it returns. The tooltips carry the names from there down.
+ * Below `LABEL_MIN_ZOOM` even that stops being worth it: at 0.28 the capped
+ * font renders around 4.5px on screen, and below that a label is a grey smudge
+ * costing more attention than it returns. The tooltips carry the names from
+ * there down. (The floor dropped with #87's wider pitch — a bigger cap stays
+ * readable further out.)
  */
-export const LABEL_MIN_ZOOM = 0.39;
+export const LABEL_MIN_ZOOM = 0.28;
 
 /** What a label must never render smaller than, in real screen pixels. */
 const LABEL_MIN_SCREEN_PX = 7;
@@ -33,13 +35,16 @@ const LABEL_MIN_SCREEN_PX = 7;
 const LABEL_BASE_PX = 9;
 
 /**
- * The ceiling, and it is geometry rather than taste: handles sit 16 editor px
- * apart, so a label box taller than that collides with its neighbour's. At
- * 11.5px the box lands just under the pitch. Measured without this cap, labels
- * at 0.45 grew to 18.8px tall and 166 pairs overlapped — legible text stacked
- * on top of other legible text is not an improvement.
+ * The ceiling, and it is geometry rather than taste: a label box taller than
+ * the slot pitch collides with its neighbour's. Derived from `SLOT_PITCH` so
+ * the two cannot drift — measured without any cap, labels at 0.45 grew to
+ * 18.8px tall against a 16px pitch and 166 pairs overlapped, which is legible
+ * text stacked on other legible text.
+ *
+ * The 1.35 is the box-to-font ratio the rendered label actually has (padding
+ * and leading included), measured rather than assumed.
  */
-const LABEL_MAX_EDITOR_PX = 11.5;
+const LABEL_MAX_EDITOR_PX = Math.floor((SLOT_PITCH / 1.35) * 10) / 10;
 
 /**
  * Font size in EDITOR units — the canvas multiplies it by the zoom, so this

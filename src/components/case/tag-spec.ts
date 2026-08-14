@@ -83,6 +83,17 @@ export interface TagSpec {
   doc: string;
   /** Value type hint for the editor (text/number/date/bool/ref). */
   valueType?: 'text' | 'number' | 'date' | 'bool' | 'ref';
+  /**
+   * Render the row even when the tag has no value.
+   *
+   * An unset ref is normally hidden — a panel listing every slot a kind COULD
+   * hold reads as a form to fill in rather than a record of what is known. The
+   * exception is a relationship the user is expected to go and create: an
+   * order's `resolves` is the whole point of the order being on the canvas, and
+   * hiding it until it has a value makes the one thing you came to set the one
+   * thing you cannot find.
+   */
+  alwaysShow?: boolean;
   /** For ref-typed tags, which entityKind the target should be. */
   refTarget?: 'person' | 'motion' | 'case' | 'court' | 'hearing' | 'doc' | 'motionAttachment';
   /** Haystack ontology plumbing — not surfaced in the tag panel UI.
@@ -205,6 +216,9 @@ const FILING_FILE_REF_SPEC: TagSpec = {
 const RESOLVES_SPEC: TagSpec = {
   name: 'resolves',
   tier: 'ref',
+  // Visible on every order, set or not (#88): it is the edge the user opens an
+  // order to draw, so it has to be discoverable before it exists.
+  alwaysShow: true,
   doc: 'The motion this order rules on.',
   refTarget: 'motion',
   info: {
@@ -346,6 +360,21 @@ function attachmentBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
         xetoSpec: 'cc.courtlens.legal::ReportersRecord.reporterRef',
         example: '@person-jeffrey-kyle',
         relatedTags: ['clerkRef', 'caseRef'],
+      },
+    },
+    {
+      name: 'orderRef',
+      tier: 'ref',
+      doc: 'The order, judgment or decree this filing concerns.',
+      refTarget: 'motionAttachment',
+      info: {
+        whatItIs: 'Pointer from this filing to an order / judgment / decree that it is about.',
+        howItWorks:
+          'A reference, NOT a move: setting it leaves the filing under the same parent motion and in the same case. Use it for a notice about an order, a response to one, or a reply that turns on one. Distinct from `resolves`, which runs the other way and points an ORDER at the motion it rules on.',
+        mapsTo: "tags JSON: '$.orderRef' (Haystack ref)",
+        xetoSpec: 'cc.courtlens.legal::MotionAttachment.orderRef',
+        example: '@attachment-order-9f2',
+        relatedTags: ['resolves', 'motionRef', 'caseRef'],
       },
     },
     { name: 'amends', tier: 'ref', doc: 'Attachment this one amends.', refTarget: 'motionAttachment' },
@@ -1413,4 +1442,18 @@ export function groupByTier(specs: TagSpec[]): Record<'marker' | 'ref' | 'value'
     else out.value.push(s);
   }
   return out;
+}
+
+/**
+ * Whether a ref row renders at all.
+ *
+ * Read mode hides empty refs so a panel shows what IS known rather than every
+ * slot a kind could hold — except where the spec says the tag is worth
+ * advertising unset (`alwaysShow`). Edit mode shows everything, because that is
+ * where things get set.
+ *
+ * Exported as a predicate so the rule can be tested without mounting a panel.
+ */
+export function rendersWhenEmpty(spec: TagSpec, hasValue: boolean, editMode: boolean): boolean {
+  return hasValue || editMode || spec.alwaysShow === true;
 }

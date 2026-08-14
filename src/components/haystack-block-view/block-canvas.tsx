@@ -25,7 +25,8 @@ import {
 } from './scope-blocks';
 import { caseTriState, type EntityKey, type ScopeGraph } from './scope-graph';
 import { setTransform, setZoom } from './zoom-state';
-import { setPinned, useHovered, usePinned } from './hover-state';
+import { setPinned, setSelectedBlocks, useHovered, usePinned, useSelectedBlocks } from './hover-state';
+import { edgeVisibility } from './edge-visibility';
 import { useShowAllLinks } from './link-visibility';
 import { mountBandRules, mountColumnHeaders } from './column-headers';
 import { fanPath, refPath } from './fan-route';
@@ -683,6 +684,19 @@ export default function BlockCanvas(props: Props) {
 
   // Paint state: diff against what's on screen, repaint only what changed.
   const selectionSignal = props.mode === 'edit' ? props.activeKey : props.selected;
+
+  // Selection is the third thing that can reveal an edge (#91). It lives in the
+  // tab's own store — the cascade in filtering, the active block in the editor —
+  // so the canvas mirrors it into the store edges subscribe to. Case keys are
+  // included: selecting a case reveals its whole fan, which is the point.
+  useEffect(() => {
+    const current = propsRef.current;
+    setSelectedBlocks(
+      current.mode === 'edit'
+        ? new Set(current.activeKey ? [current.activeKey] : [])
+        : new Set(current.selected),
+    );
+  }, [selectionSignal]);
   useEffect(() => {
     const area = areaRef.current;
     if (!area) return;
@@ -962,47 +976,33 @@ function EdgeLayer({
   const drag = useDragState();
   const hovered = useHovered();
   const pinned = usePinned();
+  const selected = useSelectedBlocks();
   const showAll = useShowAllLinks();
-  // A pinned block reads as hovered: opening a menu moves the pointer off the
-  // block, and a line that vanished at that moment would be useless.
-  const touchesPointer =
-    (hovered !== null && endpoints.includes(hovered)) ||
-    (pinned !== null && endpoints.includes(pinned));
 
-  if (isContains) {
-    const authoringCaseLinks = drag.active && drag.slot === 'caseRef';
-    // "Show all links" means ALL: the case fan is a link like any other, drawn
-    // fainter so the ref chains still read first. Without it the toggle told a
-    // half-truth — the user asked for everything and got the refs.
-    if (!(showAll || (editMode && (authoringCaseLinks || touchesPointer)))) return null;
-    return (
-      <div
-        style={{ opacity: touchesPointer ? 0.55 : 0.3 }}
-        className="[&_path]:[pointer-events:stroke]"
-        data-edge-kind="contains"
-        data-edge-id={props.data.id}
-        data-edge-state={touchesPointer ? 'revealed' : 'show-all'}
-      >
-        <Presets.classic.Connection {...props} />
-      </div>
-    );
-  }
+  // The decision lives in `edgeVisibility` — four reveal sources with a stated
+  // precedence, testable without a canvas.
+  const shown = edgeVisibility({
+    isContains,
+    endpoints,
+    editMode,
+    hovered,
+    pinned,
+    selected,
+    showAll,
+    draggingCaseRef: drag.active && drag.slot === 'caseRef',
+  });
+  if (!shown.visible) return null;
 
-  // Ref edges are hidden at rest too now. Muting them to 0.15 (#60) still left
-  // every line crossing the columns, which is the thing being read THROUGH. A
-  // line appears when it is the one being traced — its own block hovered or
-  // pinned — or when the toolbar toggle asks for the whole picture back.
-  if (!(touchesPointer || showAll)) return null;
   return (
     <div
-      style={{ opacity: touchesPointer ? 1 : 0.45 }}
-      // Only a drawn line is clickable, and only along its stroke — so a line
-      // can be right-clicked and deleted (#75) without swallowing clicks meant
-      // for the blocks underneath it.
-      className="[&_path]:[pointer-events:stroke]"
-      data-edge-kind="ref"
+      style={{ opacity: shown.opacity }}
+      // Only a deliberately revealed line takes the pointer, and only along its
+      // stroke — so an edge can be right-clicked and deleted (#75/#91) without
+      // swallowing clicks meant for the blocks beneath it.
+      className={shown.interactive ? '[&_path]:[pointer-events:stroke]' : undefined}
+      data-edge-kind={isContains ? 'contains' : 'ref'}
       data-edge-id={props.data.id}
-      data-edge-state={touchesPointer ? 'full' : 'show-all'}
+      data-edge-state={shown.state}
     >
       <Presets.classic.Connection {...props} />
     </div>

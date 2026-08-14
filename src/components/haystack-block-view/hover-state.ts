@@ -17,6 +17,16 @@ import type { EntityKey } from './scope-graph';
 
 let hovered: EntityKey | null = null;
 let pinned: EntityKey | null = null;
+/**
+ * Which blocks are SELECTED, mirrored here from whichever store owns selection
+ * (the cascade in filtering, the active block in the editor).
+ *
+ * Mirrored rather than read directly because the consumer is the per-edge
+ * component rete renders: it cannot see the tab's React state, and threading
+ * selection down through the canvas would rebuild every connection on each
+ * change. The tab publishes; edges subscribe.
+ */
+let selected: ReadonlySet<EntityKey> = new Set();
 const listeners = new Set<() => void>();
 
 function publish() {
@@ -37,6 +47,14 @@ export function setPinned(key: EntityKey | null) {
 
 export function currentPinned(): EntityKey | null {
   return pinned;
+}
+
+export function setSelectedBlocks(next: ReadonlySet<EntityKey>) {
+  // Same-size, same-members means nothing to publish — this runs on every
+  // selection change, including the ones that only moved a case rollup.
+  if (next.size === selected.size && [...next].every(key => selected.has(key))) return;
+  selected = next;
+  publish();
 }
 
 function subscribe(listener: () => void) {
@@ -62,4 +80,18 @@ function getPinnedSnapshot(): EntityKey | null {
 
 export function usePinned(): EntityKey | null {
   return useSyncExternalStore(subscribe, getPinnedSnapshot, getServerSnapshot);
+}
+
+const EMPTY: ReadonlySet<EntityKey> = new Set();
+
+function getSelectedSnapshot(): ReadonlySet<EntityKey> {
+  return selected;
+}
+
+function getSelectedServerSnapshot(): ReadonlySet<EntityKey> {
+  return EMPTY;
+}
+
+export function useSelectedBlocks(): ReadonlySet<EntityKey> {
+  return useSyncExternalStore(subscribe, getSelectedSnapshot, getSelectedServerSnapshot);
 }

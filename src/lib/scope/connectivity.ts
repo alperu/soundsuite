@@ -35,6 +35,11 @@ export interface ScopeRefs {
   /** Order / judgment / decree → the motion it rules on. Tags-only slot, and
    *  deliberately distinct from `motionRef`: filed-under is not rules-on. */
   resolves?: string
+  /** Attachment → the order it concerns (task #89). A REFERENCE, not
+   *  parentage: a notice about an order still belongs to whatever motion it
+   *  was filed under, and its case is untouched. Note the singular —
+   *  `orderRefs` is the derived list on a Motion, a different thing. */
+  orderRef?: string
   amends?: string
   supersedes?: string
   judgeRef?: string
@@ -45,7 +50,8 @@ export interface ScopeRefs {
 
 /** The ref keys the scope graph treats as structural (filing → filing). */
 export const STRUCTURAL_REF_KEYS = [
-  'motionRef', 'respondingTo', 'replyingTo', 'resolves', 'amends', 'supersedes',
+  'motionRef', 'respondingTo', 'replyingTo', 'resolves', 'orderRef',
+  'amends', 'supersedes',
 ] as const
 
 /** The ref keys the scope graph treats as person attribution. */
@@ -140,6 +146,7 @@ export function refsFromAttachment(row: AttachmentRowLike): ScopeRefs {
     respondingTo: tagRef(tags, 'respondingTo'),
     replyingTo: tagRef(tags, 'replyingTo'),
     resolves: tagRef(tags, 'resolves'),
+    orderRef: tagRef(tags, 'orderRef'),
     amends: tagRef(tags, 'amends') ?? row.amendsId ?? undefined,
     supersedes: tagRef(tags, 'supersedes') ?? row.supersedesId ?? undefined,
     authoredBy: tagRef(tags, 'authoredBy') ?? row.authoredById ?? undefined,

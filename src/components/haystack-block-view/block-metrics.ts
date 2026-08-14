@@ -13,11 +13,15 @@
 export const SOCKET_D = 14;
 
 /**
- * Minimum centre-to-centre distance between two handles on the same edge.
- * A circle is 14px, so this leaves 2px of daylight — below that adjacent
- * circles touch and, a pixel later, overlap.
+ * Centre-to-centre distance between two handles on the same edge.
+ *
+ * 22, not the 14 a circle strictly needs: the pitch is what caps how large a
+ * slot LABEL can be drawn, and at 16 the cap left labels at 5.2px on screen at
+ * the 0.45 the editor opens at — present but not readable. 22 buys ~7px there.
+ * It costs height, since block bodies are sized from this, and that trade was
+ * made deliberately (#87): more readable labels for a taller canvas.
  */
-export const SLOT_PITCH = 16;
+export const SLOT_PITCH = 22;
 
 /** Clearance kept between the outermost handle and the block's own edges. */
 const EDGE_PAD = 6;

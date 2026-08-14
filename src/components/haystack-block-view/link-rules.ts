@@ -150,6 +150,15 @@ const SLOT_SPECS: Record<LinkSlot, SlotSpec> = {
     accepts: () => true,
     refusal: 'supersedes points at an earlier filing of the same kind',
   },
+  /**
+   * MOTION SIDE. One label, TWO write plans — see `ORDER_REF_ON_ATTACHMENT`
+   * below, and read both before changing either.
+   *
+   * A motion has no writable order pointer: `Motion.orderRefs` (PLURAL) is
+   * derived from the orders whose `resolves` names it. So the gesture runs
+   * motion → order while the WRITE lands on the order as `resolves`. This entry
+   * is an inversion affordance; it persists nothing on the motion.
+   */
   orderRef: {
     label: 'orderRef',
     description: 'is ruled on by',
@@ -167,6 +176,42 @@ const SLOT_SPECS: Record<LinkSlot, SlotSpec> = {
     refusal: "caseRef points at a case block's id",
   },
 };
+
+/**
+ * ATTACHMENT SIDE of `orderRef`. Same label as the entry above, opposite write.
+ *
+ * A notice, response, reply or record can be ABOUT an order, and that is a real
+ * tag on the filing itself: `orderRef` persists on the attachment, pointing at
+ * the order. Parentage is untouched — `motionRef` and the case both stay put —
+ * because this is a reference, not a move.
+ *
+ * THE TRAP: one name, two write plans, chosen by the SOURCE's kind. A motion's
+ * orderRef writes `resolves` on the target; everyone else's writes `orderRef`
+ * on themselves. `specFor` is the only place that choice is made — never read
+ * `SLOT_SPECS.orderRef` directly in the commit path. (And mind the plural:
+ * `orderRefs` is the derived read-only list on a Motion, which `splitPatch`
+ * drops by exact match. One letter apart, nothing alike.)
+ */
+const ORDER_REF_ON_ATTACHMENT: SlotSpec = {
+  label: 'orderRef',
+  description: 'concerns',
+  accepts: kind => ORDER_SHAPED_KINDS.has(kind),
+  refusal: 'orderRef points at an order, judgment or decree',
+};
+
+/**
+ * The spec that governs THIS source writing THIS slot.
+ *
+ * Only `orderRef` forks, and only on whether the source is a motion. Every
+ * other slot answers the same for every kind, so the fork lives here rather
+ * than in the spec table where it would read as a special case of nothing.
+ */
+export function specFor(slot: LinkSlot, sourceKind: string): SlotSpec {
+  if (slot === 'orderRef' && normalizeKind(sourceKind) !== 'motion') {
+    return ORDER_REF_ON_ATTACHMENT;
+  }
+  return SLOT_SPECS[slot];
+}
 
 /** Slots whose target must match the source's own kind. */
 const SAME_KIND_SLOTS = new Set<LinkSlot>(['amends', 'supersedes']);
@@ -188,11 +233,16 @@ export function slotsForKind(kind: string): LinkSlot[] {
   // the LAST entry. Structural slots (caseRef) and inverted ones (orderRef)
   // must never be what the unslotted fallback picks, since the fallback takes
   // the first writable slot; the explicit-pick guard in `planLink` backs this up.
-  if (kind === 'response') return ['respondingTo', ...revision, 'caseRef'];
-  if (kind === 'reply') return ['replyingTo', ...revision, 'caseRef'];
+  // Every non-order attachment can be ABOUT an order, so it carries the slot
+  // whether or not it holds a value — an empty socket is what you drag FROM to
+  // make the link, so hiding it until populated would hide the feature (#89,
+  // same reasoning as #88's always-visible `resolves`). An order does not get
+  // one: its side of that relationship is `resolves`, which it already has.
+  if (kind === 'response') return ['respondingTo', ...revision, 'orderRef', 'caseRef'];
+  if (kind === 'reply') return ['replyingTo', ...revision, 'orderRef', 'caseRef'];
   if (ORDER_SHAPED_KINDS.has(kind)) return ['resolves', ...revision, 'caseRef'];
   if (kind === 'motion') return [...revision, 'orderRef', 'caseRef'];
-  return ['motionRef', ...revision, 'caseRef'];
+  return ['motionRef', ...revision, 'orderRef', 'caseRef'];
 }
 
 /**
@@ -284,8 +334,10 @@ export function visibleSlotsFor(
   const writable = slotsForKind(normalizeKind(kind));
   const held = ALL_SLOTS.filter(
     slot =>
-      // `orderRef` is never stored on anything — it is derived from the orders
-      // pointing back — so a held-slot scan must not resurrect it.
+      // A MOTION never stores `orderRef` — its side of that relationship is
+      // derived from the orders pointing back — so a held-slot scan must not
+      // resurrect it there. Attachments DO store it (#89), but for them the
+      // slot is writable and so is already in the list above.
       slot !== 'orderRef' &&
       !writable.includes(slot) &&
       typeof refs?.[slot] === 'string' &&
@@ -463,7 +515,8 @@ export function planLink(
   // neither should be what an unaimed drag happens to mean.
   const fallback = writable.find(s => !STRUCTURAL_SLOTS.has(s)) ?? writable[0];
   const slot = picked ?? fallback;
-  const spec = SLOT_SPECS[slot];
+  // One label, two write plans (#89): which one applies depends on the SOURCE.
+  const spec = specFor(slot, from);
   if (STRUCTURAL_SLOTS.has(slot) && !picked) {
     return { ok: false, reason: `Pull the ${slot} socket to record that link` };
   }

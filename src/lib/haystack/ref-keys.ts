@@ -39,6 +39,15 @@ export const REF_TARGET_TABLE: Record<string, 'Case' | 'Motion' | 'MotionAttachm
   // side of the pair renders raw cuids.
   resolves: 'Motion',
   orderRefs: 'MotionAttachment',
+  // `orderRef` (SINGULAR) is a different slot from `orderRefs` above, and the
+  // one-letter difference is a trap worth naming: this one is WRITABLE and
+  // lives on an attachment (a notice/response/reply pointing at the order it
+  // concerns), while the plural is the DERIVED list on a Motion and is dropped
+  // by `splitPatch` before it can ever be persisted. The singular follows the
+  // repo's writable-pointer convention (caseRef / motionRef / judgeRef), so
+  // renaming it would be the bigger surprise — but never treat the two as the
+  // same key. See task #89.
+  orderRef: 'MotionAttachment',
   judgeRef: 'Person',
   judgeRefs: 'Person',
   movantRef: 'Person',

@@ -5,6 +5,7 @@ import {
   TAG_SPEC_BY_KIND,
   TIER_LABEL,
   groupByTier,
+  rendersWhenEmpty,
   type EntityKind,
   type TagSpec,
 } from './tag-spec';
@@ -1016,7 +1017,7 @@ function RefRow({
     ? basename(labelDisplay)
     : labelDisplay;
   const display = labelForDisplay || rawDisplay;
-  if (!editMode && !display) return null;
+  if (!rendersWhenEmpty(spec, Boolean(display), editMode)) return null;
   // A read-only ref (caseRef) still renders its resolved label, but offers no
   // picker, no clear and no paste — its value is synthesized from the owning
   // Prisma column on every read, so an edit here could only ever create a
@@ -1082,14 +1083,23 @@ function RefRow({
           )
         ) : (
           <span className="inline-flex items-center gap-1">
-            <span className="text-gray-800 break-all" title={rawTooltip || undefined}>
-              {display}
-              {rawTooltip && (
-                <span className="text-[10px] text-gray-400 ml-1 font-mono">
-                  {rawDisplay.replace(/^@/, '').slice(0, 8)}…
-                </span>
-              )}
-            </span>
+            {display ? (
+              <span className="text-gray-800 break-all" title={rawTooltip || undefined}>
+                {display}
+                {rawTooltip && (
+                  <span className="text-[10px] text-gray-400 ml-1 font-mono">
+                    {rawDisplay.replace(/^@/, '').slice(0, 8)}…
+                  </span>
+                )}
+              </span>
+            ) : (
+              // An `alwaysShow` ref with nothing in it. Phrased as an invitation
+              // rather than a gap: the row is here BECAUSE the link is worth
+              // making, and both ways of making it are named.
+              <span className="text-gray-400 italic" title="Set it here in edit mode, or draw the link on the canvas">
+                not linked yet
+              </span>
+            )}
             <TagRowActions spec={spec} value={value} label={labelDisplay} editMode={false} onPaste={() => { /* read-only */ }} />
           </span>
         )}

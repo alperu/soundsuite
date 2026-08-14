@@ -53,14 +53,35 @@ jest.mock('p-queue', () => {
   });
 });
 
-// Mock Prisma
+// Mock Prisma.
+//
+// Served through a Proxy rather than a hand-listed object. This mock used to
+// declare exactly `document.findMany` and `document.update`; JobQueue has since
+// grown a `document.findUnique` call, and the suite died with
+// "this.prisma.document.findUnique is not a function" surfacing as worker
+// child-process exceptions (task #84). Naming delegates by hand just defers the
+// same break to the next call someone adds, so unknown models and unknown
+// methods both answer with a jest.fn().
+//
+// Delegates are memoised so `mockPrisma.document.findMany` is the SAME mock
+// across accesses — the tests below configure it via mockResolvedValue.
 jest.mock('@prisma/client', () => {
-  const mockPrisma = {
-    document: {
-      findMany: jest.fn(),
-      update: jest.fn(),
+  const models = new Map<string, Record<string, jest.Mock>>();
+  const modelProxy = () =>
+    new Proxy({} as Record<string, jest.Mock>, {
+      get(target, method: string | symbol) {
+        if (typeof method !== 'string') return undefined;
+        if (!target[method]) target[method] = jest.fn().mockResolvedValue(undefined);
+        return target[method];
+      },
+    });
+  const mockPrisma = new Proxy({} as Record<string, unknown>, {
+    get(_target, model: string | symbol) {
+      if (typeof model !== 'string' || model === 'then') return undefined;
+      if (!models.has(model)) models.set(model, modelProxy());
+      return models.get(model);
     },
-  };
+  });
   return {
     PrismaClient: jest.fn(() => mockPrisma),
   };

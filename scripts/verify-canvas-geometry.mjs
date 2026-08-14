@@ -12,8 +12,8 @@
  *   3. no socket sits inside the title bar OR the footer band
  *   4. no socket hangs below the block's bottom edge — the other end of the
  *      body, and the next place a handle count bump will push one out
- *   5. SEPARATION: no two handles on the same edge closer than 16px centre to
- *      centre. Handles are counted WITHOUT deduping identical rects: #65 was
+ *   5. SEPARATION: no two handles on the same edge closer than SLOT_PITCH
+ *      (currently 22px, widened in #87) centre to centre. Handles are counted WITHOUT deduping identical rects: #65 was
  *      the input hub sitting exactly on top of the first slot, and two
  *      detectors missed it because they merged coincident boxes. The hub is
  *      included on purpose — it is a circle on the same edge as the slots, and
@@ -34,6 +34,11 @@ const port = (() => {
   const i = process.argv.indexOf('--port');
   return i > -1 ? Number(process.argv[i + 1]) : 9222;
 })();
+
+/** Mirrors SLOT_PITCH in src/components/haystack-block-view/block-metrics.ts.
+ *  This script runs standalone over CDP, so it cannot import it — if the pitch
+ *  moves there, move it here. */
+const SLOT_PITCH = 22;
 
 const PROBE = `(async () => {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -80,7 +85,7 @@ const PROBE = `(async () => {
       for (let i = 1; i < ys.length; i++) {
         const gap = (ys[i] - ys[i - 1]) / k;
         minSeparation = Math.min(minSeparation, gap);
-        if (gap < 16 - 0.5) tooClose++;
+        if (gap < ${SLOT_PITCH} - 0.5) tooClose++;
       }
     }
   }
@@ -193,7 +198,7 @@ async function main() {
   if (result?.circlesBelowBlock > 0) failures.push(`${result.circlesBelowBlock} sockets hanging below the block`);
   if (result?.handlePairsTooClose > 0) {
     failures.push(
-      `${result.handlePairsTooClose} handle pairs closer than 16px (worst ${result.minEdgeSeparationPx}px)`,
+      `${result.handlePairsTooClose} handle pairs closer than ${SLOT_PITCH}px (worst ${result.minEdgeSeparationPx}px)`,
     );
   }
   if (result?.rightEdgeMaxDevPx > 1.5) failures.push(`right-edge drift ${result.rightEdgeMaxDevPx}px`);

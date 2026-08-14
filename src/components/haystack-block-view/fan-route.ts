@@ -121,7 +121,9 @@ function nearer(a: Point, b: Point, x: number): Point {
 const LANE_PITCH = 12;
 
 /** Lanes that fit in a column gutter without touching either column. */
-const LANES = Math.max(1, Math.floor((KIND_COL_GAP - 16) / LANE_PITCH));
+/** Keep a lane's width clear of both columns; 16 is that margin, not a pitch. */
+const GUTTER_MARGIN = 16;
+const LANES = Math.max(1, Math.floor((KIND_COL_GAP - GUTTER_MARGIN) / LANE_PITCH));
 
 export function refPath(
   graph: ScopeGraph,

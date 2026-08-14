@@ -313,6 +313,12 @@ MotionAttachment: Amendable <abstract> {
   filedOn:         DateTime?
   receivedOn:      DateTime?
   attachmentKind:  Str?
+  // The order / judgment / decree this filing is ABOUT — a notice of an order,
+  // a response to one, a reply turning on one. A reference only: parentage
+  // stays with `motionRef`, the case with `caseRef`. Declared on the base so
+  // every attachment kind inherits it, and distinct from `Order.resolves`,
+  // which runs the other way (an order naming the motion it rules on).
+  orderRef:        Ref?
 }
 
 //////////////////////////////////////////////////////////////////////////

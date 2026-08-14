@@ -25,6 +25,9 @@ module.exports = {
   ],
   testTimeout: 30000, // 30 seconds for OCR tests
   transformIgnorePatterns: [
-    'node_modules/(?!(chokidar|p-queue|p-timeout|eventemitter3|@langchain|@haxall|haystack-core)/)',
+    // `@xenova/transformers` is ESM ("export * from './pipelines.js'") and went
+    // untransformed, so any suite importing it died at parse with
+    // "Unexpected token 'export'" before running a test (task #84).
+    'node_modules/(?!(chokidar|p-queue|p-timeout|eventemitter3|@langchain|@haxall|haystack-core|@xenova)/)',
   ],
 };

@@ -119,16 +119,13 @@ describe('buildScopeGraph column layout', () => {
       ]),
       testCase('c2', [filing('m2', 'motion')]),
     ]);
-    // Seven filings one per column push the next band down no further than a
-    // single filing would: band height follows the fullest COLUMN, never the
-    // filing count. Compared against a one-filing band rather than a literal —
-    // block height is derived from the handles a block carries, so a literal
-    // here would just re-encode today's socket count.
-    const single = buildScopeGraph([
-      testCase('c1', [filing('m1', 'motion')]),
-      testCase('c2', [filing('m2', 'motion')]),
-    ]);
-    expect(spread.caseById.get('c2')?.y).toBe(single.caseById.get('c2')?.y);
+    // Seven filings, one per column, make a band ONE ROW tall: height follows
+    // the fullest COLUMN, never the filing count. Asserted inside this graph
+    // rather than against a second one — block height is derived from the
+    // handles a kind carries, so two graphs with different kinds in them are
+    // legitimately different heights and would compare unequal for a reason
+    // that has nothing to do with what this test is about.
+    expect(spread.bands[0].height).toBe(Math.max(96, spread.rowH));
 
     // Three filings stacked in ONE column make a taller band than seven spread.
     const stacked = buildScopeGraph([
