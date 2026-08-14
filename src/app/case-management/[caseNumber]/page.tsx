@@ -1822,6 +1822,15 @@ export default function CaseDetailPage() {
         </div>
         {/* Toolbar — uniform icon-button row below the path. */}
         <div className="mt-2 flex items-center gap-0.5 border border-gray-200 bg-gray-50 rounded-md px-1 py-1 overflow-x-auto">
+          <button onClick={() => router.push(`/scope?case=${encodeURIComponent(caseRecord.id)}`)}
+            title="Open this case in the Haystack Block View — granular scope selection and entity linking"
+            className="inline-flex items-center gap-1 h-7 px-2 text-xs text-indigo-700 rounded hover:bg-white hover:shadow-sm transition-colors">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 6.375a1.125 1.125 0 112.25 0 1.125 1.125 0 01-2.25 0zM16.5 6.375a1.125 1.125 0 112.25 0 1.125 1.125 0 01-2.25 0zM10.875 17.625a1.125 1.125 0 112.25 0 1.125 1.125 0 01-2.25 0zM6.375 7.5v3.75a2.25 2.25 0 002.25 2.25h6.75a2.25 2.25 0 002.25-2.25V7.5M12 13.5v3" />
+            </svg>
+            Block View
+          </button>
+          <div className="w-px h-4 bg-gray-200 mx-0.5" />
           {/* Group: folder ops */}
           <button onClick={handleRefreshFolder} disabled={refreshFolderLoading}
             title="Refresh folder — rescan case directory for renames or new files"

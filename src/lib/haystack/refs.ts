@@ -12,6 +12,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { cacheGet, cacheSet, cacheDelete } from './cache'
 import { REF_TARGET_MODEL } from './entities'
+import { REF_TARGET_TABLE, isRefKey } from './ref-keys'
 
 /**
  * Coerce a ref-shaped value into a bare id string.
@@ -44,7 +45,8 @@ export function stripSelfRefs(out: Record<string, unknown>): void {
   const selfId = typeof out.id === 'string' ? out.id : null
   if (!selfId) return
   const refLikeExact = new Set([
-    'amends', 'supersedes', 'authoredBy', 'respondingTo',
+    'amends', 'supersedes', 'authoredBy', 'respondingTo', 'replyingTo',
+    'resolves',
     'motionRefV', 'caseRefV', 'fileRefV', 'amendsV', 'supersedesV',
   ])
   for (const k of Object.keys(out)) {
@@ -166,58 +168,24 @@ export function synthesizeRefsFromColumns(table: string, row: any): Record<strin
   return out
 }
 
+/**
+ * Attachment kinds that can rule on a motion — the ones carrying the
+ * `resolves` slot, and the ones the derived `Motion.orderRefs` collects.
+ * Proposed orders are included deliberately: a motion's docket history is
+ * incomplete without the proposal that preceded the signed order, so the
+ * read route labels them "Proposed:" rather than dropping them.
+ */
+export const ORDER_SHAPED_KINDS = ['order', 'proposedOrder', 'judgment', 'decree'] as const
+
 // ---------- ref-label resolution -------------------------------------------
 
 /**
- * Map a ref key name → the Prisma model that ref points at. Mirrors the
- * `refTarget` slot on each TagSpec so the panel and the server agree on
- * how to format the label for a given ref slot.
- *
- * Multi-target refs (scopeRef is polymorphic per PersonRole.scopeKind) are
- * resolved dynamically — see `resolveScopeRef`.
+ * Ref-key table. The data lives in `./ref-keys` — a leaf module with no
+ * imports — so the XETO namespace can read it without closing the import
+ * cycle `prisma → validate → xeto-namespace → refs → prisma`. Re-exported
+ * here because every existing caller imports it from this module.
  */
-export const REF_TARGET_TABLE: Record<string, 'Case' | 'Motion' | 'Person' | 'Court' | 'Hearing' | 'Document'> = {
-  caseRef: 'Case',
-  caseRefs: 'Case',
-  motionRef: 'Motion',
-  motionRefs: 'Motion',
-  amends: 'Motion',
-  supersedes: 'Motion',
-  judgeRef: 'Person',
-  judgeRefs: 'Person',
-  movantRef: 'Person',
-  movantRefs: 'Person',
-  respondentRef: 'Person',
-  respondentRefs: 'Person',
-  authoredBy: 'Person',
-  servedOn: 'Person',
-  courtClerkRef: 'Person',
-  courtClerkRefs: 'Person',
-  // `clerkRef` is the tag name used on Order / Decree / clerk-stamped entries
-  // (introduced with the clerkRef extractor — commits 12596cb / beda95b).
-  // Without this entry inlineRefLabels skips it and the panel renders the
-  // raw cuid instead of the resolved Person name.
-  clerkRef: 'Person',
-  clerkRefs: 'Person',
-  courtReporterRef: 'Person',
-  courtReporterRefs: 'Person',
-  reporterRef: 'Person',
-  personRef: 'Person',
-  plaintiffRefs: 'Person',
-  defendantRefs: 'Person',
-  plaintiffLawyers: 'Person',
-  defendantLawyers: 'Person',
-  // Notice / Letter / Demand-letter sender + recipient refs. Without these
-  // entries `inlineRefLabels` would skip them and the panel would render the
-  // raw cuid (e.g. `cmpfjm2i800009zuu5uieqzcu`) instead of the resolved
-  // person name (Task #6).
-  from: 'Person',
-  to: 'Person',
-  courtRef: 'Court',
-  hearingRef: 'Hearing',
-  fileRef: 'Document',
-  transcriptRef: 'Document',
-}
+export { REF_TARGET_TABLE, isRefKey }
 
 /**
  * Invalidate any cached labels for the given ids across every known target

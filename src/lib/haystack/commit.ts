@@ -24,6 +24,7 @@ import {
   deriveOrigin,
   getSelfPersonId,
   recoverTagObject,
+  refToId,
   stripSelfRefs,
 } from './refs'
 import {
@@ -116,6 +117,8 @@ export function splitPatch(
   const colSet = NON_TAG_COLUMNS[model] ?? new Set(['id', 'tags', 'createdAt', 'updatedAt'])
   const structural = new Set(['id', 'tags', 'createdAt', 'updatedAt'])
   const dateCols = DATE_COLUMNS[model] ?? new Set<string>()
+  /** A `caseRef` seen in the patch, translated to `caseId` after the loop. */
+  let caseRefValue: unknown = undefined
 
   for (const [k, vRaw] of Object.entries(patch)) {
     if (structural.has(k)) continue
@@ -130,6 +133,24 @@ export function splitPatch(
     // opposingFiled, courtIssued, thirdParty) still flow through to tagPatch
     // below — that's the manual-override persistence path.
     if (k === 'origin') continue
+    // `orderRefs` is the derived inverse of the orders' `resolves` slot,
+    // recomputed on every Motion read. The panel posts back the whole inlined
+    // record, so without this the list freezes into tags JSON — and the read
+    // path layers tags OVER synthesized values, so that stale copy would then
+    // beat the live derivation. The edge is written on the order, never here.
+    if (k === 'orderRefs') continue
+    // `caseRef` is the panel's case picker, and it TRANSLATES to the
+    // authoritative `caseId` column rather than persisting as a tag. Reads
+    // synthesize caseRef from that column, so a tag copy would be a second
+    // writable source of truth for one fact — and since reads layer tags OVER
+    // synthesized refs, a stale tag would win and show the row under a case it
+    // doesn't belong to. Translating instead of dropping is what turns the
+    // picker into a real "move this filing" control. Deferred until after the
+    // loop so an explicit `caseId` in the same patch still wins.
+    if (k === 'caseRef') {
+      caseRefValue = vRaw
+      continue
+    }
     if (colSet.has(k)) {
       let v = vRaw
       // Normalize empty strings on nullable columns to null so the form's
@@ -153,6 +174,17 @@ export function splitPatch(
       tagPatch[k] = vRaw
     }
   }
+
+  // Land the translated case pointer. Only for models that actually own a
+  // `caseId` column (Case itself doesn't), only when the patch didn't set the
+  // column explicitly, and only for a resolvable id — clearing the picker is
+  // not a move, and `caseId` is a required FK on most of these models, so a
+  // null would fail the write rather than express anything the user meant.
+  if (caseRefValue !== undefined && colSet.has('caseId') && columnPatch.caseId === undefined) {
+    const caseId = refToId(caseRefValue)
+    if (caseId) columnPatch.caseId = caseId
+  }
+
   return { columnPatch, tagPatch }
 }
 
@@ -395,6 +427,14 @@ export async function commitEntity(input: {
     // re-trigger the XETO validator on legacy/un-migrated tag keys.
     if (Object.keys(tagPatch).length > 0) {
       data.tags = merged
+      // Re-send the row's own discriminator with a tag write so the XETO
+      // extension can pick the concrete subtype spec (Notice, Order, …) —
+      // it only ever sees `args.data`. Same value that's already stored, so
+      // the column is unchanged; the alternative is a pre-read inside the
+      // extension, which would import the client it extends.
+      if (model === 'motionAttachment' && existing.attachmentKind && data.attachmentKind == null) {
+        data.attachmentKind = existing.attachmentKind
+      }
     }
 
     const updated = await client.update({ where: { id }, data })

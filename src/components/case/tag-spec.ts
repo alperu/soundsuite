@@ -96,6 +96,11 @@ export interface TagSpec {
    * the `doc` string only until a future pass populates them.
    */
   info?: TagInfo;
+  /** Server-derived on every read: the panel renders the value but offers no
+   *  editing affordance (no picker, no clear, no paste), and the commit path
+   *  drops the key before it can reach the tags JSON. Editing it would only
+   *  persist a value the next read recomputes anyway. */
+  readOnly?: boolean;
 }
 
 /**
@@ -188,6 +193,27 @@ const FILING_FILE_REF_SPEC: TagSpec = {
     example:
       '@doc-stamped-petition-a31  → /Users/alper/Court/03-25-00333-CV/Motion/Stamped Petition.pdf',
     relatedTags: ['caseRef', 'motionRef', 'authoredBy'],
+  },
+}
+
+/**
+ * The ruling edge, shared by every order-shaped filing kind (order,
+ * proposedOrder, judgment, decree). It is the writable half of the pair whose
+ * derived inverse is `Motion.orderRefs` — the edge always lives on the order,
+ * because one motion accumulates many rulings over its life.
+ */
+const RESOLVES_SPEC: TagSpec = {
+  name: 'resolves',
+  tier: 'ref',
+  doc: 'The motion this order rules on.',
+  refTarget: 'motion',
+  info: {
+    whatItIs: 'Pointer to the motion that this order / judgment / decree decides.',
+    howItWorks: 'Distinct from `motionRef`, which only says which motion the filing was filed under — an order can be filed under one motion and rule on another. Set it here or by drawing an order → motion link on the scope canvas; the motion side shows the inverse as its read-only `orderRefs` list.',
+    mapsTo: "tags JSON: '$.resolves' (Haystack ref)",
+    xetoSpec: 'cc.courtlens.legal::Order.resolves',
+    example: '@motion-7a3f',
+    relatedTags: ['motionRef', 'orderRefs', 'signedBy', 'signedOn'],
   },
 }
 
@@ -695,6 +721,21 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
         xetoSpec: 'cc.courtlens.legal::Motion.respondentRef',
         example: '@person-john-roe',
         relatedTags: ['movantRef', 'plaintiffRefs', 'defendantRefs'],
+      },
+    },
+    {
+      name: 'orderRefs',
+      tier: 'refs',
+      doc: 'Orders, judgments and decrees that rule on this motion (derived).',
+      refTarget: 'motionAttachment',
+      readOnly: true,
+      info: {
+        whatItIs: 'Every order / proposed order / judgment / decree that resolves this motion.',
+        howItWorks: 'Derived on read, never stored: the server collects the order-shaped filings whose `resolves` points at this motion (falling back to `motionRef` for rows tagged before `resolves` existed). Set the edge from the order — draw order → motion on the canvas, or set `resolves` in the order\'s own panel. Proposed orders are included and their labels are prefixed "Proposed:".',
+        mapsTo: 'computed (haystack read route) — inverse of MotionAttachment.resolves',
+        xetoSpec: 'cc.courtlens.legal::Motion.orderRefs',
+        example: '@attachment-order-9f2',
+        relatedTags: ['resolves', 'motionRef', 'signedOn'],
       },
     },
     // values
@@ -1231,6 +1272,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   order: [
     ...attachmentBaseSpec('order', 'Marker: this record is a court Order.'),
     { name: 'signedBy', tier: 'ref', doc: 'Judge who signed the order.', refTarget: 'person' },
+    RESOLVES_SPEC,
     { name: 'orderType', tier: 'value', doc: 'Type of order (e.g. "scheduling", "protective").', valueType: 'text' },
     { name: 'signedOn', tier: 'value', doc: 'Date the order was signed.', valueType: 'date' },
   ],
@@ -1238,6 +1280,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   proposedOrder: [
     ...attachmentBaseSpec('proposedOrder', 'Marker: this record is a Proposed Order.'),
     { name: 'signedBy', tier: 'ref', doc: 'Judge who would sign the order if granted.', refTarget: 'person' },
+    RESOLVES_SPEC,
     { name: 'orderType', tier: 'value', doc: 'Type of order proposed.', valueType: 'text' },
     { name: 'signedOn', tier: 'value', doc: 'Date the order was signed (if granted).', valueType: 'date' },
   ],
@@ -1281,6 +1324,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   judgment: [
     ...attachmentBaseSpec('judgment', 'Marker: this record is a Judgment.'),
     { name: 'signedBy', tier: 'ref', doc: 'Judge who signed the judgment.', refTarget: 'person' },
+    RESOLVES_SPEC,
     { name: 'judgmentType', tier: 'value', doc: 'Kind of judgment (e.g. "default", "summary", "final").', valueType: 'text' },
     { name: 'signedOn', tier: 'value', doc: 'Date the judgment was signed.', valueType: 'date' },
   ],
@@ -1288,6 +1332,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   decree: [
     ...attachmentBaseSpec('decree', 'Marker: this record is a Decree.'),
     { name: 'signedBy', tier: 'ref', doc: 'Judge who signed the decree.', refTarget: 'person' },
+    RESOLVES_SPEC,
     { name: 'decreeType', tier: 'value', doc: 'Kind of decree (e.g. "divorce", "adoption").', valueType: 'text' },
     { name: 'signedOn', tier: 'value', doc: 'Date the decree was signed.', valueType: 'date' },
   ],

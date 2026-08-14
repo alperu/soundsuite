@@ -158,6 +158,12 @@ Motion: Amendable {
   movantRef:      Ref?
   respondentRef:  Ref?
   appellate:      Marker?
+  // Every order/judgment/decree whose `resolves` points back at this motion.
+  // DERIVED on read from the attachment side and never persisted — a motion
+  // accumulates proposed and signed orders over its life, so a writable
+  // singular slot here would drift out of step with the rows that own the
+  // edge. See the derivation in api/haystack/[op]/route.ts.
+  orderRefs:      List? <of:Ref>
   // Universal filing slots — every filing kind carries these. Optional per
   // slot-optionality policy: real entity identity lives in Prisma columns
   // (Motion has no documentId column yet — `fileRef` is tags-only here
@@ -329,11 +335,18 @@ Letter: MotionAttachment {
   subject:  Str?
 }
 
+// `resolves` is the ruling edge: this order decides that motion. Distinct
+// from the inherited `motionRef`, which only says which motion the filing was
+// filed under — an order can be filed under one motion and rule on another,
+// and a motion accumulates several orders over its life. ProposedOrder,
+// Judgment and Decree carry the same slot; Motion.orderRefs is its derived
+// inverse.
 Order: MotionAttachment {
   order
   orderType:  Str?
   signedBy:   Ref?
   signedOn:   DateTime?
+  resolves:   Ref?
 }
 
 ProposedOrder: Order {
@@ -381,6 +394,7 @@ Judgment: MotionAttachment {
   judgmentType:  Str?
   signedBy:      Ref?
   signedOn:      DateTime?
+  resolves:      Ref?
 }
 
 Decree: MotionAttachment {
@@ -388,6 +402,7 @@ Decree: MotionAttachment {
   decreeType:  Str?
   signedBy:    Ref?
   signedOn:    DateTime?
+  resolves:    Ref?
 }
 
 ClerksRecord: MotionAttachment {

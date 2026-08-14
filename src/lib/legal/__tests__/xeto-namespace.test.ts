@@ -69,18 +69,40 @@ describe.skip('xeto-namespace', () => {
     expect(result.errors).toEqual([])
   })
 
-  test('rejects a Motion dict missing required caseRef (fits → false)', async () => {
+  // This used to assert that omitting `caseRef` fails. It cannot:
+  // `Motion.caseRef` is `Ref?` on purpose — a Motion's case lives in the
+  // Prisma `caseId` column (set on every row), and only a handful of rows
+  // carry the tag, so requiring it would reject nearly every Motion write.
+  // The `motion` marker is the slot that really is mandatory, so it carries
+  // the same intent. Mirrored in scripts/xeto-smoke.mjs.
+  test('rejects a Motion dict missing the required `motion` marker (fits → false)', async () => {
     const boot = await mod.getNamespace()
     const bad = mod.dict(boot, {
-      motion: true,
+      // `motion` marker OMITTED — required by cc.courtlens.legal::Motion
       equip: true,
-      // caseRef OMITTED — required by cc.courtlens.legal::Motion
+      caseRef: mod.ref(boot, 'case-1'),
       motionType: 'disqualify',
       siteRef: mod.ref(boot, 'case-1'),
     })
     const result = await mod.validateTags('Motion', bad)
     expect(result.ok).toBe(false)
     expect(result.errors.length).toBeGreaterThan(0)
+  })
+
+  // Regression guard for task #39: `dict()` coerces '@id' strings on ref keys
+  // into Fantom Refs. If that regresses a Str reaches the type checker, no
+  // ref-bearing dict fits any more, and validation goes quietly inert again.
+  test('coerces a plain "@id" string on a ref key into a Ref (fits → true)', async () => {
+    const boot = await mod.getNamespace()
+    const good = mod.dict(boot, {
+      motion: true,
+      equip: true,
+      caseRef: '@case-1',
+      motionType: 'disqualify',
+      siteRef: '@case-1',
+    })
+    const result = await mod.validateTags('Motion', good)
+    expect(result.ok).toBe(true)
   })
 
   test('rejects a MotionEvent with conflicting EventKind choice markers', async () => {

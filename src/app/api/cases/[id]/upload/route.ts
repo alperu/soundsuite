@@ -58,6 +58,9 @@ export async function POST(
       documentId?: string;
       filingId?: string;
       error?: string;
+      /** The hash already existed: this reassigned a document rather than
+       *  adding one. Callers report it differently — "queued" would be a lie. */
+      duplicate?: boolean;
     }> = [];
 
     for (const file of files) {
@@ -99,6 +102,7 @@ export async function POST(
             status: existing.status,
             documentId: existing.id,
             filingId: filingId || existing.filingId || undefined,
+            duplicate: true,
           });
           continue;
         }

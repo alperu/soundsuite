@@ -17,9 +17,11 @@
  * This script exercises the same assertions the Jest test would:
  *   1. The namespace boots with all five libs loaded.
  *   2. A known-good Motion dict fits the Motion spec.
- *   3. A Motion missing the required `caseRef` does NOT fit.
- *   4. A MotionEvent with two EventKind markers does NOT fit.
- *   5. A MotionEvent with no EventKind marker does NOT fit.
+ *   3. A Motion missing the required `motion` marker does NOT fit.
+ *   4. A Motion whose caseRef is a Str rather than a Ref does NOT fit
+ *      (regression guard for the task #39 value conversion).
+ *   5. A MotionEvent with two EventKind markers does NOT fit.
+ *   6. A MotionEvent with no EventKind marker does NOT fit.
  */
 
 import path from 'node:path'
@@ -104,15 +106,40 @@ const goodMotion = mkDict(b, {
 })
 assert('good Motion fits', b.ns.fits(goodMotion, motion, igRefs))
 
-const badMotion = mkDict(b, {
-  motion: M,
+// This used to assert that a Motion missing `caseRef` does not fit. It never
+// could: `Motion.caseRef` is declared `Ref?`, deliberately — a Motion's case
+// lives in the Prisma `caseId` column (populated on all 48 rows), and only 6
+// carry a `caseRef` tag, so requiring the tag would reject nearly every Motion
+// write. The database owns that invariant; the spec doesn't duplicate it.
+// What the spec DOES require is the `motion` marker, so assert that instead —
+// same intent (a structurally invalid Motion is rejected), against a slot that
+// is actually mandatory.
+const noMarkerMotion = mkDict(b, {
   equip: M,
+  caseRef: b.xeto.Ref.make('case-1', null),
   motionType: 'disqualify',
   siteRef: b.xeto.Ref.make('case-1', null),
 })
 assert(
-  'Motion missing caseRef does not fit',
-  !b.ns.fits(badMotion, motion, igRefs),
+  'Motion missing the `motion` marker does not fit',
+  !b.ns.fits(noMarkerMotion, motion, igRefs),
+)
+
+// Pins the type-checker behaviour that task #39 was built around: a ref slot
+// holding a plain Str does not fit, which is exactly why `dict()` has to coerce
+// '@id' strings into Fantom Refs. Note this builds dicts with the local
+// `mkDict`, so it pins the requirement, not the coercion itself — the test that
+// exercises `dict()` lives in the mirrored jest suite.
+const strRefMotion = mkDict(b, {
+  motion: M,
+  equip: M,
+  caseRef: 'case-1',
+  motionType: 'disqualify',
+  siteRef: b.xeto.Ref.make('case-1', null),
+})
+assert(
+  'Motion with caseRef as a Str (not a Ref) does not fit',
+  !b.ns.fits(strRefMotion, motion, igRefs),
 )
 
 const conflictEvent = mkDict(b, {

@@ -28,6 +28,10 @@ interface UnifiedSearchBody {
   chatId?: string;
   limit?: number;
   searchMode?: 'vector' | 'hybrid' | 'keyword';
+  /** Pre-compiled LanceDB pre-filter clauses (graph scope — see
+   *  `scopeToWhereClauses`). Mutually exclusive with `caseId` at the call
+   *  site: the two AND together and would match nothing. */
+  whereClauses?: string[];
 }
 
 export async function POST(request: NextRequest) {
@@ -70,6 +74,9 @@ export async function POST(request: NextRequest) {
         query,
         ...(body.caseId ? { caseId: body.caseId } : {}),
         ...(body.chatId ? { chatId: body.chatId } : {}),
+        ...(body.whereClauses && body.whereClauses.length > 0
+          ? { whereClauses: body.whereClauses }
+          : {}),
         limit,
         searchMode,
         mode: 'boolean',

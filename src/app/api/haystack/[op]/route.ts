@@ -34,6 +34,8 @@ import {
   applyOrigin,
   inlineRefLabels,
   recoverTagObject,
+  refToId,
+  ORDER_SHAPED_KINDS,
   ORIGIN_RELEVANT_TABLES,
   type Origin,
 } from '@/lib/haystack/refs'
@@ -397,10 +399,62 @@ async function opRead(params: URLSearchParams, body: any): Promise<string> {
         }
       }
     }
+    // Derive `orderRefs` on Motion rows: the inverse of the `resolves` edge
+    // that orders / judgments / decrees carry. Assigned AFTER the tag merge
+    // and unconditionally — a stale value persisted into tags JSON by an older
+    // build must not win over the live derivation (the merge at line ~348
+    // gives tags priority over synthesized refs).
+    const proposedOrderIds = new Set<string>()
+    if (table === 'Motion' && inlined.length > 0) {
+      const rulings = await (prisma as any).motionAttachment.findMany({
+        where: { attachmentKind: { in: [...ORDER_SHAPED_KINDS] } },
+        select: { id: true, motionId: true, attachmentKind: true, tags: true },
+      })
+      const byMotion = new Map<string, string[]>()
+      for (const ruling of rulings) {
+        const tags = recoverTagObject(ruling.tags)
+        // `resolves` is the real edge; `motionRef` is the fallback for rows
+        // tagged before it existed. The shadow-parent sentinel
+        // (motionId === own id, seeded by ensureMotionAttachmentForFiling)
+        // is not a parent link — without this guard every order that shares a
+        // filing id with its shadow Motion would resolve itself.
+        const explicit = refToId(tags.resolves)
+        const fallback =
+          typeof ruling.motionId === 'string' && ruling.motionId !== ruling.id
+            ? ruling.motionId
+            : null
+        const targetId = explicit ?? fallback
+        if (!targetId || targetId === ruling.id) continue
+        const list = byMotion.get(targetId) ?? []
+        list.push(ruling.id)
+        byMotion.set(targetId, list)
+        if (ruling.attachmentKind === 'proposedOrder') proposedOrderIds.add(ruling.id)
+      }
+      for (const r of inlined) {
+        const ids = byMotion.get(r.id)
+        if (ids && ids.length > 0) r.orderRefs = ids.map((id: string) => `@${id}`)
+        else delete r.orderRefs
+      }
+    }
     // Resolve every ref-shaped value (caseRef, judgeRef, ...) into a
     // sibling `<refName>Label` string the panel can render in read mode.
     // Batched per-target so we issue at most one Prisma query per table.
     const withLabels = await Promise.all(inlined.map((r: any) => inlineRefLabels(r, table)))
+    // A proposed order and a signed one resolve to the same display string, so
+    // mark the proposals in the derived list. Done here rather than in
+    // `computeDis` — that label feeds every ref row in the app, and only this
+    // list needs the distinction.
+    if (proposedOrderIds.size > 0) {
+      for (const r of withLabels as any[]) {
+        if (!Array.isArray(r.orderRefs) || !Array.isArray(r.orderRefsLabel)) continue
+        r.orderRefsLabel = r.orderRefsLabel.map((label: unknown, i: number) => {
+          const id = refToId(r.orderRefs[i])
+          return id && proposedOrderIds.has(id) && typeof label === 'string'
+            ? `Proposed: ${label}`
+            : label
+        })
+      }
+    }
     // Materialize the filing-provenance Origin marker (Task #27). No-op when
     // `table` isn't one of the Origin-bearing kinds. selfPersonId is hoisted
     // out of the per-row loop so we do one lookup per request, not per row.

@@ -27,6 +27,11 @@
 // At Next.js server runtime this still resolves correctly because the
 // route handler / server component is already running as ESM (verified
 // by the `serverExternalPackages` entries in `next.config.ts`).
+import { PER_FILING_TYPE_KINDS } from '@/lib/filings/classify-entity-kind'
+// Leaf module on purpose — importing `@/lib/haystack/refs` here would close
+// the cycle prisma → validate → xeto-namespace → refs → prisma.
+import { isRefKey } from '@/lib/haystack/ref-keys'
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const dynImport: <T>(spec: string) => Promise<T> = new Function(
   's',
@@ -245,56 +250,140 @@ export async function getNamespace(): Promise<XetoBoot> {
  * singleton handy).
  */
 export function dict(boot: XetoBoot, obj: Record<string, unknown>): Dict {
-  const { sys, xeto, haystack } = boot
+  const { sys, haystack } = boot
   const map = sys.Map.make(sys.Str.type$, sys.Obj.type$.toNullable())
   for (const [k, v] of Object.entries(obj)) {
     if (v === undefined || v === null) continue
-    if (v === true) {
-      map.set(k, xeto.Marker.val())
-      continue
+    map.set(k, toXetoValue(boot, k, v))
+  }
+  return haystack.Etc.makeDict(map)
+}
+
+/** ISO-8601 string → Fantom DateTime, or null when it isn't one. */
+function toFantomDateTime(boot: XetoBoot, raw: string): unknown {
+  try {
+    // Normalize "2025-07-09" → "2025-07-09T00:00:00Z UTC" (Fantom's
+    // ISO-with-tz form). If the string already has a time component
+    // but no tz suffix, append " UTC".
+    let s = raw
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      s = s + 'T00:00:00Z UTC'
+    } else if (!/UTC|GMT|\s[A-Z]/.test(s)) {
+      // ISO datetime, possibly trailing 'Z' — Fantom wants " UTC" form
+      s = s.replace(/Z$/, '') + 'Z UTC'
+    }
+    return boot.sys.DateTime.fromStr(s, false) ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Bare id out of a ref-shaped value: `'@x'`, `'x'`, `{_kind:'ref',val:'@x'}`. */
+function refIdOf(v: unknown): string | null {
+  if (typeof v === 'string') return v.replace(/^@/, '') || null
+  if (v && typeof v === 'object') {
+    const o = v as { _kind?: unknown; val?: unknown }
+    if (o._kind === 'ref' && typeof o.val === 'string') return o.val.replace(/^@/, '') || null
+  }
+  return null
+}
+
+/**
+ * Convert one JS/JSON tag value into the Fantom value the XETO type checker
+ * expects.
+ *
+ * This is what makes validation actually run. Tags are persisted as Hayson
+ * JSON (`{_kind:'marker'}`, `{_kind:'ref',val:'@id'}`) and refs are also
+ * written as plain `'@id'` strings; handed to Haxall unconverted, a marker
+ * object raises `UnknownTypeErr` inside `fits()` — which `validateTags`
+ * catches and soft-passes, so before this every row validated vacuously
+ * (task #39). A `Str` where the spec wants a `Ref` doesn't throw but never
+ * fits, which is why plain `'@id'` strings are converted too.
+ *
+ * `key` decides ref-ness, not the value shape: a bare id is indistinguishable
+ * from an ordinary string, and `@`-prefixing isn't applied uniformly by the
+ * writers. Anything this function can't confidently convert is passed through
+ * unchanged so the existing soft-fail keeps the write moving.
+ */
+function toXetoValue(boot: XetoBoot, key: string, v: unknown): unknown {
+  const { sys, xeto } = boot
+
+  // Sugar: `true` means "marker present" for callers without the singleton.
+  if (v === true) return xeto.Marker.val()
+
+  if (v instanceof Date) {
+    const dt = toFantomDateTime(boot, v.toISOString())
+    return dt ?? v
+  }
+
+  if (Array.isArray(v)) {
+    // List-valued refs (plaintiffRefs, defendantLawyers, …). A JS array is not
+    // a Fantom List — passing one raises `Not a Fantom type` inside fits().
+    // Only convert when every element really is a ref; a mixed list has no
+    // sound element type, and guessing one would trade a visible miss for an
+    // invisible pass.
+    if (!isRefKey(key)) return v
+    const ids = v.map(refIdOf)
+    if (ids.length === 0 || ids.some(id => !id)) return v
+    try {
+      const list = sys.List.make(xeto.Ref.type$)
+      for (const id of ids) list.add(xeto.Ref.make(id, null))
+      return list
+    } catch {
+      return v
+    }
+  }
+
+  if (v && typeof v === 'object') {
+    const o = v as { _kind?: unknown; val?: unknown }
+    switch (o._kind) {
+      case 'marker':
+        return xeto.Marker.val()
+      case 'ref': {
+        const id = refIdOf(v)
+        return id ? xeto.Ref.make(id, null) : v
+      }
+      case 'date':
+      case 'dateTime': {
+        if (typeof o.val !== 'string') return v
+        return toFantomDateTime(boot, o.val) ?? v
+      }
+      case 'number':
+        // Hayson numbers carry an optional unit we have no spec use for yet.
+        return typeof o.val === 'number' ? o.val : v
+      default: {
+        // A nested plain dict (no `_kind`). Recurse so it lands as a Dict
+        // rather than as a raw JS object fits() can't type.
+        if (o._kind === undefined) {
+          try {
+            return dict(boot, v as Record<string, unknown>)
+          } catch {
+            return v
+          }
+        }
+        return v
+      }
+    }
+  }
+
+  if (typeof v === 'string') {
+    if (isRefKey(key)) {
+      const id = refIdOf(v)
+      if (id) return xeto.Ref.make(id, null)
     }
     // ISO-8601 date / datetime strings → Fantom DateTime. The XETO type
-    // checker rejects a Str where a DateTime is expected; the tag-panel
+    // checker rejects a Str where a DateTime is expected; the tag panel
     // routinely sends date pickers as plain strings (`'2025-07-09'`).
     // Without this coercion, `ns.fits()` returns false on every Case
     // edit that includes `filedOn` (and the analogous slots on
     // MotionEvent/Hearing/etc.). See task #19.
-    if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) {
-      try {
-        // Normalize "2025-07-09" → "2025-07-09T00:00:00Z UTC" (Fantom's
-        // ISO-with-tz form). If the string already has a time component
-        // but no tz suffix, append " UTC".
-        let s = v
-        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-          s = s + 'T00:00:00Z UTC'
-        } else if (!/UTC|GMT|\s[A-Z]/.test(s)) {
-          // ISO datetime, possibly trailing 'Z' — Fantom wants " UTC" form
-          s = s.replace(/Z$/, '') + 'Z UTC'
-        }
-        const fantomDt = sys.DateTime.fromStr(s, false)
-        if (fantomDt != null) {
-          map.set(k, fantomDt)
-          continue
-        }
-      } catch {
-        // fall through; some other path may accept the raw string
-      }
+    if (/^\d{4}-\d{2}-\d{2}/.test(v)) {
+      const dt = toFantomDateTime(boot, v)
+      if (dt != null) return dt
     }
-    if (v instanceof Date) {
-      try {
-        const isoStr = v.toISOString().replace(/Z$/, '') + 'Z UTC'
-        const fantomDt = sys.DateTime.fromStr(isoStr, false)
-        if (fantomDt != null) {
-          map.set(k, fantomDt)
-          continue
-        }
-      } catch {
-        /* fall through */
-      }
-    }
-    map.set(k, v)
   }
-  return haystack.Etc.makeDict(map)
+
+  return v
 }
 
 /** Convenience: build a Haystack `Ref` from a string id. */
@@ -399,7 +488,132 @@ export interface ValidationResult {
 }
 
 /**
+ * EntityKind (the `MotionAttachment.attachmentKind` discriminator) → the
+ * concrete XETO subtype that kind's rows should fit. Enumerated from
+ * `PER_FILING_TYPE_KINDS` so a new filing type only has to be declared
+ * once; the qnames themselves already live in `MODEL_TO_QNAME` under the
+ * camelCase aliases.
+ */
+const KIND_QNAME_MAP: Record<string, string> = Object.fromEntries(
+  Object.keys(PER_FILING_TYPE_KINDS)
+    .map(kind => [kind, MODEL_TO_QNAME[kind]] as const)
+    .filter((entry): entry is readonly [string, string] => typeof entry[1] === 'string'),
+)
+
+/**
+ * The concrete spec a row of this model+kind should fit, or `null` when the
+ * pair has no subtype. An unmapped discriminator deliberately resolves to
+ * `null` rather than to a missing qname — the base-spec check still runs, so
+ * an unknown kind loses the extra signal but never loses validation.
+ */
+function subtypeQname(model: string, discriminator?: string | null): string | null {
+  if (model !== 'MotionAttachment' && model !== 'motionAttachment') return null
+  if (!discriminator) return null
+  return KIND_QNAME_MAP[discriminator] ?? null
+}
+
+/**
+ * Fit a dict against one spec and describe the misfit. Empty array means it
+ * fits. Shared by the base check and the advisory subtype check so both
+ * produce the same actionable message shape.
+ */
+function fitErrors(
+  boot: XetoBoot,
+  d: unknown,
+  tagDict: Record<string, unknown> | unknown,
+  spec: Spec,
+  qname: string,
+  opts: unknown,
+): string[] {
+  if (boot.ns.fits(d, spec, opts) as boolean) return []
+
+  const errors: string[] = [`tags do not fit ${qname}`]
+  try {
+    const report = boot.ns.validate(d, spec, opts)
+    errors.push(String(report))
+  } catch {
+    // ns.validate() throws unless inside an XetoContext; the boolean
+    // from fits() is the load-bearing check.
+  }
+
+  // Synthesize a human-readable diff between what's in the dict and
+  // what the spec declares. The Haxall `validate` output is terse;
+  // augmenting it with slot-by-slot info makes the error actionable
+  // ("missing required: causeNo" instead of just "tags do not fit").
+  try {
+    const want = extractSlotShape(boot, spec)
+    const dictKeys = Object.keys(
+      (tagDict && typeof tagDict === 'object' ? tagDict : {}) as Record<string, unknown>,
+    )
+    const missingRequired = want.required.filter(k => !dictKeys.includes(k))
+    const unknown = dictKeys.filter(k => !want.known.has(k) && !INFRA_KEYS.has(k))
+    if (missingRequired.length) {
+      errors.push(`missing required: ${missingRequired.join(', ')}`)
+    }
+    if (unknown.length) {
+      errors.push(`unknown for ${qname}: ${unknown.join(', ')}`)
+    }
+  } catch {
+    /* best-effort enrichment only */
+  }
+
+  return errors
+}
+
+/**
+ * Fit a dict against the concrete subtype for `model` + `discriminator`.
+ * `null` when the pair has no subtype (nothing extra to check).
+ */
+function subtypeFit(
+  boot: XetoBoot,
+  d: unknown,
+  tagDict: Record<string, unknown> | unknown,
+  model: string,
+  discriminator: string | null | undefined,
+  opts: unknown,
+): ValidationResult | null {
+  const qname = subtypeQname(model, discriminator)
+  if (!qname) return null
+  try {
+    const spec = specOf(boot, qname)
+    if (!spec) return null
+    const errors = fitErrors(boot, d, tagDict, spec, qname, opts)
+    return { ok: errors.length === 0, errors }
+  } catch {
+    // Subtype spec unresolvable — the base spec already carried the write.
+    return null
+  }
+}
+
+/**
+ * Advisory-only: does this dict fit the concrete subtype for its kind?
+ * Exported for the fit-check tooling that decides when the subtype pass can
+ * be promoted from a log line to a hard gate. The write path never calls it
+ * directly — `validateTags` runs the same check internally.
+ */
+export async function validateSubtypeTags(
+  model: string,
+  tagDict: Record<string, unknown> | unknown,
+  discriminator?: string | null,
+): Promise<ValidationResult | null> {
+  try {
+    const boot = await getNamespace()
+    const d =
+      tagDict && typeof tagDict === 'object' && !(tagDict as { has?: unknown }).has
+        ? dict(boot, tagDict as Record<string, unknown>)
+        : tagDict
+    return subtypeFit(boot, d, tagDict, model, discriminator, dict(boot, { ignoreRefs: true }))
+  } catch {
+    return null
+  }
+}
+
+/**
  * Validate a tag dict against the spec for the given Prisma model.
+ *
+ * `discriminator` is the row's `attachmentKind` where it has one. It selects
+ * the concrete subtype (`Notice`, `Order`, …) for an ADVISORY second check —
+ * the base spec remains the pass/fail gate (see the subtype pass below).
  *
  * Async because the namespace boots lazily on first call. After the
  * first hit it returns in microseconds.
@@ -414,6 +628,7 @@ export interface ValidationResult {
 export async function validateTags(
   model: string,
   tagDict: Record<string, unknown> | unknown,
+  discriminator?: string | null,
 ): Promise<ValidationResult> {
   // Defensive wrapper: never let an internal Haxall/XETO error bubble
   // out of this function. The Prisma extension treats us as a boolean
@@ -441,40 +656,32 @@ export async function validateTags(
         : tagDict
 
     const opts = dict(boot, { ignoreRefs: true })
-    const ok = boot.ns.fits(d, targetSpec, opts) as boolean
-    if (ok) return { ok: true, errors: [] }
+    const errors = fitErrors(boot, d, tagDict, targetSpec, qname, opts)
+    if (errors.length) return { ok: false, errors }
 
-    const errors: string[] = [`tags do not fit ${qname}`]
-    try {
-      const report = boot.ns.validate(d, targetSpec, opts)
-      errors.push(String(report))
-    } catch {
-      // ns.validate() throws unless inside an XetoContext; the boolean
-      // from fits() is the load-bearing check.
+    // Subtype pass — part of the verdict, not a side note (task #39).
+    //
+    // `MotionAttachment` is the union of every per-filing-type spec, so an
+    // order validated against the base never has to satisfy anything
+    // order-specific: `orderType` isn't declared there, and a Haystack dict is
+    // OPEN, so undeclared keys are never fatal. That makes the base blind to
+    // exactly the errors the subtypes exist to catch — an `orderType` of the
+    // wrong type fits the base and misses `Order`. Checking the concrete
+    // subtype is therefore the only way these specs earn their keep.
+    //
+    // Safe to fold into the verdict because a miss no longer blocks anything
+    // by itself: `prisma-extensions/validate` is advisory unless
+    // XETO_VALIDATION_ENFORCE=1, and every attachment row in the corpus fits
+    // its subtype today (32/32, see scripts/probe-validation-triage.ts).
+    const sub = subtypeFit(boot, d, tagDict, model, discriminator, opts)
+    if (sub && !sub.ok) {
+      return {
+        ok: false,
+        errors: [`tags fit ${qname} but not the '${discriminator}' subtype`, ...sub.errors],
+      }
     }
 
-    // Synthesize a human-readable diff between what's in the dict and
-    // what the spec declares. The Haxall `validate` output is terse;
-    // augmenting it with slot-by-slot info makes the error actionable
-    // ("missing required: causeNo" instead of just "tags do not fit").
-    try {
-      const want = extractSlotShape(boot, targetSpec)
-      const dictKeys = Object.keys(
-        (tagDict && typeof tagDict === 'object' ? tagDict : {}) as Record<string, unknown>,
-      )
-      const missingRequired = want.required.filter(k => !dictKeys.includes(k))
-      const unknown = dictKeys.filter(k => !want.known.has(k) && !INFRA_KEYS.has(k))
-      if (missingRequired.length) {
-        errors.push(`missing required: ${missingRequired.join(', ')}`)
-      }
-      if (unknown.length) {
-        errors.push(`unknown for ${qname}: ${unknown.join(', ')}`)
-      }
-    } catch {
-      /* best-effort enrichment only */
-    }
-
-    return { ok: false, errors }
+    return { ok: true, errors: [] }
   } catch (e) {
     // Haxall internal error (NullErr, ArgErr, etc.) — pass through the
     // write rather than block on broken validation.

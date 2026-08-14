@@ -136,6 +136,14 @@ export interface DeepSearchOptions {
   useRlm?: boolean;
   /** Max RLM tool-use rounds before forcing a final answer. Default 4. */
   rlmMaxRounds?: number;
+  /**
+   * Pre-compiled LanceDB pre-filter clauses for a graph scope (see
+   * `scopeToWhereClauses`). AND'd into EVERY retrieval this run performs —
+   * per-sub-query vector/FTS, the regex backstop, and the RLM's recursive
+   * tool calls — so nothing outside the scope can reach the report. Callers
+   * send this INSTEAD of `caseId`, never alongside it.
+   */
+  whereClauses?: string[];
 }
 
 export interface DeepSearchResult {
@@ -551,6 +559,7 @@ export async function executePatternSearch(
   caseId: string | undefined,
   registry: ToolRegistry,
   pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
+  scopeWhereClauses?: string[],
 ): Promise<SubQueryResult> {
   const keywords = extractPatternKeywords(query);
 
@@ -566,6 +575,7 @@ export async function executePatternSearch(
     const result = await registry.execute('scan_for_pattern', {
       pattern,
       ...(caseId ? { caseId } : {}),
+      ...(scopeWhereClauses && scopeWhereClauses.length > 0 ? { whereClauses: scopeWhereClauses } : {}),
       limit: 50,
     }, pushWarning ? { pushWarning } : undefined);
 
@@ -610,6 +620,7 @@ export async function executePerChipPatternSearches(
   caseId: string | undefined,
   registry: ToolRegistry,
   pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
+  scopeWhereClauses?: string[],
 ): Promise<SubQueryResult[]> {
   const promises = specs.map(async (spec): Promise<SubQueryResult> => {
     const keywords = extractPatternKeywords(spec.query);
@@ -621,7 +632,10 @@ export async function executePerChipPatternSearches(
       const result = await registry.execute('scan_for_pattern', {
         pattern,
         ...(caseId ? { caseId } : {}),
-        ...(spec.whereClauses && spec.whereClauses.length > 0 ? { whereClauses: spec.whereClauses } : {}),
+        ...(() => {
+          const merged = [...(spec.whereClauses ?? []), ...(scopeWhereClauses ?? [])];
+          return merged.length > 0 ? { whereClauses: merged } : {};
+        })(),
         limit: 50,
       }, pushWarning ? { pushWarning } : undefined);
 
@@ -1769,6 +1783,7 @@ export async function deepSearch(
   options: DeepSearchOptions = {},
 ): Promise<DeepSearchResult> {
   const { provider, model, caseId, chatId, onProgress, history, workflowContext, thinking, maxTokens, effort, signal, onToken, onThinking, multiPass, useRlm, rlmMaxRounds } = options;
+  const scopeWhere = options.whereClauses && options.whereClauses.length > 0 ? options.whereClauses : undefined;
   const emit = onProgress || (() => {});
 
   // Accumulate the research trace alongside streaming it, so the completed
@@ -1860,8 +1875,18 @@ export async function deepSearch(
     emit({ step: 'warning', message: `${w.source}${w.host ? ` (${w.host})` : ''}: ${msg}`, warnings: [out] });
   };
 
+  // An active graph scope AND-joins onto every spec's own filters (chip
+  // filters narrow within the scope, they never widen past it). `_rawWhere`
+  // entries AND together, so appending is exactly that intersection.
+  const scopedDispatchSpecs: ReadonlyArray<string | SubQuerySpec> = scopeWhere
+    ? dispatchSpecs.map(s => {
+        const spec: SubQuerySpec = typeof s === 'string' ? { query: s } : s;
+        return { ...spec, whereClauses: [...(spec.whereClauses ?? []), ...scopeWhere] };
+      })
+    : dispatchSpecs;
+
   const subQueryResults = await executeParallelSearches(
-    dispatchSpecs,
+    scopedDispatchSpecs,
     caseId,
     registry,
     pushWarning,
@@ -1886,6 +1911,7 @@ export async function deepSearch(
       caseId,
       registry,
       pushWarning,
+      scopeWhere,
     );
     let perChipPatternTotal = 0;
     for (const r of perChipPatternResults) {
@@ -1896,7 +1922,7 @@ export async function deepSearch(
     }
     console.log(`[Deep Search] Per-chip pattern search found ${perChipPatternTotal} additional chunks across ${perChipPatternResults.length} chip slice(s)`);
   } else {
-    const patternResult = await executePatternSearch(query, caseId, registry, pushWarning);
+    const patternResult = await executePatternSearch(query, caseId, registry, pushWarning, scopeWhere);
     if (patternResult.sources.length > 0) {
       subQueryResults.push(patternResult);
       console.log(`[Deep Search] Pattern search found ${patternResult.sources.length} additional chunks`);
@@ -1961,6 +1987,11 @@ export async function deepSearch(
       if (perChipBlocks.length > 0) {
         inheritedWhereClauses = [perChipBlocks.length === 1 ? perChipBlocks[0] : `(${perChipBlocks.join(' OR ')})`];
       }
+    }
+    // An active graph scope binds the RLM's follow-up tool calls too. Appended
+    // as separate entries so it AND's with any chip union rather than widening it.
+    if (scopeWhere) {
+      inheritedWhereClauses = [...(inheritedWhereClauses ?? []), ...scopeWhere];
     }
 
     // RLM is OPTIONAL supplemental evidence-gathering — it does NOT write the

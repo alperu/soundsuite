@@ -1,0 +1,818 @@
+'use client';
+
+import { useEffect, useRef, type MouseEvent as ReactMouseEvent } from 'react';
+import { createRoot } from 'react-dom/client';
+import { NodeEditor, type GetSchemes } from 'rete';
+import { AreaExtensions, AreaPlugin, type Position } from 'rete-area-plugin';
+import { ClassicFlow, ConnectionPlugin, getSourceTarget } from 'rete-connection-plugin';
+import { Presets, ReactPlugin, type ReactArea2D } from 'rete-react-plugin';
+import { beginDrag, currentDrag, endDrag, useDragState } from './drag-state';
+import {
+  anchorSideFor,
+  planLink,
+  slotAnchorRatio,
+  slotEdge,
+  slotsForKind,
+  visibleSlotsFor,
+} from './link-rules';
+import {
+  BlockConnection,
+  BlockNode,
+  ScopeBlock,
+  SocketCircle,
+  socketFor,
+} from './scope-blocks';
+import { caseTriState, type EntityKey, type ScopeGraph } from './scope-graph';
+import { setTransform, setZoom } from './zoom-state';
+import { useHovered } from './hover-state';
+import { mountColumnHeaders } from './column-headers';
+import { setupMarquee, type MarqueeResult } from './use-selection-area';
+
+/** Left-button gesture. The lasso keeps its slot here for when it lands. */
+export type CanvasTool = 'pointer' | 'marquee';
+
+/** Below this the typed sockets are too small to aim at. */
+const MIN_EDIT_ZOOM = 0.45;
+
+/** Pointer travel, in px, above which a press-and-release was a pan. */
+const CLICK_SLOP = 4;
+
+type Schemes = GetSchemes<BlockNode, BlockConnection>;
+type AreaExtra = ReactArea2D<Schemes>;
+
+/**
+ * The block canvas, shared by both tabs.
+ *
+ * Filtering mode is read-only structure: no connection plugin, no rete
+ * selector, clicks feed the cascade store. Editor mode swaps that for linking:
+ * sockets become draggable, a drawn connection is validated and committed by
+ * the host, and a click makes the block active so the tag panel follows it.
+ * Neither mode lets rete own domain state — nodes carry display flags only.
+ */
+type Props = {
+  graph: ScopeGraph;
+  /** A click that landed on nothing. Each tab decides what "nothing selected"
+   *  means for it — filtering empties the cascade, the editor closes the tag
+   *  panel — so the canvas only reports the gesture. */
+  onBackgroundClick?: () => void;
+} & (
+  | {
+      mode: 'filter';
+      selected: Set<EntityKey>;
+      /** `bare` (Ctrl/Cmd) asks for this block alone, without its ref chain. */
+      onToggle: (key: EntityKey, bare: boolean) => void;
+      /** Which gesture the left button performs. Absent means 'pointer'. */
+      tool?: CanvasTool;
+      /** A finished marquee. Editor mode has no multi-select to feed yet, so
+       *  only filtering offers the tool at all. */
+      onMarquee?: (result: MarqueeResult) => void;
+    }
+  | {
+      mode: 'edit';
+      activeKey: EntityKey | null;
+      onSelectBlock: (key: EntityKey) => void;
+      /** Resolves once the ref write (or its rejection) has been handled.
+       *  `slot` is the output socket the drag came from — it names the ref. */
+      onConnect: (source: EntityKey, target: EntityKey, slot?: string) => void | Promise<void>;
+      /** A drop the pre-drop veto refused — the flow never proposes it, so the
+       *  reason would otherwise never reach the user. */
+      onRefuse?: (reason: string) => void;
+      /** The user pulled an existing ref edge off a block's input hub. That
+       *  grab is the unlink gesture — the host clears the ref (undoably) and
+       *  the refetch redraws whatever the data then says. */
+      onUnlink?: (edgeId: string) => void;
+    }
+);
+
+/**
+ * Where the block at the far end of this socket's edge sits, if there is one.
+ * An output slot points at whatever its ref names. The shared `in` hub takes
+ * many edges at a single point, so it answers with the farthest-right block
+ * pointing at this one — the direction the bundle arrives from.
+ */
+function edgeTargetX(
+  graph: ScopeGraph,
+  nodeId: string,
+  side: 'input' | 'output',
+  key: string,
+): number | undefined {
+  const filing = graph.filingById.get(nodeId.replace(/^filing:/, ''));
+  if (!filing) return undefined;
+  if (side === 'output') {
+    const targetId = filing.refs?.[key];
+    if (typeof targetId !== 'string') return undefined;
+    return graph.filingById.get(targetId)?.x;
+  }
+  if (key !== 'in') return undefined;
+  let rightmost: number | undefined;
+  for (const edge of graph.edges) {
+    if (edge.kind !== 'ref' || edge.target !== nodeId) continue;
+    const source = graph.filingById.get(edge.source.replace(/^filing:/, ''));
+    if (source && (rightmost === undefined || source.x > rightmost)) rightmost = source.x;
+  }
+  return rightmost;
+}
+
+/**
+ * Socket positions come from the layout, not the DOM: blocks are fixed-size and
+ * never move, so an anchor is arithmetic. Which EDGE it lands on depends on
+ * where the edge is going — see `anchorSideFor`.
+ */
+function layoutSocketPositions(graph: ScopeGraph) {
+  return {
+    attach() {
+      /* positions are static — nothing to watch */
+    },
+    listen(nodeId: string, side: 'input' | 'output', key: string, change: (p: Position) => void) {
+      const box = graph.boxes.get(nodeId);
+      if (box) {
+        // Output slots stack down the right edge in the same order the block
+        // renders them; anything else (the input hub, a slot this kind doesn't
+        // offer but still holds data for) anchors at the vertical centre.
+        const filing = graph.filingById.get(nodeId.replace(/^filing:/, ''));
+        const slots = filing
+          ? visibleSlotsFor(filing.primaryKind, filing.refs).filter(s => slotEdge(s) === 'right')
+          : [];
+        // Same helper the block renders with — two copies of this arithmetic
+        // is how an edge ends up anchored to a circle that has since moved.
+        const ratio = slotAnchorRatio(side, key, slots);
+        const onRight =
+          anchorSideFor({
+            slot: key,
+            side,
+            sourceX: box.x,
+            targetX: edgeTargetX(graph, nodeId, side, key),
+          }) === 'right';
+        const position: Position = {
+          x: onRight ? box.x + box.w : box.x,
+          y: box.y + box.h * ratio,
+        };
+        // Deferred: the connection component subscribes during render.
+        void Promise.resolve().then(() => change(position));
+      }
+      return () => {
+        /* nothing to unsubscribe */
+      };
+    },
+  };
+}
+
+/** The single painted-state rule, shared by the build pass and the repaint. */
+function blockState(
+  graph: ScopeGraph,
+  props: Props,
+  kind: 'case' | 'filing' | 'unfiled',
+  key: EntityKey,
+): 'active' | 'selected' | 'partial' | 'none' {
+  if (props.mode === 'edit') return props.activeKey === key ? 'active' : 'none';
+  if (kind !== 'case') return props.selected.has(key) ? 'selected' : 'none';
+  const state = caseTriState(graph, props.selected, key);
+  return state === 'all' ? 'selected' : state === 'some' ? 'partial' : 'none';
+}
+
+export default function BlockCanvas(props: Props) {
+  const { graph } = props;
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const marqueeLayerRef = useRef<HTMLDivElement | null>(null);
+  // Set when a marquee just completed, so the click that ends the same gesture
+  // isn't also read as a deselect.
+  const marqueeConsumedRef = useRef(false);
+  const areaRef = useRef<AreaPlugin<Schemes, AreaExtra> | null>(null);
+  const nodesRef = useRef<Map<string, BlockNode>>(new Map());
+  // Held in a ref so new handler identities never rebuild the canvas.
+  const propsRef = useRef(props);
+  propsRef.current = props;
+  const paintedRef = useRef<Map<string, string>>(new Map());
+  // Survives a rebuild so a committed edge doesn't yank the viewport back.
+  const transformRef = useRef<{ x: number; y: number; k: number } | null>(null);
+  const connectionRef = useRef<ConnectionPlugin<Schemes, AreaExtra> | null>(null);
+  // Where the press that will become this click started, and whether it landed
+  // on background at all — a pan ends in a click too, and a gesture that began
+  // on a block or a socket is never a deselect however it ends.
+  const pointerDownRef = useRef<{ x: number; y: number; onBackground: boolean } | null>(null);
+
+  const editMode = props.mode === 'edit';
+
+  // Build / rebuild, keyed on the graph identity and the mode only.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    let disposed = false;
+    let layoutSettled = false;
+    let buildingEdges = false;
+    // `editor.clear()` on teardown removes every connection; those removals are
+    // bookkeeping, not a user unlinking anything.
+    let tearingDown = false;
+
+    const editor = new NodeEditor<Schemes>();
+    const area = new AreaPlugin<Schemes, AreaExtra>(container);
+    // AreaPlugin appended its holder element to the shared container — keep a
+    // reference so teardown removes exactly THIS mount's DOM. Wiping the whole
+    // container from the deferred cleanup would destroy the next mount's
+    // canvas (React's dev double-mount runs cleanup and the next effect
+    // synchronously, before microtasks).
+    const areaHolder = container.lastElementChild;
+    // Motions whose orderRef is already satisfied — derived, because the ref
+    // itself lives on the order (`resolves`), never on the motion.
+    const orderRefTargets = new Set(
+      graph.filings
+        .map(f => f.refs?.resolves)
+        .filter((id): id is string => typeof id === 'string' && !!id)
+        .map(id => `filing:${id}`),
+    );
+    const render = new ReactPlugin<Schemes, AreaExtra>({ createRoot });
+
+    render.addPreset(
+      Presets.classic.setup({
+        socketPositionWatcher: layoutSocketPositions(graph),
+        customize: {
+          node() {
+            return (nodeProps: { data: BlockNode; emit: (p: ReactArea2D<Schemes>) => void }) => (
+              <ScopeBlock
+                node={nodeProps.data}
+                onToggle={(key, modifiers) => {
+                  const current = propsRef.current;
+                  if (current.mode === 'edit') current.onSelectBlock(key);
+                  else current.onToggle(key, modifiers.bare);
+                }}
+                sockets={
+                  {
+                        // Filtering shows the same anatomy, drawn but inert:
+                        // one canvas in two interaction modes, rather than two
+                        // canvases. Only editor mode wires RefSocket, so only
+                        // it can start a drag.
+                        input: editMode ? (
+                          <SocketHandle
+                            node={nodeProps.data}
+                            side="input"
+                            socketKey="in"
+                            emit={nodeProps.emit}
+                          />
+                        ) : (
+                          <SocketCircle socket={socketFor(nodeProps.data.entityKind)} />
+                        ),
+                        // A case block's right edge carries its id — the handle
+                        // a filing's caseRef links to.
+                        caseTarget:
+                          nodeProps.data.payload.kind !== 'case' ? undefined : editMode ? (
+                            <SocketHandle
+                              node={nodeProps.data}
+                              side="input"
+                              socketKey="contains"
+                              emit={nodeProps.emit}
+                            />
+                          ) : (
+                            <SocketCircle socket={socketFor('case')} />
+                          ),
+                        // The block draws each handle on the edge its wire will
+                        // leave from — same helper the watcher anchors with.
+                        sideOf: (slot: string) =>
+                          anchorSideFor({
+                            slot,
+                            side: 'output',
+                            sourceX: graph.boxes.get(nodeProps.data.id)?.x ?? 0,
+                            targetX: edgeTargetX(graph, nodeProps.data.id, 'output', slot),
+                          }),
+                        inputSide: anchorSideFor({
+                          slot: 'in',
+                          side: 'input',
+                          sourceX: graph.boxes.get(nodeProps.data.id)?.x ?? 0,
+                          targetX: edgeTargetX(graph, nodeProps.data.id, 'input', 'in'),
+                        }),
+                        outputs: nodeProps.data.writableSlots.map(slot => ({
+                          slot,
+                          occupied:
+                            slot === 'orderRef'
+                              ? // Nothing stores orderRef: it is occupied when
+                                // some order already points back at this motion.
+                                orderRefTargets.has(nodeProps.data.id)
+                              : slot === 'caseRef'
+                                ? // Every filing has a case; the marker is always
+                                  // filled and a second draw is a MOVE.
+                                  graph.caseOfFiling.has(nodeProps.data.id)
+                                : nodeProps.data.payload.kind === 'filing' &&
+                                  typeof nodeProps.data.payload.data.refs[slot] === 'string',
+                          node: editMode ? (
+                            <SocketHandle
+                              node={nodeProps.data}
+                              side="output"
+                              socketKey={slot}
+                              emit={nodeProps.emit}
+                            />
+                          ) : (
+                            <SocketCircle socket={socketFor(slot)} />
+                          ),
+                        })),
+                      }
+                }
+              />
+            );
+          },
+          socket(context) {
+            const socket = context.payload;
+            return () => (
+              <SocketCircle socket={socket as ReturnType<typeof socketFor>} />
+            );
+          },
+          connection(context) {
+            const payload = context.payload as BlockConnection;
+            const isContains = payload.edgeKind === 'contains';
+            const endpoints = [payload.source, payload.target];
+            return (props: { data: BlockConnection }) => (
+              <EdgeLayer
+                isContains={isContains}
+                endpoints={endpoints}
+                editMode={editMode}
+                props={props}
+              />
+            );
+          },
+        },
+      }),
+    );
+
+    editor.use(area);
+
+    if (editMode) {
+      // Registered before the render plugin: it learns which elements are
+      // sockets from the render signals, which only reach plugins already in
+      // the pipeline.
+      const connection = new ConnectionPlugin<Schemes, AreaExtra>();
+      connectionRef.current = connection;
+      // Compatibility is asked of `planLink`, the same rules the commit obeys —
+      // one source of truth instead of a socket matrix that could drift from it.
+      // `getSourceTarget` is not optional: a drag started on an input socket
+      // arrives with source and target the other way round.
+      connection.addPreset(
+        () =>
+          new ClassicFlow({
+            canMakeConnection: (from, to) => {
+              const pair = getSourceTarget(from, to);
+              if (!pair) return false;
+              const [source, target] = pair;
+              // The slot comes from the NORMALISED source, never from the
+              // socket the user happened to grab first: a backwards drag
+              // (motion input → response slot) swaps the two.
+              return planLink(graph, source.nodeId, target.nodeId, source.key).ok;
+            },
+            // `makeConnection` stays default so the drop still reaches
+            // `connectioncreate` below, which is what commits the ref.
+          }),
+      );
+      area.use(connection);
+
+      // Pick/drop are observed on the connection plugin's own pipeline —
+      // those signals stay inside its scope and never reach the area's.
+      // Highlighting is component-level state, not a canvas repaint: every
+      // block subscribes to the drag store and restyles itself.
+      connection.addPipe(context => {
+        const signal = context as { type?: string; data?: unknown };
+        if (signal.type === 'connectionpick') {
+          const picked = (
+            signal.data as {
+              socket?: { nodeId: string; side: 'input' | 'output'; key: string };
+            }
+          )?.socket;
+          if (picked) {
+            const compatible = new Set<EntityKey>();
+            for (const id of nodesRef.current.keys()) {
+              if (id === picked.nodeId) continue;
+              // Pulling from a slot asks what THAT slot accepts. Pulling from
+              // the input hub asks the mirror question of every candidate: does
+              // any slot it offers accept this block?
+              const ok =
+                picked.side === 'output'
+                  ? planLink(graph, picked.nodeId, id, picked.key).ok
+                  : slotsForKind(
+                      graph.filingById.get(id.replace(/^filing:/, ''))?.primaryKind ?? '',
+                    ).some(slot => planLink(graph, id, picked.nodeId, slot).ok);
+              if (ok) compatible.add(id);
+            }
+            beginDrag(picked.nodeId, compatible, {
+              slot: picked.side === 'output' ? picked.key : null,
+              side: picked.side,
+            });
+          }
+        } else if (signal.type === 'connectiondrop') {
+          endDrag();
+        }
+        return context;
+      });
+    }
+    area.use(render);
+
+    if (editMode) {
+      // A user-drawn connection never lands in the editor: the host commits the
+      // ref, the shell refetches, and the rebuilt graph draws the real edge.
+      editor.addPipe(context => {
+        // Pulling an existing edge off an input hub is how ClassicFlow starts a
+        // re-route. We don't support re-routing — we read the gesture as
+        // "unlink this" and block the removal, so the canvas keeps showing the
+        // edge until the data actually loses it.
+        if (context.type === 'connectionremove' && !buildingEdges && !tearingDown) {
+          const removed = context.data as unknown as { id: string };
+          const edge = graph.edges.find(e => e.id === removed.id);
+          const current = propsRef.current;
+          if (edge?.kind === 'ref' && current.mode === 'edit' && current.onUnlink) {
+            current.onUnlink(removed.id);
+            return undefined;
+          }
+          return context;
+        }
+        if (context.type !== 'connectioncreate' || buildingEdges) return context;
+        const data = context.data as unknown as {
+          source: string;
+          target: string;
+          sourceOutput?: string;
+        };
+        const current = propsRef.current;
+        if (current.mode === 'edit') {
+          void current.onConnect(data.source, data.target, data.sourceOutput);
+        }
+        return undefined;
+      });
+    }
+
+    // Publish the zoom so blocks can drop detail that would be illegible, and
+    // the full transform so the column chrome outside the canvas tracks it.
+    area.addPipe(context => {
+      const signal = context as { type?: string };
+      if (signal.type === 'zoomed' || signal.type === 'translated' || signal.type === 'resized') {
+        const t = area.area.transform;
+        setZoom(t.k);
+        setTransform({ x: t.x, y: t.y, k: t.k });
+      }
+      return context;
+    });
+
+    AreaExtensions.restrictor(area, {
+      scaling: () => ({ min: 0.15, max: 1.5 }),
+      translation: false,
+    });
+    AreaExtensions.simpleNodesOrder(area);
+
+    // Blocks sit where the layout puts them; only the initial positioning pass
+    // is allowed to translate a node.
+    area.addPipe(context =>
+      context.type === 'nodetranslate' && layoutSettled ? undefined : context,
+    );
+
+    areaRef.current = area;
+    nodesRef.current = new Map();
+    paintedRef.current = new Map();
+
+    void (async () => {
+      const byKey = nodesRef.current;
+
+      for (const block of [
+        ...graph.cases.map(data => ({ kind: 'case' as const, data })),
+        ...graph.filings.map(data => ({ kind: 'filing' as const, data })),
+        ...graph.unfiled.map(data => ({ kind: 'unfiled' as const, data })),
+      ]) {
+        if (disposed) return;
+        const node = new BlockNode(block);
+        // A rebuild (a refetch after `entity-updated`) has to come back with
+        // the selection already painted — including a partial case.
+        const state = blockState(graph, propsRef.current, block.kind, block.data.key);
+        node.isSelected = state === 'selected';
+        node.isPartial = state === 'partial';
+        node.isActive = state === 'active';
+        await editor.addNode(node);
+        if (disposed) return;
+        await area.translate(node.id, { x: block.data.x, y: block.data.y });
+        if (disposed) return;
+        byKey.set(node.id, node);
+        paintedRef.current.set(node.id, state);
+      }
+
+      // Edges after every block exists and has painted once.
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      if (disposed) return;
+
+      buildingEdges = true;
+      for (const edge of graph.edges) {
+        const source = byKey.get(edge.source);
+        const target = byKey.get(edge.target);
+        if (!source || !target) continue;
+        // A ref edge leaves from the slot that holds it, so it lands on the
+        // labelled socket the user would have drawn it from. Containment keeps
+        // the generic port.
+        // Ref edges leave from the slot holding them; the case edge leaves from
+        // the filing's caseRef; the unfiled pile still hangs off the case.
+        const sourceKey = edge.slot ?? 'out';
+        if (!source.outputs[sourceKey]) continue;
+        const targetKey = edge.kind === 'ref' ? 'in' : 'contains';
+        const connection = new BlockConnection(source, sourceKey, target, targetKey);
+        connection.id = edge.id;
+        connection.edgeKind = edge.kind;
+        await editor.addConnection(connection);
+      }
+      buildingEdges = false;
+
+      if (disposed) return;
+      layoutSettled = true;
+      // An edit rebuilds the canvas on every commit — restore the viewport the
+      // user was working in instead of snapping back to a full fit.
+      const previous = transformRef.current;
+      if (previous) {
+        await area.area.zoom(previous.k, 0, 0);
+        await area.area.translate(previous.x, previous.y);
+      } else {
+        // Fit the FIRST case band, not the whole corpus: with seven columns a
+        // full fit lands near 0.20, where a socket is a couple of pixels and
+        // nothing is legible. One band is a real starting place — the user pans
+        // to the rest.
+        const firstBand = graph.cases[0];
+        const bandNodes = firstBand
+          ? editor
+              .getNodes()
+              .filter(
+                n =>
+                  n.id === firstBand.key ||
+                  graph.caseOfFiling.get(n.id) === firstBand.key ||
+                  n.id === `unfiled:${firstBand.id}`,
+              )
+          : [];
+        await AreaExtensions.zoomAt(area, bandNodes.length > 0 ? bandNodes : editor.getNodes());
+        if (editMode && area.area.transform.k < MIN_EDIT_ZOOM) {
+          await area.area.zoom(MIN_EDIT_ZOOM, 0, 0);
+        }
+      }
+      setZoom(area.area.transform.k);
+    })();
+
+    return () => {
+      disposed = true;
+      tearingDown = true;
+      // Only a canvas that finished building has a viewport worth restoring —
+      // capturing the default transform of a half-built one (React's dev
+      // double-mount) would defeat the initial fit.
+      const t = layoutSettled ? area.area?.transform : null;
+      if (t) transformRef.current = { x: t.x, y: t.y, k: t.k };
+      areaRef.current = null;
+      nodesRef.current = new Map();
+      paintedRef.current = new Map();
+      // Deferred so an addNode already past its `disposed` check can land
+      // first. `editor.clear()` removes every node THROUGH the pipeline, which
+      // is what makes rete-react-plugin unmount the per-node React roots it
+      // created — destroy() + a bare DOM wipe detached the DOM but leaked one
+      // root per node per rebuild. Removing only this mount's holder (never
+      // the shared container) is what keeps the next mount's canvas alive.
+      queueMicrotask(() => {
+        void (async () => {
+          try { await editor.clear(); } catch { /* noop */ }
+          try { await area.destroy(); } catch { /* noop */ }
+          areaHolder?.remove();
+        })();
+      });
+    };
+  }, [graph, editMode]);
+
+  // Paint state: diff against what's on screen, repaint only what changed.
+  const selectionSignal = props.mode === 'edit' ? props.activeKey : props.selected;
+  useEffect(() => {
+    const area = areaRef.current;
+    if (!area) return;
+    for (const [id, node] of nodesRef.current) {
+      const state = blockState(graph, propsRef.current, node.payload.kind, id);
+      if (paintedRef.current.get(id) === state) continue;
+      paintedRef.current.set(id, state);
+      node.isSelected = state === 'selected';
+      node.isPartial = state === 'partial';
+      node.isActive = state === 'active';
+      void area.update('node', id);
+    }
+  }, [selectionSignal, graph]);
+
+  // A vetoed drop never reaches `connectiondrop`, so the pointer itself is what
+  // reliably ends a drag. Capture phase: the plugin stops propagation on a
+  // socket it accepts.
+  useEffect(() => {
+    if (!editMode) return;
+    const clear = (event: PointerEvent) => {
+      // The veto refuses the drop before the flow proposes it, so this is the
+      // only place that can explain the refusal: look at what the pointer was
+      // over and ask the rules why that pair wouldn't have worked.
+      const drag = currentDrag();
+      const current = propsRef.current;
+      if (drag.active && current.mode === 'edit' && current.onRefuse) {
+        const over = document
+          .elementsFromPoint(event.clientX, event.clientY)
+          .map(el => (el as HTMLElement).closest?.('[data-block-id]'))
+          .find(Boolean) as HTMLElement | undefined;
+        const targetKey = over?.getAttribute('data-block-id');
+        if (targetKey && targetKey !== drag.sourceKey && !drag.compatible.has(targetKey)) {
+          const plan =
+            drag.side === 'output'
+              ? planLink(graph, drag.sourceKey as string, targetKey, drag.slot ?? undefined)
+              : planLink(graph, targetKey, drag.sourceKey as string);
+          if (!plan.ok) current.onRefuse(plan.reason);
+        }
+      }
+      endDrag();
+      // A refused drop leaves ClassicFlow holding the picked socket, so the
+      // wire keeps following the cursor until the user clicks somewhere empty.
+      // Deferred: the plugin's own pointerup runs in the bubble phase and must
+      // get its chance to accept a valid drop first.
+      setTimeout(() => connectionRef.current?.drop(), 0);
+    };
+    window.addEventListener('pointerup', clear, true);
+    window.addEventListener('pointercancel', clear, true);
+    return () => {
+      window.removeEventListener('pointerup', clear, true);
+      window.removeEventListener('pointercancel', clear, true);
+      endDrag();
+    };
+  }, [editMode, graph]);
+
+  // A click that hit no block is the "nothing selected" gesture — until now the
+  // editor had no way at all to close the tag panel. Panning is the same
+  // pointer on the same element, so the press has to be remembered and a click
+  // that travelled is read as a pan, not a deselect.
+  const handleBackgroundClick = (event: ReactMouseEvent) => {
+    const start = pointerDownRef.current;
+    pointerDownRef.current = null;
+    if (marqueeConsumedRef.current) {
+      marqueeConsumedRef.current = false;
+      return;
+    }
+    if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > CLICK_SLOP) return;
+    // A link drag that misses its target releases over background, and the
+    // browser then fires the click on the common ancestor — the canvas. Reading
+    // that as "deselect" would close the tag panel every time a drop is refused.
+    if (start && !start.onBackground) return;
+    // Blocks and edges handle their own clicks; only what falls between them
+    // counts as background.
+    const target = event.target as HTMLElement | null;
+    if (target?.closest?.('[data-block-id],[data-edge-kind]')) return;
+    propsRef.current.onBackgroundClick?.();
+  };
+
+  // The press has to be caught in the CAPTURE phase: rete's area owns dragging
+  // and stops `pointerdown` propagating, so a React `onPointerDown` on this
+  // wrapper never fires — and a pan with no recorded start reads as a click,
+  // which would wipe the selection on every drag of the background.
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
+    const down = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      pointerDownRef.current = {
+        x: event.clientX,
+        y: event.clientY,
+        onBackground: !target?.closest?.('[data-block-id]'),
+      };
+    };
+    wrapper.addEventListener('pointerdown', down, true);
+    return () => wrapper.removeEventListener('pointerdown', down, true);
+  }, []);
+
+  // The marquee attaches to the container element, which outlives any single
+  // rete mount, and reads the area through a ref — so switching tools never
+  // rebuilds the canvas.
+  useEffect(() => {
+    const container = containerRef.current;
+    const overlay = marqueeLayerRef.current;
+    if (!container || !overlay) return;
+    return setupMarquee({
+      container,
+      overlay,
+      transform: () => areaRef.current?.area.transform ?? { x: 0, y: 0, k: 1 },
+      boxes: () => graph.boxes,
+      enabled: () => {
+        const current = propsRef.current;
+        return current.mode === 'filter' && current.tool === 'marquee' && !!current.onMarquee;
+      },
+      // A link drag owns the pointer while it is in flight.
+      blocked: () => currentDrag().active,
+      onSelect: result => {
+        const current = propsRef.current;
+        if (current.mode !== 'filter') return;
+        // The gesture ends in a click on the wrapper, which would otherwise
+        // read as "clicked nothing" and clear what the marquee just selected.
+        // A flag, not a second distance threshold: two thresholds owning one
+        // boundary is how a 3px drag both selects and clears.
+        marqueeConsumedRef.current = true;
+        current.onMarquee?.(result);
+      },
+    });
+  }, [graph]);
+
+  // Column chrome is plain DOM over the canvas, positioned from the transform
+  // subscription rather than re-rendered.
+  useEffect(() => {
+    const layer = overlayRef.current;
+    if (!layer) return;
+    return mountColumnHeaders(layer);
+  }, []);
+
+  return (
+    // The rete container keeps its own element: teardown removes exactly the
+    // holder rete appended to it, so the overlay is a SIBLING, never a parent.
+    <div
+      ref={wrapperRef}
+      className="relative h-full w-full overflow-hidden"
+      onClick={handleBackgroundClick}
+    >
+      <div ref={containerRef} className="h-full w-full" />
+      <div
+        ref={overlayRef}
+        className="pointer-events-none absolute inset-0 z-10"
+        data-canvas-chrome="columns"
+      />
+      {/* The rubber band gets its own layer: the column chrome owns the
+          contents of its own, and teardown there must not take the band. */}
+      <div
+        ref={marqueeLayerRef}
+        className="pointer-events-none absolute inset-0 z-20"
+        data-canvas-chrome="marquee-layer"
+      />
+    </div>
+  );
+}
+
+/**
+ * How loudly an edge draws itself.
+ *
+ * Containment is ~82 of ~90 edges and, since kind columns, fans from every
+ * column back to the case block — it buries the ref chains that are the point
+ * of the canvas. So it hides by default and reveals exactly when it is the
+ * thing being worked on: while a caseRef link is being dragged, or while one of
+ * its own blocks is hovered. Filtering never shows it — nothing is authored
+ * there, and the band already says which case owns what.
+ *
+ * Ref edges stay drawn, and fade when the pointer is on some other block, so
+ * the hovered filing's own chain is what stands out.
+ */
+function EdgeLayer({
+  isContains,
+  endpoints,
+  editMode,
+  props,
+}: {
+  isContains: boolean;
+  endpoints: string[];
+  editMode: boolean;
+  props: { data: BlockConnection };
+}) {
+  const drag = useDragState();
+  const hovered = useHovered();
+  const touchesPointer = hovered !== null && endpoints.includes(hovered);
+
+  if (isContains) {
+    const authoringCaseLinks = drag.active && drag.slot === 'caseRef';
+    if (!editMode || !(authoringCaseLinks || touchesPointer)) return null;
+    return (
+      <div style={{ opacity: 0.55 }} data-edge-kind="contains" data-edge-state="revealed">
+        <Presets.classic.Connection {...props} />
+      </div>
+    );
+  }
+
+  const muted = hovered !== null && !touchesPointer;
+  return (
+    <div
+      style={{ opacity: muted ? 0.15 : 1 }}
+      data-edge-kind="ref"
+      data-edge-state={muted ? 'muted' : 'full'}
+    >
+      <Presets.classic.Connection {...props} />
+    </div>
+  );
+}
+
+/**
+ * A connection drag handle. Only editor mode renders these; `stopPropagation`
+ * keeps a drag from also toggling the block underneath.
+ */
+function SocketHandle({
+  node,
+  side,
+  socketKey,
+  emit,
+}: {
+  node: BlockNode;
+  side: 'input' | 'output';
+  socketKey: string;
+  emit: (props: ReactArea2D<Schemes>) => void;
+}) {
+  // An output handle is typed by the slot it writes; the input hub is typed by
+  // the block's own kind, which is what a source slot checks against.
+  const payload = side === 'output' && socketKey !== 'out'
+    ? socketFor(socketKey)
+    : socketFor(node.entityKind);
+  return (
+    <div onClick={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()}>
+      <Presets.classic.RefSocket
+        name={`${side}-socket`}
+        side={side}
+        emit={emit}
+        socketKey={socketKey}
+        nodeId={node.id}
+        payload={payload}
+      />
+    </div>
+  );
+}

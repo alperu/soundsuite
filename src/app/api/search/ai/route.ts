@@ -38,6 +38,7 @@ export async function POST(request: NextRequest) {
       maxTokens: reqMaxTokens,
       effort,
       useRlm,
+      whereClauses,
     } = body as {
       query: string;
       provider: string;
@@ -54,6 +55,10 @@ export async function POST(request: NextRequest) {
       maxTokens?: number;
       effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
       useRlm?: boolean;
+      /** Pre-compiled LanceDB pre-filter clauses (graph scope — see
+       *  `scopeToWhereClauses`). Sent INSTEAD of `caseId`, never alongside:
+       *  the two AND together and would match nothing. */
+      whereClauses?: string[];
     };
 
     if (!query?.trim()) {
@@ -100,6 +105,7 @@ export async function POST(request: NextRequest) {
             query: query.trim(),
             ...(caseId ? { caseId } : {}),
             ...(chatId ? { chatId } : {}),
+            ...(whereClauses && whereClauses.length > 0 ? { whereClauses } : {}),
             limit,
             searchMode,
             ...(mode ? { mode } : {}),
@@ -152,7 +158,11 @@ export async function POST(request: NextRequest) {
               const patternResult = await registry.execute('scan_for_pattern', {
                 pattern,
                 ...(caseId ? { caseId } : {}),
-            ...(chatId ? { chatId } : {}),
+                ...(chatId ? { chatId } : {}),
+                // The pattern arm feeds the same `sources` array as the vector
+                // arm, so it has to honour the scope too — otherwise an active
+                // graph scope leaks out-of-scope excerpts into the answer.
+                ...(whereClauses && whereClauses.length > 0 ? { whereClauses } : {}),
                 limit: 30,
               });
 

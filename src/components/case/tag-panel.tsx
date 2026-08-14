@@ -43,6 +43,14 @@ interface Props {
    * Throws on failure to surface error to the input.
    */
   onRename?: (newTitle: string) => Promise<void>;
+  /**
+   * Embedded mode (Haystack Block View editor tab): fill the host container —
+   * no fixed width, no drag-resize handle, no collapse button, no width
+   * persistence. Selection is entirely props-driven either way (the
+   * case-management layout's 'selected-entity-changed' wiring lives in the
+   * layout, not here), so multiple instances never fight over selection.
+   */
+  embedded?: boolean;
 }
 
 type HaystackRecord = Record<string, unknown> & { id?: string };
@@ -51,7 +59,7 @@ type HaystackRecord = Record<string, unknown> & { id?: string };
  * Right-column context-aware tag panel.
  * Consumes /api/haystack/read (Agent 3) — gracefully degrades if 404.
  */
-export function TagPanel({ entityKind, entityId, entityLabel, onRename }: Props) {
+export function TagPanel({ entityKind, entityId, entityLabel, onRename, embedded }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   const [width, setWidth] = useState<number>(TAG_PANEL_DEFAULT_WIDTH);
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -105,7 +113,9 @@ export function TagPanel({ entityKind, entityId, entityLabel, onRename }: Props)
   };
 
   // Load persisted panel width from IndexedDB preferences (once).
+  // Embedded instances fill their host — skip width load/persist entirely.
   useEffect(() => {
+    if (embedded) return;
     let cancelled = false;
     getPreference(TAG_PANEL_WIDTH_PREF_KEY)
       .then((v: unknown) => {
@@ -119,10 +129,11 @@ export function TagPanel({ entityKind, entityId, entityLabel, onRename }: Props)
       })
       .catch(() => { /* ignore */ });
     return () => { cancelled = true; };
-  }, []);
+  }, [embedded]);
 
   // Debounced persistence on width change.
   useEffect(() => {
+    if (embedded) return;
     if (persistTimer.current) clearTimeout(persistTimer.current);
     persistTimer.current = setTimeout(() => {
       void setPreference(TAG_PANEL_WIDTH_PREF_KEY, width);
@@ -130,7 +141,7 @@ export function TagPanel({ entityKind, entityId, entityLabel, onRename }: Props)
     return () => {
       if (persistTimer.current) clearTimeout(persistTimer.current);
     };
-  }, [width]);
+  }, [width, embedded]);
 
   // Drag handle: mousedown on the left edge starts a global drag.
   // The panel is on the right side of the layout, so dragging the handle
@@ -295,6 +306,12 @@ export function TagPanel({ entityKind, entityId, entityLabel, onRename }: Props)
         setRecord(rec);
         setDraft(rec);
         setEditMode(false);
+        // Announce the new edge so other mounted views (the block view's
+        // worklist and scope graph) refresh. Our own listener re-reads once —
+        // the read path emits nothing, so there is no loop.
+        window.dispatchEvent(
+          new CustomEvent('entity-updated', { detail: { kind: entityKind, id: entityId } }),
+        );
       }
     } catch (err) {
       showToast(`Save failed: ${err instanceof Error ? err.message : 'unknown'}`);
@@ -338,26 +355,32 @@ export function TagPanel({ entityKind, entityId, entityLabel, onRename }: Props)
 
   return (
     <div
-      className="border-l border-gray-200 bg-gray-50 flex flex-col flex-shrink-0 relative"
-      style={{ width: `${width}px` }}
+      className={embedded
+        ? 'bg-gray-50 flex flex-col h-full w-full relative'
+        : 'border-l border-gray-200 bg-gray-50 flex flex-col flex-shrink-0 relative'}
+      style={embedded ? undefined : { width: `${width}px` }}
     >
       {/* Drag handle (left edge) — drag to resize, persists to IndexedDB */}
-      <div
-        onMouseDown={handleResizeStart}
-        title="Drag to resize"
-        className="absolute top-0 left-0 h-full w-1 cursor-col-resize hover:bg-blue-400 active:bg-blue-500 transition-colors z-10"
-      />
+      {!embedded && (
+        <div
+          onMouseDown={handleResizeStart}
+          title="Drag to resize"
+          className="absolute top-0 left-0 h-full w-1 cursor-col-resize hover:bg-blue-400 active:bg-blue-500 transition-colors z-10"
+        />
+      )}
       {/* Header */}
       <div className="px-3 py-2 border-b border-gray-200 bg-white flex items-center gap-2">
-        <button
-          onClick={() => setCollapsed(true)}
-          title="Collapse"
-          className="p-0.5 text-gray-400 hover:text-blue-600 flex-shrink-0"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </button>
+        {!embedded && (
+          <button
+            onClick={() => setCollapsed(true)}
+            title="Collapse"
+            className="p-0.5 text-gray-400 hover:text-blue-600 flex-shrink-0"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+        )}
         <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider flex-1 truncate">
           {entityKind ? `${entityKind} tags` : 'Tags'}
         </h2>
@@ -901,7 +924,9 @@ function RefRow({
     const labelList: unknown[] = Array.isArray(label) ? (label as unknown[]) : [];
     // In read mode, hide the row entirely when there are no refs.
     if (!editMode && rawList.length === 0) return null;
-    const hasTypedRefTarget = Boolean(spec.refTarget);
+    // A derived row (orderRefs) renders its chips but offers no way to change
+    // them — the next read recomputes the list from the rows that own the edge.
+    const hasTypedRefTarget = Boolean(spec.refTarget) && !spec.readOnly;
     return (
       <div className="group flex items-start gap-2 text-[11px]">
         <div className="flex items-center gap-1 w-28 flex-shrink-0 text-gray-500">
@@ -938,7 +963,7 @@ function RefRow({
               <TagRowActions
                 spec={spec}
                 value={value}
-                editMode={editMode}
+                editMode={editMode && !spec.readOnly}
                 onPaste={(v) => {
                   // For list-valued ref slots, paste appends a single ref UUID
                   // to the existing list (keeps prior picks intact). The
@@ -992,7 +1017,11 @@ function RefRow({
     : labelDisplay;
   const display = labelForDisplay || rawDisplay;
   if (!editMode && !display) return null;
-  const hasTypedRefTarget = Boolean(spec.refTarget);
+  // A read-only ref (caseRef) still renders its resolved label, but offers no
+  // picker, no clear and no paste — its value is synthesized from the owning
+  // Prisma column on every read, so an edit here could only ever create a
+  // second, divergent copy in the tags JSON.
+  const hasTypedRefTarget = Boolean(spec.refTarget) && !spec.readOnly;
   // For Document refs, the tooltip should be the full filePath (more
   // informative than the UUID). For other refs we keep the historical
   // "show the UUID when label differs" behavior so users can still see the id.

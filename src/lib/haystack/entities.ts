@@ -42,6 +42,10 @@ export const ENTITY_FINDERS: Record<string, (filter: string, limit?: number) => 
 export const REF_TARGET_MODEL: Record<string, string> = {
   Case: 'case',
   Motion: 'motion',
+  // `replyingTo` targets a MotionAttachment (the response being replied to).
+  // Without this entry `inlineRefLabels` fills the bucket, finds no delegate,
+  // and every resolved label falls through to "(missing)".
+  MotionAttachment: 'motionAttachment',
   Person: 'person',
   Court: 'court',
   Hearing: 'hearing',

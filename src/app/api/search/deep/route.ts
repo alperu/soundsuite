@@ -17,7 +17,7 @@ import { prisma } from '@/lib/db/prisma';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { query, provider, model, caseId, chatId, history, workflowIds, thinking, maxTokens, effort, multiPass, useRlm, rlmMaxRounds } = body as {
+    const { query, provider, model, caseId, chatId, history, workflowIds, thinking, maxTokens, effort, multiPass, useRlm, rlmMaxRounds, whereClauses } = body as {
       query: string;
       provider: string;
       model: string;
@@ -31,6 +31,10 @@ export async function POST(request: NextRequest) {
       multiPass?: boolean;
       useRlm?: boolean;
       rlmMaxRounds?: number;
+      /** Pre-compiled LanceDB pre-filter clauses (graph scope — see
+       *  `scopeToWhereClauses`). Sent INSTEAD of `caseId`, never alongside:
+       *  the two AND together and would match nothing. */
+      whereClauses?: string[];
     };
 
     if (!query?.trim()) {
@@ -107,6 +111,7 @@ export async function POST(request: NextRequest) {
             ...(multiPass ? { multiPass: true } : {}),
             ...(useRlm ? { useRlm: true } : {}),
             ...(typeof rlmMaxRounds === 'number' ? { rlmMaxRounds } : {}),
+            ...(Array.isArray(whereClauses) && whereClauses.length > 0 ? { whereClauses } : {}),
             signal: request.signal,
           });
 

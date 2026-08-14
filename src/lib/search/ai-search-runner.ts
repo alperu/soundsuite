@@ -70,6 +70,9 @@ export interface AISearchStartParams {
   history?: Array<{ role: 'user' | 'assistant'; content: string }>;
   /** Route the synthesis through ss-rlm with recursive tool calls. */
   useRlm?: boolean;
+  /** Graph-scope pre-filter clauses. Sent INSTEAD of `caseId` — the two AND
+   *  together server-side and would match nothing. */
+  whereClauses?: string[];
 }
 
 const initialState: AISearchRunnerState = {
@@ -198,6 +201,9 @@ class AISearchRunner {
           maxTokens: params.maxTokens,
           effort: params.effort,
           useRlm: params.useRlm,
+          ...(params.whereClauses && params.whereClauses.length > 0
+            ? { whereClauses: params.whereClauses }
+            : {}),
           ...(params.booleanMode ? { mode: 'boolean' } : {}),
           ...(params.history && params.history.length > 0 ? { history: params.history } : {}),
           ...(params.workflowIds && params.workflowIds.length > 0 ? { workflowIds: params.workflowIds } : {}),

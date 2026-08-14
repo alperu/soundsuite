@@ -74,6 +74,9 @@ export interface DeepSearchStartParams {
   history?: Array<{ role: 'user' | 'assistant'; content: string }>;
   /** Route the final synthesis through ss-rlm with recursive tool calls. */
   useRlm?: boolean;
+  /** Graph-scope pre-filter clauses. Sent INSTEAD of `caseId` — the two AND
+   *  together server-side and would match nothing. */
+  whereClauses?: string[];
 }
 
 const initialState: DeepSearchRunnerState = {
@@ -207,6 +210,9 @@ class DeepSearchRunner {
           maxTokens: params.maxTokens,
           effort: params.effort,
           multiPass: params.multiPass,
+          ...(params.whereClauses && params.whereClauses.length > 0
+            ? { whereClauses: params.whereClauses }
+            : {}),
           ...(params.useRlm ? { useRlm: true } : {}),
           ...(params.history && params.history.length > 0 ? { history: params.history } : {}),
           ...(params.workflowIds && params.workflowIds.length > 0 ? { workflowIds: params.workflowIds } : {}),

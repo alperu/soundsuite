@@ -715,6 +715,52 @@ export class VectorStore {
   }
 
   /**
+   * Re-stamp `case_id` / `case_number` on every chunk of the given documents.
+   *
+   * Chunks denormalize their case at index time, so moving a filing to another
+   * case in SQL leaves its already-indexed chunks pointing at the old one:
+   * case-scoped search keeps returning them under the source case, and the
+   * displayed case number is wrong. This is the vector-store half of that move.
+   *
+   * Returns the number of documents stamped so the caller can log it. Unlike
+   * the readiness stamps this RETHROWS: a caller that has already committed a
+   * SQL move needs to know the two stores have diverged — LanceDB can't join
+   * the SQL transaction, so the failure has to surface rather than vanish into
+   * a warning.
+   */
+  async stampCaseAssignment(
+    documentIds: string[],
+    caseId: string,
+    caseNumber: string,
+  ): Promise<number> {
+    if (documentIds.length === 0) return 0;
+    // Deliberately NOT folded into the check above: "nothing to stamp" and
+    // "the store is unavailable" are opposite outcomes. Returning 0 for the
+    // second would tell the caller the re-stamp succeeded while the chunks
+    // still carry the old case — precisely the silent divergence this method
+    // exists to prevent.
+    if (!this.db || !this.table) {
+      throw new Error('VectorStore not initialized — cannot re-stamp chunk case assignment');
+    }
+
+    // Chunked IN-lists, same bound as stampPageScores.
+    const IN_CHUNK = 500;
+    for (let i = 0; i < documentIds.length; i += IN_CHUNK) {
+      const slice = documentIds.slice(i, i + IN_CHUNK);
+      const list = slice.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
+      await this.table.update({
+        where: `document_id IN (${list})`,
+        values: { case_id: caseId, case_number: caseNumber },
+      });
+    }
+    logger.info('Re-stamped chunk case assignment', {
+      documents: documentIds.length,
+      caseId,
+    });
+    return documentIds.length;
+  }
+
+  /**
    * Stamp PER-PAGE readiness scores onto a document's chunk rows (readiness
    * v2 Phase 3): every chunk inherits its page's score. Bucketed by score
    * value — most documents collapse to a handful of updates (e.g. 95 for

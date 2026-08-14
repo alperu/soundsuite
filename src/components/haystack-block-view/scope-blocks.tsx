@@ -1,0 +1,513 @@
+'use client';
+
+import type { ReactNode } from 'react';
+import { ClassicPreset } from 'rete';
+import { useDragState } from './drag-state';
+import { setHovered } from './hover-state';
+import {
+  ALL_SLOTS,
+  normalizeKind,
+  slotAnchorRatio,
+  slotEdge,
+  slotLabel,
+  visibleSlotsFor,
+  type LinkSlot,
+} from './link-rules';
+import { LABEL_ZOOM_THRESHOLD, useZoom } from './zoom-state';
+import {
+  CASE_H,
+  CASE_W,
+  BLOCK_TITLE_H,
+  FILING_H,
+  FILING_W,
+  type CaseBlock,
+  type FilingBlock,
+  type UnfiledBlock,
+} from './scope-graph';
+
+/**
+ * Rete node subclass + the React blocks that paint it.
+ *
+ * The node carries display flags only (`isSelected` / `isPartial`); the store
+ * owns selection and pushes flag changes with a targeted `area.update`.
+ */
+
+/**
+ * A socket that knows what kind of entity it belongs to. The kind is what the
+ * user sees (the circle takes the block's type colour) and what the drag-time
+ * veto reasons about — compatibility itself is still derived from `planLink`,
+ * never from a second table that could drift out of step with it.
+ */
+export class BlockSocket extends ClassicPreset.Socket {
+  constructor(public entityKind: string) {
+    super(entityKind);
+  }
+}
+
+/** One socket instance per kind — nodes of the same kind share it. */
+const socketRegistry = new Map<string, BlockSocket>();
+
+export function socketFor(entityKind: string): BlockSocket {
+  const key = entityKind || 'filing';
+  const existing = socketRegistry.get(key);
+  if (existing) return existing;
+  const socket = new BlockSocket(key);
+  socketRegistry.set(key, socket);
+  return socket;
+}
+
+export type BlockPayload =
+  | { kind: 'case'; data: CaseBlock }
+  | { kind: 'filing'; data: FilingBlock }
+  | { kind: 'unfiled'; data: UnfiledBlock };
+
+/** The entity kind a block speaks for, as the link rules understand it. */
+export function blockEntityKind(payload: BlockPayload): string {
+  if (payload.kind === 'case') return 'case';
+  if (payload.kind === 'unfiled') return 'unfiled';
+  // `primaryKind` is the server's single answer and is already camelCase —
+  // lowercasing it here would turn `proposedOrder` into a kind nothing knows.
+  return normalizeKind(payload.data.primaryKind);
+}
+
+export class BlockNode extends ClassicPreset.Node {
+  width: number;
+  height: number;
+  isSelected = false;
+  isPartial = false;
+  /** Editor mode: the block whose tags the right-hand panel is showing. */
+  isActive = false;
+  entityKind: string;
+
+  constructor(public payload: BlockPayload) {
+    super(payload.kind);
+    this.id = payload.data.key;
+    this.width = payload.kind === 'case' ? CASE_W : FILING_W;
+    this.height = payload.kind === 'case' ? CASE_H : FILING_H;
+    this.entityKind = blockEntityKind(payload);
+    const blockSocket = socketFor(this.entityKind);
+    // multipleConnections MUST be true on both sides: a motion is a hub that
+    // accumulates many inbound refs (responses, replies, orders). Without it,
+    // rete's syncConnections removes the port's existing edges on every
+    // accepted drop — the post-refetch rebuild masked it, but a failed commit
+    // would leave an unrelated valid edge deleted.
+    this.addInput('in', new ClassicPreset.Input(blockSocket, undefined, true));
+    this.addOutput('out', new ClassicPreset.Output(blockSocket, undefined, true));
+    // Containment gets its own lane. Sharing the ref hub meant every filing's
+    // input already held its case's edge, and rete's ClassicFlow grabs an
+    // existing edge instead of starting a new link when you pick an occupied
+    // input — which made a target-first drag impossible.
+    this.addInput('contains', new ClassicPreset.Input(blockSocket, undefined, true));
+    // A port per ref slot, not just the writable ones. Data written before a
+    // filing's kind changed can still hold a ref in a slot the kind no longer
+    // offers, and an edge with no port to attach to throws the whole edge pass.
+    // Singular slots keep `multipleConnections` on: replacement is enforced in
+    // `planLink`, so rete never silently drops an edge the data still has.
+    if (payload.kind === 'filing') {
+      for (const slot of ALL_SLOTS) {
+        this.addOutput(slot, new ClassicPreset.Output(socketFor(slot), slotLabel(slot), true));
+      }
+    }
+  }
+
+  /** The slots this block actually offers the user, in render order. */
+  get writableSlots(): LinkSlot[] {
+    return this.payload.kind === 'filing'
+      ? visibleSlotsFor(this.entityKind, this.payload.data.refs)
+      : [];
+  }
+}
+
+export class BlockConnection extends ClassicPreset.Connection<BlockNode, BlockNode> {
+  edgeKind: 'contains' | 'ref' = 'contains';
+}
+
+const TYPE_CHIP: Record<string, string> = {
+  motion: 'bg-blue-100 text-blue-700',
+  response: 'bg-amber-100 text-amber-700',
+  reply: 'bg-violet-100 text-violet-700',
+  order: 'bg-emerald-100 text-emerald-700',
+  notice: 'bg-slate-100 text-slate-600',
+  exhibit: 'bg-rose-100 text-rose-700',
+  affidavit: 'bg-teal-100 text-teal-700',
+  petition: 'bg-indigo-100 text-indigo-700',
+};
+
+const FALLBACK_CHIPS = [
+  'bg-cyan-100 text-cyan-700',
+  'bg-lime-100 text-lime-700',
+  'bg-orange-100 text-orange-700',
+  'bg-fuchsia-100 text-fuchsia-700',
+];
+
+/**
+ * The circle a socket paints, in its kind's colour.
+ *
+ * Sized and coloured with inline styles on purpose: the value is derived from
+ * the entity kind at runtime, and Tailwind only emits classes it can read
+ * literally in the source — a computed `bg-…-400` would come out unstyled.
+ */
+export function SocketCircle({ socket }: { socket: BlockSocket }) {
+  return (
+    <span
+      title={socket.entityKind}
+      style={{
+        display: 'block',
+        width: 14,
+        height: 14,
+        borderRadius: 9999,
+        border: '1px solid #fff',
+        boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
+        background: dotColor(socket.entityKind),
+      }}
+    />
+  );
+}
+
+/** Same hues as the type chips, so a socket and its block read as one colour. */
+const DOT_COLORS: Record<string, string> = {
+  motion: '#60a5fa',
+  response: '#fbbf24',
+  reply: '#a78bfa',
+  order: '#34d399',
+  notice: '#94a3b8',
+  exhibit: '#fb7185',
+  affidavit: '#2dd4bf',
+  petition: '#818cf8',
+  reportersrecord: '#f472b6',
+  clerksrecord: '#c084fc',
+  brief: '#38bdf8',
+  supplement: '#facc15',
+  objection: '#f97316',
+  letter: '#a3a3a3',
+  case: '#475569',
+  unfiled: '#cbd5e1',
+};
+
+const DOT_FALLBACKS = ['#22d3ee', '#a3e635', '#fb923c', '#e879f9'];
+
+function dotColor(entityKind: string): string {
+  const normalized = (entityKind || '').toLowerCase();
+  for (const [needle, color] of Object.entries(DOT_COLORS)) {
+    if (normalized.includes(needle)) return color;
+  }
+  let hash = 0;
+  for (let i = 0; i < normalized.length; i += 1) hash = (hash * 31 + normalized.charCodeAt(i)) | 0;
+  return DOT_FALLBACKS[Math.abs(hash) % DOT_FALLBACKS.length];
+}
+
+function chipClass(filingType: string): string {
+  const normalized = (filingType || '').toLowerCase();
+  for (const [needle, cls] of Object.entries(TYPE_CHIP)) {
+    if (normalized.includes(needle)) return cls;
+  }
+  let hash = 0;
+  for (let i = 0; i < normalized.length; i += 1) hash = (hash * 31 + normalized.charCodeAt(i)) | 0;
+  return FALLBACK_CHIPS[Math.abs(hash) % FALLBACK_CHIPS.length];
+}
+
+export interface SlotHandle {
+  slot: LinkSlot;
+  /** True when the slot already holds a ref — drawing again replaces it. */
+  occupied: boolean;
+  node: ReactNode;
+}
+
+/** What a click carried, as the stores understand it — never a DOM event. */
+export interface ClickModifiers {
+  /** Ctrl (or Cmd on macOS) was held: act on this block alone, no cascade. */
+  bare: boolean;
+}
+
+/** macOS turns Ctrl-click into a context menu, so Cmd is the modifier that
+ *  actually arrives there — both are accepted. */
+function modifiersOf(event: { ctrlKey: boolean; metaKey: boolean }): ClickModifiers {
+  return { bare: event.ctrlKey || event.metaKey };
+}
+
+interface BlockProps {
+  node: BlockNode;
+  onToggle: (key: string, modifiers: ClickModifiers) => void;
+  /** Editor mode renders drag handles so connections can be drawn. The output
+   *  side is one handle per writable ref slot, each labelled with the tag it
+   *  writes, so the relationship is legible before the drag ends. */
+  sockets?: {
+    input: ReactNode;
+    outputs: SlotHandle[];
+    /** Case blocks only: the right-edge drop handle a filing's caseRef targets. */
+    caseTarget?: ReactNode;
+    /** Which edge each socket sits on — the canvas decides, from where the
+     *  edge is headed, so the handle and its wire agree. */
+    sideOf?: (slot: string) => 'left' | 'right';
+    inputSide?: 'left' | 'right';
+  };
+}
+
+export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
+  const { payload, isSelected, isPartial, isActive } = node;
+  const size = { width: node.width, height: node.height };
+
+  // While a link is being dragged, every block says whether it would take it.
+  const drag = useDragState();
+  const zoom = useZoom();
+  const isDragSource = drag.active && drag.sourceKey === node.id;
+  const isCompatible = drag.active && drag.compatible.has(node.id);
+  const dragClass = !drag.active
+    ? ''
+    : isCompatible
+      ? 'ring-2 ring-emerald-400'
+      : isDragSource
+        ? ''
+        : 'opacity-40';
+
+  const ring = isActive
+    ? 'ring-2 ring-indigo-500 border-indigo-400'
+    : isSelected
+      ? 'ring-2 ring-blue-500 border-blue-400'
+      : isPartial
+        ? 'border-2 border-dashed border-blue-400'
+        : 'border-gray-200';
+
+  // The socket's own element has to be a block box: the connection plugin
+  // hit-tests it with `elementsFromPoint`, and an inline wrapper's box doesn't
+  // cover the handle its children paint.
+  const handleBox = 'absolute [&_.input-socket]:block [&_.output-socket]:block';
+  // caseRef sits on the left edge; every other slot on the right. Splitting
+  // here keeps each edge's stacking independent, so adding caseRef doesn't
+  // shift the ref slots down.
+  // Which side each handle sits on is the canvas's call — it knows where the
+  // wire is going. Without a decision (filter mode) fall back to the slot's
+  // structural home.
+  const sideOf = (slot: LinkSlot) => sockets?.sideOf?.(slot) ?? slotEdge(slot);
+  const leftHandles = (sockets?.outputs ?? []).filter(h => sideOf(h.slot) === 'left');
+  const rightHandles = (sockets?.outputs ?? []).filter(h => sideOf(h.slot) === 'right');
+  const handles = sockets ? (
+    <>
+      {/* The ref hub faces whichever side its inbound edges arrive from: under
+          docket order refs point leftward, so a motion collects them on its
+          RIGHT edge rather than dragging every wire around the block.
+          A case block never shows it — a case has exactly one affordance, the
+          id tag, and its ports exist only so edges have somewhere to attach. */}
+      {payload.kind !== 'case' && <div
+        className={`${handleBox} ${
+          (sockets.inputSide ?? 'left') === 'right'
+            ? 'right-0 translate-x-1/2'
+            : 'left-0 -translate-x-1/2'
+        } -translate-y-1/2`}
+        style={{ top: `${slotAnchorRatio('input', 'in', []) * 100}%` }}
+        data-hub-side={sockets.inputSide ?? 'left'}
+      >
+        {sockets.input}
+      </div>}
+      {/* caseRef leaves from the LEFT edge — it faces the case column, so its
+          edge runs straight there instead of round the block. Its label sits
+          to the RIGHT of the circle, i.e. still inside the block. */}
+      {leftHandles.map(handle => (
+        <div
+          key={handle.slot}
+          className={`${handleBox} left-0 -translate-x-1/2 -translate-y-1/2`}
+          style={{ top: `${slotAnchorRatio('output', handle.slot, [handle.slot]) * 100}%` }}
+          data-slot={handle.slot}
+          data-slot-edge="left"
+          data-slot-occupied={handle.occupied ? 'yes' : 'no'}
+          title={`${slotLabel(handle.slot)}${
+            handle.occupied ? ' — drawing to another case moves this filing' : ''
+          }`}
+        >
+          {handle.node}
+          {zoom >= LABEL_ZOOM_THRESHOLD && (
+            <span className="pointer-events-none absolute left-full top-1/2 ml-1 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 text-[9px] leading-tight text-gray-500 shadow-sm">
+              {slotLabel(handle.slot)}
+              {handle.occupied ? ' •' : ''}
+            </span>
+          )}
+        </div>
+      ))}
+      {rightHandles.map((handle, index) => (
+        <div
+          key={handle.slot}
+          className={`${handleBox} right-0 translate-x-1/2 -translate-y-1/2`}
+          style={{
+            top: `${
+              slotAnchorRatio(
+                'output',
+                handle.slot,
+                rightHandles.map(o => o.slot),
+              ) * 100
+            }%`,
+          }}
+          data-slot={handle.slot}
+          data-slot-edge="right"
+          data-slot-occupied={handle.occupied ? 'yes' : 'no'}
+          title={`${slotLabel(handle.slot)}${handle.occupied ? ' — already linked; drawing again replaces it' : ''}`}
+        >
+          {handle.node}
+          {/* The tag name is the whole point of a slot socket: it says where
+              the link will be written before the drag ends. Below the legible
+              zoom it would be a 4px smudge, so the tooltip carries it instead.
+              ABSOLUTE, outside the layout flow: the wrapper was a flex row, so
+              the label's appearance at the zoom threshold widened it and the
+              translate-x-1/2 centering pushed the circle off the block edge —
+              the anchor math (box.x + box.w) never moves, so circles and edge
+              endpoints visibly disagreed exactly when labels were visible. */}
+          {zoom >= LABEL_ZOOM_THRESHOLD && (
+            <span
+              // INSIDE the block, to the left of the circle: edges leave from
+              // the right edge, so a label sitting outside had every outgoing
+              // wire drawn straight through it. Still absolute — that is what
+              // keeps the circle pinned to the edge (the #46 regression).
+              className="pointer-events-none absolute right-full top-1/2 mr-1 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 text-[9px] leading-tight text-gray-500 shadow-sm"
+            >
+              {slotLabel(handle.slot)}
+              {handle.occupied ? ' •' : ''}
+            </span>
+          )}
+        </div>
+      ))}
+    </>
+  ) : null;
+
+  if (payload.kind === 'unfiled') {
+    const u = payload.data;
+    return (
+      <div
+        style={size}
+        onClick={event => onToggle(u.key, modifiersOf(event))}
+        onPointerEnter={() => setHovered(u.key)}
+        onPointerLeave={() => setHovered(null)}
+        className={`relative flex cursor-pointer select-none flex-col justify-center rounded-md border border-dashed bg-gray-50 px-2.5 shadow-sm transition-opacity ${
+          isActive ? 'ring-2 ring-indigo-500' : 'border-gray-300'
+        } ${dragClass}`}
+        data-block-kind="unfiled"
+        data-drag-target={drag.active ? (isCompatible ? 'yes' : 'no') : undefined}
+        data-block-id={u.key}
+        data-block-state={isActive ? 'active' : 'none'}
+      >
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+          Unfiled documents
+        </div>
+        <div className="mt-0.5 text-[11px] text-gray-500">
+          {u.docCount} docs · {u.indexedCount} indexed · no filing
+        </div>
+        <div className="mt-0.5 text-[10px] text-gray-400">
+          listed in the Unfiled docs panel — drag one onto a filing
+        </div>
+        {handles}
+      </div>
+    );
+  }
+
+  if (payload.kind === 'case') {
+    const c = payload.data;
+    return (
+      <div
+        style={size}
+        onClick={event => onToggle(c.key, modifiersOf(event))}
+        onPointerEnter={() => setHovered(c.key)}
+        onPointerLeave={() => setHovered(null)}
+        className={`relative flex cursor-pointer select-none flex-col justify-center rounded-lg border bg-white px-3 shadow-sm transition-colors ${ring} ${
+          isSelected ? 'bg-blue-50/60' : 'hover:bg-gray-50'
+        } ${dragClass}`}
+        data-block-kind="case"
+        data-drag-target={drag.active ? (isCompatible ? 'yes' : 'no') : undefined}
+        data-block-id={c.key}
+        data-block-state={
+          isActive ? 'active' : isSelected ? 'selected' : isPartial ? 'partial' : 'none'
+        }
+      >
+        <div className="truncate text-[13px] font-semibold text-gray-800">{c.name}</div>
+        <div className="mt-1 text-[11px] text-gray-500">
+          {c.filingCount} filings · {c.indexedDocCount}/{c.docCount} indexed
+        </div>
+        {c.unfiledDocCount > 0 && (
+          <div className="mt-0.5 text-[10px] text-gray-400">
+            {c.unfiledDocCount} unfiled docs
+          </div>
+        )}
+        {/* The case exposes its id on the right edge: that is what a filing's
+            caseRef links TO, so it reads as a tag rather than a bare socket. */}
+        {sockets?.caseTarget && (
+          <div
+            className={`${handleBox} right-0 top-1/2 translate-x-1/2 -translate-y-1/2`}
+            data-slot="id"
+            data-slot-edge="right"
+            title={`id — ${c.id}`}
+          >
+            {sockets.caseTarget}
+            {zoom >= LABEL_ZOOM_THRESHOLD && (
+              <span className="pointer-events-none absolute right-full top-1/2 mr-1 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 text-[9px] leading-tight text-gray-500 shadow-sm">
+                id
+              </span>
+            )}
+          </div>
+        )}
+        {handles}
+      </div>
+    );
+  }
+
+  const f = payload.data;
+  const unindexed = f.indexedCount === 0;
+  return (
+    <div
+      style={size}
+      onClick={event => onToggle(f.key, modifiersOf(event))}
+      onPointerEnter={() => setHovered(f.key)}
+      onPointerLeave={() => setHovered(null)}
+      // NOT `overflow-hidden`: handles are centred ON the edge, so half of each
+      // circle sits outside the box and clipping sliced every one in half. The
+      // title bar rounds its own top corners instead of relying on the parent.
+      className={`relative flex cursor-pointer select-none flex-col rounded-md border shadow-sm transition-colors ${ring} ${
+        unindexed ? 'bg-gray-50' : 'bg-white'
+      } ${isSelected ? 'bg-blue-50/60' : 'hover:bg-gray-50'} ${dragClass}`}
+      data-block-kind="filing"
+      data-drag-target={drag.active ? (isCompatible ? 'yes' : 'no') : undefined}
+      data-block-id={f.key}
+      data-block-state={isActive ? 'active' : isSelected ? 'selected' : 'none'}
+      data-block-mapped={f.missing.length === 0 ? 'yes' : 'no'}
+    >
+      {/* Title bar, like a rete node's: the filing's name is what identifies it,
+          so it reads first. Padded clear of the slot labels that render inside
+          the right edge, and truncated with the full name in the tooltip. */}
+      <div
+        style={{ height: BLOCK_TITLE_H }}
+        className={`flex shrink-0 items-center truncate rounded-t-md border-b px-2.5 pr-16 text-[12px] font-medium ${
+          unindexed
+            ? 'border-gray-200 bg-gray-100/70 text-gray-400'
+            : 'border-gray-200 bg-gray-50 text-gray-800'
+        }`}
+        title={f.label}
+        data-block-title="filing"
+      >
+        {f.label}
+      </div>
+      {/* Everything that describes the filing lives below the title, on one
+          row, so no badge can collide with the name. */}
+      <div className="flex flex-1 flex-wrap items-center gap-1.5 px-2.5 pr-16">
+        <span
+          className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${chipClass(
+            f.filingType,
+          )} ${unindexed ? 'opacity-60' : ''}`}
+        >
+          {f.filingType || 'filing'}
+        </span>
+        <span
+          className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${
+            unindexed ? 'bg-gray-100 text-gray-400' : 'bg-gray-100 text-gray-600'
+          }`}
+        >
+          {f.indexedCount}/{f.docCount} docs
+        </span>
+        {f.missing.length > 0 && (
+          <span
+            className="shrink-0 rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-medium text-amber-700"
+            title={f.missing.join(', ')}
+          >
+            unmapped
+          </span>
+        )}
+      </div>
+      {handles}
+    </div>
+  );
+}

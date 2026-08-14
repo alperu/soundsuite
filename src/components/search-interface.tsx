@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { deepSearchRunner } from '@/lib/search/deep-search-runner';
+import { scopeToWhereClauses } from '@/lib/search/scope-filter';
 import { classifyQueryComplexity } from '@/lib/search/query-router';
 import { segmentChipsAndIntents } from '@/lib/search/chip-segments';
 import { aiSearchRunner } from '@/lib/search/ai-search-runner';
@@ -44,6 +45,16 @@ import { GenerateAxonPopover } from './search/generate-axon-popover';
 // src/lib/search/boolean-to-fts.ts; replicated here to avoid pulling the
 // LanceDB server-only module into the client bundle).
 const BOOLEAN_FIELD_NAMES = ['case', 'caseNumber', 'caseId', 'documentId', 'filingId', 'filingType', 'documentType', 'motionType'];
+
+/** Persisted graph-scope selection (`search.scopeSet`). Case ids and filing
+ *  ids stay separate so a whole-case selection keeps meaning "whole case" as
+ *  new filings are indexed. */
+interface ScopeSet {
+  caseIds: string[];
+  filingIds: string[];
+  version: 1;
+}
+const EMPTY_SCOPE_SET: ScopeSet = { caseIds: [], filingIds: [], version: 1 };
 import { parseBooleanQuery, type ParseResult } from '@/lib/search/boolean-query';
 import { TokenNameSuggestions } from './search/token-name-suggestions';
 import {
@@ -526,6 +537,29 @@ export default function SearchInterface({
     });
   }, []);
   const [aiCaseId, setAiCaseId] = usePersistedState<string>('search.aiCaseId', '');
+  // Graph scope (Haystack Block View). Kept separate from `search.aiCaseId`
+  // so deactivating the scope restores the case dropdown with no migration.
+  // While active it REPLACES caseId at every request-build site — the server
+  // AND-joins the two and the search would return nothing.
+  const [scopeSet, setScopeSet] = usePersistedState<ScopeSet>('search.scopeSet', EMPTY_SCOPE_SET);
+  const [scopeSetActive, setScopeSetActive] = usePersistedState<boolean>('search.scopeSetActive', false);
+  // Compiled once per scope change and spread into each request body. When
+  // this is non-empty the caller MUST omit `caseId` — see `scopeRequestScope`.
+  const scopeWhereClauses = useMemo(
+    () => (scopeSetActive ? scopeToWhereClauses(scopeSet ?? EMPTY_SCOPE_SET) : []),
+    [scopeSetActive, scopeSet],
+  );
+  /** Spread into a search request body: either the graph scope's whereClauses
+   *  or the legacy single-case `caseId`, never both. */
+  const scopeRequestScope = useMemo(
+    () =>
+      scopeWhereClauses.length > 0
+        ? { whereClauses: scopeWhereClauses }
+        : aiCaseId
+        ? { caseId: aiCaseId }
+        : {},
+    [scopeWhereClauses, aiCaseId],
+  );
   const [aiProvider, setAiProvider] = usePersistedState<string>('search.aiProvider', '');
   const [aiModel, setAiModel] = usePersistedState<string>('search.aiModel', '');
   const [aiResults, setAiResults] = useState<AISearchResult[]>([]);
@@ -978,7 +1012,7 @@ export default function SearchInterface({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query,
-          ...(aiCaseId ? { caseId: aiCaseId } : {}),
+          ...scopeRequestScope,
         }),
       });
       const data = await res.json();
@@ -1491,7 +1525,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
       query: q,
       provider,
       model,
-      caseId: aiCaseId || undefined,
+      ...scopeRequestScope,
       sessionId: currentSessionId,
       thinking: thinkingMode,
       maxTokens,
@@ -1519,7 +1553,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
       query: q,
       provider,
       model,
-      caseId: aiCaseId || undefined,
+      ...scopeRequestScope,
       sessionId: currentSessionId,
       thinking: thinkingMode,
       maxTokens,
@@ -2434,6 +2468,16 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                   </option>
                   {presets.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
+              )}
+              {mode === 'ai' && !compareMode && scopeSetActive && ((scopeSet?.caseIds.length ?? 0) > 0 || (scopeSet?.filingIds.length ?? 0) > 0) && (
+                <button
+                  type="button"
+                  onClick={() => router.push('/scope')}
+                  className="shrink-0 text-[10px] px-2 py-1 rounded-full bg-indigo-100 text-indigo-700 font-medium hover:bg-indigo-200 transition-colors"
+                  title={`Graph scope active (${scopeSet.filingIds.length} filings, ${scopeSet.caseIds.length} cases) — overrides preset/case scope. Click to edit.`}
+                >
+                  Graph scope
+                </button>
               )}
               {mode === 'ai' && (
                 <div className="flex items-center gap-4">
@@ -3788,14 +3832,41 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                 </select>
               </div>
               <div>
-                <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Case Scope</label>
-                <select value={aiCaseId} onChange={e => handleCaseFilterChange(e.target.value)}
-                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-md text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                >
-                  <option value="">All Cases</option>
-                  {cases.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-                <p className="text-[10px] text-gray-400 mt-1">Applies to your next question — the conversation continues.</p>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Case Scope</label>
+                  <button
+                    type="button"
+                    onClick={() => router.push('/scope')}
+                    title="Open the Haystack Block View — select scope granularly on the entity graph"
+                    className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-indigo-600 hover:bg-indigo-50 transition-colors"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 6.375a1.125 1.125 0 112.25 0 1.125 1.125 0 01-2.25 0zM16.5 6.375a1.125 1.125 0 112.25 0 1.125 1.125 0 01-2.25 0zM10.875 17.625a1.125 1.125 0 112.25 0 1.125 1.125 0 01-2.25 0zM6.375 7.5v3.75a2.25 2.25 0 002.25 2.25h6.75a2.25 2.25 0 002.25-2.25V7.5M12 13.5v3" />
+                    </svg>
+                    Block View
+                  </button>
+                </div>
+                {scopeSetActive && ((scopeSet?.caseIds.length ?? 0) > 0 || (scopeSet?.filingIds.length ?? 0) > 0) ? (
+                  <div className="w-full px-2.5 py-1.5 border border-indigo-200 bg-indigo-50 rounded-md text-sm flex items-center gap-2">
+                    <span className="flex-1 text-indigo-700 text-xs font-medium truncate">
+                      Scoped by graph: {scopeSet.filingIds.length} filing{scopeSet.filingIds.length === 1 ? '' : 's'}, {scopeSet.caseIds.length} case{scopeSet.caseIds.length === 1 ? '' : 's'}
+                    </span>
+                    <button type="button" onClick={() => router.push('/scope')}
+                      className="text-[10px] font-medium text-indigo-600 hover:underline shrink-0">Edit</button>
+                    <button type="button" onClick={() => setScopeSetActive(false)}
+                      className="text-[10px] font-medium text-gray-500 hover:text-red-600 shrink-0" title="Deactivate graph scope — the case picker below takes over again">Clear</button>
+                  </div>
+                ) : (
+                  <select value={aiCaseId} onChange={e => handleCaseFilterChange(e.target.value)}
+                    className="w-full px-2.5 py-1.5 border border-gray-300 rounded-md text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="">All Cases</option>
+                    {cases.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                )}
+                <p className="text-[10px] text-gray-400 mt-1">
+                  {scopeSetActive ? 'Graph scope overrides the case picker and presets while active.' : 'Applies to your next question — the conversation continues.'}
+                </p>
               </div>
               <div className="space-y-2.5">
                 <label className="block text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Search Modes</label>

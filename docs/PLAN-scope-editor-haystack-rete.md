@@ -111,6 +111,19 @@ that jumps to the Editor tab (the filter→edit→filter loop's visible hinge).
 
 ### Editor tab (mapping workbench — composes, never rebuilds)
 
+**Amendment 2026-08-13 (user direction):** the Editor tab becomes THREE panes — worklist
+(left, collapsible) | **rete canvas (middle)** | **TagPanel (right)**. The canvas is shared
+with the Filtering tab: Filtering mode = cascade selection; Editor mode = **block
+programming**: the canvas shows all cases, filings, AND an "Unlinked" lane (unconnected
+entities + unfiled documents as visible blocks), `rete-connection-plugin` is enabled in
+editor mode only, and drawing a connection commits the corresponding ref (response→motion
+= respondingTo, reply→response = replyingTo, filing→motion = motionRef, file→case = link)
+via hsCommit + an `entity-updated` dispatch. Clicking a block loads its tags in the
+right-hand TagPanel. A **file droplet** drop zone lets the user add files and link them to
+cases from the editor (upload mechanism: reuse an existing path if one fits; otherwise UI
+stub + follow-up). Edge-creation and droplet may phase as follow-ups if needed —
+Filtering-tab completion is not to be sacrificed.
+
 - Left: the **unconnected worklist** — grouped by case, badged by what's missing
   ("no parent motion", "no respondingTo", "no persons"), filterable by kind. Backed by a
   new `GET /api/scope/unconnected` running the tag-aware SQL above.
