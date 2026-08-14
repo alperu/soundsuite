@@ -7,6 +7,7 @@ import { AreaExtensions, AreaPlugin, type Position } from 'rete-area-plugin';
 import { ClassicFlow, ConnectionPlugin, getSourceTarget } from 'rete-connection-plugin';
 import { Presets, ReactPlugin, type ReactArea2D } from 'rete-react-plugin';
 import { beginDrag, currentDrag, endDrag, useDragState } from './drag-state';
+import { resolveDrop } from './drop-target';
 import {
   anchorSideFor,
   compatibleKeys,
@@ -717,23 +718,23 @@ export default function BlockCanvas(props: Props) {
   useEffect(() => {
     if (!editMode) return;
     const clear = (event: PointerEvent) => {
-      // The veto refuses the drop before the flow proposes it, so this is the
-      // only place that can explain the refusal: look at what the pointer was
-      // over and ask the rules why that pair wouldn't have worked.
+      // The plugin only proposes a connection when the release lands on a
+      // SOCKET, and a socket circle is 7px at corpus zoom on one edge of the
+      // block — so letting go on the target block itself did nothing at all
+      // (#93). The whole block is the drop target; `resolveDrop` asks the same
+      // `planLink` the socket path obeys, and defers when the plugin has it.
       const drag = currentDrag();
       const current = propsRef.current;
-      if (drag.active && current.mode === 'edit' && current.onRefuse) {
-        const over = document
-          .elementsFromPoint(event.clientX, event.clientY)
-          .map(el => (el as HTMLElement).closest?.('[data-block-id]'))
-          .find(Boolean) as HTMLElement | undefined;
-        const targetKey = over?.getAttribute('data-block-id');
-        if (targetKey && targetKey !== drag.sourceKey && !drag.compatible.has(targetKey)) {
-          const plan =
-            drag.side === 'output'
-              ? planLink(graph, drag.sourceKey as string, targetKey, drag.slot ?? undefined)
-              : planLink(graph, targetKey, drag.sourceKey as string);
-          if (!plan.ok) current.onRefuse(plan.reason);
+      if (drag.active && current.mode === 'edit') {
+        const outcome = resolveDrop({
+          graph,
+          drag,
+          stack: document.elementsFromPoint(event.clientX, event.clientY),
+        });
+        if (outcome.type === 'commit') {
+          void current.onConnect(outcome.sourceKey, outcome.targetKey, outcome.slot);
+        } else if (outcome.type === 'refuse') {
+          current.onRefuse?.(outcome.reason);
         }
       }
       endDrag();
