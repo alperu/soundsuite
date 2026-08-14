@@ -18,6 +18,7 @@ import { LABEL_ZOOM_THRESHOLD, useZoom } from './zoom-state';
 import {
   CASE_H,
   CASE_W,
+  BLOCK_FOOTER_H,
   BLOCK_TITLE_H,
   FILING_H,
   FILING_W,
@@ -413,6 +414,10 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
   const leftStack = edgeStackFor({ edge: 'left', slots: slotKeys, sideOf, hubSide });
   const rightStack = edgeStackFor({ edge: 'right', slots: slotKeys, sideOf, hubSide });
   const hubStack = hubSide === 'left' ? leftStack : rightStack;
+  // Only a FILING draws a title bar. The unfiled pile and the case block don't,
+  // so their handles centre on the whole block — and the watcher has to be told
+  // the same thing or the two disagree by half the title height (#77).
+  const bands = payload.kind === 'filing' ? undefined : { titleH: 0, footerH: 0 };
   const handles = sockets ? (
     <>
       {/* The ref hub faces whichever side its inbound edges arrive from: under
@@ -426,7 +431,7 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
             ? 'right-0 translate-x-1/2'
             : 'left-0 -translate-x-1/2'
         } -translate-y-1/2`}
-        style={{ top: `${slotAnchorRatio('in', hubStack, node.height) * 100}%` }}
+        style={{ top: `${slotAnchorRatio('in', hubStack, node.height, bands) * 100}%` }}
         data-hub-side={sockets.inputSide ?? 'left'}
         // The hub is what a ref points AT, so it is this block's id — the same
         // thing a case block already advertises. It worked all along; with no
@@ -461,7 +466,7 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
         <div
           key={handle.slot}
           className={`${handleBox} left-0 -translate-x-1/2 -translate-y-1/2`}
-          style={{ top: `${slotAnchorRatio(handle.slot, leftStack, node.height) * 100}%` }}
+          style={{ top: `${slotAnchorRatio(handle.slot, leftStack, node.height, bands) * 100}%` }}
           data-slot={handle.slot}
           data-slot-edge="left"
           data-slot-occupied={handle.occupied ? 'yes' : 'no'}
@@ -489,7 +494,7 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
         <div
           key={handle.slot}
           className={`${handleBox} right-0 translate-x-1/2 -translate-y-1/2`}
-          style={{ top: `${slotAnchorRatio(handle.slot, rightStack, node.height) * 100}%` }}
+          style={{ top: `${slotAnchorRatio(handle.slot, rightStack, node.height, bands) * 100}%` }}
           data-slot={handle.slot}
           data-slot-edge="right"
           data-slot-occupied={handle.occupied ? 'yes' : 'no'}
@@ -589,7 +594,11 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
             caseRef links TO, so it reads as a tag rather than a bare socket. */}
         {sockets?.caseTarget && (
           <div
-            className={`${handleBox} right-0 top-1/2 translate-x-1/2 -translate-y-1/2`}
+            className={`${handleBox} right-0 translate-x-1/2 -translate-y-1/2`}
+            // Same helper the edge watcher anchors with, with no title band:
+            // two copies of this arithmetic is how the fan and the circle ended
+            // up 12px apart.
+            style={{ top: `${slotAnchorRatio('contains', [], node.height, { titleH: 0, footerH: 0 }) * 100}%` }}
             data-slot="id"
             data-slot-edge="right"
             title={`id — ${c.id}`}
@@ -642,18 +651,29 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
       >
         {f.label}
       </div>
-      {/* Everything that describes the filing lives below the title, on one
-          row, so no badge can collide with the name. */}
-      <div className="flex flex-1 flex-wrap items-center gap-1.5 px-2.5 pr-16">
+      {/* The body belongs to the slots. It used to carry the chips as well,
+          which is why the labels needed 4rem of right padding and why a fourth
+          handle started crowding the badges — the two were competing for one
+          band. Now it is deliberately empty. */}
+      <div className="flex-1" data-block-body="slots" />
+      {/* Footer: what the filing IS and how much of it is indexed, on one row
+          out of the slots' way. Mirrors the title bar at the other end. */}
+      <div
+        style={{ height: BLOCK_FOOTER_H }}
+        className={`flex shrink-0 items-center gap-1.5 overflow-hidden rounded-b-md border-t px-2.5 ${
+          unindexed ? 'border-gray-200 bg-gray-100/70' : 'border-gray-200 bg-gray-50'
+        }`}
+        data-block-footer="filing"
+      >
         <span
-          className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${chipClass(
+          className={`shrink-0 rounded px-1.5 text-[9px] font-semibold uppercase tracking-wide ${chipClass(
             f.filingType,
           )} ${unindexed ? 'opacity-60' : ''}`}
         >
           {f.filingType || 'filing'}
         </span>
         <span
-          className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${
+          className={`shrink-0 rounded-full px-1.5 text-[9px] font-medium ${
             unindexed ? 'bg-gray-100 text-gray-400' : 'bg-gray-100 text-gray-600'
           }`}
         >
@@ -661,7 +681,7 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
         </span>
         {f.missing.length > 0 && (
           <span
-            className="shrink-0 rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-medium text-amber-700"
+            className="shrink-0 rounded bg-amber-50 px-1.5 text-[9px] font-medium text-amber-700"
             title={f.missing.join(', ')}
           >
             unmapped

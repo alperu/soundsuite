@@ -1,4 +1,4 @@
-import { BLOCK_TITLE_H, filingHeightFor } from './block-metrics';
+import { BLOCK_FOOTER_H, BLOCK_TITLE_H, filingHeightFor } from './block-metrics';
 import { visibleSlotsFor } from './link-rules';
 import type {
   ScopeCase,
@@ -37,7 +37,7 @@ const BASELINE_EDGE_MEMBERS = 4;
  * than its own handles stacks them on top of each other (#65).
  */
 export const FILING_H = filingHeightFor(BASELINE_EDGE_MEMBERS);
-export { BLOCK_TITLE_H };
+export { BLOCK_TITLE_H, BLOCK_FOOTER_H };
 export const ROW_GAP = 14;
 export const ROW_H = FILING_H + ROW_GAP;
 export const COL_GAP = 140;
@@ -196,6 +196,10 @@ export interface ScopeGraph {
   filingH: number;
   /** Row pitch that follows from it, so bands and family rows stay aligned. */
   rowH: number;
+  /** Where each case's band sits, for the horizontal rules and their labels.
+   *  Derived here rather than re-measured from block positions: the layout is
+   *  the only thing that knows a band's height before the blocks are placed. */
+  bands: Array<{ key: EntityKey; name: string; top: number; height: number }>;
 }
 
 /**
@@ -361,6 +365,7 @@ export function buildScopeGraph(cases: ScopeCase[], options: BuildOptions = {}):
     caseById: new Map(),
     filingH: 0,
     rowH: 0,
+    bands: [],
   };
   graph.filingH = filingHeightOf(cases.flatMap(c => c.filings));
   graph.rowH = graph.filingH + ROW_GAP;
@@ -462,6 +467,12 @@ export function buildScopeGraph(cases: ScopeCase[], options: BuildOptions = {}):
       });
     }
 
+    graph.bands.push({
+      key: cBlock.key,
+      name: c.name,
+      top: clusterTop,
+      height: clusterHeight,
+    });
     clusterTop += clusterHeight + CLUSTER_GAP;
   }
 

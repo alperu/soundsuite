@@ -19,6 +19,12 @@
  *      included on purpose — it is a circle on the same edge as the slots, and
  *      leaving it out is why checks 1-4 passed while it overlapped.
  *   6. a case block shows exactly one affordance (its id tag)
+ *   7. EVERY VISIBLE EDGE terminates on a circle (≤1px, both ends). The old
+ *      suite never looked at edges at all, which is how the containment fan
+ *      came to converge 12px below the case's id circle (#77) while all six
+ *      other checks passed. The probe reveals the edges itself — "Show all
+ *      links" for refs, a hover for the block's contains edge — and puts the
+ *      toggle back the way it found it.
  *
  * Requires the dev server on :3000 and Chrome started with
  * --remote-debugging-port (see scripts/chromeMcpRun.sh).
@@ -30,6 +36,7 @@ const port = (() => {
 })();
 
 const PROBE = `(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
   const scaleOf = el => {
     let p = el;
     while (p && !/scale\\(/.test(p.style?.transform || '')) p = p.parentElement;
@@ -74,6 +81,49 @@ const PROBE = `(async () => {
       }
     }
   }
+  // --- edge endpoints -------------------------------------------------------
+  const toggle = Array.from(document.querySelectorAll('button'))
+    .find(b => (b.textContent || '').trim() === 'Show all links');
+  const toggleWasOn = toggle ? toggle.getAttribute('aria-pressed') === 'true' : false;
+  if (toggle && !toggleWasOn) { toggle.click(); await sleep(400); }
+  // A contains edge is only drawn while one of its blocks is hovered.
+  const hovered = document.querySelector('[data-block-kind="filing"]');
+  if (hovered) hovered.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+  await sleep(400);
+
+  const centres = [];
+  for (const b of document.querySelectorAll('[data-block-id]')) {
+    for (const h of b.querySelectorAll('[data-slot],[data-hub-side]')) {
+      const c = h.querySelector('span[style]:not([data-link-badge]):not([data-link-badge] *)');
+      if (!c) continue;
+      const cr = c.getBoundingClientRect();
+      centres.push({ x: cr.left + cr.width / 2, y: cr.top + cr.height / 2 });
+    }
+  }
+  const atClient = (path, len) => {
+    const p = path.getPointAtLength(len);
+    const m = path.getScreenCTM();
+    return { x: p.x * m.a + p.y * m.c + m.e, y: p.x * m.b + p.y * m.d + m.f };
+  };
+  const nearestPx = pt => {
+    let best = Infinity;
+    for (const c of centres) best = Math.min(best, Math.hypot(c.x - pt.x, c.y - pt.y));
+    return best / k;
+  };
+  let edgesMeasured = 0, worstEdgeGapPx = 0, edgeEndsAdrift = 0;
+  for (const wrapper of document.querySelectorAll('[data-edge-kind]')) {
+    const path = wrapper.querySelector('path');
+    if (!path || typeof path.getTotalLength !== 'function') continue;
+    edgesMeasured++;
+    const total = path.getTotalLength();
+    for (const gap of [nearestPx(atClient(path, 0)), nearestPx(atClient(path, total))]) {
+      worstEdgeGapPx = Math.max(worstEdgeGapPx, gap);
+      if (gap > 1.5) edgeEndsAdrift++;
+    }
+  }
+  if (hovered) hovered.dispatchEvent(new PointerEvent('pointerout', { bubbles: true }));
+  if (toggle && !toggleWasOn) { toggle.click(); await sleep(200); }
+
   const caseExtras = Array.from(document.querySelectorAll('[data-block-kind="case"]'))
     .filter(c => c.querySelectorAll('[data-slot="id"]').length !== 1 || c.querySelectorAll('[data-hub-side]').length !== 0).length;
   return {
@@ -87,6 +137,9 @@ const PROBE = `(async () => {
     rightEdgeMaxDevPx: Math.round((worstRight / k) * 10) / 10,
     leftEdgeMaxDevPx: Math.round((worstLeft / k) * 10) / 10,
     caseBlocksWithWrongAffordances: caseExtras,
+    edgesMeasured,
+    worstEdgeGapPx: Math.round(worstEdgeGapPx * 10) / 10,
+    edgeEndsAdrift,
   };
 })()`;
 
@@ -137,6 +190,14 @@ async function main() {
   }
   if (result?.rightEdgeMaxDevPx > 1.5) failures.push(`right-edge drift ${result.rightEdgeMaxDevPx}px`);
   if (result?.leftEdgeMaxDevPx > 1.5) failures.push(`left-edge drift ${result.leftEdgeMaxDevPx}px`);
+  if (result?.edgeEndsAdrift > 0) {
+    failures.push(
+      `${result.edgeEndsAdrift} edge ends miss their circle (worst ${result.worstEdgeGapPx}px)`,
+    );
+  }
+  if (result?.edgesMeasured === 0) {
+    failures.push('no edges were visible to measure — the endpoint check proved nothing');
+  }
   if (result?.caseBlocksWithWrongAffordances > 0) {
     failures.push(`${result.caseBlocksWithWrongAffordances} case blocks show something other than one id tag`);
   }
@@ -144,7 +205,9 @@ async function main() {
     console.error('\nFAILED:\n- ' + failures.join('\n- '));
     process.exit(1);
   }
-  console.log('\nOK — centres, widths, title/bottom clearance, separation and case affordances all pass.');
+  console.log(
+    '\nOK — centres, widths, title/bottom clearance, separation, case affordances and edge endpoints all pass.',
+  );
 }
 
 main().catch(err => {

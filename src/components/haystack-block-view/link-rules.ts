@@ -254,8 +254,10 @@ export function slotAnchorRatio(
   key: string,
   stack: readonly string[],
   height: number,
+  /** Zeroes for blocks that draw no title or footer — see `anchorRatio`. */
+  bands?: { titleH?: number; footerH?: number },
 ): number {
-  return anchorRatio(key, stack, height);
+  return anchorRatio(key, stack, height, bands);
 }
 
 /**

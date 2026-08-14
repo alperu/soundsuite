@@ -26,6 +26,16 @@ const EDGE_PAD = 6;
  *  excludes this band so no circle lands on the filing's name. */
 export const BLOCK_TITLE_H = 24;
 
+/**
+ * The filing block's footer: kind chip, doc count, unmapped badge.
+ *
+ * Those three used to sit in the body, sharing it with the slot handles and
+ * their labels — which is why the labels needed right-padding and why a fourth
+ * handle started crowding the badges. Giving them a band of their own leaves
+ * the body to the slots, and both bands are excluded from the anchor maths.
+ */
+export const BLOCK_FOOTER_H = 20;
+
 /** Body height when the handles don't ask for more: room for two lines of
  *  badges under the title. */
 const BODY_MIN = 52;
@@ -46,7 +56,7 @@ export function filingBodyFor(members: number): number {
 
 /** Total block height for a given per-edge handle count. */
 export function filingHeightFor(members: number): number {
-  return BLOCK_TITLE_H + filingBodyFor(members);
+  return BLOCK_TITLE_H + filingBodyFor(members) + BLOCK_FOOTER_H;
 }
 
 /**
@@ -60,8 +70,21 @@ export function filingHeightFor(members: number): number {
  * Anything not on this edge answers with the body's centre — that is where a
  * socket with no rendered handle (a slot the kind no longer offers) anchors.
  */
-export function anchorRatio(key: string, stack: readonly string[], height: number): number {
-  const centre = BLOCK_TITLE_H + (height - BLOCK_TITLE_H) / 2;
+export function anchorRatio(
+  key: string,
+  stack: readonly string[],
+  height: number,
+  /**
+   * The bands to keep clear, top and bottom. Filings have both; a case block
+   * and the unfiled pile have neither, and passing a filing's 24px title there
+   * is what put the containment fan 12px below the circle it lands on (#77) —
+   * the anchor measured from a band the block never drew.
+   */
+  bands: { titleH?: number; footerH?: number } = {},
+): number {
+  const titleH = bands.titleH ?? BLOCK_TITLE_H;
+  const footerH = bands.footerH ?? BLOCK_FOOTER_H;
+  const centre = titleH + (height - titleH - footerH) / 2;
   const index = stack.indexOf(key);
   if (index < 0) return centre / height;
   return (centre + (index - (stack.length - 1) / 2) * SLOT_PITCH) / height;

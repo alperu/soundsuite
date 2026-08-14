@@ -9,11 +9,12 @@ import type { LinkPlan } from './link-rules';
 import { hydrateShowAllLinks, setShowAllLinks, useShowAllLinks } from './link-visibility';
 import { LinkPopup, type InboundLinkRow } from './link-popup';
 import { PairingWorkbench } from './pairing-workbench';
-import { setPinned } from './hover-state';
+import { setPinned, usePinned } from './hover-state';
 import { LinkPicker } from './link-picker';
 import { currentPendingLink, setPendingLink, usePendingLink } from './pending-link';
 import { commitLinkBatch, visibleSlotsFor, slotLabel } from './link-rules';
 import { subscribeTransform } from './zoom-state';
+import { panelTargetFor } from './panel-target';
 import type { CanvasHandle, ContextTarget } from './block-canvas';
 import { buildScopeGraph, filingKey, type EntityKey } from './scope-graph';
 import { asEntityKind, type ScopeCase, type UnconnectedRow } from './types';
@@ -162,6 +163,8 @@ export function EditorTab({
     { sourceKey: string; slot?: string; side: 'input' | 'output'; rect: DOMRect } | null
   >(null);
   const pendingLink = usePendingLink();
+  /** A line the user pinned. It stays until they say otherwise (#75). */
+  const pinnedKey = usePinned();
   useEffect(() => {
     hydrateShowAllLinks();
   }, []);
@@ -280,42 +283,26 @@ export function EditorTab({
 
   const handleBlockClick = useCallback(
     (key: EntityKey) => {
-      if (key.startsWith('document:')) {
-        setBanner({
-          tone: 'error',
-          text: 'A document carries no tags — drag it onto a filing to file it.',
-        });
+      // What the click MEANS is decided by `panelTargetFor`; this only carries
+      // out the state writes, so the decision can be tested on its own.
+      const target = panelTargetFor(key, {
+        graph,
+        entryKeys: new Set(allEntries.map(e => e.key)),
+        caseNameById,
+      });
+      if (target.kind === 'refuse') {
+        setBanner({ tone: 'error', text: target.reason });
         return;
       }
-      if (key.startsWith('unfiled:')) {
-        setBanner({
-          tone: 'error',
-          text: 'Unfiled documents have no tag row — file them onto a filing first.',
-        });
+      if (target.kind === 'none') return;
+      if (target.kind === 'entry') {
+        const entry = allEntries.find(e => e.key === target.entryKey);
+        if (entry) select(entry);
         return;
       }
-      if (key.startsWith('case:')) {
-        const id = key.slice('case:'.length);
-        setSelectedKey(null);
-        setSelectedTable(null);
-        setGraphPick({ kind: 'case', id, label: caseNameById.get(id) ?? 'Case' });
-        return;
-      }
-      const id = key.slice('filing:'.length);
-      const entry = allEntries.find(e => e.key === id);
-      if (entry) {
-        select(entry);
-        return;
-      }
-      const block = graph.filingById.get(id);
-      if (!block) return;
       setSelectedKey(null);
       setSelectedTable(null);
-      setGraphPick({
-        kind: block.primaryKind || 'motion',
-        id,
-        label: block.label,
-      });
+      setGraphPick({ kind: target.entityKind, id: target.id, label: target.label });
     },
     [allEntries, caseNameById, graph],
   );
@@ -631,7 +618,7 @@ export function EditorTab({
         setMenu(null);
         return;
       }
-      if (target.kind === 'badge') {
+      if (target.kind === 'badge' || target.kind === 'edge') {
         const edge = graph.edges.find(e => e.id === target.edgeId);
         if (!edge) return;
         const other = edge.target;
@@ -655,6 +642,10 @@ export function EditorTab({
               label: `Delete ${edge.slot ?? 'link'}`,
               danger: true,
               onClick: () => void handleUnlink(target.edgeId),
+            },
+            {
+              label: 'Hide links',
+              onClick: () => setPinned(null),
             },
           ],
         });
@@ -1142,18 +1133,32 @@ export function EditorTab({
             the editor has no toolbar, and this is where the user meets the
             question — lines are hidden until a block is hovered. */}
         <div className="pointer-events-none absolute left-3 top-3">
-          <button
-            onClick={() => setShowAllLinks(!showAllLinks)}
-            aria-pressed={showAllLinks}
-            title="Show every ref link at once instead of on hover"
-            className={`pointer-events-auto rounded-full border px-2.5 py-1 text-[11px] shadow-sm ${
-              showAllLinks
-                ? 'border-blue-600 bg-blue-600 text-white'
-                : 'border-gray-300 bg-white/90 text-gray-600 hover:bg-gray-50'
-            }`}
-          >
-            Show all links
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowAllLinks(!showAllLinks)}
+              aria-pressed={showAllLinks}
+              title="Show every link at once — refs and the case fan — instead of on hover"
+              className={`pointer-events-auto rounded-full border px-2.5 py-1 text-[11px] shadow-sm ${
+                showAllLinks
+                  ? 'border-blue-600 bg-blue-600 text-white'
+                  : 'border-gray-300 bg-white/90 text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              Show all links
+            </button>
+            {/* Only offered when there is something to hide: a pinned line
+                stays put through clicks and Escape, so this is its way out. */}
+            {pinnedKey && (
+              <button
+                onClick={() => setPinned(null)}
+                data-hide-links="yes"
+                title="Stop showing the pinned links"
+                className="pointer-events-auto rounded-full border border-gray-300 bg-white/90 px-2.5 py-1 text-[11px] text-gray-600 shadow-sm hover:bg-gray-50"
+              >
+                Hide links
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Droplet */}

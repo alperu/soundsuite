@@ -1,4 +1,5 @@
 import {
+  BLOCK_FOOTER_H,
   BLOCK_TITLE_H,
   SLOT_PITCH,
   SOCKET_D,
@@ -73,6 +74,20 @@ describe('edge stack geometry', () => {
   it('a socket that is not drawn on this edge answers with the body centre', () => {
     const stack = ['in', 'amends'];
     const centre = anchorRatio('motionRef', stack, FILING_H) * FILING_H;
-    expect(centre).toBe(BLOCK_TITLE_H + (FILING_H - BLOCK_TITLE_H) / 2);
+    // The body is what is left between the title bar and the footer — both
+    // bands are excluded, so the centre is not the block's own midpoint.
+    expect(centre).toBeCloseTo(
+      BLOCK_TITLE_H + (FILING_H - BLOCK_TITLE_H - BLOCK_FOOTER_H) / 2,
+      6,
+    );
+  });
+
+  it('keeps the stack clear of the footer as well as the title', () => {
+    for (let n = 1; n <= 6; n += 1) {
+      const stack = Array.from({ length: n }, (_, i) => `s${i}`);
+      const height = filingHeightFor(n);
+      const ys = centres(stack, height);
+      expect(ys[ys.length - 1] + SOCKET_D / 2).toBeLessThanOrEqual(height - BLOCK_FOOTER_H + 0.01);
+    }
   });
 });

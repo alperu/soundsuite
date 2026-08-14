@@ -40,6 +40,8 @@ export type CanvasTool = 'pointer' | 'marquee';
  */
 export type ContextTarget =
   | { kind: 'badge'; edgeId: string; blockKey: EntityKey }
+  /** The drawn line itself — reachable once it is pinned or shown. */
+  | { kind: 'edge'; edgeId: string }
   | { kind: 'idTag'; blockKey: EntityKey }
   | { kind: 'slot'; slot: string; blockKey: EntityKey }
   | { kind: 'block'; blockKey: EntityKey }
@@ -188,7 +190,18 @@ function layoutSocketPositions(graph: ScopeGraph) {
           sideOf,
           hubSide,
         });
-        const ratio = slotAnchorRatio(key, stack, box.h);
+        // A case block draws no title bar, so its handles centre on the whole
+        // block. Measuring from a band it never rendered is what pushed the
+        // containment fan 12px off the id circle (#77).
+        // A case block and the unfiled pile draw neither band; a filing draws
+        // both. Measuring from a band the block never rendered is what put the
+        // containment fan off its circle (#77).
+        const ratio = slotAnchorRatio(
+          key,
+          stack,
+          box.h,
+          filing ? undefined : { titleH: 0, footerH: 0 },
+        );
         const position: Position = {
           x: onRight ? box.x + box.w : box.x,
           y: box.y + box.h * ratio,
@@ -711,8 +724,8 @@ export default function BlockCanvas(props: Props) {
     // counts as background.
     const target = event.target as HTMLElement | null;
     if (target?.closest?.('[data-block-id],[data-edge-kind]')) return;
-    // Clicking nothing also drops a pinned line — same gesture, same meaning.
-    setPinned(null);
+    // A pinned line SURVIVES this (#75): the user asked for it explicitly and
+    // takes it away explicitly, through "Hide links". Only the selection goes.
     propsRef.current.onBackgroundClick?.();
   };
 
@@ -741,16 +754,10 @@ export default function BlockCanvas(props: Props) {
   // Escape drops a pinned line. Cheap to own here: the canvas is the only
   // thing that pins, and the key has no other meaning while it is focused.
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      // A menu open over the canvas gets Escape first — closing it is what the
-      // user meant, and dropping the pinned line at the same time would take
-      // away the line they opened the menu to act on.
-      const current = propsRef.current;
-      const menuOpen = current.mode === 'edit' && current.menuOpen;
-      if (event.key === 'Escape' && !menuOpen) setPinned(null);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    // Escape used to drop the pin. It no longer does (#75) — a pinned line is
+    // a deliberate state with a deliberate way out, and Escape is already
+    // spoken for by menus, the picker and a pending link.
+    return () => {};
   }, []);
 
   // Right-click, resolved to what it hit. The host gets a discriminated target
@@ -768,6 +775,13 @@ export default function BlockCanvas(props: Props) {
     }
     const el = event.target as HTMLElement | null;
     const at = { x: event.clientX, y: event.clientY };
+    // A line is not inside a block, so it is asked about first.
+    const edgeEl = el?.closest?.('[data-edge-id]') as HTMLElement | null;
+    const edgeId = edgeEl?.getAttribute('data-edge-id');
+    if (edgeId) {
+      current.onContextMenu({ kind: 'edge', edgeId }, at);
+      return;
+    }
     const blockEl = el?.closest?.('[data-block-id]') as HTMLElement | null;
     const blockKey = blockEl?.getAttribute('data-block-id') ?? null;
     const badge = el?.closest?.('[data-link-badge]') as HTMLElement | null;
@@ -918,9 +932,18 @@ function EdgeLayer({
 
   if (isContains) {
     const authoringCaseLinks = drag.active && drag.slot === 'caseRef';
-    if (!editMode || !(authoringCaseLinks || touchesPointer)) return null;
+    // "Show all links" means ALL: the case fan is a link like any other, drawn
+    // fainter so the ref chains still read first. Without it the toggle told a
+    // half-truth — the user asked for everything and got the refs.
+    if (!(showAll || (editMode && (authoringCaseLinks || touchesPointer)))) return null;
     return (
-      <div style={{ opacity: 0.55 }} data-edge-kind="contains" data-edge-state="revealed">
+      <div
+        style={{ opacity: touchesPointer ? 0.55 : 0.3 }}
+        className="[&_path]:[pointer-events:stroke]"
+        data-edge-kind="contains"
+        data-edge-id={props.data.id}
+        data-edge-state={touchesPointer ? 'revealed' : 'show-all'}
+      >
         <Presets.classic.Connection {...props} />
       </div>
     );
@@ -934,7 +957,12 @@ function EdgeLayer({
   return (
     <div
       style={{ opacity: touchesPointer ? 1 : 0.45 }}
+      // Only a drawn line is clickable, and only along its stroke — so a line
+      // can be right-clicked and deleted (#75) without swallowing clicks meant
+      // for the blocks underneath it.
+      className="[&_path]:[pointer-events:stroke]"
       data-edge-kind="ref"
+      data-edge-id={props.data.id}
       data-edge-state={touchesPointer ? 'full' : 'show-all'}
     >
       <Presets.classic.Connection {...props} />
