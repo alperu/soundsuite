@@ -1,4 +1,4 @@
-import { ROW_GAP } from './scope-graph';
+import { KIND_COL_GAP, ROW_GAP } from './scope-graph';
 import type { ScopeGraph } from './scope-graph';
 
 /**
@@ -93,4 +93,81 @@ export function fanPath(
 /** Whichever point sits closer to the filing's own left edge. */
 function nearer(a: Point, b: Point, x: number): Point {
   return Math.abs(a.x - x) <= Math.abs(b.x - x) ? a : b;
+}
+
+/**
+ * The same channels, for a ref.
+ *
+ * Refs are a different geometry from the fan — arbitrary pairs of filings
+ * rather than everything-to-one-case — so this is not the trunk reused. What
+ * carries over is the pair of guaranteed-empty channels the layout provides:
+ * the gap between rows, and the 64px gutter between two kind columns. A ref
+ * drops into its own row's gap, crosses to the gutter beside its target's
+ * column, rides it to the target's row, and comes in level.
+ *
+ * Measured before designing, as the fan was: both ref edges in the corpus cross
+ * blocks (6 crossings, one edge through 4), so "there is nothing to route
+ * around" is no longer true for refs either — and the user asked for one visual
+ * language besides.
+ *
+ * LANES: several refs can want the same gutter. The lane is derived from the
+ * source's ROW rather than allocated from shared mutable state — two edges in
+ * one gutter are almost always on different rows, and a derived lane keeps the
+ * router a pure function of the layout, which is what makes both routers
+ * reproducible and testable.
+ */
+
+/** How far apart parallel lines sit inside one gutter. */
+const LANE_PITCH = 12;
+
+/** Lanes that fit in a column gutter without touching either column. */
+const LANES = Math.max(1, Math.floor((KIND_COL_GAP - 16) / LANE_PITCH));
+
+export function refPath(
+  graph: ScopeGraph,
+  sourceKey: string,
+  targetKey: string,
+  start: Point,
+  end: Point,
+): string | null {
+  const source = graph.boxes.get(sourceKey);
+  const target = graph.boxes.get(targetKey);
+  if (!source || !target) return null;
+
+  // Same row and adjacent: the straight line IS the clear route, and bending it
+  // through a gutter would be theatre.
+  if (Math.abs(source.y - target.y) < 1 && Math.abs(source.x - target.x) <= COLUMN_STEP) {
+    return `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
+  }
+
+  const gapY = source.y + source.h + ROW_GAP / 2;
+  // The gutter beside the target, on the side the edge arrives from.
+  const gutterCentre =
+    target.x > source.x
+      ? target.x - KIND_COL_GAP / 2
+      : target.x + target.w + KIND_COL_GAP / 2;
+  const lane = laneOffset(graph, source.y);
+  const gutterX = gutterCentre + lane;
+  const stubX = start.x + (start.x < source.x + source.w / 2 ? -STUB : STUB);
+
+  return [
+    `M ${start.x} ${start.y}`,
+    `L ${stubX} ${start.y}`,
+    `L ${stubX} ${gapY}`,
+    `L ${gutterX} ${gapY}`,
+    `L ${gutterX} ${end.y}`,
+    `L ${end.x} ${end.y}`,
+  ].join(' ');
+}
+
+/** One column step, for the "already adjacent" test. */
+const COLUMN_STEP = 320 + KIND_COL_GAP;
+
+/**
+ * Which lane inside a gutter this edge takes, spread around its centre.
+ * Derived from the row so it is stable across rebuilds and needs no allocator.
+ */
+function laneOffset(graph: ScopeGraph, y: number): number {
+  const row = Math.round(y / Math.max(graph.rowH, 1));
+  return ((row % LANES) - (LANES - 1) / 2) * LANE_PITCH;
 }

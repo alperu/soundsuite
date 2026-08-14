@@ -10,8 +10,11 @@ import type { ScopeGraph } from './scope-graph';
  */
 
 export type PanelTarget =
-  /** A row the worklist already knows: the list selection drives the panel. */
-  | { kind: 'entry'; entryKey: string }
+  /** A row the worklist already knows: the list selection drives the panel.
+   *  `entityKind` names WHICH of the entry's rows to open — an attachment-kind
+   *  filing carries a shadow Motion row at the same id, and opening that one is
+   *  how a Notice ended up showing MOTION TAGS. */
+  | { kind: 'entry'; entryKey: string; entityKind: string }
   /** A block the worklist doesn't list — the canvas supplies the identity. */
   | { kind: 'graph'; entityKind: string; id: string; label: string }
   /** Nothing to edit, and a reason to say so. */
@@ -23,8 +26,10 @@ export function panelTargetFor(
   key: string,
   context: {
     graph: ScopeGraph;
-    /** Worklist entry keys — bare filing ids, not block keys. */
-    entryKeys: Set<string>;
+    /** Worklist entries by bare filing id, with the entity kinds each one has
+     *  rows for. The kinds matter: the list is only the right place to open a
+     *  block if it actually holds that block's OWN row. */
+    entryKinds: Map<string, string[]>;
     caseNameById: Map<string, string>;
   },
 ): PanelTarget {
@@ -50,17 +55,18 @@ export function panelTargetFor(
     };
   }
   const id = key.slice('filing:'.length);
-  // The worklist wins where it has the row: its selection carries the entity
-  // TABLE as well as the id, which the canvas cannot know.
-  if (context.entryKeys.has(id)) return { kind: 'entry', entryKey: id };
   const block = context.graph.filingById.get(id);
   if (!block) return { kind: 'none' };
-  return {
-    kind: 'graph',
-    // A filing with no entity row yet still has a kind to edit against;
-    // falling back to `motion` is what makes an unmapped block editable.
-    entityKind: block.primaryKind || 'motion',
-    id,
-    label: block.label,
-  };
+  // A filing with no entity row yet still has a kind to edit against; falling
+  // back to `motion` is what makes an unmapped block editable.
+  const primary = block.primaryKind || 'motion';
+
+  // The worklist wins ONLY where it holds this block's own row — its selection
+  // carries the entity TABLE, which the canvas cannot know. Where it holds just
+  // the shadow Motion, going through the list would open that shadow: a Notice
+  // showing MOTION TAGS, which is exactly what the user hit.
+  if (context.entryKinds.get(id)?.includes(primary)) {
+    return { kind: 'entry', entryKey: id, entityKind: primary };
+  }
+  return { kind: 'graph', entityKind: primary, id, label: block.label };
 }

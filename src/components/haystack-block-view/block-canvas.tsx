@@ -28,7 +28,7 @@ import { setTransform, setZoom } from './zoom-state';
 import { setPinned, useHovered, usePinned } from './hover-state';
 import { useShowAllLinks } from './link-visibility';
 import { mountBandRules, mountColumnHeaders } from './column-headers';
-import { fanPath } from './fan-route';
+import { fanPath, refPath } from './fan-route';
 import { setupMarquee, type MarqueeResult } from './use-selection-area';
 
 /** Left-button gesture. The lasso keeps its slot here for when it lands. */
@@ -429,10 +429,12 @@ export default function BlockCanvas(props: Props) {
       if (signal.type !== 'connectionpath' || !signal.data) return context;
       const payload = signal.data.payload;
       const points = signal.data.points;
-      if (!payload || payload.edgeKind !== 'contains' || !points || points.length !== 2) {
-        return context;
-      }
-      const path = fanPath(graph, payload.source, payload.target, points[0], points[1]);
+      if (!payload || !points || points.length !== 2) return context;
+      // One path source for both reveal modes: this pipe runs whenever a
+      // connection is drawn, so a hovered line and a show-all line are the same
+      // geometry by construction rather than by two code paths agreeing.
+      const route = payload.edgeKind === 'contains' ? fanPath : refPath;
+      const path = route(graph, payload.source, payload.target, points[0], points[1]);
       // Mutating the signal's own data rather than rebuilding the context: the
       // plugin reads `path` back off the object it emitted, and a fresh object
       // does not type-check against its union of signal shapes.

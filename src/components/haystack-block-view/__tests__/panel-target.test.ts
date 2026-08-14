@@ -39,13 +39,33 @@ const graph = buildScopeGraph(
 
 const context = {
   graph,
-  entryKeys: new Set(['m1']),
+  // m1 has its own motion row; rec1 is listed too but only as the shadow
+  // Motion, which is the case that used to open MOTION TAGS on a record.
+  entryKinds: new Map([
+    ['m1', ['motion']],
+    ['rec1', ['motion']],
+  ]),
   caseNameById: new Map([['c1', 'case one']]),
 };
 
 describe('panelTargetFor', () => {
   it('hands a worklist-listed filing to the list, which knows its entity table', () => {
-    expect(panelTargetFor(filingKey('m1'), context)).toEqual({ kind: 'entry', entryKey: 'm1' });
+    expect(panelTargetFor(filingKey('m1'), context)).toEqual({
+      kind: 'entry',
+      entryKey: 'm1',
+      entityKind: 'motion',
+    });
+  });
+
+  it('refuses the list when it only holds the shadow Motion row', () => {
+    // rec1 IS listed, but only as a Motion. Going through the list would open
+    // MOTION TAGS on a reporter's record — the #86 bug exactly.
+    expect(panelTargetFor(filingKey('rec1'), context)).toEqual({
+      kind: 'graph',
+      entityKind: 'reportersRecord',
+      id: 'rec1',
+      label: 'filing rec1',
+    });
   });
 
   it('opens a canvas-only filing from the graph', () => {

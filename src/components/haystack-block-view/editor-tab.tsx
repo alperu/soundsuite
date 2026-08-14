@@ -287,7 +287,10 @@ export function EditorTab({
       // out the state writes, so the decision can be tested on its own.
       const target = panelTargetFor(key, {
         graph,
-        entryKeys: new Set(allEntries.map(e => e.key)),
+        // Which KINDS each entry has rows for, not just which entries exist:
+        // an attachment-kind filing carries a shadow Motion at the same id, and
+        // routing a Notice through the list opened that shadow (#86).
+        entryKinds: new Map(allEntries.map(e => [e.key, e.rows.map(r => r.entityKind)])),
         caseNameById,
       });
       if (target.kind === 'refuse') {
@@ -297,7 +300,10 @@ export function EditorTab({
       if (target.kind === 'none') return;
       if (target.kind === 'entry') {
         const entry = allEntries.find(e => e.key === target.entryKey);
-        if (entry) select(entry);
+        // Open the row that IS this block, not whichever row the list would
+        // have preferred on its own.
+        const row = entry?.rows.find(r => r.entityKind === target.entityKind);
+        if (entry) select(entry, row?.entityTable);
         return;
       }
       setSelectedKey(null);

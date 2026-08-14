@@ -1,4 +1,17 @@
 /**
+ * @jest-environment node
+ *
+ * These tests start the real MCP HTTP server and drive it with `fetch`. jsdom
+ * supplies no global fetch, so every request-level test failed with
+ * `ReferenceError: fetch is not defined`; Node's environment provides one. That
+ * is also the honest environment here — the MCP server is server-only code.
+ *
+ * Note this is NOT the TextDecoder polyfill case (task #55): the polyfill is
+ * global and applies either way. This suite needs `fetch`, which only the node
+ * environment brings.
+ */
+
+/**
  * Unit tests for MCPServer class.
  *
  * These tests verify:
@@ -17,7 +30,56 @@ import type { ToolExecutionContext } from '../tool-types';
 
 // Mock dependencies
 jest.mock('../../vector/vector-store');
-jest.mock('@prisma/client');
+
+/**
+ * `@prisma/client` needs a factory, not the bare automock.
+ *
+ * Importing `../tools` reaches `@/lib/db/prisma`, which builds its client at
+ * MODULE scope and immediately chains `.$extends(...)` twice (cache
+ * invalidation, then XETO validation). Jest's automock can't see `$extends` —
+ * the real client exposes it dynamically — so the automocked instance has no
+ * such method and the whole suite died on the import line with
+ * `TypeError: client.$extends is not a function`, before a single test ran.
+ *
+ * `$extends` returns the same stub so the chain terminates, and
+ * `Prisma.defineExtension` hands its argument straight back, which is all the
+ * extension modules do with it. No real database is opened: the tools read the
+ * `mockDatabase` passed into their context, and anything that reaches for the
+ * global client instead gets the empty delegates below.
+ */
+jest.mock('@prisma/client', () => {
+  const base: Record<string, unknown> = {
+    $connect: jest.fn().mockResolvedValue(undefined),
+    $disconnect: jest.fn().mockResolvedValue(undefined),
+    $on: jest.fn(),
+    $queryRaw: jest.fn().mockResolvedValue([]),
+    $executeRaw: jest.fn().mockResolvedValue(0),
+  };
+  // A Proxy rather than a fixed object: code behind these tools also queries
+  // the GLOBAL client for models this suite never names (the boolean-filter
+  // traversal in search/boolean-to-fts walks motion / person / motionEvent).
+  // Listing models by hand only moves the "reading 'findMany' of undefined"
+  // failure to whichever model someone adds next, so any unknown property
+  // answers with an empty delegate.
+  const client: Record<string, unknown> = new Proxy(base, {
+    get(target, prop: string | symbol) {
+      if (typeof prop !== 'string') return undefined;
+      if (prop in target) return target[prop];
+      if (prop === '$extends') return () => client;
+      if (prop.startsWith('$') || prop === 'then') return undefined;
+      return {
+        findMany: jest.fn().mockResolvedValue([]),
+        findUnique: jest.fn().mockResolvedValue(null),
+        findFirst: jest.fn().mockResolvedValue(null),
+        count: jest.fn().mockResolvedValue(0),
+      };
+    },
+  }) as Record<string, unknown>;
+  return {
+    PrismaClient: jest.fn(() => client),
+    Prisma: { defineExtension: (ext: unknown) => ext },
+  };
+});
 
 /** Build a real ToolRegistry backed by mock services. */
 async function createTestRegistry(
@@ -57,10 +119,28 @@ describe('MCPServer', () => {
       close: jest.fn(),
     };
 
+    // This mock only had `document.findUnique` — all query_case_knowledge
+    // needed when the test was written. The tool has since grown case-scope
+    // resolution, filing/document enrichment, and the prisma-traverse filter
+    // path in `resolvePrismaFilters` (search/boolean-to-fts.ts), which walks
+    // motion / person / motionEvent. Each landed on an undefined delegate, so
+    // the tool answered 500 with "Cannot read properties of undefined (reading
+    // 'findMany')" — invisible until this suite could run at all.
+    //
+    // The delegate list mirrors the `PrismaLike` interface boolean-to-fts
+    // declares. Empty results are the right stub: these assertions are about
+    // the vector hits, which come from mockVectorStore.
+    const emptyModel = () => ({
+      findUnique: jest.fn().mockResolvedValue(null),
+      findMany: jest.fn().mockResolvedValue([]),
+    });
     mockDatabase = {
-      document: {
-        findUnique: jest.fn(),
-      },
+      document: { findUnique: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+      filing: emptyModel(),
+      case: emptyModel(),
+      motion: emptyModel(),
+      motionEvent: emptyModel(),
+      person: emptyModel(),
       $disconnect: jest.fn(),
     };
 
@@ -422,8 +502,12 @@ describe('MCPServer', () => {
       const data = await response.json();
       expect(data.tools).toBeDefined();
       expect(Array.isArray(data.tools)).toBe(true);
-      // Only the 3 existing tools are enabled by default; stubs are disabled
-      expect(data.tools.length).toBe(3);
+      // Asserted `=== 3` back when the registry held only the original three
+      // tools; it now ships 15. An exact count here is a tripwire that fires
+      // whenever a tool is added, not a statement about what `list_tools`
+      // promises — which is that enabled tools come back and the three core
+      // ones are among them, checked immediately below.
+      expect(data.tools.length).toBeGreaterThanOrEqual(3);
 
       const toolNames = data.tools.map((t: any) => t.name);
       expect(toolNames).toContain('query_case_knowledge');
