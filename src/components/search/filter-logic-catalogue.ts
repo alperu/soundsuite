@@ -26,7 +26,7 @@ import type { CaseTags, PersonTags, MotionTags } from '@/lib/legal/types';
 // types.ts and must be updated by hand.
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 const _check_caseTags: Pick<CaseTags, 'causeNo' | 'jurisdictionRef' | 'courtRef' | 'judgeRefs'> = {
   causeNo: '',
   jurisdictionRef: '',
@@ -34,7 +34,7 @@ const _check_caseTags: Pick<CaseTags, 'causeNo' | 'jurisdictionRef' | 'courtRef'
   judgeRefs: undefined,
 };
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 const _check_personTags: Pick<PersonTags, 'displayName' | 'email' | 'barNumber' | 'jurisdictionRef'> = {
   displayName: '',
   email: undefined,
@@ -42,7 +42,7 @@ const _check_personTags: Pick<PersonTags, 'displayName' | 'email' | 'barNumber' 
   jurisdictionRef: undefined,
 };
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 const _check_motionTags: Pick<MotionTags, 'motionType' | 'caseRef' | 'judgeRef' | 'movantRef' | 'respondentRef'> = {
   motionType: '',
   caseRef: '',

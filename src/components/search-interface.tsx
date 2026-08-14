@@ -800,7 +800,7 @@ export default function SearchInterface({
     // Only update state if it actually changed (cheap deep equality on joined).
     const nextJoined = filtered.join('|');
     setTokenSuggestions((prev) => (prev.join('|') === nextJoined ? prev : filtered));
-  }, [aiQuery, aiQueryCursor, useHaystackFilters]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [aiQuery, aiQueryCursor, useHaystackFilters]);  
 
   // ---------------------------------------------------------------------------
   // chip-focus listener — opens the SelectedChipEditor when a chip is clicked.

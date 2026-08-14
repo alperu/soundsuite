@@ -399,14 +399,14 @@ export default function AdminRoleAssignments() {
           // Background sync — log to console, don't toast (would spam every 30s
           // for a single flaky host). The lastSyncedAt indicator stays stale,
           // which is itself a visible cue something is wrong.
-          // eslint-disable-next-line no-console
+           
           console.warn(`auto-sync ${sidecarUrl}: HTTP ${res.status}`);
           return false;
         }
         setLastSyncedAt((m) => ({ ...m, [sidecarUrl]: Date.now() }));
         return true;
       } catch (e: any) {
-        // eslint-disable-next-line no-console
+         
         console.warn(`auto-sync ${sidecarUrl} failed:`, e);
         return false;
       }
@@ -453,7 +453,7 @@ export default function AdminRoleAssignments() {
       clearTimeout(firstTimer);
       clearInterval(interval);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [sidecars, assignmentsByUrl, computeAssignmentHash, silentSync]);
 
   /* ─────────────────────────── Mutations ─────────────────────────── */

@@ -20,9 +20,9 @@ import { NextRequest } from 'next/server'
 
 process.env.HAYSTACK_API_KEY = 'test-key-xyz'
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 import { PUT } from '../[op]/route'
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 import { prisma } from '@/lib/db/prisma'
 
 function mkReq(op: string, body: any) {

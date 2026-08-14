@@ -211,7 +211,7 @@ export function defaultModelFor(mode: ModeName, hostOs: HostOs): string | null {
  */
 export function resolveModelFromConfig(
   mode: ModeName,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   cfg: any,
 ): string {
   let v: string | undefined;

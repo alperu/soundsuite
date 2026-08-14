@@ -7,7 +7,7 @@
  * 
  * Uses Redis to persist queue state so it survives page refreshes.
  */
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 import path from 'path';
 import { NextRequest, NextResponse } from 'next/server';

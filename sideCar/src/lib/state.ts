@@ -564,7 +564,7 @@ export function applyHostOllamaOverrides(): void {
   const getWarn = () => {
     if (warn) return warn;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
+       
       const { createLogger } = require('./logger') as typeof import('./logger');
       const log = createLogger('host-runtime-overrides');
       warn = (m: string) => log.warn(m);

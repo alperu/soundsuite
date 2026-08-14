@@ -9,10 +9,10 @@
 import React from 'react';
 import { HaystackPreviewGrid } from '../haystack-preview-grid';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 let RTL: any;
 try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+   
   RTL = require('@testing-library/react');
 } catch {
   RTL = null;

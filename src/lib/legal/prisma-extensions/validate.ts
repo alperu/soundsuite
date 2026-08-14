@@ -135,7 +135,7 @@ export async function validateWriteOperation({
       // toast string. Goes to logs/dashboard.log; surfaces in the
       // dev-server stdout too.
       try {
-        // eslint-disable-next-line no-console
+         
         console.error(
           `[xeto-validate] ${ENFORCE ? 'REJECTED' : 'ADVISORY'} ${model}.${operation}\n` +
             `  errors: ${result.errors.join(' | ')}\n` +

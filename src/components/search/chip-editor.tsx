@@ -285,7 +285,7 @@ const FilterChipNode = Node.create({
   },
 
   addNodeView() {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     return ReactNodeViewRenderer(FilterChipNodeView as any);
   },
 
@@ -484,7 +484,7 @@ function lazyResolveUuid(atUuid: string): void {
   })();
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function buildDecorationSet(doc: any): DecorationSet {
   const docNode = doc;
   const decorations: Decoration[] = [];

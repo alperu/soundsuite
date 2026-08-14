@@ -1167,7 +1167,7 @@ export default function CaseDetailPage() {
         }
       }
     } catch { /* silent */ }
-  }, [caseRecord]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [caseRecord]);  
 
   // Check for in-progress queue on mount
   useEffect(() => {

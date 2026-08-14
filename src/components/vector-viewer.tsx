@@ -629,7 +629,7 @@ function TableViewContent({
     setPage(1);
     setExpandedChunk(null);
     syncUrl({ selection: null, sortBy: nextBy, sortDir: nextDir, pg: 1 });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [sortBy, sortDir, syncUrl]);
 
   const handleApplyFilters = (e: React.FormEvent) => {
@@ -1129,12 +1129,12 @@ function PageReportContent({
       setStatusFilter(initialStatusFilter);
       setReportPage(1);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [initialStatusFilter]);
   useEffect(() => {
     if (initialDocumentId) setSelectedDocId(initialDocumentId);
     if (initialCaseId) setSelectedCaseId(initialCaseId);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [initialDocumentId, initialCaseId]);
 
   // Modals — both URL-addressable: page-{n} (chunks) / pageview-{n} (image viewer)

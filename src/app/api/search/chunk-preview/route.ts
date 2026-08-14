@@ -56,7 +56,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       extraWhere = resolved.whereClauses;
     } catch (e) {
       // Non-fatal — log via response.
-      // eslint-disable-next-line no-console
+       
       console.warn('[chunk-preview] prisma resolve failed', e);
     }
   }

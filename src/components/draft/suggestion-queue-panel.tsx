@@ -94,7 +94,7 @@ export function SuggestionQueuePanel({
       rowEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
     return () => cancelAnimationFrame(raf);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [externalHighlightId, suggestions]);
 
   const counts = useMemo(() => {

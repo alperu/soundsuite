@@ -28,6 +28,7 @@ import { setTransform, setZoom } from './zoom-state';
 import { setPinned, useHovered, usePinned } from './hover-state';
 import { useShowAllLinks } from './link-visibility';
 import { mountBandRules, mountColumnHeaders } from './column-headers';
+import { fanPath } from './fan-route';
 import { setupMarquee, type MarqueeResult } from './use-selection-area';
 
 /** Left-button gesture. The lasso keeps its slot here for when it lands. */
@@ -417,6 +418,28 @@ export default function BlockCanvas(props: Props) {
       }),
     );
 
+    // Route the case fan orthogonally. `connectionpath` wants a FINISHED `d`
+    // string; returning points instead would be refused for anything that is
+    // not exactly two of them.
+    render.addPipe(context => {
+      const signal = context as {
+        type?: string;
+        data?: { payload?: BlockConnection; points?: Position[]; path?: string };
+      };
+      if (signal.type !== 'connectionpath' || !signal.data) return context;
+      const payload = signal.data.payload;
+      const points = signal.data.points;
+      if (!payload || payload.edgeKind !== 'contains' || !points || points.length !== 2) {
+        return context;
+      }
+      const path = fanPath(graph, payload.source, payload.target, points[0], points[1]);
+      // Mutating the signal's own data rather than rebuilding the context: the
+      // plugin reads `path` back off the object it emitted, and a fresh object
+      // does not type-check against its union of signal shapes.
+      if (path) signal.data.path = path;
+      return context;
+    });
+
     editor.use(area);
 
     if (editMode) {
@@ -528,7 +551,16 @@ export default function BlockCanvas(props: Props) {
       scaling: () => ({ min: 0.15, max: 1.5 }),
       translation: false,
     });
-    AreaExtensions.simpleNodesOrder(area);
+    // NOT `simpleNodesOrder`: it brings a node to the front by re-appending its
+    // DOM element on pointerdown, and a real (trusted) click never fires when
+    // the element moves mid-gesture — pointerdown and pointerup arrive, `click`
+    // does not, so the block's onClick and the tag panel behind it are dead.
+    // Dispatched events cannot show this: they don't go through the browser's
+    // click-target computation, which is why an earlier repro matrix built on
+    // element.dispatchEvent passed on every path. z-index ordering achieves the
+    // same stacking without touching the DOM, and the plugin recommends it
+    // wherever click handlers inside nodes must stay stable.
+    AreaExtensions.zIndexNodesOrder(area);
 
     // Blocks sit where the layout puts them; only the initial positioning pass
     // is allowed to translate a node.

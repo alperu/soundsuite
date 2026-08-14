@@ -1,20 +1,4 @@
 /**
- * @jest-environment node
- *
- * Node, not the project-default jsdom: `@lancedb/lancedb` pulls in apache-arrow,
- * which touches `TextDecoder` at import time. jsdom doesn't provide it, so this
- * suite died on the import line with `ReferenceError: TextDecoder is not
- * defined` — zero tests executed, and the vector store had no coverage at all
- * while still looking like an ordinary red suite (task #53).
- *
- * jest.setup.js does polyfill TextEncoder/TextDecoder, but nothing loads it —
- * jest.config.js declares no `setupFiles` / `setupFilesAfterEnv`. Wiring that
- * up would change the environment for every suite at once; the node docblock
- * is both smaller and more honest, since the vector store is server-only code
- * that never runs in a browser.
- */
-
-/**
  * Unit tests for VectorStore class.
  *
  * These tests verify the core functionality of the VectorStore including:

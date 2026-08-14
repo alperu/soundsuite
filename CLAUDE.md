@@ -140,7 +140,18 @@ Supports auth modes: `none`, `apikey`, `oauth` (configured via `MCP_AUTH_MODE`).
 
 - Jest with `ts-jest` preset and `jsdom` environment
 - Test timeout is 30 seconds (for OCR tests)
-- `jest.setup.js` globally mocks: `tesseract.js`, `@/lib/logger`, `fetch`, and polyfills `TextEncoder`/`TextDecoder`
+- **There are no global mocks.** `jest.polyfills.js` (wired via `setupFiles`, so it
+  runs before any import is evaluated) supplies `TextEncoder` / `TextDecoder` and
+  nothing else. Every suite mocks what it needs itself — assume no ambient
+  `fetch`, logger or `tesseract.js` mock exists.
+  - History worth knowing: a `jest.setup.js` used to *describe* global mocks for
+    `fetch` / `Request` / `Response` / `@/lib/logger`, but it was never referenced
+    by `jest.config.js`, so it never ran. Wiring it in was measured against the
+    full suite and cost 12 suites and 100 test failures — its hand-rolled Web API
+    stubs shadow the real ones route tests use. It was deleted (task #55).
+- Server-only suites that import native/ESM-heavy modules (e.g. `@lancedb/lancedb`,
+  which pulls apache-arrow) should declare `@jest-environment node` in a docblock —
+  jsdom is the wrong environment for code that never runs in a browser
 - Tests are colocated with source in `__tests__/` directories
 - `transformIgnorePatterns` allows ESM packages: `chokidar`, `p-queue`, `eventemitter3`
 - Native modules (`sharp`, `@xenova/transformers`, `@lancedb/lancedb`, `onnxruntime-node`) are externalized in webpack config for server-side only

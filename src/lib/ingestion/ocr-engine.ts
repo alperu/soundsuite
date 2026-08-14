@@ -155,7 +155,7 @@ export class OCREngine implements IOCREngine {
       // We use eval('require') to make the fork() call completely opaque to
       // Turbopack's static analysis — otherwise it tries to resolve the worker
       // script path as a module dependency and fails at build time.
-      // eslint-disable-next-line no-eval
+       
       const forkFn = (eval('require') as NodeRequire)('child_process').fork as
         typeof import('child_process').fork;
       const workerPath = path.join(process.cwd(), 'workers', 'ocr-worker.js');

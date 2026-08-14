@@ -10,10 +10,10 @@
 import React from 'react';
 import { SampleQueryPanel } from '../sample-query-panel';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 let RTL: any;
 try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+   
   RTL = require('@testing-library/react');
 } catch {
   RTL = null;

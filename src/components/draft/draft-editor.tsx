@@ -165,7 +165,7 @@ interface DraftEditorProps {
  * convert accurately.
  */
 function findTextRangeInDoc(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   doc: { descendants: (fn: (node: any, pos: number) => boolean | void) => void },
   targetText: string,
 ): { from: number; to: number } | null {
@@ -174,7 +174,7 @@ function findTextRangeInDoc(
   let plain = '';
   const posMap: number[] = []; // posMap[i] = PM position of plain-text char at index i
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   doc.descendants((node: any, pos: number) => {
     if (node.isText) {
       const text: string = node.text ?? '';
@@ -544,7 +544,7 @@ const DraftEditor = forwardRef<DraftEditorHandle, DraftEditorProps>(
       },
       findTextInDoc: (targetText: string) => {
         if (!editor) return null;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+         
         return findTextRangeInDoc(editor.state.doc as any, targetText);
       },
     }), [editor, getSelection]);

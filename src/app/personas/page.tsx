@@ -112,7 +112,7 @@ export default function PersonasPage() {
               if (EXTRACT_MODAL_AVAILABLE) {
                 setExtractOpen(true);
               } else {
-                // eslint-disable-next-line no-console
+                 
                 console.log('[TODO] Extract modal — Agent C delivers <ExtractModal /> @/components/personas/extract-modal');
                 alert('Extract-from-file modal is delivered by Agent C. Stub for now.');
               }

@@ -16,7 +16,7 @@
  */
 import path from 'node:path'
 // better-sqlite3 ships no .d.ts in this repo; type as any to avoid TS2307.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+ 
 const Database: any = require('better-sqlite3')
 import { Kysely, SqliteDialect } from 'kysely'
 

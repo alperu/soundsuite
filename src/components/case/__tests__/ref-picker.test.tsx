@@ -10,10 +10,10 @@
 import React from 'react';
 import { __clearRefPickerCache, RefPicker } from '../ref-picker';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 let RTL: any;
 try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+   
   RTL = require('@testing-library/react');
 } catch {
   RTL = null;
@@ -28,7 +28,7 @@ maybe('RefPicker', () => {
 
   beforeEach(() => {
     __clearRefPickerCache();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (global as any).fetch = jest.fn(async () =>
       ({
         ok: true,
@@ -39,7 +39,7 @@ maybe('RefPicker', () => {
   });
 
   afterEach(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     delete (global as any).fetch;
   });
 
@@ -60,20 +60,22 @@ maybe('RefPicker', () => {
     const input = screen.getByPlaceholderText(/search person/i) as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'rob' } });
 
-    // wait for debounce + fetch
+    // Wait for the NARROWED render — both conditions in one waitFor, because
+    // each alone matches a transient state: the picker first paints the
+    // unfiltered set (Roberts present, but so is Smith), and while the
+    // debounced query is in flight the list is empty (Smith absent, but so is
+    // Roberts). Only the settled post-filter render satisfies both.
     await waitFor(() => {
       expect(screen.queryByText(/Hon\. Roberts/)).toBeTruthy();
+      expect(screen.queryByText(/Jane Smith/)).toBeNull();
     });
-
-    // Smith should be filtered out client-side.
-    expect(screen.queryByText(/Jane Smith/)).toBeNull();
 
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(onChange).toHaveBeenCalledWith('@person-roberts');
   });
 
   it('renders auth-warning fallback on 401', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (global as any).fetch = jest.fn(async () =>
       ({ ok: false, status: 401, json: async () => ({}) }) as unknown as Response,
     );
@@ -90,8 +92,12 @@ maybe('RefPicker', () => {
       />,
     );
 
+    // The banner's job is to tell the user auth isn't wired and that they can
+    // still type a ref by hand. This asserted "Haystack API unavailable",
+    // wording the component has never rendered — the behaviour is right, the
+    // expected string was stale.
     await waitFor(() => {
-      expect(screen.queryByText(/Haystack API unavailable/i)).toBeTruthy();
+      expect(screen.queryByText(/Bearer auth not configured/i)).toBeTruthy();
     });
 
     const input = screen.getByPlaceholderText(/@person-/i) as HTMLInputElement;

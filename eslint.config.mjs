@@ -9,8 +9,26 @@ import nextCoreWebVitals from 'eslint-config-next/core-web-vitals';
  * object rather than reporting anything useful. Import the entry point instead.
  *
  * Note this pulls in Next's rules and the TS *parser*, but no
- * `@typescript-eslint` rules are enabled by it — see `eslint-config-next/typescript`
- * if the team wants those (it is a large baseline; measured in the task notes).
+ * `@typescript-eslint` rules are enabled by it.
+ *
+ * DECISION (task #43): the TypeScript rule set stays OFF, deliberately.
+ *
+ * Turning it on means adding `eslint-config-next/typescript` after
+ * core-web-vitals. That was measured, not guessed: it produces 1242 errors and
+ * 237 warnings, of which 1151 are `@typescript-eslint/no-explicit-any` and 188
+ * `no-unused-vars`. Nothing else moves materially. So the question is really
+ * "do we want to burn down 1151 `any`s", and nobody has asked for that; a rule
+ * whose violations are never fixed is noise that trains people to ignore lint.
+ *
+ * Consequence handled at the same time: because those rules never ran, the
+ * codebase had accumulated 46 `// eslint-disable-next-line @typescript-eslint/...`
+ * comments suppressing rules that do not exist here. `eslint --fix` removed
+ * them (they reported as "unused eslint-disable directive"), so the remaining
+ * directives all reference rules that actually run.
+ *
+ * Revisit when either is true: someone commits to the `any` burn-down as
+ * scheduled work, or a bug lands that `no-explicit-any` / `no-unused-vars`
+ * would plausibly have caught. Re-measure before flipping — the baseline moves.
  */
 const eslintConfig = [
   {

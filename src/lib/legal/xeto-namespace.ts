@@ -32,7 +32,7 @@ import { PER_FILING_TYPE_KINDS } from '@/lib/filings/classify-entity-kind'
 // the cycle prisma → validate → xeto-namespace → refs → prisma.
 import { isRefKey } from '@/lib/haystack/ref-keys'
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 const dynImport: <T>(spec: string) => Promise<T> = new Function(
   's',
   'return import(s);',
@@ -49,7 +49,7 @@ const LIB_NAMES = [
 type Spec = unknown
 type Dict = unknown
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 type AnyMod = any
 
 interface XetoBoot {
@@ -114,7 +114,7 @@ async function loadHaxallModules(): Promise<{
   const inheritedFanHome = process.env.FAN_HOME
   if (inheritedFanHome) {
     delete process.env.FAN_HOME
-    // eslint-disable-next-line no-console
+     
     console.log(
       `[xeto-namespace] dropped inherited FAN_HOME=${inheritedFanHome}`,
     )
@@ -761,7 +761,7 @@ const SPEC_MISS_LOGGED = new Set<string>()
 function logSpecMissOnce(model: string, qname: string): void {
   if (SPEC_MISS_LOGGED.has(model)) return
   SPEC_MISS_LOGGED.add(model)
-  // eslint-disable-next-line no-console
+   
   console.warn(
     `[xeto] spec '${qname}' for model ${model} not loaded — write passes through unvalidated`,
   )
@@ -772,7 +772,7 @@ function logBootErrorOnce(model: string, e: unknown): void {
   if (BOOT_ERR_LOGGED.has(model)) return
   BOOT_ERR_LOGGED.add(model)
   const msg = e instanceof Error ? `${e.constructor.name}: ${e.message}` : String(e)
-  // eslint-disable-next-line no-console
+   
   console.warn(
     `[xeto] validation passthrough for ${model} (haxall internal error: ${msg})`,
   )

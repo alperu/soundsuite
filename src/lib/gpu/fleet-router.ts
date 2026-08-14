@@ -635,7 +635,7 @@ function buildLegacyRegistry(
 function buildEffectiveModelMap(
   enabledModes: string[],
   perHostOverrides: Record<string, string>,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   cfg: any,
 ): Record<string, string> {
   const out: Record<string, string> = {};
