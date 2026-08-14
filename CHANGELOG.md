@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.3.2](https://github.com/alperu/soundsuite/compare/v1.3.1...v1.3.2) (2026-08-14)
+
+
+### Features
+
+* **scope+test:** containment fan router, test-infra archaeology paid down ([ad8a340](https://github.com/alperu/soundsuite/commit/ad8a3407ab3e41f132f24440e711dae678e0293b))
+* **scope:** complete linking UX — badges, menus, picker, pairing workbench ([2898798](https://github.com/alperu/soundsuite/commit/2898798384d5087ae10f4bc60daa8ac3294f4657))
+* **scope:** Haystack Block View — visual scope editor, entity linking, and search-scope override ([dbadca4](https://github.com/alperu/soundsuite/commit/dbadca4b27da18c39e2580c617b672fcbe0512ed))
+* **scope:** selection-persistent edges, attachment→order links, Haystack Management nav ([e1ca5fd](https://github.com/alperu/soundsuite/commit/e1ca5fdebb03d6e73668a1cbbc2e23803ae4d512))
+* **scope:** zoom-compensated slot labels + layout polish ([4affaaf](https://github.com/alperu/soundsuite/commit/4affaaf6a975177eb2b823bbd5de7e54bca27eda))
+
+
+### Bug Fixes
+
+* **scope:** edge-to-circle alignment corpus-wide, show-all includes containment, pin-until-hide links ([02d7e0f](https://github.com/alperu/soundsuite/commit/02d7e0f2500cd27397d95c369f99dddecebb5f5c))
+* **scope:** real clicks select blocks, ref edges route through channels, panel opens the entity's own row ([7caacf6](https://github.com/alperu/soundsuite/commit/7caacf62356a44d7fc4ebf609aa053206cbd0f0e))
+
+
+### Miscellaneous Chores
+
+* sync release-please manifest to v1.3.1, pin next release ([df528b9](https://github.com/alperu/soundsuite/commit/df528b9d0ee37c210cfece5a1d67f0bb830c0d34))
+
 ## [1.3.1](https://github.com/alperu/soundsuite/compare/v1.3.0...v1.3.1) (2026-08-12)
 
 ### Features
