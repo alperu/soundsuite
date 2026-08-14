@@ -430,12 +430,24 @@ export function TagPanel({ entityKind, entityId, entityLabel, onRename, embedded
               type="button"
               onClick={beginRename}
               title="Click to rename"
-              className="block w-full text-left text-[11px] text-gray-500 truncate px-1 -mx-1 rounded hover:bg-blue-50 hover:text-blue-700 transition-colors"
+              // Wraps rather than truncates (#99): a filing's name IS how the
+              // user identifies it, and an ellipsis two words in makes two
+              // motions from the same matter indistinguishable. Capped at three
+              // lines so the header cannot push the tags off screen.
+              className="block w-full text-left text-[11px] text-gray-500 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:3] overflow-hidden px-1 -mx-1 rounded hover:bg-blue-50 hover:text-blue-700 transition-colors"
             >
               {entityLabel}
             </button>
           ) : (
-            <div className="text-[11px] text-gray-500 truncate" title={entityLabel}>{entityLabel}</div>
+            <div
+              // Same three-line wrap as the rename button above — the read-only
+              // header must not identify a filing less clearly than the
+              // editable one does.
+              className="text-[11px] text-gray-500 [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:3] overflow-hidden"
+              title={entityLabel}
+            >
+              {entityLabel}
+            </div>
           )}
           {titleError && (
             <div className="mt-1 text-[10px] text-red-600">{titleError}</div>

@@ -153,7 +153,16 @@ describe('buildScopeGraph column layout', () => {
     expect(edge?.source).toBe(filingKey('m1'));
     expect(edge?.slot).toBe('caseRef');
     const box = graph.boxes.get(filingKey('m1'));
-    expect(box).toEqual({ x: columnX(0), y: 0, w: 320, h: FILING_H });
+    // Height comes from the GRAPH, not the module constant: a block is as tall
+    // as its own handles and its own title need (#87/#89/#99), and FILING_H is
+    // only the one-line floor those derivations start from.
+    expect(box).toEqual({
+      x: columnX(0),
+      y: 0,
+      w: 320,
+      h: graph.filingById.get('m1')?.height,
+    });
+    expect(box?.h).toBeGreaterThanOrEqual(FILING_H);
   });
 
   it('keeps rows a whole ROW_H apart', () => {
@@ -161,6 +170,10 @@ describe('buildScopeGraph column layout', () => {
       testCase('c1', [filing('m1', 'motion'), filing('m2', 'motion')]),
     ]);
     const gap = (graph.filingById.get('m2')?.y ?? 0) - (graph.filingById.get('m1')?.y ?? 0);
-    expect(gap).toBe(ROW_H);
+    // One pitch for every row — that is what family alignment across columns
+    // rests on — but the pitch itself is derived per graph, so the assertion
+    // reads it from there rather than from the baseline constant.
+    expect(gap).toBe(graph.rowH);
+    expect(graph.rowH).toBeGreaterThanOrEqual(ROW_H);
   });
 });

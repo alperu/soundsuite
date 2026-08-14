@@ -93,9 +93,20 @@ describe('the tag panel agrees with the canvas', () => {
     }
   });
 
-  it('does not promote it on kinds that are not order-shaped', () => {
-    const spec = TAG_SPEC_BY_KIND.notice.find(s => s.name === 'motionRef');
-    expect(spec).toBeDefined();
-    expect(spec!.alwaysShow).toBeUndefined();
+  // #94 scoped the promotion to order-shaped kinds and pinned that a notice did
+  // NOT get it. #100 widened the rule — the panel advertises whatever the canvas
+  // draws a socket for, and a notice draws motionRef — so what is pinned now is
+  // the shape of the rule, not its old boundary. The boundary that survives is
+  // `orderRef`, which order-shaped kinds neither draw nor advertise.
+  it('promotes a ref exactly when the canvas offers the socket', () => {
+    const noticeMotionRef = TAG_SPEC_BY_KIND.notice.find(s => s.name === 'motionRef');
+    expect(noticeMotionRef).toBeDefined();
+    expect(rendersWhenEmpty(noticeMotionRef!, false, false)).toBe(true);
+
+    for (const kind of ORDER_SHAPED) {
+      const orderRef = TAG_SPEC_BY_KIND[kind as keyof typeof TAG_SPEC_BY_KIND]
+        ?.find(s => s.name === 'orderRef');
+      expect(orderRef?.alwaysShow).toBeUndefined();
+    }
   });
 });

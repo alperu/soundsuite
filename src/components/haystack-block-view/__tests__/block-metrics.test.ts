@@ -1,6 +1,7 @@
 import {
   BLOCK_FOOTER_H,
   BLOCK_TITLE_H,
+  titleHeightFor,
   SLOT_PITCH,
   SOCKET_D,
   anchorRatio,
@@ -89,5 +90,45 @@ describe('edge stack geometry', () => {
       const ys = centres(stack, height);
       expect(ys[ys.length - 1] + SOCKET_D / 2).toBeLessThanOrEqual(height - BLOCK_FOOTER_H + 0.01);
     }
+  });
+});
+
+/**
+ * #99: a filing's name wraps to two or three lines instead of being cut off,
+ * which makes the title band per-block. These pin the estimator's shape — its
+ * exact character width is a measurement that may be tuned, so nothing here
+ * asserts a pixel count that would break when it is.
+ */
+describe('titleHeightFor', () => {
+  const WIDTH = 246; // the block's title column, less padding and the label gutter
+
+  it('gives a short name a single line', () => {
+    expect(titleHeightFor('Motion to compel', WIDTH)).toBe(BLOCK_TITLE_H);
+  });
+
+  it('grows for a name that cannot fit on one line', () => {
+    const long = 'Motion to compel arbitration and to abate all pending discovery deadlines';
+    expect(titleHeightFor(long, WIDTH)).toBeGreaterThan(BLOCK_TITLE_H);
+  });
+
+  it('stops at three lines however long the name is', () => {
+    const three = titleHeightFor('x'.repeat(200), WIDTH);
+    const absurd = titleHeightFor('x'.repeat(5000), WIDTH);
+    expect(absurd).toBe(three);
+  });
+
+  it('never returns less than the one-line bar, even for an empty name', () => {
+    expect(titleHeightFor('', WIDTH)).toBe(BLOCK_TITLE_H);
+    expect(titleHeightFor('', 0)).toBe(BLOCK_TITLE_H);
+  });
+
+  it('keeps the handles clear of a grown title', () => {
+    // The band the anchors exclude must be the block's OWN title height, so a
+    // three-line title still leaves its stack below the bar (#77's lesson).
+    const tall = titleHeightFor('x'.repeat(200), WIDTH);
+    const height = filingHeightFor(5, tall);
+    const stack = ['in', 'a', 'b', 'c', 'd'];
+    const first = anchorRatio(stack[0], stack, height, { titleH: tall }) * height;
+    expect(first - SOCKET_D / 2).toBeGreaterThanOrEqual(tall);
   });
 });

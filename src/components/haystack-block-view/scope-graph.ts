@@ -1,4 +1,4 @@
-import { BLOCK_FOOTER_H, BLOCK_TITLE_H, filingHeightFor } from './block-metrics';
+import { BLOCK_FOOTER_H, BLOCK_TITLE_H, filingHeightFor, titleHeightFor } from './block-metrics';
 import { visibleSlotsFor } from './link-rules';
 import type {
   ScopeCase,
@@ -137,6 +137,13 @@ export interface FilingBlock {
    *  picker and the suggester read the date itself, not just the sort it
    *  produced upstream. */
   filingDate: string | null;
+  /** This block's own title-bar height: one to three lines of its name (#99).
+   *  Every consumer that excludes the title band reads THIS, not the constant —
+   *  a shared band height and a per-block title is the #77 bug again. */
+  titleH: number;
+  /** Total height, title included. Rows keep a uniform pitch (`rowH`), but a
+   *  block is only as tall as it needs to be. */
+  height: number;
   filingType: string;
   docCount: number;
   indexedCount: number;
@@ -223,6 +230,23 @@ export function filingHeightOf(filings: readonly ScopeFiling[]): number {
     members = Math.max(members, slots.length + 1);
   }
   return filingHeightFor(members);
+}
+
+/**
+ * The width a title wraps inside: the block, less its 1px border on each side,
+ * its 10px left padding, and the 64px gutter the right-edge slot labels render
+ * into. The block's `border px-2.5 pr-16` is where the other copy of those
+ * numbers lives.
+ *
+ * The border matters. Measured against every real title, 246 (border ignored)
+ * under-reserved two of them and 244 under-reserved none — one pixel of slack
+ * either side is the difference between a name shown in full and a name cut off.
+ */
+const TITLE_TEXT_W = FILING_W - 2 - 10 - 64;
+
+/** This filing's title bar, one to three lines depending on its name (#99). */
+export function titleHeightOf(label: string): number {
+  return titleHeightFor(label, TITLE_TEXT_W);
 }
 
 function refTargetOf(filing: ScopeFiling): { id: string; slot: RefSlot } | null {
@@ -367,7 +391,15 @@ export function buildScopeGraph(cases: ScopeCase[], options: BuildOptions = {}):
     rowH: 0,
     bands: [],
   };
-  graph.filingH = filingHeightOf(cases.flatMap(c => c.filings));
+  // The body and footer are uniform (handles and chips); only the title varies.
+  const bodyAndFooterH = filingHeightOf(cases.flatMap(c => c.filings)) - BLOCK_TITLE_H;
+  // Rows keep ONE pitch — family alignment across columns depends on it — so
+  // the pitch follows the tallest title in the graph even though each block is
+  // drawn only as tall as its own name needs.
+  const tallestTitle = cases
+    .flatMap(c => c.filings)
+    .reduce((tallest, f) => Math.max(tallest, titleHeightOf(f.label)), BLOCK_TITLE_H);
+  graph.filingH = bodyAndFooterH + tallestTitle;
   graph.rowH = graph.filingH + ROW_GAP;
 
   let clusterTop = 0;
@@ -416,6 +448,8 @@ export function buildScopeGraph(cases: ScopeCase[], options: BuildOptions = {}):
         id: filing.id,
         caseId: c.id,
         label: filing.label,
+        titleH: titleHeightOf(filing.label),
+        height: bodyAndFooterH + titleHeightOf(filing.label),
         filingDate: filing.filingDate ?? null,
         filingType: filing.filingType,
         docCount: filing.docCount,
@@ -432,7 +466,7 @@ export function buildScopeGraph(cases: ScopeCase[], options: BuildOptions = {}):
       };
       graph.filings.push(fBlock);
       graph.filingById.set(filing.id, fBlock);
-      graph.boxes.set(fBlock.key, { x: fBlock.x, y: fBlock.y, w: FILING_W, h: graph.filingH });
+      graph.boxes.set(fBlock.key, { x: fBlock.x, y: fBlock.y, w: FILING_W, h: fBlock.height });
       graph.caseOfFiling.set(fBlock.key, cBlock.key);
       childKeys.push(fBlock.key);
       // Drawn filing → case, matching the gesture: the filing's caseRef socket

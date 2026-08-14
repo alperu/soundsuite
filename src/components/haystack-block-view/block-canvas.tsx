@@ -197,11 +197,14 @@ function layoutSocketPositions(graph: ScopeGraph) {
         // A case block and the unfiled pile draw neither band; a filing draws
         // both. Measuring from a band the block never rendered is what put the
         // containment fan off its circle (#77).
+        // Per-block title band (#99): a filing's bar is as tall as its own name
+        // needs, so the anchors read THAT, not the constant. A case block and
+        // the unfiled pile draw neither band.
         const ratio = slotAnchorRatio(
           key,
           stack,
           box.h,
-          filing ? undefined : { titleH: 0, footerH: 0 },
+          filing ? { titleH: filing.titleH } : { titleH: 0, footerH: 0 },
         );
         const position: Position = {
           x: onRight ? box.x + box.w : box.x,

@@ -36,9 +36,104 @@ export const CLICK_SLOP = 4;
 /** Clearance kept between the outermost handle and the block's own edges. */
 const EDGE_PAD = 6;
 
-/** The filing block's title bar. Handles live BELOW it — the anchor helper
- *  excludes this band so no circle lands on the filing's name. */
-export const BLOCK_TITLE_H = 24;
+/** One line of the title bar, including its share of the vertical padding. */
+const TITLE_LINE_H = 15;
+
+/** Padding above and below the title text, together. */
+const TITLE_PAD = 9;
+
+/**
+ * The filing block's title bar at ONE line — the floor, and the value anything
+ * without a label of its own falls back to. Handles live BELOW the bar, and
+ * the anchor helper excludes it, so a block whose title grows must pass its own
+ * height everywhere the band is measured (#77's lesson, now per block).
+ */
+export const BLOCK_TITLE_H = TITLE_LINE_H + TITLE_PAD;
+
+/**
+ * Longest title we will draw before the rest becomes an ellipsis.
+ *
+ * FIVE, measured rather than picked. Rendered against every real title, the
+ * longest wraps to five lines; four left three names still cut off. Five covers
+ * the corpus completely, and the cost lands on the row pitch, which follows the
+ * tallest title in the graph.
+ *
+ * It is still a cap, not "unlimited": a pathological name clips at five lines
+ * and keeps the full text in its tooltip. Without a ceiling one bad title would
+ * set the pitch for every row on the canvas.
+ */
+const MAX_TITLE_LINES = 5;
+
+/**
+ * Fallback character width, used only where text cannot be measured (jest's
+ * jsdom returns nothing useful from `measureText`). Calibrated against real
+ * titles, and deliberately generous — a spare line is invisible, a clipped
+ * name is the bug.
+ */
+const TITLE_CHAR_W = 7.0;
+
+/**
+ * A canvas context kept for measuring, created once.
+ *
+ * The layout runs in the browser, so it can ask the same engine that will do
+ * the wrapping how wide a word is, rather than estimating from a character
+ * count. Estimation was wrong in a way no constant could fix: titles carrying
+ * long unbreakable tokens wrapped at ~19 characters per line where an average
+ * predicted 35, and three names stayed clipped through two calibration passes.
+ */
+let measurer: CanvasRenderingContext2D | null | undefined;
+
+function textWidth(text: string, font: string): number | null {
+  if (measurer === undefined) {
+    const canvas = typeof document === 'undefined' ? null : document.createElement('canvas');
+    measurer = canvas?.getContext('2d') ?? null;
+  }
+  if (!measurer) return null;
+  measurer.font = font;
+  const width = measurer.measureText(text).width;
+  // jsdom answers 0 for everything; treat that as "cannot measure".
+  return width > 0 ? width : null;
+}
+
+/** The title bar's font, as the block renders it. */
+const TITLE_FONT = '500 12px ui-sans-serif, system-ui, -apple-system, sans-serif';
+
+/**
+ * How many lines this label really takes, by greedy word wrap — the same rule
+ * the browser applies. A single word wider than the line gets its own line and
+ * overflows rather than looping forever.
+ */
+function wrappedLines(label: string, width: number, font: string): number | null {
+  const space = textWidth(' ', font);
+  if (space === null) return null;
+  let lines = 1;
+  let used = 0;
+  for (const word of label.split(/\s+/).filter(Boolean)) {
+    const w = textWidth(word, font) ?? 0;
+    if (used === 0) {
+      used = w;
+    } else if (used + space + w <= width) {
+      used += space + w;
+    } else {
+      lines += 1;
+      used = w;
+    }
+    // A word too wide for the line pushes the next one down as well.
+    while (used > width && lines < 64) {
+      lines += 1;
+      used -= width;
+    }
+  }
+  return lines;
+}
+
+export function titleHeightFor(label: string, width: number): number {
+  const text = label ?? '';
+  const measured = text ? wrappedLines(text, width, TITLE_FONT) : 1;
+  const estimated = Math.ceil(text.length / Math.max(1, Math.floor(width / TITLE_CHAR_W)));
+  const lines = Math.min(MAX_TITLE_LINES, Math.max(1, measured ?? estimated));
+  return lines * TITLE_LINE_H + TITLE_PAD;
+}
 
 /**
  * The filing block's footer: kind chip, doc count, unmapped badge.
@@ -68,9 +163,14 @@ export function filingBodyFor(members: number): number {
   return Math.max(BODY_MIN, span);
 }
 
-/** Total block height for a given per-edge handle count. */
-export function filingHeightFor(members: number): number {
-  return BLOCK_TITLE_H + filingBodyFor(members) + BLOCK_FOOTER_H;
+/**
+ * Total block height for a handle count and a title bar.
+ *
+ * `titleH` defaults to the one-line bar so every existing caller keeps its
+ * meaning; a block with a two- or three-line name passes its own.
+ */
+export function filingHeightFor(members: number, titleH: number = BLOCK_TITLE_H): number {
+  return titleH + filingBodyFor(members) + BLOCK_FOOTER_H;
 }
 
 /**

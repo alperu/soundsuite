@@ -238,8 +238,14 @@ export function slotsForKind(kind: string): LinkSlot[] {
   // make the link, so hiding it until populated would hide the feature (#89,
   // same reasoning as #88's always-visible `resolves`). An order does not get
   // one: its side of that relationship is `resolves`, which it already has.
-  if (kind === 'response') return ['respondingTo', ...revision, 'orderRef', 'caseRef'];
-  if (kind === 'reply') return ['replyingTo', ...revision, 'orderRef', 'caseRef'];
+  // A response and a reply each carry TWO motion-side facts: what they answer
+  // (`respondingTo` / `replyingTo`) and what they were filed under (`motionRef`).
+  // Only the first was listed, so the parentage socket arrived through the
+  // held-ref scan alone — a response with a motionRef drew one, an identical
+  // response without drew none (#100, the same trap as #94's order). It goes
+  // SECOND: the answer is still the primary link and the unaimed fallback.
+  if (kind === 'response') return ['respondingTo', 'motionRef', ...revision, 'orderRef', 'caseRef'];
+  if (kind === 'reply') return ['replyingTo', 'motionRef', ...revision, 'orderRef', 'caseRef'];
   // An order carries BOTH motion pointers, and they mean different things:
   // `resolves` is what it rules on, `motionRef` is what it was filed under (an
   // order can be filed under one motion and rule on another — see
@@ -249,7 +255,11 @@ export function slotsForKind(kind: string): LinkSlot[] {
   // `resolves` stays FIRST — `primarySlotFor` and the unslotted fallback both
   // take the first non-secondary slot, and an order's primary link is the ruling.
   if (ORDER_SHAPED_KINDS.has(kind)) return ['resolves', 'motionRef', ...revision, 'caseRef'];
-  if (kind === 'motion') return [...revision, 'orderRef', 'caseRef'];
+  // A motion writes a motionRef too — its PARENT motion, the tag that makes the
+  // server emit `subMotion` and that `missingForMotion` already counts as a
+  // wanted link. It comes after the revision pair so the unaimed fallback stays
+  // `amends`, and `primarySlotFor` keeps saying null for a motion (#100).
+  if (kind === 'motion') return [...revision, 'motionRef', 'orderRef', 'caseRef'];
   return ['motionRef', ...revision, 'orderRef', 'caseRef'];
 }
 
@@ -264,6 +274,10 @@ export function slotsForKind(kind: string): LinkSlot[] {
  * it is the root every other kind points at.
  */
 export function primarySlotFor(kind: string): LinkSlot | null {
+  // A motion's `motionRef` is an amendment parent — a fact ABOUT the motion,
+  // not what places it in a chain — so exposing that socket (#100) must not
+  // turn every root motion into a workbench row demanding a parent.
+  if (normalizeKind(kind) === 'motion') return null;
   const secondary = new Set<LinkSlot>(['amends', 'supersedes', 'orderRef', 'caseRef']);
   return slotsForKind(normalizeKind(kind)).find(slot => !secondary.has(slot)) ?? null;
 }

@@ -21,7 +21,6 @@ import {
   CASE_H,
   CASE_W,
   BLOCK_FOOTER_H,
-  BLOCK_TITLE_H,
   FILING_H,
   FILING_W,
   type CaseBlock,
@@ -422,7 +421,12 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
   // Only a FILING draws a title bar. The unfiled pile and the case block don't,
   // so their handles centre on the whole block — and the watcher has to be told
   // the same thing or the two disagree by half the title height (#77).
-  const bands = payload.kind === 'filing' ? undefined : { titleH: 0, footerH: 0 };
+  // A filing's title bar is one to three lines of its own name (#99), so the
+  // band the anchors exclude is per BLOCK, not a constant. Everything that
+  // measures it reads this one value — a shared constant beside a per-block bar
+  // is exactly how the fan came to miss its circle in #77.
+  const titleH = payload.kind === 'filing' ? payload.data.titleH : 0;
+  const bands = payload.kind === 'filing' ? { titleH } : { titleH: 0, footerH: 0 };
   /**
    * The grab handle for a slot is its whole ROW, not its 6.3px circle (#96).
    *
@@ -694,8 +698,12 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
           so it reads first. Padded clear of the slot labels that render inside
           the right edge, and truncated with the full name in the tooltip. */}
       <div
-        style={{ height: BLOCK_TITLE_H }}
-        className={`flex shrink-0 items-center truncate rounded-t-md border-b px-2.5 pr-16 text-[12px] font-medium ${
+        style={{ height: titleH }}
+        // Wraps to the height the layout already reserved for it. `line-clamp`
+        // rather than `truncate`: a filing's name is how the user tells two
+        // motions in the same matter apart, and an ellipsis after four words
+        // makes them identical.
+        className={`flex shrink-0 items-start rounded-t-md border-b px-2.5 pr-16 pt-1 text-[12px] font-medium leading-[15px] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:5] overflow-hidden ${
           unindexed
             ? 'border-gray-200 bg-gray-100/70 text-gray-400'
             : 'border-gray-200 bg-gray-50 text-gray-800'

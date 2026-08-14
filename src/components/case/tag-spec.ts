@@ -262,8 +262,44 @@ const FILING_RECEIVED_ON_SPEC: TagSpec = {
 }
 
 /**
+ * A link a block can draw is a link its panel must offer unset.
+ *
+ * The rule generalises #88 (`resolves`) and #94 (an order's `motionRef`): a ref
+ * row hidden until it holds a value hides the very thing the user opened the
+ * filing to set. So every ref that has a socket on the canvas — the writable
+ * list in `slotsForKind`, link-rules.ts — is advertised here, and the two
+ * surfaces are pinned against each other in the tests (#100).
+ *
+ * Deliberately NOT a shared import: link-rules.ts pulls the haystack client
+ * (fetch, window events) and this module is read by non-browser callers, the
+ * same reason link-rules duplicates `ORDER_SHAPED_KINDS` rather than importing
+ * the server-only refs module.
+ */
+function advertiseLinkRefs(specs: TagSpec[], names: readonly string[]): TagSpec[] {
+  return specs.map(spec => (names.includes(spec.name) ? { ...spec, alwaysShow: true } : spec));
+}
+
+/** What `slotsForKind` offers a generic filing kind. */
+const FILING_LINK_REFS = ['caseRef', 'motionRef', 'orderRef', 'amends', 'supersedes'] as const;
+
+/**
+ * An order-shaped kind's list. `orderRef` is absent on purpose: an order's side
+ * of that relationship is `resolves`, so the canvas draws no orderRef socket
+ * there and the panel must not advertise a row the canvas won't honour.
+ */
+const ORDER_SHAPED_LINK_REFS = ['caseRef', 'motionRef', 'amends', 'supersedes'] as const;
+
+/**
+ * A motion's list. Its `motionRef` is the PARENT motion of an amendment chain
+ * (the tag `subMotion` is derived from), and the canvas draws that socket; the
+ * motion's order side is the derived, read-only `orderRefs`, which is not a
+ * slot anyone writes.
+ */
+const MOTION_LINK_REFS = ['caseRef', 'motionRef', 'amends', 'supersedes'] as const;
+
+/**
  * The base set for an order-shaped kind (order, proposedOrder, judgment,
- * decree), with `motionRef` promoted to `alwaysShow`.
+ * decree).
  *
  * An order carries two motion pointers that mean different things: `resolves`
  * (what it rules on) and `motionRef` (what it was filed under). `resolves` has
@@ -273,9 +309,7 @@ const FILING_RECEIVED_ON_SPEC: TagSpec = {
  * half of this lives in `slotsForKind` in link-rules.ts; the two must agree.
  */
 function orderShapedBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
-  return attachmentBaseSpec(kindMarker, kindDoc).map(spec =>
-    spec.name === 'motionRef' ? { ...spec, alwaysShow: true } : spec,
-  );
+  return advertiseLinkRefs(attachmentTagRows(kindMarker, kindDoc), ORDER_SHAPED_LINK_REFS);
 }
 
 /**
@@ -284,6 +318,11 @@ function orderShapedBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
  * type-specific). Order is: markers → refs → values, matching the UI grouping.
  */
 function attachmentBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
+  return advertiseLinkRefs(attachmentTagRows(kindMarker, kindDoc), FILING_LINK_REFS);
+}
+
+/** The rows themselves, before any are advertised. */
+function attachmentTagRows(kindMarker: string, kindDoc: string): TagSpec[] {
   return [
     // markers
     { name: kindMarker, tier: 'marker', doc: kindDoc, valueType: 'bool' },
@@ -622,7 +661,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     },
   ],
 
-  motion: [
+  motion: advertiseLinkRefs([
     // markers
     {
       name: 'motion',
@@ -869,7 +908,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     FILING_FILE_REF_SPEC,
     FILING_FILED_ON_SPEC,
     FILING_RECEIVED_ON_SPEC,
-  ],
+  ], MOTION_LINK_REFS),
 
   motionEvent: [
     { name: 'motionEvent', tier: 'marker', doc: 'Marker: lifecycle event on a Motion.', valueType: 'bool', internal: true },
@@ -1182,7 +1221,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // but the full quartet is offered for manual override.
     ...ORIGIN_MARKERS,
     // refs
-    { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
+    { name: 'caseRef', tier: 'ref', alwaysShow: true, doc: 'Reference to the parent case.', refTarget: 'case' },
     FILING_FILE_REF_SPEC,
     { name: 'preparedBy', tier: 'ref', doc: 'Court clerk who prepared this volume.', refTarget: 'person' },
     // Single ref slots filled by the haystack extractor (from /s/ Deputy Clerk
@@ -1248,7 +1287,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
     // but the full quartet is offered for manual override.
     ...ORIGIN_MARKERS,
     // refs
-    { name: 'caseRef', tier: 'ref', doc: 'Reference to the parent case.', refTarget: 'case' },
+    { name: 'caseRef', tier: 'ref', alwaysShow: true, doc: 'Reference to the parent case.', refTarget: 'case' },
     { name: 'reporterRef', tier: 'ref', doc: 'Court reporter who produced this volume.', refTarget: 'person' },
     // Single clerk attribution — courts often list a specific deputy clerk
     // on the cover sheet who certified the volume. Distinct from
@@ -1359,12 +1398,15 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
 
   response: [
     ...attachmentBaseSpec('response', 'Marker: this record is a Response filing.'),
-    { name: 'respondingTo', tier: 'ref', doc: 'The motion/filing this responds to.', refTarget: 'motion' },
+    // The defining link of a response — offered unset, like every other slot
+    // the canvas draws a socket for (#100).
+    { name: 'respondingTo', tier: 'ref', alwaysShow: true, doc: 'The motion/filing this responds to.', refTarget: 'motion' },
   ],
 
   reply: [
     ...attachmentBaseSpec('reply', 'Marker: this record is a Reply filing.'),
-    { name: 'replyingTo', tier: 'ref', doc: 'The response this replies to.', refTarget: 'motionAttachment' },
+    // The defining link of a reply — offered unset, same rule (#100).
+    { name: 'replyingTo', tier: 'ref', alwaysShow: true, doc: 'The response this replies to.', refTarget: 'motionAttachment' },
   ],
 
   judgment: [
