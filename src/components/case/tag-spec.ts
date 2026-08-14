@@ -262,6 +262,23 @@ const FILING_RECEIVED_ON_SPEC: TagSpec = {
 }
 
 /**
+ * The base set for an order-shaped kind (order, proposedOrder, judgment,
+ * decree), with `motionRef` promoted to `alwaysShow`.
+ *
+ * An order carries two motion pointers that mean different things: `resolves`
+ * (what it rules on) and `motionRef` (what it was filed under). `resolves` has
+ * been always-visible since #88; `motionRef` was not, so on an order with no
+ * value yet the filed-under row simply wasn't there — the same hidden-until-
+ * populated trap, on the tag it is most natural to reach for (#94). The canvas
+ * half of this lives in `slotsForKind` in link-rules.ts; the two must agree.
+ */
+function orderShapedBaseSpec(kindMarker: string, kindDoc: string): TagSpec[] {
+  return attachmentBaseSpec(kindMarker, kindDoc).map(spec =>
+    spec.name === 'motionRef' ? { ...spec, alwaysShow: true } : spec,
+  );
+}
+
+/**
  * Helper: the common MotionAttachment-derived tag set every per-filing-type
  * entity inherits. Returns a fresh array each call (the kind marker is
  * type-specific). Order is: markers → refs → values, matching the UI grouping.
@@ -1299,7 +1316,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   ],
 
   order: [
-    ...attachmentBaseSpec('order', 'Marker: this record is a court Order.'),
+    ...orderShapedBaseSpec('order', 'Marker: this record is a court Order.'),
     { name: 'signedBy', tier: 'ref', doc: 'Judge who signed the order.', refTarget: 'person' },
     RESOLVES_SPEC,
     { name: 'orderType', tier: 'value', doc: 'Type of order (e.g. "scheduling", "protective").', valueType: 'text' },
@@ -1307,7 +1324,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   ],
 
   proposedOrder: [
-    ...attachmentBaseSpec('proposedOrder', 'Marker: this record is a Proposed Order.'),
+    ...orderShapedBaseSpec('proposedOrder', 'Marker: this record is a Proposed Order.'),
     { name: 'signedBy', tier: 'ref', doc: 'Judge who would sign the order if granted.', refTarget: 'person' },
     RESOLVES_SPEC,
     { name: 'orderType', tier: 'value', doc: 'Type of order proposed.', valueType: 'text' },
@@ -1351,7 +1368,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   ],
 
   judgment: [
-    ...attachmentBaseSpec('judgment', 'Marker: this record is a Judgment.'),
+    ...orderShapedBaseSpec('judgment', 'Marker: this record is a Judgment.'),
     { name: 'signedBy', tier: 'ref', doc: 'Judge who signed the judgment.', refTarget: 'person' },
     RESOLVES_SPEC,
     { name: 'judgmentType', tier: 'value', doc: 'Kind of judgment (e.g. "default", "summary", "final").', valueType: 'text' },
@@ -1359,7 +1376,7 @@ export const TAG_SPEC_BY_KIND: Record<EntityKind, TagSpec[]> = {
   ],
 
   decree: [
-    ...attachmentBaseSpec('decree', 'Marker: this record is a Decree.'),
+    ...orderShapedBaseSpec('decree', 'Marker: this record is a Decree.'),
     { name: 'signedBy', tier: 'ref', doc: 'Judge who signed the decree.', refTarget: 'person' },
     RESOLVES_SPEC,
     { name: 'decreeType', tier: 'value', doc: 'Kind of decree (e.g. "divorce", "adoption").', valueType: 'text' },

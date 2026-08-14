@@ -240,7 +240,15 @@ export function slotsForKind(kind: string): LinkSlot[] {
   // one: its side of that relationship is `resolves`, which it already has.
   if (kind === 'response') return ['respondingTo', ...revision, 'orderRef', 'caseRef'];
   if (kind === 'reply') return ['replyingTo', ...revision, 'orderRef', 'caseRef'];
-  if (ORDER_SHAPED_KINDS.has(kind)) return ['resolves', ...revision, 'caseRef'];
+  // An order carries BOTH motion pointers, and they mean different things:
+  // `resolves` is what it rules on, `motionRef` is what it was filed under (an
+  // order can be filed under one motion and rule on another — see
+  // `ScopeRefs.resolves`). Only the second was missing, so an order's filed-under
+  // socket appeared only on rows that already held a value, which is the #88/#89
+  // "hidden until populated" trap: you cannot draw the link you cannot see (#94).
+  // `resolves` stays FIRST — `primarySlotFor` and the unslotted fallback both
+  // take the first non-secondary slot, and an order's primary link is the ruling.
+  if (ORDER_SHAPED_KINDS.has(kind)) return ['resolves', 'motionRef', ...revision, 'caseRef'];
   if (kind === 'motion') return [...revision, 'orderRef', 'caseRef'];
   return ['motionRef', ...revision, 'orderRef', 'caseRef'];
 }
