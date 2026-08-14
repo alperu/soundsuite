@@ -6,6 +6,7 @@ import { NodeEditor, type GetSchemes } from 'rete';
 import { AreaExtensions, AreaPlugin, type Position } from 'rete-area-plugin';
 import { ClassicFlow, ConnectionPlugin, getSourceTarget } from 'rete-connection-plugin';
 import { Presets, ReactPlugin, type ReactArea2D } from 'rete-react-plugin';
+import { CLICK_SLOP } from './block-metrics';
 import { beginDrag, currentDrag, endDrag, useDragState } from './drag-state';
 import { resolveDrop } from './drop-target';
 import {
@@ -58,9 +59,6 @@ export interface CanvasHandle {
 
 /** Below this the typed sockets are too small to aim at. */
 const MIN_EDIT_ZOOM = 0.45;
-
-/** Pointer travel, in px, above which a press-and-release was a pan. */
-const CLICK_SLOP = 4;
 
 type Schemes = GetSchemes<BlockNode, BlockConnection>;
 type AreaExtra = ReactArea2D<Schemes>;
@@ -361,6 +359,11 @@ export default function BlockCanvas(props: Props) {
                             targetX: edgeTargetX(graph, nodeProps.data.id, 'output', slot),
                           }),
                         inbound: inboundLinks.get(nodeProps.data.id),
+                        // Filtering draws the same anatomy inert, so its circles
+                        // are bare `SocketCircle` spans with no plugin behind
+                        // them. Saying so is better than letting the row's
+                        // lookup come back empty and calling that safe (#96).
+                        armable: editMode,
                         inputSide: anchorSideFor({
                           slot: 'in',
                           side: 'input',

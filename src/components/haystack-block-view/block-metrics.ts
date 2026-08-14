@@ -23,6 +23,16 @@ export const SOCKET_D = 14;
  */
 export const SLOT_PITCH = 22;
 
+/**
+ * Pointer travel, in px, above which a press-and-release stops being a click.
+ *
+ * ONE definition on purpose. The canvas reads it to tell a pan from a
+ * background click; a slot row reads it to tell a link drag from a
+ * click-to-select (#96). Two constants that happen to both be 4, under a
+ * comment claiming they agree, is the drift #46 already paid for once.
+ */
+export const CLICK_SLOP = 4;
+
 /** Clearance kept between the outermost handle and the block's own edges. */
 const EDGE_PAD = 6;
 

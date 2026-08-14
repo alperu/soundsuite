@@ -28,14 +28,20 @@ import { PER_FILING_TYPE_KINDS } from '@/lib/filings/classify-entity-kind'
  * Idempotency: races between two concurrent saves can both reach the
  * `create` call. We catch the unique-violation on the second one and
  * re-read the row.
+ *
+ * `opts.client` lets a caller run this inside an open transaction — see
+ * `ensureMotionAttachmentForFiling`, which needs the Motion and the attachment
+ * to land or fail together. Defaults to the ambient client, so every existing
+ * caller is unaffected.
  */
 export async function ensureMotionForFiling(
   filingId: string,
-  opts: { anyFilingType?: boolean } = {},
+  opts: { anyFilingType?: boolean; client?: any } = {},
 ): Promise<any | null> {
-  const existing = await (prisma as any).motion.findUnique({ where: { id: filingId } })
+  const db = opts.client ?? (prisma as any)
+  const existing = await db.motion.findUnique({ where: { id: filingId } })
   if (existing) return existing
-  const filing = await (prisma as any).filing.findUnique({ where: { id: filingId } })
+  const filing = await db.filing.findUnique({ where: { id: filingId } })
   if (!filing) return null
   // Default behavior (motion-typed Filings only): preserves Task #10 semantics
   // where `kind:'motion'` reads/commits materialize a Motion row.
@@ -49,7 +55,7 @@ export async function ensureMotionForFiling(
   // those kinds, not Motion.
   if (!opts.anyFilingType && !/motion/i.test(filing.filingType ?? '')) return null
   try {
-    return await (prisma as any).motion.create({
+    return await db.motion.create({
       data: {
         id: filing.id,
         filingId: filing.id,
@@ -69,6 +75,10 @@ export async function ensureMotionForFiling(
       },
     })
   } catch (e: any) {
+    // Inside a transaction a failed statement can poison the rest of it, so
+    // recovery does not belong here — rethrow and let the caller re-read once
+    // its transaction has rolled back.
+    if (opts.client) throw e
     // Likely a unique-violation race — another request created it first.
     const row = await (prisma as any).motion.findUnique({ where: { id: filingId } })
     if (row) return row
@@ -105,6 +115,12 @@ export const KIND_TO_ATTACHMENT_KIND: Record<string, string> = PER_FILING_TYPE_K
  * the tag panel reads MotionAttachment for these kinds.
  *
  * Idempotent — catches unique-violation races and re-reads.
+ *
+ * The two creates run in ONE transaction. They used to be sequential awaits, so
+ * an attachment create that failed for any reason other than the unique race
+ * left the shadow Motion behind while the caller was told the row did not
+ * exist — an orphan nobody would go looking for (#98). Either both rows exist
+ * afterwards or neither does.
  */
 export async function ensureMotionAttachmentForFiling(
   filingId: string,
@@ -115,14 +131,11 @@ export async function ensureMotionAttachmentForFiling(
   const filing = await (prisma as any).filing.findUnique({ where: { id: filingId } })
   if (!filing) return null
 
-  // Ensure a parent Motion row exists for the FK.
-  const motion = await ensureMotionForFiling(filingId, { anyFilingType: true })
-  if (!motion) return null
-
   // Auto-link the Filing's primary indexed Document into documentId so the
   // tag-panel's `fileRef` field shows the actual PDF without manual picking
   // (Task #3). Typical filings have exactly one PDF; we pick the oldest by
-  // createdAt to be deterministic.
+  // createdAt to be deterministic. Read before the transaction opens — it
+  // writes nothing, and holding a write transaction across it buys nothing.
   const primaryDoc = await (prisma as any).document.findFirst({
     where: { filingId },
     orderBy: { createdAt: 'asc' },
@@ -130,24 +143,34 @@ export async function ensureMotionAttachmentForFiling(
   })
 
   try {
-    return await (prisma as any).motionAttachment.create({
-      data: {
-        id: filingId,
-        motionId: motion.id,
-        caseId: filing.caseId,
-        attachmentKind,
-        revisionSeq: filing.supplementalOrder ?? 1,
-        documentId: primaryDoc?.id ?? null,
-        // Seed XETO markers so the row passes any future validator hooks. The
-        // `attachment` umbrella marker plus the specific kind marker mirror
-        // what the tag-spec entries for each kind define.
-        tags: {
-          attachment: { _kind: 'marker' },
-          [attachmentKind]: { _kind: 'marker' },
-        } as any,
-      },
+    return await (prisma as any).$transaction(async (tx: any) => {
+      // Ensure a parent Motion row exists for the FK — inside the transaction,
+      // so it rolls back with the attachment if the attachment cannot be made.
+      const motion = await ensureMotionForFiling(filingId, { anyFilingType: true, client: tx })
+      if (!motion) return null
+
+      return await tx.motionAttachment.create({
+        data: {
+          id: filingId,
+          motionId: motion.id,
+          caseId: filing.caseId,
+          attachmentKind,
+          revisionSeq: filing.supplementalOrder ?? 1,
+          documentId: primaryDoc?.id ?? null,
+          // Seed XETO markers so the row passes any future validator hooks. The
+          // `attachment` umbrella marker plus the specific kind marker mirror
+          // what the tag-spec entries for each kind define.
+          tags: {
+            attachment: { _kind: 'marker' },
+            [attachmentKind]: { _kind: 'marker' },
+          } as any,
+        },
+      })
     })
   } catch (e: any) {
+    // The transaction has rolled back by now, so this read sees committed state
+    // only: a concurrent request that won the race, or nothing at all. Same
+    // unique-violation recovery as before, just outside the aborted transaction.
     const row = await (prisma as any).motionAttachment.findUnique({ where: { id: filingId } })
     if (row) return row
     throw e

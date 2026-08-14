@@ -116,6 +116,38 @@ describe('commitEntity — validation & errors', () => {
     if (!result.ok) expect(result.errGridJson).toContain('not found')
   })
 
+  it('materialises the entity row when an order-shaped Filing has none', async () => {
+    // Three of the corpus's order blocks are Filing rows with NO Motion and no
+    // MotionAttachment — they reach `primaryKind: 'order'` from the filing type
+    // alone. Since #94 they render writable motionRef/resolves sockets, so a
+    // ref write now lands on a row that does not exist yet. `commitEntity` must
+    // upsert it rather than answering "not found" (#98). MotionAttachment.motionId
+    // is a required FK, so a parent Motion is created first.
+    mockPrisma.motionAttachment = delegate({}) // no attachment row yet
+    mockPrisma.motion = delegate({}) // …and no Motion to hang it off
+    mockPrisma.filing = delegate({ f1: { id: 'f1', caseId: 'c1', filingType: 'Order', title: 'An order' } })
+    mockPrisma.document = { findFirst: jest.fn(async () => null) }
+    // Callback form handed the same client, so the creates inside the
+    // transaction land on the same jest.fn()s asserted below.
+    mockPrisma.$transaction = jest.fn(async (fn: any) => fn(mockPrisma))
+
+    const result = await commitEntity({ id: 'f1', kind: 'order', patch: { motionRef: 'm1' } })
+
+    expect(result.ok).toBe(true)
+    expect(mockPrisma.motion.create).toHaveBeenCalledTimes(1)
+    expect(mockPrisma.motionAttachment.create).toHaveBeenCalledTimes(1)
+    // Both creates are one unit of work — a failed attachment must not leave
+    // the shadow Motion behind (#98).
+    expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1)
+    // The row is created under the Filing's id, discriminated as an order.
+    const created = mockPrisma.motionAttachment.create.mock.calls[0][0]
+    expect(created.data).toEqual(expect.objectContaining({ id: 'f1', attachmentKind: 'order' }))
+    // …and the ref the user drew lands on it in the same request.
+    const updated = mockPrisma.motionAttachment.update.mock.calls[0][0]
+    expect(updated.where).toEqual({ id: 'f1' })
+    expect(updated.data.tags).toEqual(expect.objectContaining({ motionRef: 'm1' }))
+  })
+
   it('maps Prisma P2002 to a friendly unique-violation grid', async () => {
     const del = delegate({ c1: { id: 'c1', name: 'Old', path: null, tags: null } })
     del.update = jest.fn(async () => {

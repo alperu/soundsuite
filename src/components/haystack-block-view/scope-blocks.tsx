@@ -14,6 +14,8 @@ import {
   visibleSlotsFor,
   type LinkSlot,
 } from './link-rules';
+import { SLOT_PITCH } from './block-metrics';
+import { beginRowPress } from './slot-row-press';
 import { LABEL_MIN_ZOOM, labelFontSize, useZoom } from './zoom-state';
 import {
   CASE_H,
@@ -256,6 +258,9 @@ interface BlockProps {
     inputSide?: 'left' | 'right';
     /** What points at this block — shown as a count on its id tag. */
     inbound?: InboundLinks;
+    /** Whether a slot's row can start a link (#96). Only the editor wires the
+     *  connection plugin, so only there is there anything for a row to arm. */
+    armable?: boolean;
   };
 }
 
@@ -418,8 +423,53 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
   // so their handles centre on the whole block — and the watcher has to be told
   // the same thing or the two disagree by half the title height (#77).
   const bands = payload.kind === 'filing' ? undefined : { titleH: 0, footerH: 0 };
+  /**
+   * The grab handle for a slot is its whole ROW, not its 6.3px circle (#96).
+   *
+   * Transparent, half the block wide, one SLOT_PITCH tall, pinned to the slot's
+   * own edge — so a left-edge row and a right-edge row can never cover the same
+   * point, and rows on one edge tile at exactly the pitch. Each row is bound to
+   * ONE slot at render time, so there is no nearest-socket search and nothing to
+   * disambiguate; that is what enlarging the circles could not offer, since at
+   * 9.9px of on-screen pitch their boxes would have had to overlap.
+   *
+   * `data-slot-row`, never `data-slot`: the geometry verifier reads every
+   * `[data-slot]` as a handle and measures the circle inside it, and these rows
+   * have no circle. They are also not `.output-socket`, which is what keeps
+   * `resolveDrop`'s socket-bail as narrow as it is.
+   */
+  const slotRow = (handle: SlotHandle, edge: 'left' | 'right', stack: string[]) => (
+    <div
+      key={`row-${handle.slot}`}
+      className={`absolute ${edge === 'left' ? 'left-0' : 'right-0'} w-1/2 -translate-y-1/2`}
+      style={{
+        top: `${slotAnchorRatio(handle.slot, stack, node.height, bands) * 100}%`,
+        height: SLOT_PITCH,
+      }}
+      data-slot-row={handle.slot}
+      onPointerDown={event => {
+        // `currentTarget` is read HERE, synchronously: React nulls it as soon as
+        // the handler returns, and the arming decision is made later, on the
+        // move that crosses the slop. The QUERY stays lazy so a re-render
+        // between press and threshold can't leave us holding a detached circle.
+        const stack = event.currentTarget.parentElement;
+        beginRowPress(event, {
+          circleFor: () =>
+            stack?.querySelector(`[data-slot="${handle.slot}"] .output-socket`) ?? null,
+        });
+      }}
+    />
+  );
+
   const handles = sockets ? (
     <>
+      {/* Rows FIRST, handles second. Painted underneath, a press on the circle
+          reaches the circle (the plugin's own gesture, armed once) and a click
+          on a LinkBadge still reaches the badge — badges sit outside the
+          handle's box but are how a link is opened and deleted (#61/#75), and a
+          row painted over them would swallow that. */}
+      {sockets.armable && leftHandles.map(handle => slotRow(handle, 'left', leftStack))}
+      {sockets.armable && rightHandles.map(handle => slotRow(handle, 'right', rightStack))}
       {/* The ref hub faces whichever side its inbound edges arrive from: under
           docket order refs point leftward, so a motion collects them on its
           RIGHT edge rather than dragging every wire around the block.
