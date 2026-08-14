@@ -260,6 +260,19 @@ export function slotsForKind(kind: string): LinkSlot[] {
   // wanted link. It comes after the revision pair so the unaimed fallback stays
   // `amends`, and `primarySlotFor` keeps saying null for a motion (#100).
   if (kind === 'motion') return [...revision, 'motionRef', 'orderRef', 'caseRef'];
+  // A Clerk's / Reporter's Record owns a record row and NO Motion or
+  // MotionAttachment row (0 of 23 and 0 of 5 in the corpus), and the scope graph
+  // selects only `{ id: true }` from those two tables — see the query at
+  // `app/api/scope/graph/route.ts:95-96` and the refs it builds from motions and
+  // attachments alone at :119-125. So their `refs` is always `{}`: a ref written
+  // from one of these blocks lands in the record row's tags JSON, which no read
+  // path consults, and it can never be drawn, replaced or unlinked afterwards.
+  // These volumes carry the one link the system can round-trip — the case they
+  // belong to, drawn from `Filing.caseId`. Everything else was a socket that
+  // swallowed the write (#101). XETO does permit the tags (ClerksRecord and
+  // ReportersRecord both extend MotionAttachment), so if records should ever
+  // hang off motions the road is the read path, and this branch is the revert.
+  if (kind === 'clerksRecord' || kind === 'reportersRecord') return ['caseRef'];
   return ['motionRef', ...revision, 'orderRef', 'caseRef'];
 }
 
@@ -353,14 +366,18 @@ export function visibleSlotsFor(
   kind: string,
   refs: Record<string, unknown> | undefined,
 ): LinkSlot[] {
-  const writable = slotsForKind(normalizeKind(kind));
+  const sourceKind = normalizeKind(kind);
+  const writable = slotsForKind(sourceKind);
   const held = ALL_SLOTS.filter(
     slot =>
       // A MOTION never stores `orderRef` — its side of that relationship is
       // derived from the orders pointing back — so a held-slot scan must not
       // resurrect it there. Attachments DO store it (#89), but for them the
-      // slot is writable and so is already in the list above.
-      slot !== 'orderRef' &&
+      // slot is writable and so is already in the list above. The exclusion
+      // was unconditional, which also caught the one kind that can hold one
+      // without writing it: an order-shaped filing tagged before `resolves`
+      // existed rendered nothing for the value it was actually carrying (#102).
+      !(slot === 'orderRef' && sourceKind === 'motion') &&
       !writable.includes(slot) &&
       typeof refs?.[slot] === 'string' &&
       refs[slot],
@@ -532,6 +549,17 @@ export function planLink(
   const picked = pickedSlot && isLinkSlot(pickedSlot) && writable.includes(pickedSlot)
     ? pickedSlot
     : null;
+  // A socket the block RENDERS but its kind cannot write — a held ref surfaced
+  // by `visibleSlotsFor` — used to fall through to the fallback, so pulling an
+  // order's held `orderRef` silently planned a `resolves` write instead: a
+  // different fact, saved without being asked for. An aimed drag either means
+  // the slot it was aimed at or it means nothing (#102).
+  if (pickedSlot && isLinkSlot(pickedSlot) && !picked) {
+    return {
+      ok: false,
+      reason: `A ${kindLabel(from) || 'filing'} does not write ${pickedSlot}`,
+    };
+  }
   // Structural slots (caseRef) and inverted ones (orderRef) never come from the
   // fallback: one writes a column, the other writes on the OTHER block, and
   // neither should be what an unaimed drag happens to mean.

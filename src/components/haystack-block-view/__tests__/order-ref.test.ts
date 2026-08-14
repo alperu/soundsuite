@@ -42,6 +42,7 @@ const graph = buildScopeGraph([
       filing('n1', 'notice', { motionRef: 'm1' }),
       filing('r1', 'response', { respondingTo: 'm1' }),
       filing('y1', 'reply'),
+      filing('b1', 'brief'),
       filing('rec1', 'reportersRecord'),
     ],
   } as ScopeCase,
@@ -73,11 +74,17 @@ describe('orderRef — the motion side stays inverted', () => {
 });
 
 describe('orderRef — the attachment side writes directly', () => {
+  // `reportersRecord` was one of these exemplars until #101. A records volume
+  // owns no Motion/MotionAttachment row and the scope graph reads only its id,
+  // so the orderRef it wrote went into a tags bag no read path consults — the
+  // #89 property held at the commit layer and nowhere after it. The property
+  // itself is unchanged and still pinned across four attachment kinds; see
+  // records-kind-slots.test.ts for what those volumes offer now.
   for (const [kind, id] of [
     ['notice', 'n1'],
     ['response', 'r1'],
     ['reply', 'y1'],
-    ['reportersRecord', 'rec1'],
+    ['brief', 'b1'],
   ] as const) {
     it(`${kind} → order writes orderRef on ITSELF`, () => {
       const result = plan(id, 'o1', 'orderRef');
@@ -116,8 +123,13 @@ describe('orderRef — the attachment side writes directly', () => {
 
 describe('the slot is offered wherever it can be used', () => {
   it('every attachment kind carries it, empty or not', () => {
-    for (const kind of ['notice', 'response', 'reply', 'reportersRecord', 'affidavit']) {
+    for (const kind of ['notice', 'response', 'reply', 'brief', 'affidavit']) {
       expect(slotsForKind(kind)).toContain('orderRef');
+    }
+    // Records volumes are the documented exception (#101): the write had
+    // nowhere to be read back from, so the socket is gone rather than dead.
+    for (const kind of ['clerksRecord', 'reportersRecord']) {
+      expect(slotsForKind(kind)).not.toContain('orderRef');
     }
     // An unset slot is still rendered — it is what you drag FROM.
     expect(visibleSlotsFor('notice', {})).toContain('orderRef');

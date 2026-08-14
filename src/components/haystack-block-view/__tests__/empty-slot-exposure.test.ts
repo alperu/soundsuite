@@ -134,10 +134,16 @@ describe('the tag panel advertises every slot the canvas draws', () => {
       const specs = TAG_SPEC_BY_KIND[kind as keyof typeof TAG_SPEC_BY_KIND] ?? [];
       for (const slot of slotsForKind(kind)) {
         const spec = specs.find(s => s.name === slot);
-        // Some kinds carry no row for a slot at all (a reporter's record has no
-        // motionRef row). That gap is reported separately — what is pinned here
-        // is that a row which EXISTS is never hidden while the socket is drawn.
-        if (!spec) continue;
+        // A motion is the one kind with a writable slot and no row of its own:
+        // its `orderRef` is the inversion affordance, and the panel carries the
+        // derived read-only `orderRefs` list instead. The records kinds used to
+        // need this escape hatch too, until #101 narrowed them to the one link
+        // the system can round-trip. What is pinned here is that a row which
+        // EXISTS is never hidden while the socket is drawn.
+        if (!spec) {
+          expect([kind, slot]).toEqual(['motion', 'orderRef']);
+          continue;
+        }
         expect([kind, slot, rendersWhenEmpty(spec, false, false)]).toEqual([kind, slot, true]);
       }
     }
