@@ -14,7 +14,7 @@ import {
   visibleSlotsFor,
   type LinkSlot,
 } from './link-rules';
-import { LABEL_ZOOM_THRESHOLD, useZoom } from './zoom-state';
+import { LABEL_MIN_ZOOM, labelFontSize, useZoom } from './zoom-state';
 import {
   CASE_H,
   CASE_W,
@@ -449,9 +449,10 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
             color={dotColor(node.entityKind)}
           />
         )}
-        {zoom >= LABEL_ZOOM_THRESHOLD && (
+        {zoom >= LABEL_MIN_ZOOM && (
           <span
-            className={`pointer-events-none absolute top-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 text-[9px] leading-tight text-gray-500 shadow-sm ${
+            style={{ fontSize: labelFontSize(zoom) }}
+            className={`pointer-events-none absolute top-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 leading-tight text-gray-500 shadow-sm ${
               (sockets.inputSide ?? 'left') === 'right' ? 'right-full mr-1' : 'left-full ml-1'
             }`}
           >
@@ -483,8 +484,9 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
               title={`${slotLabel(handle.slot)} → ${handle.link.targetLabel}`}
             />
           )}
-          {zoom >= LABEL_ZOOM_THRESHOLD && (
-            <span className="pointer-events-none absolute left-full top-1/2 ml-1 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 text-[9px] leading-tight text-gray-500 shadow-sm">
+          {zoom >= LABEL_MIN_ZOOM && (
+            <span style={{ fontSize: labelFontSize(zoom) }}
+              className="pointer-events-none absolute left-full top-1/2 ml-1 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 leading-tight text-gray-500 shadow-sm">
               {slotLabel(handle.slot)}
             </span>
           )}
@@ -517,13 +519,14 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
               translate-x-1/2 centering pushed the circle off the block edge —
               the anchor math (box.x + box.w) never moves, so circles and edge
               endpoints visibly disagreed exactly when labels were visible. */}
-          {zoom >= LABEL_ZOOM_THRESHOLD && (
+          {zoom >= LABEL_MIN_ZOOM && (
             <span
               // INSIDE the block, to the left of the circle: edges leave from
               // the right edge, so a label sitting outside had every outgoing
               // wire drawn straight through it. Still absolute — that is what
               // keeps the circle pinned to the edge (the #46 regression).
-              className="pointer-events-none absolute right-full top-1/2 mr-1 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 text-[9px] leading-tight text-gray-500 shadow-sm"
+              style={{ fontSize: labelFontSize(zoom) }}
+              className="pointer-events-none absolute right-full top-1/2 mr-1 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 leading-tight text-gray-500 shadow-sm"
             >
               {slotLabel(handle.slot)}
             </span>
@@ -604,8 +607,9 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
             title={`id — ${c.id}`}
           >
             {sockets.caseTarget}
-            {zoom >= LABEL_ZOOM_THRESHOLD && (
-              <span className="pointer-events-none absolute right-full top-1/2 mr-1 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 text-[9px] leading-tight text-gray-500 shadow-sm">
+            {zoom >= LABEL_MIN_ZOOM && (
+              <span style={{ fontSize: labelFontSize(zoom) }}
+              className="pointer-events-none absolute right-full top-1/2 mr-1 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 leading-tight text-gray-500 shadow-sm">
                 id
               </span>
             )}

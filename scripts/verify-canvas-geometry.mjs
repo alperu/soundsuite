@@ -9,7 +9,7 @@
  *   1. circle CENTRES sit on the block edge they anchor to (±1px)
  *   2. circle WIDTHS are full — a clipped circle keeps its centre, so the
  *      centre check passed for a whole round while every circle was halved
- *   3. no socket sits inside the title bar
+ *   3. no socket sits inside the title bar OR the footer band
  *   4. no socket hangs below the block's bottom edge — the other end of the
  *      body, and the next place a handle count bump will push one out
  *   5. SEPARATION: no two handles on the same edge closer than 16px centre to
@@ -19,7 +19,7 @@
  *      included on purpose — it is a circle on the same edge as the slots, and
  *      leaving it out is why checks 1-4 passed while it overlapped.
  *   6. a case block shows exactly one affordance (its id tag)
- *   7. EVERY VISIBLE EDGE terminates on a circle (≤1px, both ends). The old
+ *   7. EVERY VISIBLE EDGE terminates on a circle (≤1.5 SCREEN px, both ends). The old
  *      suite never looked at edges at all, which is how the containment fan
  *      came to converge 12px below the case's id circle (#77) while all six
  *      other checks passed. The probe reveals the edges itself — "Show all
@@ -45,11 +45,12 @@ const PROBE = `(async () => {
   const blocks = Array.from(document.querySelectorAll('[data-block-kind="filing"]'));
   if (blocks.length === 0) return { error: 'no filing blocks — is the editor open?' };
   const k = scaleOf(blocks[0]);
-  let clipped = 0, inTitle = 0, belowBlock = 0, worstRight = 0, worstLeft = 0, circles = 0;
+  let clipped = 0, inTitle = 0, inFooter = 0, belowBlock = 0, worstRight = 0, worstLeft = 0, circles = 0;
   let minSeparation = Infinity, tooClose = 0;
   for (const b of blocks) {
     const br = b.getBoundingClientRect();
     const title = b.querySelector('[data-block-title]')?.getBoundingClientRect();
+    const footer = b.querySelector('[data-block-footer]')?.getBoundingClientRect();
     // Every handle on the block, hub included. No Set, no rect dedupe: two
     // handles at the same coordinates are exactly what this is looking for.
     const handles = Array.from(b.querySelectorAll('[data-slot],[data-hub-side]'));
@@ -65,6 +66,8 @@ const PROBE = `(async () => {
       if (cr.width / k < 13) clipped++;
       const cy = cr.top + cr.height / 2;
       if (title && cy < title.bottom - 0.5) inTitle++;
+      // The footer is the other band a handle must stay out of (#72).
+      if (footer && cy > footer.top + 0.5) inFooter++;
       if (cr.bottom > br.bottom + 0.5) belowBlock++;
       const mid = cr.left + cr.width / 2;
       const edge = h.getAttribute('data-slot-edge') || h.getAttribute('data-hub-side') || 'right';
@@ -105,10 +108,13 @@ const PROBE = `(async () => {
     const m = path.getScreenCTM();
     return { x: p.x * m.a + p.y * m.c + m.e, y: p.x * m.b + p.y * m.d + m.f };
   };
+  // SCREEN pixels, not editor units. The error being bounded here is rendering
+  // rounding, which is a screen-space quantity — dividing by the zoom turned a
+  // half-pixel at k=0.21 into a 2.2 "editor px" failure that meant nothing.
   const nearestPx = pt => {
     let best = Infinity;
     for (const c of centres) best = Math.min(best, Math.hypot(c.x - pt.x, c.y - pt.y));
-    return best / k;
+    return best;
   };
   let edgesMeasured = 0, worstEdgeGapPx = 0, edgeEndsAdrift = 0;
   for (const wrapper of document.querySelectorAll('[data-edge-kind]')) {
@@ -131,6 +137,7 @@ const PROBE = `(async () => {
     circles,
     clippedCircles: clipped,
     circlesInTitle: inTitle,
+    circlesInFooter: inFooter,
     circlesBelowBlock: belowBlock,
     minEdgeSeparationPx: minSeparation === Infinity ? null : Math.round(minSeparation * 10) / 10,
     handlePairsTooClose: tooClose,
@@ -138,7 +145,7 @@ const PROBE = `(async () => {
     leftEdgeMaxDevPx: Math.round((worstLeft / k) * 10) / 10,
     caseBlocksWithWrongAffordances: caseExtras,
     edgesMeasured,
-    worstEdgeGapPx: Math.round(worstEdgeGapPx * 10) / 10,
+    worstEdgeGapScreenPx: Math.round(worstEdgeGapPx * 10) / 10,
     edgeEndsAdrift,
   };
 })()`;
@@ -182,6 +189,7 @@ async function main() {
   if (result?.error) failures.push(result.error);
   if (result?.clippedCircles > 0) failures.push(`${result.clippedCircles} circles rendered clipped`);
   if (result?.circlesInTitle > 0) failures.push(`${result.circlesInTitle} sockets inside the title bar`);
+  if (result?.circlesInFooter > 0) failures.push(`${result.circlesInFooter} sockets inside the footer`);
   if (result?.circlesBelowBlock > 0) failures.push(`${result.circlesBelowBlock} sockets hanging below the block`);
   if (result?.handlePairsTooClose > 0) {
     failures.push(
@@ -192,7 +200,7 @@ async function main() {
   if (result?.leftEdgeMaxDevPx > 1.5) failures.push(`left-edge drift ${result.leftEdgeMaxDevPx}px`);
   if (result?.edgeEndsAdrift > 0) {
     failures.push(
-      `${result.edgeEndsAdrift} edge ends miss their circle (worst ${result.worstEdgeGapPx}px)`,
+      `${result.edgeEndsAdrift} edge ends miss their circle (worst ${result.worstEdgeGapScreenPx}px on screen)`,
     );
   }
   if (result?.edgesMeasured === 0) {

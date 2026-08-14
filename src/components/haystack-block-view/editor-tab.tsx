@@ -1132,7 +1132,7 @@ export function EditorTab({
         {/* Link visibility. Lives on the canvas rather than in a toolbar strip:
             the editor has no toolbar, and this is where the user meets the
             question — lines are hidden until a block is hovered. */}
-        <div className="pointer-events-none absolute left-3 top-3">
+        <div className="pointer-events-none absolute left-3 top-10">
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowAllLinks(!showAllLinks)}
@@ -1161,8 +1161,10 @@ export function EditorTab({
           </div>
         </div>
 
-        {/* Droplet */}
-        <div className="pointer-events-none absolute right-3 top-3 flex flex-col items-end gap-2">
+        {/* Droplet, below the column header band. At top-3 it sat inside that
+            band (measured: droplet top 94px, header bottom 107px), so panning a
+            column under it put the two on top of each other. */}
+        <div className="pointer-events-none absolute right-3 top-10 flex flex-col items-end gap-2">
           <label
             className={`pointer-events-auto cursor-pointer rounded-lg border-2 border-dashed px-3 py-2 text-[11px] shadow-sm transition-colors ${
               dropCaseId

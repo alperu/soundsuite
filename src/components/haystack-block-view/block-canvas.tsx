@@ -27,7 +27,7 @@ import { caseTriState, type EntityKey, type ScopeGraph } from './scope-graph';
 import { setTransform, setZoom } from './zoom-state';
 import { setPinned, useHovered, usePinned } from './hover-state';
 import { useShowAllLinks } from './link-visibility';
-import { mountColumnHeaders } from './column-headers';
+import { mountBandRules, mountColumnHeaders } from './column-headers';
 import { setupMarquee, type MarqueeResult } from './use-selection-area';
 
 /** Left-button gesture. The lasso keeps its slot here for when it lands. */
@@ -867,8 +867,13 @@ export default function BlockCanvas(props: Props) {
   useEffect(() => {
     const layer = overlayRef.current;
     if (!layer) return;
-    return mountColumnHeaders(layer);
-  }, []);
+    const unmountColumns = mountColumnHeaders(layer);
+    const unmountBands = mountBandRules(layer, graph);
+    return () => {
+      unmountBands();
+      unmountColumns();
+    };
+  }, [graph]);
 
   return (
     // The rete container keeps its own element: teardown removes exactly the
