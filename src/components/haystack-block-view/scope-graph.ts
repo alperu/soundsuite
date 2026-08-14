@@ -1,3 +1,5 @@
+import { BLOCK_TITLE_H, filingHeightFor } from './block-metrics';
+import { visibleSlotsFor } from './link-rules';
 import type {
   ScopeCase,
   ScopeFiling,
@@ -19,13 +21,23 @@ import type {
 export const CASE_W = 260;
 export const CASE_H = 96;
 export const FILING_W = 320;
-// Tall enough to aim at three 14px slot handles individually: most kinds now
-// carry a ref slot plus amends and supersedes, and at 62px they sat one pixel
-// apart — unusable at the editor's zoom.
-export const FILING_H = 76;
-/** The filing block's title bar. Sockets live BELOW it — `slotAnchorRatio`
- *  excludes this band so no circle lands on top of the filing's name. */
-export const BLOCK_TITLE_H = 24;
+/**
+ * The per-edge handle count every filing is sized for, whatever the data says:
+ * the input hub plus the three slots the busiest kind writes (a ref slot,
+ * amends, supersedes). Holding the floor here keeps the whole canvas from
+ * re-laying-out when a commit adds or removes one handle somewhere — geometry
+ * that moves under the user on every write is worse than geometry that is
+ * slightly taller than it needs to be.
+ */
+const BASELINE_EDGE_MEMBERS = 4;
+/**
+ * The height a filing block gets when its handles ask for nothing unusual —
+ * the floor, not the answer. `buildScopeGraph` sizes blocks to the tallest edge
+ * stack in the graph (see `filingHeightOf`), because a block that is shorter
+ * than its own handles stacks them on top of each other (#65).
+ */
+export const FILING_H = filingHeightFor(BASELINE_EDGE_MEMBERS);
+export { BLOCK_TITLE_H };
 export const ROW_GAP = 14;
 export const ROW_H = FILING_H + ROW_GAP;
 export const COL_GAP = 140;
@@ -120,6 +132,11 @@ export interface FilingBlock {
   id: string;
   caseId: string;
   label: string;
+  /** ISO filing date, null where the record has none. Docket order is a domain
+   *  signal on this canvas — a response answers an EARLIER motion — so the
+   *  picker and the suggester read the date itself, not just the sort it
+   *  produced upstream. */
+  filingDate: string | null;
   filingType: string;
   docCount: number;
   indexedCount: number;
@@ -175,6 +192,33 @@ export interface ScopeGraph {
   refNeighbors: Map<EntityKey, EntityKey[]>;
   filingById: Map<string, FilingBlock>;
   caseById: Map<string, CaseBlock>;
+  /** Block height for every filing in THIS graph — see `filingHeightOf`. */
+  filingH: number;
+  /** Row pitch that follows from it, so bands and family rows stay aligned. */
+  rowH: number;
+}
+
+/**
+ * How tall the filings in this graph have to be.
+ *
+ * A block's handles all sit on one of two edges, and which edge is
+ * direction-dependent, so the honest bound is "every handle on the same edge":
+ * the input hub plus every visible slot except caseRef, which has a fixed home
+ * on the left. Held-but-unwritable slots count too — they are rendered, so they
+ * take a place in the stack.
+ *
+ * Uniform across the graph on purpose: rows keep a single pitch, which is what
+ * family alignment between columns depends on.
+ */
+export function filingHeightOf(filings: readonly ScopeFiling[]): number {
+  let members = BASELINE_EDGE_MEMBERS;
+  for (const filing of filings) {
+    const slots = visibleSlotsFor(filing.primaryKind ?? '', filing.refs).filter(
+      slot => slot !== 'caseRef',
+    );
+    members = Math.max(members, slots.length + 1);
+  }
+  return filingHeightFor(members);
 }
 
 function refTargetOf(filing: ScopeFiling): { id: string; slot: RefSlot } | null {
@@ -315,7 +359,11 @@ export function buildScopeGraph(cases: ScopeCase[], options: BuildOptions = {}):
     refNeighbors: new Map(),
     filingById: new Map(),
     caseById: new Map(),
+    filingH: 0,
+    rowH: 0,
   };
+  graph.filingH = filingHeightOf(cases.flatMap(c => c.filings));
+  graph.rowH = graph.filingH + ROW_GAP;
 
   let clusterTop = 0;
 
@@ -328,7 +376,11 @@ export function buildScopeGraph(cases: ScopeCase[], options: BuildOptions = {}):
     // count — that is the whole point of columns.
     const placement = placeFilingsInColumns(ordered.map(o => o.filing));
     const laneRows = options.unlinkedLane && c.unfiledDocCount > 0 ? 1 : 0;
-    const clusterHeight = Math.max(CASE_H, placement.rowCount * ROW_H, laneRows * ROW_H);
+    const clusterHeight = Math.max(
+      CASE_H,
+      placement.rowCount * graph.rowH,
+      laneRows * graph.rowH,
+    );
 
     const indexedDocCount =
       c.filings.reduce((sum, f) => sum + f.indexedCount, 0) + c.unfiledIndexedCount;
@@ -359,6 +411,7 @@ export function buildScopeGraph(cases: ScopeCase[], options: BuildOptions = {}):
         id: filing.id,
         caseId: c.id,
         label: filing.label,
+        filingDate: filing.filingDate ?? null,
         filingType: filing.filingType,
         docCount: filing.docCount,
         indexedCount: filing.indexedCount,
@@ -370,11 +423,11 @@ export function buildScopeGraph(cases: ScopeCase[], options: BuildOptions = {}):
         // `depth` is kept for the ref-nesting order it still encodes, but no
         // longer indents x: a filing's column is its kind, full stop.
         x: columnX(cell.column),
-        y: clusterTop + cell.row * ROW_H,
+        y: clusterTop + cell.row * graph.rowH,
       };
       graph.filings.push(fBlock);
       graph.filingById.set(filing.id, fBlock);
-      graph.boxes.set(fBlock.key, { x: fBlock.x, y: fBlock.y, w: FILING_W, h: FILING_H });
+      graph.boxes.set(fBlock.key, { x: fBlock.x, y: fBlock.y, w: FILING_W, h: graph.filingH });
       graph.caseOfFiling.set(fBlock.key, cBlock.key);
       childKeys.push(fBlock.key);
       // Drawn filing → case, matching the gesture: the filing's caseRef socket
@@ -400,7 +453,7 @@ export function buildScopeGraph(cases: ScopeCase[], options: BuildOptions = {}):
         y: clusterTop,
       };
       graph.unfiled.push(uBlock);
-      graph.boxes.set(uBlock.key, { x: uBlock.x, y: uBlock.y, w: FILING_W, h: FILING_H });
+      graph.boxes.set(uBlock.key, { x: uBlock.x, y: uBlock.y, w: FILING_W, h: graph.filingH });
       graph.edges.push({
         id: `unfiled:${c.id}`,
         source: cBlock.key,

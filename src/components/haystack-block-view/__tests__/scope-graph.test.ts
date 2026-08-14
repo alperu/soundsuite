@@ -1,5 +1,4 @@
 import {
-  CASE_H,
   FILING_H,
   ROW_H,
   buildScopeGraph,
@@ -120,8 +119,16 @@ describe('buildScopeGraph column layout', () => {
       ]),
       testCase('c2', [filing('m2', 'motion')]),
     ]);
-    // The second band starts below a band only as tall as the case block.
-    expect(spread.caseById.get('c2')?.y).toBe(CASE_H + 56);
+    // Seven filings one per column push the next band down no further than a
+    // single filing would: band height follows the fullest COLUMN, never the
+    // filing count. Compared against a one-filing band rather than a literal —
+    // block height is derived from the handles a block carries, so a literal
+    // here would just re-encode today's socket count.
+    const single = buildScopeGraph([
+      testCase('c1', [filing('m1', 'motion')]),
+      testCase('c2', [filing('m2', 'motion')]),
+    ]);
+    expect(spread.caseById.get('c2')?.y).toBe(single.caseById.get('c2')?.y);
 
     // Three filings stacked in ONE column make a taller band than seven spread.
     const stacked = buildScopeGraph([

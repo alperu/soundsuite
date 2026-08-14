@@ -9,11 +9,12 @@ import { Presets, ReactPlugin, type ReactArea2D } from 'rete-react-plugin';
 import { beginDrag, currentDrag, endDrag, useDragState } from './drag-state';
 import {
   anchorSideFor,
+  compatibleKeys,
+  edgeStackFor,
   planLink,
   slotAnchorRatio,
-  slotEdge,
-  slotsForKind,
   visibleSlotsFor,
+  type LinkSlot,
 } from './link-rules';
 import {
   BlockConnection,
@@ -24,12 +25,31 @@ import {
 } from './scope-blocks';
 import { caseTriState, type EntityKey, type ScopeGraph } from './scope-graph';
 import { setTransform, setZoom } from './zoom-state';
-import { useHovered } from './hover-state';
+import { setPinned, useHovered, usePinned } from './hover-state';
+import { useShowAllLinks } from './link-visibility';
 import { mountColumnHeaders } from './column-headers';
 import { setupMarquee, type MarqueeResult } from './use-selection-area';
 
 /** Left-button gesture. The lasso keeps its slot here for when it lands. */
 export type CanvasTool = 'pointer' | 'marquee';
+
+/**
+ * What a right-click landed on, resolved by the canvas so the host never has to
+ * read the DOM. Ordered narrowest-first when resolving: a badge sits inside a
+ * slot, which sits inside a block.
+ */
+export type ContextTarget =
+  | { kind: 'badge'; edgeId: string; blockKey: EntityKey }
+  | { kind: 'idTag'; blockKey: EntityKey }
+  | { kind: 'slot'; slot: string; blockKey: EntityKey }
+  | { kind: 'block'; blockKey: EntityKey }
+  | { kind: 'background' };
+
+/** What the host can ask the canvas to do imperatively. */
+export interface CanvasHandle {
+  /** Bring a block into view at a readable zoom — "where did it go". */
+  centerOn: (key: EntityKey) => void;
+}
 
 /** Below this the typed sockets are too small to aim at. */
 const MIN_EDIT_ZOOM = 0.45;
@@ -81,6 +101,13 @@ type Props = {
        *  grab is the unlink gesture — the host clears the ref (undoably) and
        *  the refetch redraws whatever the data then says. */
       onUnlink?: (edgeId: string) => void;
+      /** A right-click, already resolved to what it landed on. */
+      onContextMenu?: (target: ContextTarget, at: { x: number; y: number }) => void;
+      /** True while the host is showing a menu. The canvas defers Escape to it
+       *  rather than racing it for the key. */
+      menuOpen?: boolean;
+      /** Handed the imperative handle once the canvas is live. */
+      onReady?: (api: CanvasHandle) => void;
     }
 );
 
@@ -126,23 +153,42 @@ function layoutSocketPositions(graph: ScopeGraph) {
     listen(nodeId: string, side: 'input' | 'output', key: string, change: (p: Position) => void) {
       const box = graph.boxes.get(nodeId);
       if (box) {
-        // Output slots stack down the right edge in the same order the block
-        // renders them; anything else (the input hub, a slot this kind doesn't
-        // offer but still holds data for) anchors at the vertical centre.
         const filing = graph.filingById.get(nodeId.replace(/^filing:/, ''));
-        const slots = filing
-          ? visibleSlotsFor(filing.primaryKind, filing.refs).filter(s => slotEdge(s) === 'right')
-          : [];
-        // Same helper the block renders with — two copies of this arithmetic
-        // is how an edge ends up anchored to a circle that has since moved.
-        const ratio = slotAnchorRatio(side, key, slots);
-        const onRight =
+        const slots = filing ? visibleSlotsFor(filing.primaryKind, filing.refs) : [];
+        // Which edge each handle sits on, decided exactly as the block decides
+        // it — the block and this watcher share `edgeStackFor` and `sideOf`, so
+        // a circle and the wire that ends on it read the same list.
+        const sideOf = (slot: LinkSlot) =>
           anchorSideFor({
-            slot: key,
-            side,
+            slot,
+            side: 'output',
             sourceX: box.x,
-            targetX: edgeTargetX(graph, nodeId, side, key),
-          }) === 'right';
+            targetX: edgeTargetX(graph, nodeId, 'output', slot),
+          });
+        const hubSide = filing
+          ? anchorSideFor({
+              slot: 'in',
+              side: 'input',
+              sourceX: box.x,
+              targetX: edgeTargetX(graph, nodeId, 'input', 'in'),
+            })
+          : null;
+        const onRight =
+          key === 'in'
+            ? hubSide === 'right'
+            : anchorSideFor({
+                slot: key,
+                side,
+                sourceX: box.x,
+                targetX: edgeTargetX(graph, nodeId, side, key),
+              }) === 'right';
+        const stack = edgeStackFor({
+          edge: onRight ? 'right' : 'left',
+          slots,
+          sideOf,
+          hubSide,
+        });
+        const ratio = slotAnchorRatio(key, stack, box.h);
         const position: Position = {
           x: onRight ? box.x + box.w : box.x,
           y: box.y + box.h * ratio,
@@ -222,6 +268,29 @@ export default function BlockCanvas(props: Props) {
         .filter((id): id is string => typeof id === 'string' && !!id)
         .map(id => `filing:${id}`),
     );
+    // Link badges stand in for the lines that are now hidden at rest, so each
+    // block needs to know what leaves it and what arrives at it. Derived once
+    // per build from the same edges the canvas draws — never a second traversal
+    // of the refs, which could disagree with what the graph decided.
+    const labelOf = (key: string) =>
+      graph.filingById.get(key.replace(/^filing:/, ''))?.label ??
+      graph.caseById.get(key.replace(/^case:/, ''))?.name ??
+      'unknown';
+    const outgoingLinks = new Map<string, { edgeId: string; targetLabel: string }>();
+    const inboundLinks = new Map<string, { count: number; rows: string[] }>();
+    for (const edge of graph.edges) {
+      if (edge.kind !== 'ref') continue;
+      outgoingLinks.set(`${edge.source}:${edge.slot ?? 'out'}`, {
+        edgeId: edge.id,
+        targetLabel: labelOf(edge.target),
+      });
+      const bucket = inboundLinks.get(edge.target) ?? { count: 0, rows: [] };
+      bucket.count += 1;
+      // Capped: a tooltip is a glance, not a report.
+      if (bucket.rows.length < 8) bucket.rows.push(`${labelOf(edge.source)} — ${edge.slot ?? 'ref'}`);
+      inboundLinks.set(edge.target, bucket);
+    }
+
     const render = new ReactPlugin<Schemes, AreaExtra>({ createRoot });
 
     render.addPreset(
@@ -275,6 +344,7 @@ export default function BlockCanvas(props: Props) {
                             sourceX: graph.boxes.get(nodeProps.data.id)?.x ?? 0,
                             targetX: edgeTargetX(graph, nodeProps.data.id, 'output', slot),
                           }),
+                        inbound: inboundLinks.get(nodeProps.data.id),
                         inputSide: anchorSideFor({
                           slot: 'in',
                           side: 'input',
@@ -294,6 +364,7 @@ export default function BlockCanvas(props: Props) {
                                   graph.caseOfFiling.has(nodeProps.data.id)
                                 : nodeProps.data.payload.kind === 'filing' &&
                                   typeof nodeProps.data.payload.data.refs[slot] === 'string',
+                          link: outgoingLinks.get(`${nodeProps.data.id}:${slot}`),
                           node: editMode ? (
                             <SocketHandle
                               node={nodeProps.data}
@@ -376,20 +447,13 @@ export default function BlockCanvas(props: Props) {
             }
           )?.socket;
           if (picked) {
-            const compatible = new Set<EntityKey>();
-            for (const id of nodesRef.current.keys()) {
-              if (id === picked.nodeId) continue;
-              // Pulling from a slot asks what THAT slot accepts. Pulling from
-              // the input hub asks the mirror question of every candidate: does
-              // any slot it offers accept this block?
-              const ok =
-                picked.side === 'output'
-                  ? planLink(graph, picked.nodeId, id, picked.key).ok
-                  : slotsForKind(
-                      graph.filingById.get(id.replace(/^filing:/, ''))?.primaryKind ?? '',
-                    ).some(slot => planLink(graph, id, picked.nodeId, slot).ok);
-              if (ok) compatible.add(id);
-            }
+            // One question, asked of the rules layer: `linkVerdicts` knows that
+            // an output slot and the input hub ask mirror-image questions, and
+            // the picker (#63) reads the reasons from the same call.
+            const compatible = compatibleKeys(graph, picked.nodeId, {
+              slot: picked.side === 'output' ? picked.key : undefined,
+              side: picked.side,
+            });
             beginDrag(picked.nodeId, compatible, {
               slot: picked.side === 'output' ? picked.key : null,
               side: picked.side,
@@ -472,7 +536,7 @@ export default function BlockCanvas(props: Props) {
         ...graph.unfiled.map(data => ({ kind: 'unfiled' as const, data })),
       ]) {
         if (disposed) return;
-        const node = new BlockNode(block);
+        const node = new BlockNode(block, graph.boxes.get(block.data.key)?.h);
         // A rebuild (a refetch after `entity-updated`) has to come back with
         // the selection already painted — including a partial case.
         const state = blockState(graph, propsRef.current, block.kind, block.data.key);
@@ -647,6 +711,8 @@ export default function BlockCanvas(props: Props) {
     // counts as background.
     const target = event.target as HTMLElement | null;
     if (target?.closest?.('[data-block-id],[data-edge-kind]')) return;
+    // Clicking nothing also drops a pinned line — same gesture, same meaning.
+    setPinned(null);
     propsRef.current.onBackgroundClick?.();
   };
 
@@ -658,6 +724,9 @@ export default function BlockCanvas(props: Props) {
     const wrapper = wrapperRef.current;
     if (!wrapper) return;
     const down = (event: PointerEvent) => {
+      // Left button only. A right-click that opens a menu must not be
+      // remembered as the start of a click that could later deselect.
+      if (event.button !== 0) return;
       const target = event.target as HTMLElement | null;
       pointerDownRef.current = {
         x: event.clientX,
@@ -668,6 +737,85 @@ export default function BlockCanvas(props: Props) {
     wrapper.addEventListener('pointerdown', down, true);
     return () => wrapper.removeEventListener('pointerdown', down, true);
   }, []);
+
+  // Escape drops a pinned line. Cheap to own here: the canvas is the only
+  // thing that pins, and the key has no other meaning while it is focused.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      // A menu open over the canvas gets Escape first — closing it is what the
+      // user meant, and dropping the pinned line at the same time would take
+      // away the line they opened the menu to act on.
+      const current = propsRef.current;
+      const menuOpen = current.mode === 'edit' && current.menuOpen;
+      if (event.key === 'Escape' && !menuOpen) setPinned(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Right-click, resolved to what it hit. The host gets a discriminated target
+  // rather than an event, so no menu code ever reads the canvas DOM.
+  const handleContextMenu = (event: ReactMouseEvent) => {
+    const current = propsRef.current;
+    if (current.mode !== 'edit' || !current.onContextMenu) return;
+    event.preventDefault();
+    // Guard: a right-click during a link drag means "cancel", exactly as
+    // Escape does — not "open a menu about whatever is under the cursor".
+    if (currentDrag().active) {
+      endDrag();
+      connectionRef.current?.drop();
+      return;
+    }
+    const el = event.target as HTMLElement | null;
+    const at = { x: event.clientX, y: event.clientY };
+    const blockEl = el?.closest?.('[data-block-id]') as HTMLElement | null;
+    const blockKey = blockEl?.getAttribute('data-block-id') ?? null;
+    const badge = el?.closest?.('[data-link-badge]') as HTMLElement | null;
+    const badgeId = badge?.getAttribute('data-link-badge') ?? null;
+    const slotEl = el?.closest?.('[data-slot]') as HTMLElement | null;
+    const slot = slotEl?.getAttribute('data-slot') ?? null;
+
+    if (!blockKey) {
+      current.onContextMenu({ kind: 'background' }, at);
+      return;
+    }
+    // Narrowest first: a badge lives inside a slot, which lives inside a block.
+    if (badgeId && badgeId !== 'inbound') {
+      current.onContextMenu({ kind: 'badge', edgeId: badgeId, blockKey }, at);
+    } else if (slot === 'id' || badgeId === 'inbound') {
+      current.onContextMenu({ kind: 'idTag', blockKey }, at);
+    } else if (slot) {
+      current.onContextMenu({ kind: 'slot', slot, blockKey }, at);
+    } else {
+      current.onContextMenu({ kind: 'block', blockKey }, at);
+    }
+  };
+
+  // The imperative handle. Published once per build, because the area it drives
+  // is created there.
+  useEffect(() => {
+    const current = propsRef.current;
+    if (current.mode !== 'edit' || !current.onReady) return;
+    current.onReady({
+      centerOn: (key: EntityKey) => {
+        const area = areaRef.current;
+        const box = graph.boxes.get(key);
+        if (!area || !box) return;
+        // Read the block's centre and put it in the middle of the viewport at a
+        // zoom where its handles are aimable — the same floor the initial fit
+        // uses, so "go to" never lands somewhere unusable.
+        const k = Math.max(area.area.transform.k, MIN_EDIT_ZOOM);
+        const rect = area.container.getBoundingClientRect();
+        void (async () => {
+          await area.area.zoom(k, 0, 0);
+          await area.area.translate(
+            rect.width / 2 - (box.x + box.w / 2) * k,
+            rect.height / 2 - (box.y + box.h / 2) * k,
+          );
+        })();
+      },
+    });
+  }, [graph]);
 
   // The marquee attaches to the container element, which outlives any single
   // rete mount, and reads the area through a ref — so switching tools never
@@ -715,6 +863,7 @@ export default function BlockCanvas(props: Props) {
       ref={wrapperRef}
       className="relative h-full w-full overflow-hidden"
       onClick={handleBackgroundClick}
+      onContextMenu={handleContextMenu}
     >
       <div ref={containerRef} className="h-full w-full" />
       <div
@@ -759,7 +908,13 @@ function EdgeLayer({
 }) {
   const drag = useDragState();
   const hovered = useHovered();
-  const touchesPointer = hovered !== null && endpoints.includes(hovered);
+  const pinned = usePinned();
+  const showAll = useShowAllLinks();
+  // A pinned block reads as hovered: opening a menu moves the pointer off the
+  // block, and a line that vanished at that moment would be useless.
+  const touchesPointer =
+    (hovered !== null && endpoints.includes(hovered)) ||
+    (pinned !== null && endpoints.includes(pinned));
 
   if (isContains) {
     const authoringCaseLinks = drag.active && drag.slot === 'caseRef';
@@ -771,12 +926,16 @@ function EdgeLayer({
     );
   }
 
-  const muted = hovered !== null && !touchesPointer;
+  // Ref edges are hidden at rest too now. Muting them to 0.15 (#60) still left
+  // every line crossing the columns, which is the thing being read THROUGH. A
+  // line appears when it is the one being traced — its own block hovered or
+  // pinned — or when the toolbar toggle asks for the whole picture back.
+  if (!(touchesPointer || showAll)) return null;
   return (
     <div
-      style={{ opacity: muted ? 0.15 : 1 }}
+      style={{ opacity: touchesPointer ? 1 : 0.45 }}
       data-edge-kind="ref"
-      data-edge-state={muted ? 'muted' : 'full'}
+      data-edge-state={touchesPointer ? 'full' : 'show-all'}
     >
       <Presets.classic.Connection {...props} />
     </div>

@@ -26,6 +26,8 @@ export interface ScopeFiling {
   id: string;
   filingType: string;
   label: string;
+  /** ISO filing date, or null where the record carries none. */
+  filingDate?: string | null;
   docCount: number;
   indexedCount: number;
   refs: ScopeRefs;

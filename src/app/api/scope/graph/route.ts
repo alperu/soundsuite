@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db/prisma';
 import {
   primaryKindForFiling,
   refsFromAttachment,
+  filedOnFromTags,
   refsFromMotion,
   type ScopeRefs,
 } from '@/lib/scope/connectivity';
@@ -30,6 +31,10 @@ interface ScopeFiling {
   id: string;
   filingType: string;
   label: string;
+  /** When it was filed, ISO, or null where the record has no date. The list is
+   *  already ORDERED by it; the canvas needs the value itself because docket
+   *  order is a domain signal — a response answers an EARLIER motion. */
+  filingDate: string | null;
   docCount: number;
   indexedCount: number;
   refs: ScopeRefs;
@@ -67,7 +72,7 @@ export async function GET() {
         orderBy: { name: 'asc' },
       }),
       prisma.filing.findMany({
-        select: { id: true, caseId: true, filingType: true, title: true },
+        select: { id: true, caseId: true, filingType: true, title: true, filingDate: true },
         orderBy: [{ caseId: 'asc' }, { filingDate: 'asc' }],
       }),
       prisma.document.findMany({
@@ -119,6 +124,20 @@ export async function GET() {
       refsByFiling.set(attachment.id, shadow ? { ...shadow, ...own } : own);
     }
 
+    // `Filing.filingDate` is null across the corpus, so the date the tag panel
+    // recorded is the only one there is. The column stays authoritative where
+    // it is populated; the attachment wins over its shadow motion, exactly as
+    // the refs above do, because the attachment is the row the panel writes.
+    const filedOnByFiling = new Map<string, string>();
+    for (const motion of motions) {
+      const filedOn = filedOnFromTags(motion.tags);
+      if (filedOn) filedOnByFiling.set(motion.id, filedOn);
+    }
+    for (const attachment of attachments) {
+      const filedOn = filedOnFromTags(attachment.tags);
+      if (filedOn) filedOnByFiling.set(attachment.id, filedOn);
+    }
+
     const kindsByFiling = new Map<string, string[]>();
     const attachmentKindByFiling = new Map<string, string>();
     const clerksRecordIds = new Set(clerks.map(c => c.id));
@@ -147,6 +166,9 @@ export async function GET() {
         id: filing.id,
         filingType: filing.filingType,
         label: filing.title,
+        filingDate: filing.filingDate
+          ? filing.filingDate.toISOString()
+          : filedOnByFiling.get(filing.id) ?? null,
         docCount: docs.length,
         indexedCount: docs.filter(d => d.status === 'INDEXED').length,
         refs: refsByFiling.get(filing.id) ?? {},

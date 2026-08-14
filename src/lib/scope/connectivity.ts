@@ -92,6 +92,29 @@ export interface AttachmentRowLike {
   tags?: unknown
 }
 
+/**
+ * The `filedOn` tag, normalised to ISO — the read-path fallback for a Filing
+ * whose `filingDate` column is null (which today is every row).
+ *
+ * Defensive by design: the tag is authored through the tag panel, so it can be
+ * a bare string or a Hayson-wrapped value, and it can be nonsense. Anything
+ * unparseable answers null rather than throwing — a bad date must not take the
+ * whole scope graph down.
+ */
+export function filedOnFromTags(rawTags: unknown): string | null {
+  const tags = recoverTagObject(rawTags)
+  const raw = tags['filedOn']
+  const value =
+    typeof raw === 'string'
+      ? raw
+      : raw && typeof raw === 'object' && typeof (raw as { val?: unknown }).val === 'string'
+        ? (raw as { val: string }).val
+        : null
+  if (!value) return null
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+}
+
 /** Columns + tags for a Motion row. Tags win, per the read path. */
 export function refsFromMotion(row: MotionRowLike): ScopeRefs {
   const tags = recoverTagObject(row.tags)

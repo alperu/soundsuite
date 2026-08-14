@@ -2,8 +2,19 @@
 
 import dynamic from 'next/dynamic';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { TagPanel } from '@/components/case/tag-panel';
 import { commitLink, planLink, relinkRef, unfileDocument, unlinkRef } from './link-rules';
+import type { LinkPlan } from './link-rules';
+import { hydrateShowAllLinks, setShowAllLinks, useShowAllLinks } from './link-visibility';
+import { LinkPopup, type InboundLinkRow } from './link-popup';
+import { PairingWorkbench } from './pairing-workbench';
+import { setPinned } from './hover-state';
+import { LinkPicker } from './link-picker';
+import { currentPendingLink, setPendingLink, usePendingLink } from './pending-link';
+import { commitLinkBatch, visibleSlotsFor, slotLabel } from './link-rules';
+import { subscribeTransform } from './zoom-state';
+import type { CanvasHandle, ContextTarget } from './block-canvas';
 import { buildScopeGraph, filingKey, type EntityKey } from './scope-graph';
 import { asEntityKind, type ScopeCase, type UnconnectedRow } from './types';
 import { DOCUMENT_DRAG_TYPE, UnfiledPanel } from './unfiled-panel';
@@ -113,7 +124,11 @@ export function EditorTab({
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [selectedTable, setSelectedTable] = useState<'Motion' | 'MotionAttachment' | null>(null);
   const [worklistOpen, setWorklistOpen] = useState(true);
-  const [leftTab, setLeftTab] = useState<'unconnected' | 'unfiled' | 'filing'>('unconnected');
+  const [leftTab, setLeftTab] = useState<'unconnected' | 'unfiled' | 'filing' | 'pair'>(
+    'unconnected',
+  );
+  /** True while a batch is in flight — the workbench disables Apply. */
+  const [batchBusy, setBatchBusy] = useState(false);
   /** Bumped after a file/unfile so the unfiled panel refetches its page. */
   const [unfiledRefresh, setUnfiledRefresh] = useState(0);
   const [draggingDocument, setDraggingDocument] = useState(false);
@@ -127,10 +142,29 @@ export function EditorTab({
   const [banner, setBanner] = useState<{
     tone: 'ok' | 'error';
     text: string;
+    /** Batch results stay until dismissed — they are a report, not a flash. */
+    sticky?: boolean;
     /** Present on reversible writes — the banner grows an Undo button. */
     undo?: () => void | Promise<void>;
   } | null>(null);
   const [dropBusy, setDropBusy] = useState(false);
+  const showAllLinks = useShowAllLinks();
+  /** An open menu, and what it was opened on. */
+  const [menu, setMenu] = useState<
+    | { kind: 'flat'; x: number; y: number; items: ContextMenuItem[] }
+    | { kind: 'inbound'; x: number; y: number; targetLabel: string; rows: InboundLinkRow[] }
+    | null
+  >(null);
+  /** The canvas's imperative handle — centering is the canvas's job, not ours. */
+  const canvasRef = useRef<CanvasHandle | null>(null);
+  /** An open link picker: which end it is filling in, and where it sits. */
+  const [picker, setPicker] = useState<
+    { sourceKey: string; slot?: string; side: 'input' | 'output'; rect: DOMRect } | null
+  >(null);
+  const pendingLink = usePendingLink();
+  useEffect(() => {
+    hydrateShowAllLinks();
+  }, []);
 
   /** The canvas draws the whole scope, badged with what the worklist reports. */
   const graph = useMemo(
@@ -238,7 +272,7 @@ export function EditorTab({
   };
 
   useEffect(() => {
-    if (!banner) return;
+    if (!banner || banner.sticky) return;
     // An Undo has to outlast the moment of surprise that makes you want it.
     const timer = setTimeout(() => setBanner(null), banner.undo ? 12000 : 3500);
     return () => clearTimeout(timer);
@@ -352,6 +386,39 @@ export function EditorTab({
   );
 
   /** A drawn connection: validate the pair, write the ref, let the refetch draw it. */
+  /**
+   * Everything that happens AFTER a link has been planned: the write, what the
+   * user is told, and where the canvas leaves them.
+   *
+   * The one commit path, deliberately. A drag, the picker and the menus all
+   * arrive here with a plan already made — nobody re-plans from a pair of keys,
+   * which is exactly where an inverted slot (orderRef writes on the ORDER)
+   * would quietly become a different link than the one the user was shown.
+   */
+  const commitPlan = useCallback(
+    async (plan: LinkPlan, options: { silent?: boolean } = {}) => {
+      const result = await commitLink(plan, options);
+      // A batch speaks once, at the end, for all of its items.
+      if (!options.silent) setBanner({ tone: result.ok ? 'ok' : 'error', text: result.message });
+      // A move relocates the block into another case's cluster, usually
+      // off-screen. Making it the active block means the rebuilt canvas marks
+      // it — the cheapest answer to "where did my filing just go".
+      if (result.ok && plan.type === 'move-filing') {
+        const moved = graph.filingById.get(plan.filingId);
+        if (moved) {
+          setSelectedKey(null);
+          setSelectedTable(null);
+          setGraphPick({ kind: moved.primaryKind, id: moved.id, label: moved.label });
+          // Marking it was the old answer to "where did my filing go"; now the
+          // canvas actually takes the user there.
+          canvasRef.current?.centerOn(filingKey(moved.id));
+        }
+      }
+      return result;
+    },
+    [graph],
+  );
+
   const handleConnect = useCallback(
     async (source: EntityKey, target: EntityKey, slot?: string) => {
       const plan = planLink(graph, source, target, slot);
@@ -359,21 +426,312 @@ export function EditorTab({
         setBanner({ tone: 'error', text: plan.reason });
         return;
       }
-      const result = await commitLink(plan.plan);
-      setBanner({ tone: result.ok ? 'ok' : 'error', text: result.message });
-      // A move relocates the block into another case's cluster, usually
-      // off-screen. Making it the active block means the rebuilt canvas marks
-      // it — the cheapest answer to "where did my filing just go".
-      if (result.ok && plan.plan.type === 'move-filing') {
-        const moved = graph.filingById.get(plan.plan.filingId);
-        if (moved) {
-          setSelectedKey(null);
-          setSelectedTable(null);
-          setGraphPick({ kind: moved.primaryKind, id: moved.id, label: moved.label });
-        }
+      await commitPlan(plan.plan);
+    },
+    [graph, commitPlan],
+  );
+
+
+  /** Labels for menu copy — the canvas hands us keys, never text. */
+  const labelOf = useCallback(
+    (key: string) =>
+      graph.filingById.get(key.replace(/^filing:/, ''))?.label ??
+      graph.caseById.get(key.replace(/^case:/, ''))?.name ??
+      'this block',
+    [graph],
+  );
+
+  /** Every ref pointing AT a block, as the popup wants it. */
+  const inboundRowsFor = useCallback(
+    (key: string): InboundLinkRow[] =>
+      graph.edges
+        .filter(edge => edge.kind === 'ref' && edge.target === key)
+        .map(edge => ({
+          edgeId: edge.id,
+          sourceKey: edge.source,
+          sourceLabel: labelOf(edge.source),
+          slot: edge.slot ?? 'ref',
+        })),
+    [graph, labelOf],
+  );
+
+
+
+  /**
+   * Apply a whole workbench batch.
+   *
+   * Every item goes through `commitPlan` — the same path a drag, the picker and
+   * the menus use — but silently: the batch owns the announcement and the
+   * banner, so N links mean one refetch and one message rather than N of each.
+   * The banner stays until dismissed because a batch result is something to
+   * read, and it names the failures, because "3 failed" without saying which
+   * three is a message that costs more time than it saves.
+   */
+  const handleApplyBatch = useCallback(
+    async (plans: LinkPlan[]) => {
+      if (plans.length === 0) return;
+      setBatchBusy(true);
+      try {
+        const result = await commitLinkBatch(plans, plan => commitPlan(plan, { silent: true }));
+        const failures = result.items
+          .filter(item => !item.ok)
+          .map(item => (item.plan.type === 'ref' ? labelOf(filingKey(item.plan.id)) : 'an item'));
+        setBanner({
+          tone: result.failed === 0 ? 'ok' : 'error',
+          text:
+            result.failed === 0
+              ? `${result.linked} linked`
+              : `${result.linked} linked, ${result.failed} failed — ${failures.join(', ')}`,
+          sticky: true,
+          undo: result.linked > 0 ? async () => {
+            const reversal = await result.undo();
+            setBanner({
+              tone: reversal.failed === 0 ? 'ok' : 'error',
+              text:
+                reversal.failed === 0
+                  ? `${reversal.linked} links undone`
+                  : `${reversal.linked} undone, ${reversal.failed} could not be`,
+              sticky: true,
+            });
+          } : undefined,
+        });
+      } finally {
+        setBatchBusy(false);
       }
     },
-    [graph],
+    [commitPlan, labelOf],
+  );
+
+  /** A rect for the picker to hang off, from the click that opened the menu. */
+  const rectAt = (at: { x: number; y: number }) =>
+    ({
+      left: at.x,
+      right: at.x,
+      top: at.y,
+      bottom: at.y,
+      width: 0,
+      height: 0,
+      x: at.x,
+      y: at.y,
+      toJSON: () => ({}),
+    }) as DOMRect;
+
+  /**
+   * The "make a link" half of a menu, in the two shapes a user reaches for.
+   *
+   * "Link … to…" opens the picker — right when the target is easier to name
+   * than to find. "Link from here" starts the two-step for when the target is
+   * easier to go and look at. Both end at `commitPlan`, so neither can write a
+   * different link than the one it showed.
+   */
+  const linkItemsFor = useCallback(
+    (blockKey: string, slot: string | undefined, at: { x: number; y: number }): ContextMenuItem[] => {
+      const pending = currentPendingLink();
+      const items: ContextMenuItem[] = [];
+      const filing = graph.filingById.get(blockKey.replace(/^filing:/, ''));
+
+      if (pending && pending.sourceKey !== blockKey) {
+        // The second half of a two-step. Both ends are known, so the rules can
+        // be asked directly — no picker, no list to read.
+        const plan = planLink(graph, pending.sourceKey, blockKey, pending.slot);
+        items.push({
+          label: plan.ok
+            ? `Link to here (as ${pending.slot ?? 'ref'})`
+            : `Cannot link here — ${plan.reason}`,
+          disabled: !plan.ok,
+          onClick: () => {
+            if (!plan.ok) return;
+            void commitPlan(plan.plan);
+            setPendingLink(null);
+          },
+        });
+        items.push({
+          label: 'Cancel pending link',
+          onClick: () => setPendingLink(null),
+        });
+        return items;
+      }
+
+      if (slot && slot !== 'id') {
+        items.push({
+          label: `Link ${slotLabel(slot as never)} to…`,
+          onClick: () => setPicker({ sourceKey: blockKey, slot, side: 'output', rect: rectAt(at) }),
+        });
+        items.push({
+          label: 'Link from here',
+          onClick: () =>
+            setPendingLink({ sourceKey: blockKey, slot, label: `${labelOf(blockKey)} · ${slot}` }),
+        });
+        return items;
+      }
+
+      if (slot === 'id') {
+        items.push({
+          label: 'Link something to this…',
+          onClick: () => setPicker({ sourceKey: blockKey, side: 'input', rect: rectAt(at) }),
+        });
+        return items;
+      }
+
+      // The block itself: one entry per slot it can actually write.
+      for (const writable of filing ? visibleSlotsFor(filing.primaryKind, filing.refs) : []) {
+        items.push({
+          label: `Link ${slotLabel(writable)} to…`,
+          onClick: () =>
+            setPicker({ sourceKey: blockKey, slot: writable, side: 'output', rect: rectAt(at) }),
+        });
+      }
+      return items;
+    },
+    [graph, labelOf, commitPlan],
+  );
+
+  /**
+   * A right-click on the canvas, already resolved to what it hit.
+   *
+   * Menus are built here rather than in the canvas because every item is a
+   * domain action — unlink with undo, centre on a block, pin a line — and the
+   * canvas deliberately owns none of those.
+   */
+  // Escape unwinds whatever this tab has open, outermost first. The canvas
+  // also listens (to drop a pinned line) and defers while `menuOpen` — a
+  // pending link and an open picker are the same kind of "in progress" state.
+  useEffect(() => {
+    if (!picker && !pendingLink) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      if (picker) setPicker(null);
+      else setPendingLink(null);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [picker, pendingLink]);
+
+  // A menu is placed in viewport pixels over a canvas that pans and zooms
+  // underneath it. `context-menu` closes itself on DOM scroll, which a rete pan
+  // never fires — so the canvas transform is what has to close it, or the menu
+  // floats away from the thing it describes.
+  useEffect(() => {
+    if (!menu) return;
+    let first = true;
+    return subscribeTransform(() => {
+      // The subscription fires once on attach with the current transform.
+      if (first) {
+        first = false;
+        return;
+      }
+      setMenu(null);
+    });
+  }, [menu]);
+
+  const handleContextMenu = useCallback(
+    (target: ContextTarget, at: { x: number; y: number }) => {
+      if (target.kind === 'background') {
+        setMenu(null);
+        return;
+      }
+      if (target.kind === 'badge') {
+        const edge = graph.edges.find(e => e.id === target.edgeId);
+        if (!edge) return;
+        const other = edge.target;
+        setMenu({
+          kind: 'flat',
+          x: at.x,
+          y: at.y,
+          items: [
+            {
+              label: `Go to ${labelOf(other)}`,
+              onClick: () => canvasRef.current?.centerOn(other),
+            },
+            {
+              label: 'Show line',
+              // Pinned rather than hovered: the pointer has to leave the block
+              // to reach this menu, and a hover-only line would already be gone.
+              onClick: () => setPinned(edge.source),
+            },
+            { separator: true, label: '', onClick: () => {} },
+            {
+              label: `Delete ${edge.slot ?? 'link'}`,
+              danger: true,
+              onClick: () => void handleUnlink(target.edgeId),
+            },
+          ],
+        });
+        return;
+      }
+      if (target.kind === 'idTag') {
+        const rows = inboundRowsFor(target.blockKey);
+        if (rows.length === 0) {
+          setMenu({
+            kind: 'flat',
+            x: at.x,
+            y: at.y,
+            items: [
+              { label: 'Nothing points here yet', onClick: () => {}, disabled: true },
+              ...linkItemsFor(target.blockKey, 'id', at),
+            ],
+          });
+        } else if (rows.length === 1) {
+          // One link is a list of one; the flat menu says it faster.
+          const only = rows[0];
+          setMenu({
+            kind: 'flat',
+            x: at.x,
+            y: at.y,
+            items: [
+              {
+                label: `Go to ${only.sourceLabel}`,
+                onClick: () => canvasRef.current?.centerOn(only.sourceKey),
+              },
+              { label: 'Show line', onClick: () => setPinned(only.sourceKey) },
+              { separator: true, label: '', onClick: () => {} },
+              {
+                label: `Delete ${only.slot}`,
+                danger: true,
+                onClick: () => void handleUnlink(only.edgeId),
+              },
+              { separator: true, label: '', onClick: () => {} },
+              ...linkItemsFor(target.blockKey, 'id', at),
+            ],
+          });
+        } else {
+          setMenu({
+            kind: 'inbound',
+            x: at.x,
+            y: at.y,
+            targetLabel: labelOf(target.blockKey),
+            rows,
+          });
+        }
+        return;
+      }
+      // A slot or the block itself: centring and pinning are always available;
+      // the Add-link items arrive with #62d.
+      setMenu({
+        kind: 'flat',
+        x: at.x,
+        y: at.y,
+        items: [
+          ...linkItemsFor(target.blockKey, target.kind === 'slot' ? target.slot : undefined, at),
+          { separator: true, label: '', onClick: () => {} },
+          {
+            label: 'Centre on this block',
+            onClick: () => canvasRef.current?.centerOn(target.blockKey),
+          },
+          { label: 'Show links', onClick: () => setPinned(target.blockKey) },
+        ],
+      });
+    },
+    [graph, labelOf, inboundRowsFor, handleUnlink, linkItemsFor],
+  );
+
+  /** Deleting several refs one after another — each keeps its own undo. */
+  const handleDeleteAll = useCallback(
+    async (edgeIds: string[]) => {
+      for (const edgeId of edgeIds) await handleUnlink(edgeId);
+    },
+    [handleUnlink],
   );
 
   /**
@@ -399,11 +757,10 @@ export function EditorTab({
         setBanner({ tone: 'error', text: plan.reason });
         return;
       }
-      const result = await commitLink(plan.plan);
-      setBanner({ tone: result.ok ? 'ok' : 'error', text: result.message });
+      const result = await commitPlan(plan.plan);
       if (result.ok) setUnfiledRefresh(n => n + 1);
     },
-    [graph],
+    [graph, commitPlan],
   );
 
   /** Dropped PDFs land in the active case's watched directory as QUEUED docs. */
@@ -507,7 +864,7 @@ export function EditorTab({
             still needs filing, and — once a filing block is active — what that
             filing holds, which is the only place a filed document is visible. */}
         <div className="flex items-center border-b border-gray-200 bg-gray-50">
-          {(['unconnected', 'unfiled', 'filing'] as const).map(t => (
+          {(['unconnected', 'pair', 'unfiled', 'filing'] as const).map(t => (
             <button
               key={t}
               onClick={() => setLeftTab(t)}
@@ -525,9 +882,11 @@ export function EditorTab({
             >
               {t === 'unconnected'
                 ? `Unconnected (${allEntries.length})`
-                : t === 'unfiled'
-                  ? 'Unfiled docs'
-                  : `Filing docs${activeFiling ? ` (${activeFiling.docCount})` : ''}`}
+                : t === 'pair'
+                  ? 'Pair up'
+                  : t === 'unfiled'
+                    ? 'Unfiled docs'
+                    : `Filing docs${activeFiling ? ` (${activeFiling.docCount})` : ''}`}
             </button>
           ))}
           <button
@@ -539,7 +898,21 @@ export function EditorTab({
           </button>
         </div>
 
-        {leftTab === 'filing' && activeFiling ? (
+        {leftTab === 'pair' ? (
+          <PairingWorkbench
+            graph={graph}
+            busy={batchBusy}
+            onChoose={row =>
+              setPicker({
+                sourceKey: row.key,
+                slot: row.slot,
+                side: 'output',
+                rect: rectAt({ x: 340, y: 200 }),
+              })
+            }
+            onApply={plans => void handleApplyBatch(plans)}
+          />
+        ) : leftTab === 'filing' && activeFiling ? (
           <UnfiledPanel
             caseNameById={caseNameById}
             refreshKey={unfiledRefresh}
@@ -709,8 +1082,79 @@ export function EditorTab({
             onConnect={handleConnect}
             onRefuse={reason => setBanner({ tone: 'error', text: reason })}
             onUnlink={edgeId => void handleUnlink(edgeId)}
+            onContextMenu={handleContextMenu}
+            menuOpen={menu !== null || picker !== null || pendingLink !== null}
+            onReady={api => {
+              canvasRef.current = api;
+            }}
           />
         )}
+
+        {menu?.kind === 'flat' && (
+          <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
+        )}
+        {menu?.kind === 'inbound' && (
+          <LinkPopup
+            x={menu.x}
+            y={menu.y}
+            targetLabel={menu.targetLabel}
+            rows={menu.rows}
+            onGoTo={key => canvasRef.current?.centerOn(key)}
+            onDelete={edgeId => void handleUnlink(edgeId)}
+            onDeleteAll={edgeIds => void handleDeleteAll(edgeIds)}
+            onClose={() => setMenu(null)}
+          />
+        )}
+
+        {picker && (
+          <LinkPicker
+            graph={graph}
+            sourceKey={picker.sourceKey}
+            slot={picker.slot}
+            side={picker.side}
+            anchorRect={picker.rect}
+            onPick={plan => void commitPlan(plan)}
+            onClose={() => setPicker(null)}
+          />
+        )}
+
+        {/* A link waiting for its second end. The pill is the only thing saying
+            the canvas is in a state at all, so it also carries the way out. */}
+        {pendingLink && (
+          <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2">
+            <div
+              className="pointer-events-auto flex items-center gap-2 rounded-full border border-blue-300 bg-blue-50/95 px-3 py-1 text-[11px] text-blue-800 shadow-sm"
+              data-pending-link="yes"
+            >
+              <span className="max-w-[280px] truncate">Linking from {pendingLink.label}</span>
+              <span className="text-blue-400">right-click the target</span>
+              <button
+                onClick={() => setPendingLink(null)}
+                className="rounded-full px-1.5 py-0.5 text-blue-700 hover:bg-blue-100"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Link visibility. Lives on the canvas rather than in a toolbar strip:
+            the editor has no toolbar, and this is where the user meets the
+            question — lines are hidden until a block is hovered. */}
+        <div className="pointer-events-none absolute left-3 top-3">
+          <button
+            onClick={() => setShowAllLinks(!showAllLinks)}
+            aria-pressed={showAllLinks}
+            title="Show every ref link at once instead of on hover"
+            className={`pointer-events-auto rounded-full border px-2.5 py-1 text-[11px] shadow-sm ${
+              showAllLinks
+                ? 'border-blue-600 bg-blue-600 text-white'
+                : 'border-gray-300 bg-white/90 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            Show all links
+          </button>
+        </div>
 
         {/* Droplet */}
         <div className="pointer-events-none absolute right-3 top-3 flex flex-col items-end gap-2">

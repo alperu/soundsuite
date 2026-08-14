@@ -3,6 +3,7 @@
 import dynamic from 'next/dynamic';
 import { useEffect, useMemo, useState } from 'react';
 import { getPreference } from '@/lib/indexed-db';
+import { hydrateShowAllLinks, setShowAllLinks, useShowAllLinks } from './link-visibility';
 import { buildScopeGraph } from './scope-graph';
 import type { CanvasTool } from './block-canvas';
 import type { ScopeCase, ScopeSelection } from './types';
@@ -61,11 +62,13 @@ export function FilteringTab({
 
   /** Which gesture the left button performs on the canvas. */
   const [tool, setTool] = useState<CanvasTool>('pointer');
+  const showAllLinks = useShowAllLinks();
 
   const [scopeActive, setScopeActive] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
+    hydrateShowAllLinks();
     let alive = true;
     void getPreference<boolean>('search.scopeSetActive').then(value => {
       if (alive) setScopeActive(Boolean(value));
@@ -130,6 +133,21 @@ export function FilteringTab({
             </button>
           ))}
         </div>
+
+        {/* Ref lines are hidden until a block is hovered; this brings the whole
+            web back for anyone who wants to read it at once. */}
+        <button
+          onClick={() => setShowAllLinks(!showAllLinks)}
+          aria-pressed={showAllLinks}
+          title="Show every ref link at once instead of on hover"
+          className={`rounded border px-2 py-1 text-[11px] ${
+            showAllLinks
+              ? 'border-blue-600 bg-blue-600 text-white'
+              : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-100'
+          }`}
+        >
+          Show all links
+        </button>
 
         <button
           onClick={selectAll}

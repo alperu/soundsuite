@@ -6,6 +6,7 @@ import { useDragState } from './drag-state';
 import { setHovered } from './hover-state';
 import {
   ALL_SLOTS,
+  edgeStackFor,
   normalizeKind,
   slotAnchorRatio,
   slotEdge,
@@ -79,11 +80,13 @@ export class BlockNode extends ClassicPreset.Node {
   isActive = false;
   entityKind: string;
 
-  constructor(public payload: BlockPayload) {
+  /** `height` comes from the graph: filings are sized to the tallest edge
+   *  stack in the corpus, so it is not a constant. */
+  constructor(public payload: BlockPayload, height?: number) {
     super(payload.kind);
     this.id = payload.data.key;
     this.width = payload.kind === 'case' ? CASE_W : FILING_W;
-    this.height = payload.kind === 'case' ? CASE_H : FILING_H;
+    this.height = payload.kind === 'case' ? CASE_H : height ?? FILING_H;
     this.entityKind = blockEntityKind(payload);
     const blockSocket = socketFor(this.entityKind);
     // multipleConnections MUST be true on both sides: a motion is a hub that
@@ -211,6 +214,16 @@ export interface SlotHandle {
   /** True when the slot already holds a ref — drawing again replaces it. */
   occupied: boolean;
   node: ReactNode;
+  /** The link this slot holds, when it holds one. Drives the badge that stands
+   *  in for the line now that lines are hidden at rest (#67). */
+  link?: { edgeId: string; targetLabel: string };
+}
+
+/** Refs arriving AT a block, for the count on its id tag. */
+export interface InboundLinks {
+  count: number;
+  /** "<source> — <slot>" rows for the tooltip, already trimmed by the canvas. */
+  rows: string[];
 }
 
 /** What a click carried, as the stores understand it — never a DOM event. */
@@ -240,7 +253,117 @@ interface BlockProps {
      *  edge is headed, so the handle and its wire agree. */
     sideOf?: (slot: string) => 'left' | 'right';
     inputSide?: 'left' | 'right';
+    /** What points at this block — shown as a count on its id tag. */
+    inbound?: InboundLinks;
   };
+}
+
+
+/**
+ * The badge that says a link LEAVES here.
+ *
+ * A hairline stub out from the socket, then a stroked ring: the detachment is
+ * the whole message. A filled dot on the circle reads "this slot is full"; a
+ * ring sitting off the edge of the block reads "something leaves from here and
+ * goes somewhere else" — which is what the user needs now that the line itself
+ * is hidden until hover (#67). It replaces the ' •' the label used to carry.
+ *
+ * `data-link-badge` carries the edge id: the geometry assertion excludes these
+ * from its circle measurements, and #62's menu will need the id anyway.
+ */
+function LinkBadge({
+  edgeId,
+  side,
+  color,
+  title,
+}: {
+  edgeId: string;
+  side: 'left' | 'right';
+  color: string;
+  title: string;
+}) {
+  const outward = side === 'right' ? { left: '100%' } : { right: '100%' };
+  return (
+    <span
+      data-link-badge={edgeId}
+      title={title}
+      style={{
+        position: 'absolute',
+        top: '50%',
+        transform: 'translateY(-50%)',
+        ...outward,
+        display: 'flex',
+        alignItems: 'center',
+        flexDirection: side === 'right' ? 'row' : 'row-reverse',
+        // Interactive from #62: the badge is the right-click target for the
+        // link it stands for, so it has to be able to receive the event.
+        pointerEvents: 'auto',
+      }}
+    >
+      <span style={{ display: 'block', width: 10, height: 1, background: color, opacity: 0.7 }} />
+      <span
+        style={{
+          display: 'block',
+          width: 11,
+          height: 11,
+          borderRadius: 9999,
+          border: `1.5px solid ${color}`,
+          background: 'transparent',
+        }}
+      />
+    </span>
+  );
+}
+
+/**
+ * How many refs point AT this block, shown on its id tag.
+ *
+ * Fan-in is the interesting number on this canvas — a motion collects
+ * responses, replies and the order that rules on it — so the count lives on the
+ * receiving end. One inbound ref is a bare ring; two or more carries the
+ * number, because that is when "how many" starts being a question.
+ */
+function InboundBadge({ inbound, side, color }: { inbound: InboundLinks; side: 'left' | 'right'; color: string }) {
+  if (inbound.count < 1) return null;
+  const outward = side === 'right' ? { left: '100%' } : { right: '100%' };
+  return (
+    <span
+      data-link-badge="inbound"
+      data-inbound-count={inbound.count}
+      title={inbound.rows.join('\n')}
+      style={{
+        position: 'absolute',
+        top: '50%',
+        transform: 'translateY(-50%)',
+        ...outward,
+        display: 'flex',
+        alignItems: 'center',
+        flexDirection: side === 'right' ? 'row' : 'row-reverse',
+        // Right-clickable: this is what opens the fan-in list.
+        pointerEvents: 'auto',
+      }}
+    >
+      <span style={{ display: 'block', width: 10, height: 1, background: color, opacity: 0.7 }} />
+      <span
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minWidth: 11,
+          height: 11,
+          padding: inbound.count > 1 ? '0 2px' : 0,
+          borderRadius: 9999,
+          border: `1.5px solid ${color}`,
+          background: 'rgba(255,255,255,0.9)',
+          fontSize: 8,
+          lineHeight: 1,
+          color,
+        }}
+      >
+        {inbound.count > 1 ? inbound.count : ''}
+      </span>
+    </span>
+  );
 }
 
 export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
@@ -281,6 +404,15 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
   const sideOf = (slot: LinkSlot) => sockets?.sideOf?.(slot) ?? slotEdge(slot);
   const leftHandles = (sockets?.outputs ?? []).filter(h => sideOf(h.slot) === 'left');
   const rightHandles = (sockets?.outputs ?? []).filter(h => sideOf(h.slot) === 'right');
+  // One stack per edge, hub included — the hub is a circle on the same edge as
+  // the slots, and laying it out on a scale of its own is how it ended up
+  // exactly on top of the first slot (#65). The canvas's watcher builds these
+  // from the same helper, so a handle and its wire cannot disagree.
+  const hubSide = payload.kind === 'case' ? null : sockets?.inputSide ?? 'left';
+  const slotKeys = (sockets?.outputs ?? []).map(h => h.slot);
+  const leftStack = edgeStackFor({ edge: 'left', slots: slotKeys, sideOf, hubSide });
+  const rightStack = edgeStackFor({ edge: 'right', slots: slotKeys, sideOf, hubSide });
+  const hubStack = hubSide === 'left' ? leftStack : rightStack;
   const handles = sockets ? (
     <>
       {/* The ref hub faces whichever side its inbound edges arrive from: under
@@ -294,10 +426,33 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
             ? 'right-0 translate-x-1/2'
             : 'left-0 -translate-x-1/2'
         } -translate-y-1/2`}
-        style={{ top: `${slotAnchorRatio('input', 'in', []) * 100}%` }}
+        style={{ top: `${slotAnchorRatio('in', hubStack, node.height) * 100}%` }}
         data-hub-side={sockets.inputSide ?? 'left'}
+        // The hub is what a ref points AT, so it is this block's id — the same
+        // thing a case block already advertises. It worked all along; with no
+        // label it read as decoration, which is why linking a motion to an
+        // order's id looked impossible.
+        data-slot="id"
+        // The unfiled pile has no entity of its own; it speaks for its case.
+        title={`id — ${payload.kind === 'filing' ? payload.data.id : payload.data.caseId}`}
       >
         {sockets.input}
+        {sockets.inbound && (
+          <InboundBadge
+            inbound={sockets.inbound}
+            side={sockets.inputSide ?? 'left'}
+            color={dotColor(node.entityKind)}
+          />
+        )}
+        {zoom >= LABEL_ZOOM_THRESHOLD && (
+          <span
+            className={`pointer-events-none absolute top-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 text-[9px] leading-tight text-gray-500 shadow-sm ${
+              (sockets.inputSide ?? 'left') === 'right' ? 'right-full mr-1' : 'left-full ml-1'
+            }`}
+          >
+            id
+          </span>
+        )}
       </div>}
       {/* caseRef leaves from the LEFT edge — it faces the case column, so its
           edge runs straight there instead of round the block. Its label sits
@@ -306,7 +461,7 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
         <div
           key={handle.slot}
           className={`${handleBox} left-0 -translate-x-1/2 -translate-y-1/2`}
-          style={{ top: `${slotAnchorRatio('output', handle.slot, [handle.slot]) * 100}%` }}
+          style={{ top: `${slotAnchorRatio(handle.slot, leftStack, node.height) * 100}%` }}
           data-slot={handle.slot}
           data-slot-edge="left"
           data-slot-occupied={handle.occupied ? 'yes' : 'no'}
@@ -315,10 +470,17 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
           }`}
         >
           {handle.node}
+          {handle.link && (
+            <LinkBadge
+              edgeId={handle.link.edgeId}
+              side="left"
+              color={dotColor(handle.slot)}
+              title={`${slotLabel(handle.slot)} → ${handle.link.targetLabel}`}
+            />
+          )}
           {zoom >= LABEL_ZOOM_THRESHOLD && (
             <span className="pointer-events-none absolute left-full top-1/2 ml-1 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 text-[9px] leading-tight text-gray-500 shadow-sm">
               {slotLabel(handle.slot)}
-              {handle.occupied ? ' •' : ''}
             </span>
           )}
         </div>
@@ -327,21 +489,21 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
         <div
           key={handle.slot}
           className={`${handleBox} right-0 translate-x-1/2 -translate-y-1/2`}
-          style={{
-            top: `${
-              slotAnchorRatio(
-                'output',
-                handle.slot,
-                rightHandles.map(o => o.slot),
-              ) * 100
-            }%`,
-          }}
+          style={{ top: `${slotAnchorRatio(handle.slot, rightStack, node.height) * 100}%` }}
           data-slot={handle.slot}
           data-slot-edge="right"
           data-slot-occupied={handle.occupied ? 'yes' : 'no'}
           title={`${slotLabel(handle.slot)}${handle.occupied ? ' — already linked; drawing again replaces it' : ''}`}
         >
           {handle.node}
+          {handle.link && (
+            <LinkBadge
+              edgeId={handle.link.edgeId}
+              side="right"
+              color={dotColor(handle.slot)}
+              title={`${slotLabel(handle.slot)} → ${handle.link.targetLabel}`}
+            />
+          )}
           {/* The tag name is the whole point of a slot socket: it says where
               the link will be written before the drag ends. Below the legible
               zoom it would be a 4px smudge, so the tooltip carries it instead.
@@ -359,7 +521,6 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
               className="pointer-events-none absolute right-full top-1/2 mr-1 -translate-y-1/2 whitespace-nowrap rounded bg-white/85 px-1 text-[9px] leading-tight text-gray-500 shadow-sm"
             >
               {slotLabel(handle.slot)}
-              {handle.occupied ? ' •' : ''}
             </span>
           )}
         </div>

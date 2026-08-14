@@ -5,12 +5,20 @@
  *   node scripts/verify-canvas-geometry.mjs            # default 0.45 + zoomed
  *   node scripts/verify-canvas-geometry.mjs --port 9222
  *
- * Checks four things that have each broken silently at least once:
+ * Checks six things that have each broken silently at least once:
  *   1. circle CENTRES sit on the block edge they anchor to (±1px)
  *   2. circle WIDTHS are full — a clipped circle keeps its centre, so the
  *      centre check passed for a whole round while every circle was halved
  *   3. no socket sits inside the title bar
- *   4. a case block shows exactly one affordance (its id tag)
+ *   4. no socket hangs below the block's bottom edge — the other end of the
+ *      body, and the next place a handle count bump will push one out
+ *   5. SEPARATION: no two handles on the same edge closer than 16px centre to
+ *      centre. Handles are counted WITHOUT deduping identical rects: #65 was
+ *      the input hub sitting exactly on top of the first slot, and two
+ *      detectors missed it because they merged coincident boxes. The hub is
+ *      included on purpose — it is a circle on the same edge as the slots, and
+ *      leaving it out is why checks 1-4 passed while it overlapped.
+ *   6. a case block shows exactly one affordance (its id tag)
  *
  * Requires the dev server on :3000 and Chrome started with
  * --remote-debugging-port (see scripts/chromeMcpRun.sh).
@@ -30,20 +38,40 @@ const PROBE = `(async () => {
   const blocks = Array.from(document.querySelectorAll('[data-block-kind="filing"]'));
   if (blocks.length === 0) return { error: 'no filing blocks — is the editor open?' };
   const k = scaleOf(blocks[0]);
-  let clipped = 0, inTitle = 0, worstRight = 0, worstLeft = 0, circles = 0;
+  let clipped = 0, inTitle = 0, belowBlock = 0, worstRight = 0, worstLeft = 0, circles = 0;
+  let minSeparation = Infinity, tooClose = 0;
   for (const b of blocks) {
     const br = b.getBoundingClientRect();
     const title = b.querySelector('[data-block-title]')?.getBoundingClientRect();
-    for (const h of b.querySelectorAll('[data-slot]')) {
-      const c = h.querySelector('span[style]');
+    // Every handle on the block, hub included. No Set, no rect dedupe: two
+    // handles at the same coordinates are exactly what this is looking for.
+    const handles = Array.from(b.querySelectorAll('[data-slot],[data-hub-side]'));
+    const byEdge = { left: [], right: [] };
+    for (const h of handles) {
+      // The socket circle only. Link badges (#61) are also styled spans, and
+      // they sit OFF the block edge by design — measuring them as sockets would
+      // read as drift and as clipping.
+      const c = h.querySelector('span[style]:not([data-link-badge]):not([data-link-badge] *)');
       if (!c) continue;
       circles++;
       const cr = c.getBoundingClientRect();
       if (cr.width / k < 13) clipped++;
-      if (title && cr.top + cr.height / 2 < title.bottom - 0.5) inTitle++;
+      const cy = cr.top + cr.height / 2;
+      if (title && cy < title.bottom - 0.5) inTitle++;
+      if (cr.bottom > br.bottom + 0.5) belowBlock++;
       const mid = cr.left + cr.width / 2;
-      if (h.getAttribute('data-slot-edge') === 'left') worstLeft = Math.max(worstLeft, Math.abs(mid - br.left));
+      const edge = h.getAttribute('data-slot-edge') || h.getAttribute('data-hub-side') || 'right';
+      if (edge === 'left') worstLeft = Math.max(worstLeft, Math.abs(mid - br.left));
       else worstRight = Math.max(worstRight, Math.abs(mid - br.right));
+      byEdge[edge === 'left' ? 'left' : 'right'].push(cy);
+    }
+    for (const edge of ['left', 'right']) {
+      const ys = byEdge[edge].slice().sort((a, z) => a - z);
+      for (let i = 1; i < ys.length; i++) {
+        const gap = (ys[i] - ys[i - 1]) / k;
+        minSeparation = Math.min(minSeparation, gap);
+        if (gap < 16 - 0.5) tooClose++;
+      }
     }
   }
   const caseExtras = Array.from(document.querySelectorAll('[data-block-kind="case"]'))
@@ -53,6 +81,9 @@ const PROBE = `(async () => {
     circles,
     clippedCircles: clipped,
     circlesInTitle: inTitle,
+    circlesBelowBlock: belowBlock,
+    minEdgeSeparationPx: minSeparation === Infinity ? null : Math.round(minSeparation * 10) / 10,
+    handlePairsTooClose: tooClose,
     rightEdgeMaxDevPx: Math.round((worstRight / k) * 10) / 10,
     leftEdgeMaxDevPx: Math.round((worstLeft / k) * 10) / 10,
     caseBlocksWithWrongAffordances: caseExtras,
@@ -98,6 +129,12 @@ async function main() {
   if (result?.error) failures.push(result.error);
   if (result?.clippedCircles > 0) failures.push(`${result.clippedCircles} circles rendered clipped`);
   if (result?.circlesInTitle > 0) failures.push(`${result.circlesInTitle} sockets inside the title bar`);
+  if (result?.circlesBelowBlock > 0) failures.push(`${result.circlesBelowBlock} sockets hanging below the block`);
+  if (result?.handlePairsTooClose > 0) {
+    failures.push(
+      `${result.handlePairsTooClose} handle pairs closer than 16px (worst ${result.minEdgeSeparationPx}px)`,
+    );
+  }
   if (result?.rightEdgeMaxDevPx > 1.5) failures.push(`right-edge drift ${result.rightEdgeMaxDevPx}px`);
   if (result?.leftEdgeMaxDevPx > 1.5) failures.push(`left-edge drift ${result.leftEdgeMaxDevPx}px`);
   if (result?.caseBlocksWithWrongAffordances > 0) {
@@ -107,7 +144,7 @@ async function main() {
     console.error('\nFAILED:\n- ' + failures.join('\n- '));
     process.exit(1);
   }
-  console.log('\nOK — centres, widths, title clearance and case affordances all pass.');
+  console.log('\nOK — centres, widths, title/bottom clearance, separation and case affordances all pass.');
 }
 
 main().catch(err => {
