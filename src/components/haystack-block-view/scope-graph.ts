@@ -45,7 +45,17 @@ export const CLUSTER_GAP = 56;
 export const INDENT = 28;
 
 /** Ref slots that make one filing a child of another. */
-export const REF_SLOTS = [
+/**
+ * Slots that make a filing a CHILD of another: they decide what it nests under
+ * and which family row it lines up on.
+ *
+ * NOT the same question as "does this slot draw a line" — see `EDGE_SLOTS`.
+ * The two were one list until #103, which is how `orderRef` ended up with no
+ * edge at all: adding it to the single list was the only way to draw its line,
+ * and that would have re-parented every attachment holding one from its motion
+ * to the order — the exact "a reference, NOT a move" that #89 established.
+ */
+export const NEST_SLOTS = [
   'respondingTo',
   'replyingTo',
   // Ahead of motionRef on purpose: an order can be filed under one motion and
@@ -56,7 +66,21 @@ export const REF_SLOTS = [
   'supersedes',
   'motionRef',
 ] as const;
-export type RefSlot = (typeof REF_SLOTS)[number];
+
+/**
+ * Slots that DRAW a ref edge. Every nesting slot draws one, plus the slots that
+ * are a reference WITHOUT being parentage.
+ *
+ * `orderRef` is the first of those: a notice about an order still belongs to
+ * its motion and its case band, and only the line says otherwise. An edge is
+ * also what makes a link removable — `handleUnlink` resolves edge ids out of
+ * `graph.edges`, so a slot with no edge cannot be unlinked from the canvas at
+ * all, which is what #102 uncovered.
+ */
+export const EDGE_SLOTS = [...NEST_SLOTS, 'orderRef'] as const;
+
+/** A slot that can carry an edge — the wider of the two lists. */
+export type RefSlot = (typeof EDGE_SLOTS)[number];
 
 /**
  * Filings are laid out in kind columns, left to right in docket order: a motion
@@ -250,7 +274,9 @@ export function titleHeightOf(label: string): number {
 }
 
 function refTargetOf(filing: ScopeFiling): { id: string; slot: RefSlot } | null {
-  for (const slot of REF_SLOTS) {
+  // NEST, not EDGE: this answers "whose child is it", and `orderRef` is a
+  // reference rather than parentage.
+  for (const slot of NEST_SLOTS) {
     const value = filing.refs?.[slot];
     if (typeof value === 'string' && value) return { id: value, slot };
   }
@@ -339,8 +365,9 @@ function placeFilingsInColumns(filings: ScopeFiling[]): Placement {
   for (const filing of filings) {
     if (byFiling.has(filing.id)) continue;
     const column = columnForKind(filing.primaryKind ?? '');
-    // The ref that says which family this filing belongs to.
-    const anchorId = REF_SLOTS.map(slot => filing.refs?.[slot]).find(
+    // The ref that says which family this filing belongs to — nesting again,
+    // so a notice ABOUT an order still lines up with its motion's row.
+    const anchorId = NEST_SLOTS.map(slot => filing.refs?.[slot]).find(
       (value): value is string => typeof value === 'string' && present.has(value),
     );
     const anchorRow = anchorId ? byFiling.get(anchorId)?.row : undefined;
@@ -522,7 +549,7 @@ export function buildScopeGraph(cases: ScopeCase[], options: BuildOptions = {}):
 
   for (const c of cases) {
     for (const filing of c.filings) {
-      for (const slot of REF_SLOTS) {
+      for (const slot of EDGE_SLOTS) {
         const targetId = filing.refs?.[slot];
         if (typeof targetId !== 'string' || !targetId || targetId === filing.id) continue;
         if (!graph.filingById.has(targetId)) continue;

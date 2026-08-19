@@ -442,15 +442,26 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
    * have no circle. They are also not `.output-socket`, which is what keeps
    * `resolveDrop`'s socket-bail as narrow as it is.
    */
-  const slotRow = (handle: SlotHandle, edge: 'left' | 'right', stack: string[]) => (
+  const pressRow = (row: {
+    /** Key this row occupies in its edge's stack — what fixes its height. The
+     *  hub stacks as `in` while advertising itself as `id`, so the two keys are
+     *  not always the same one. */
+    anchorKey: string;
+    /** `data-slot` of the handle whose circle this row arms. */
+    domSlot: string;
+    edge: 'left' | 'right';
+    stack: string[];
+    /** The hub's circle is an INPUT socket; every other row arms an output. */
+    socketClass: '.input-socket' | '.output-socket';
+  }) => (
     <div
-      key={`row-${handle.slot}`}
-      className={`absolute ${edge === 'left' ? 'left-0' : 'right-0'} w-1/2 -translate-y-1/2`}
+      key={`row-${row.domSlot}`}
+      className={`absolute ${row.edge === 'left' ? 'left-0' : 'right-0'} w-1/2 -translate-y-1/2`}
       style={{
-        top: `${slotAnchorRatio(handle.slot, stack, node.height, bands) * 100}%`,
+        top: `${slotAnchorRatio(row.anchorKey, row.stack, node.height, bands) * 100}%`,
         height: SLOT_PITCH,
       }}
-      data-slot-row={handle.slot}
+      data-slot-row={row.domSlot}
       onPointerDown={event => {
         // `currentTarget` is read HERE, synchronously: React nulls it as soon as
         // the handler returns, and the arming decision is made later, on the
@@ -459,11 +470,20 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
         const stack = event.currentTarget.parentElement;
         beginRowPress(event, {
           circleFor: () =>
-            stack?.querySelector(`[data-slot="${handle.slot}"] .output-socket`) ?? null,
+            stack?.querySelector(`[data-slot="${row.domSlot}"] ${row.socketClass}`) ?? null,
         });
       }}
     />
   );
+
+  const slotRow = (handle: SlotHandle, edge: 'left' | 'right', stack: string[]) =>
+    pressRow({
+      anchorKey: handle.slot,
+      domSlot: handle.slot,
+      edge,
+      stack,
+      socketClass: '.output-socket',
+    });
 
   const handles = sockets ? (
     <>
@@ -474,6 +494,29 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
           row painted over them would swallow that. */}
       {sockets.armable && leftHandles.map(handle => slotRow(handle, 'left', leftStack))}
       {sockets.armable && rightHandles.map(handle => slotRow(handle, 'right', rightStack))}
+      {/* The hub gets the same row (#69). It is the same 6.3px circle as a slot
+          at corpus zoom, and it is where a TARGET-FIRST drag starts — the one
+          gap #96 left. It stacks as `in` alongside that edge's slots, so its
+          row tiles with theirs at the pitch and cannot cover the same point.
+
+          ONLY WHILE THE HUB IS EMPTY. Picking an OCCUPIED input is how rete's
+          ClassicFlow starts a re-route: it grabs the existing edge instead of
+          beginning a new link, and this canvas reads that grab as the UNLINK
+          gesture. Measured: a row drag from an occupied hub cleared a ref
+          rather than writing one. Enlarging that press target 18x would have
+          made a destructive gesture far easier to hit by accident, so the row
+          exists only where it can mean what it looks like. The circle itself is
+          untouched, so the deliberate unlink is exactly as reachable as before.
+          The real cure is a dedicated input lane that never holds edges — the
+          same medicine `contains` got above, and a task of its own. */}
+      {sockets.armable && payload.kind !== 'case' && hubSide && !sockets.inbound?.count &&
+        pressRow({
+          anchorKey: 'in',
+          domSlot: 'id',
+          edge: hubSide,
+          stack: hubStack,
+          socketClass: '.input-socket',
+        })}
       {/* The ref hub faces whichever side its inbound edges arrive from: under
           docket order refs point leftward, so a motion collects them on its
           RIGHT edge rather than dragging every wire around the block.

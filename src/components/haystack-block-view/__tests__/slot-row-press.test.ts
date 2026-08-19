@@ -88,6 +88,38 @@ describe('beginRowPress', () => {
     expect(arm).not.toHaveBeenCalled();
   });
 
+  it('leaves a press that starts on an INPUT socket alone too — the hub (#69)', () => {
+    // The hub row arms `.input-socket`, so the no-double-arm bail has to cover
+    // both socket classes, not just the output side #96 shipped with.
+    const arm = jest.fn();
+    const scope = fakeScope();
+    const socket = document.createElement('div');
+    socket.className = 'input-socket';
+    const inner = document.createElement('span');
+    socket.appendChild(inner);
+
+    expect(
+      beginRowPress(press(50, 50, inner), { circleFor: () => circleAt(0, 0), arm, target: scope }),
+    ).toBe(false);
+    expect(scope.count('pointermove')).toBe(0);
+  });
+
+  it('arms the circle its own row names, never a neighbour', () => {
+    // Rows are bound to one handle at render time; this is the property that
+    // lets them tile at a 9.9px pitch without a nearest-socket search.
+    const scope = fakeScope();
+    const hub = circleAt(10, 10);
+    const slot = circleAt(10, 32);
+    const armed: Element[] = [];
+    beginRowPress(press(0, 0), { circleFor: () => hub, arm: c => armed.push(c), target: scope });
+    scope.emit('pointermove', { clientX: 100, clientY: 0 });
+    scope.emit('pointerup', {});
+    beginRowPress(press(0, 0), { circleFor: () => slot, arm: c => armed.push(c), target: scope });
+    scope.emit('pointermove', { clientX: 100, clientY: 0 });
+    scope.emit('pointerup', {});
+    expect(armed).toEqual([hub, slot]);
+  });
+
   it('ignores non-primary buttons, so right-click still opens the menu', () => {
     const scope = fakeScope();
     expect(
