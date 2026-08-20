@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.3.3](https://github.com/alperu/soundsuite/compare/v1.3.2...v1.3.3) (2026-08-20)
+
+
+### Features
+
+* **scope:** dedicated linkTo lane — target-first drags work on occupied hubs ([79ecb17](https://github.com/alperu/soundsuite/commit/79ecb1703681b414a3550ba2b85f237b162e3335))
+* **scope:** full motion names + every writable slot visible when empty ([fde91a6](https://github.com/alperu/soundsuite/commit/fde91a623cba6309094cdafb958b888bdea9544d))
+* **scope:** orderRef edges render + hub gains a safe press row ([319f8bf](https://github.com/alperu/soundsuite/commit/319f8bf8d0c12a58fe3f44c002b80aa743ea2a7e))
+
+
+### Bug Fixes
+
+* **scope:** orders expose a writable motionRef input on both surfaces ([581f880](https://github.com/alperu/soundsuite/commit/581f8804416f5401c32a365e4ab8ba479966bdd0))
+* **scope:** records kinds offer only caseRef; held orderRef renders; aimed drags never write a different fact ([69f5619](https://github.com/alperu/soundsuite/commit/69f5619c7129f8be984f7a1901e8c6cee9d2c3e8))
+* **scope:** slot rows arm link drags + atomic entity-row materialisation ([8cfa408](https://github.com/alperu/soundsuite/commit/8cfa408a3b5a4003f188dda94b0e56ea301a42e6))
+* **scope:** whole block is a drop target — drag-to-link no longer requires hitting a 7px socket ([06d0338](https://github.com/alperu/soundsuite/commit/06d0338e109a7a35bbaa3491465a5afe97f4b0a9))
+
+
+### Miscellaneous Chores
+
+* pin next release ([4ccac47](https://github.com/alperu/soundsuite/commit/4ccac4732496bd1a0b68f65740851a854256351d))
+
 ## [1.3.2](https://github.com/alperu/soundsuite/compare/v1.3.1...v1.3.2) (2026-08-14)
 
 
