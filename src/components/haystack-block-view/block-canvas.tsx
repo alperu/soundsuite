@@ -176,14 +176,21 @@ function layoutSocketPositions(graph: ScopeGraph) {
               targetX: edgeTargetX(graph, nodeId, 'input', 'in'),
             })
           : null;
+        // `linkTo` is the hub's lane, not a socket of its own (#105): it holds
+        // no edges, so it has no direction to derive and no place in any stack.
+        // Anchoring it AS the hub is what makes a lane-armed drag draw its wire
+        // from the id circle the user aimed at — left to itself it would fall
+        // through to the block's centre-right, and #46/#77 are about exactly
+        // this kind of quiet disagreement between a handle and its wire.
+        const anchorKey = key === 'linkTo' ? 'in' : key;
         const onRight =
-          key === 'in'
+          anchorKey === 'in'
             ? hubSide === 'right'
             : anchorSideFor({
-                slot: key,
+                slot: anchorKey,
                 side,
                 sourceX: box.x,
-                targetX: edgeTargetX(graph, nodeId, side, key),
+                targetX: edgeTargetX(graph, nodeId, side, anchorKey),
               }) === 'right';
         const stack = edgeStackFor({
           edge: onRight ? 'right' : 'left',
@@ -201,7 +208,7 @@ function layoutSocketPositions(graph: ScopeGraph) {
         // needs, so the anchors read THAT, not the constant. A case block and
         // the unfiled pile draw neither band.
         const ratio = slotAnchorRatio(
-          key,
+          anchorKey,
           stack,
           box.h,
           filing ? { titleH: filing.titleH } : { titleH: 0, footerH: 0 },
@@ -367,6 +374,16 @@ export default function BlockCanvas(props: Props) {
                         // them. Saying so is better than letting the row's
                         // lookup come back empty and calling that safe (#96).
                         armable: editMode,
+                        // The lane a hub row arms (#105). Only the editor has a
+                        // connection plugin, so only the editor renders it.
+                        linkStart: editMode ? (
+                          <SocketHandle
+                            node={nodeProps.data}
+                            side="input"
+                            socketKey="linkTo"
+                            emit={nodeProps.emit}
+                          />
+                        ) : undefined,
                         inputSide: anchorSideFor({
                           slot: 'in',
                           side: 'input',

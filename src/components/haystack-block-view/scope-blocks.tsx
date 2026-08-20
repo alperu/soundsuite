@@ -103,6 +103,21 @@ export class BlockNode extends ClassicPreset.Node {
     // existing edge instead of starting a new link when you pick an occupied
     // input — which made a target-first drag impossible.
     this.addInput('contains', new ClassicPreset.Input(blockSocket, undefined, true));
+    // The lane a TARGET-FIRST drag starts from, and the reason it can (#105).
+    //
+    // ClassicFlow decides between "start a link" and "grab the existing edge"
+    // purely by whether any connection has `targetInput === socket.key`
+    // (Idle.pick). The ref hub `in` is the target of every inbound ref edge, so
+    // picking it on a block that already has one is a RE-ROUTE — which this
+    // canvas reads as the unlink gesture. Measured: it cleared a ref instead of
+    // writing one. `linkTo` is never anything's `targetInput` — the edge pass
+    // only ever targets `in` or `contains` — so picking it always begins a
+    // fresh link. Same medicine `contains` got above, for the same disease.
+    //
+    // Every node gets it, cases included: the base port set stays uniform, and
+    // an inert port on a block that draws no hub costs nothing. (The per-slot
+    // outputs below vary by kind for a different reason — historical refs.)
+    this.addInput('linkTo', new ClassicPreset.Input(blockSocket, undefined, true));
     // A port per ref slot, not just the writable ones. Data written before a
     // filing's kind changed can still hold a ref in a slot the kind no longer
     // offers, and an edge with no port to attach to throws the whole edge pass.
@@ -260,6 +275,9 @@ interface BlockProps {
     /** Whether a slot's row can start a link (#96). Only the editor wires the
      *  connection plugin, so only there is there anything for a row to arm. */
     armable?: boolean;
+    /** The `linkTo` socket a hub row arms (#105). Rendered invisibly and away
+     *  from the id circle, so the circle keeps meaning "grab this edge". */
+    linkStart?: ReactNode;
   };
 }
 
@@ -371,6 +389,18 @@ function InboundBadge({ inbound, side, color }: { inbound: InboundLinks; side: '
   );
 }
 
+/**
+ * Forces a socket's own element to a BLOCK box.
+ *
+ * Not decoration, and not optional: the connection plugin hit-tests sockets
+ * with `elementsFromPoint`, and an INLINE span's box does not cover the circle
+ * its child paints — so the element never lands in the stack, `findSocket`
+ * returns nothing, and the pick fails silently. Every wrapper that holds a
+ * socket needs it, which is why it lives here rather than being written out
+ * once per wrapper and drifting.
+ */
+const SOCKET_BOX = '[&_.input-socket]:block [&_.output-socket]:block';
+
 export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
   const { payload, isSelected, isPartial, isActive } = node;
   const size = { width: node.width, height: node.height };
@@ -396,10 +426,9 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
         ? 'border-2 border-dashed border-blue-400'
         : 'border-gray-200';
 
-  // The socket's own element has to be a block box: the connection plugin
-  // hit-tests it with `elementsFromPoint`, and an inline wrapper's box doesn't
-  // cover the handle its children paint.
-  const handleBox = 'absolute [&_.input-socket]:block [&_.output-socket]:block';
+  // Socket wrappers all share `SOCKET_BOX` — see the note on that constant for
+  // what an inline socket box costs.
+  const handleBox = `absolute ${SOCKET_BOX}`;
   // caseRef sits on the left edge; every other slot on the right. Splitting
   // here keeps each edge's stacking independent, so adding caseRef doesn't
   // shift the ref slots down.
@@ -453,6 +482,9 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
     stack: string[];
     /** The hub's circle is an INPUT socket; every other row arms an output. */
     socketClass: '.input-socket' | '.output-socket';
+    /** Overrides the `[data-slot=…]` lookup — the hub row arms the invisible
+     *  `linkTo` lane, which deliberately carries no `data-slot`. */
+    circleSelector?: string;
   }) => (
     <div
       key={`row-${row.domSlot}`}
@@ -470,7 +502,9 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
         const stack = event.currentTarget.parentElement;
         beginRowPress(event, {
           circleFor: () =>
-            stack?.querySelector(`[data-slot="${row.domSlot}"] ${row.socketClass}`) ?? null,
+            stack?.querySelector(
+              row.circleSelector ?? `[data-slot="${row.domSlot}"] ${row.socketClass}`,
+            ) ?? null,
         });
       }}
     />
@@ -494,29 +528,51 @@ export function ScopeBlock({ node, onToggle, sockets }: BlockProps) {
           row painted over them would swallow that. */}
       {sockets.armable && leftHandles.map(handle => slotRow(handle, 'left', leftStack))}
       {sockets.armable && rightHandles.map(handle => slotRow(handle, 'right', rightStack))}
-      {/* The hub gets the same row (#69). It is the same 6.3px circle as a slot
-          at corpus zoom, and it is where a TARGET-FIRST drag starts — the one
-          gap #96 left. It stacks as `in` alongside that edge's slots, so its
-          row tiles with theirs at the pitch and cannot cover the same point.
+      {/* The hub row (#69), now arming the `linkTo` lane rather than the ref hub
+          (#105) — so it starts a link on EVERY block, not only on ones with no
+          inbound refs. #69 had to gate it on an empty hub because picking the
+          occupied `in` socket grabs the existing edge and unlinks; `linkTo` is
+          never an edge's target, so that branch cannot be taken.
 
-          ONLY WHILE THE HUB IS EMPTY. Picking an OCCUPIED input is how rete's
-          ClassicFlow starts a re-route: it grabs the existing edge instead of
-          beginning a new link, and this canvas reads that grab as the UNLINK
-          gesture. Measured: a row drag from an occupied hub cleared a ref
-          rather than writing one. Enlarging that press target 18x would have
-          made a destructive gesture far easier to hit by accident, so the row
-          exists only where it can mean what it looks like. The circle itself is
-          untouched, so the deliberate unlink is exactly as reachable as before.
-          The real cure is a dedicated input lane that never holds edges — the
-          same medicine `contains` got above, and a task of its own. */}
-      {sockets.armable && payload.kind !== 'case' && hubSide && !sockets.inbound?.count &&
-        pressRow({
-          anchorKey: 'in',
-          domSlot: 'id',
-          edge: hubSide,
-          stack: hubStack,
-          socketClass: '.input-socket',
-        })}
+          The id CIRCLE is deliberately left alone. It still picks `in`, which
+          on an occupied hub still means "grab this edge" — the unlink gesture
+          keeps its affordance (alongside the link badges, #61/#75), and the row
+          means "start a link from here". The two must not overlap, or a press
+          on the circle would arm the lane and unlink would become unreachable.
+
+          Stacks as `in`, so the row tiles with that edge's slot rows. */}
+      {sockets.armable && payload.kind !== 'case' && hubSide && (
+        <>
+          {/* The lane's socket has to EXIST in the DOM for the plugin to have
+              registered it and for the re-dispatch to hit-test onto it. Set in
+              from the edge by a pitch so it never covers the id circle, and
+              invisible: no `data-slot`/`data-hub-side`, so the geometry
+              verifier's handle census does not see it either. */}
+          <div
+            key="link-start"
+            aria-hidden="true"
+            className={`absolute -translate-y-1/2 ${SOCKET_BOX} ${
+              hubSide === 'left' ? 'left-0' : 'right-0'
+            }`}
+            style={{
+              top: `${slotAnchorRatio('in', hubStack, node.height, bands) * 100}%`,
+              [hubSide === 'left' ? 'marginLeft' : 'marginRight']: SLOT_PITCH,
+              opacity: 0,
+            }}
+            data-link-start={hubSide}
+          >
+            {sockets.linkStart}
+          </div>
+          {pressRow({
+            anchorKey: 'in',
+            domSlot: 'id',
+            edge: hubSide,
+            stack: hubStack,
+            socketClass: '.input-socket',
+            circleSelector: '[data-link-start] .input-socket',
+          })}
+        </>
+      )}
       {/* The ref hub faces whichever side its inbound edges arrive from: under
           docket order refs point leftward, so a motion collects them on its
           RIGHT edge rather than dragging every wire around the block.
