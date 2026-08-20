@@ -9,6 +9,7 @@ import { Presets, ReactPlugin, type ReactArea2D } from 'rete-react-plugin';
 import { CLICK_SLOP } from './block-metrics';
 import { beginDrag, currentDrag, endDrag, useDragState } from './drag-state';
 import { resolveDrop } from './drop-target';
+import { pressIsAmbiguous } from './hub-press';
 import {
   anchorSideFor,
   compatibleKeys,
@@ -258,6 +259,9 @@ export default function BlockCanvas(props: Props) {
   // Survives a rebuild so a committed edge doesn't yank the viewport back.
   const transformRef = useRef<{ x: number; y: number; k: number } | null>(null);
   const connectionRef = useRef<ConnectionPlugin<Schemes, AreaExtra> | null>(null);
+  /** What points AT each block, mirrored out of the render effect so the
+   *  capture-phase press handler can read it (#107). */
+  const inboundRef = useRef<Map<string, { count: number; rows: string[] }>>(new Map());
   // Where the press that will become this click started, and whether it landed
   // on background at all — a pan ends in a click too, and a gesture that began
   // on a block or a socket is never a deselect however it ends.
@@ -314,6 +318,7 @@ export default function BlockCanvas(props: Props) {
       if (bucket.rows.length < 8) bucket.rows.push(`${labelOf(edge.source)} — ${edge.slot ?? 'ref'}`);
       inboundLinks.set(edge.target, bucket);
     }
+    inboundRef.current = inboundLinks;
 
     const render = new ReactPlugin<Schemes, AreaExtra>({ createRoot });
 
@@ -813,6 +818,40 @@ export default function BlockCanvas(props: Props) {
       // remembered as the start of a click that could later deselect.
       if (event.button !== 0) return;
       const target = event.target as HTMLElement | null;
+
+      // A press on an id circle that several edges arrive at cannot say WHICH
+      // one it means — they all end on the same circle — and rete would answer
+      // by removing whichever connection it holds first (#107). Take the press
+      // away from the plugin and open the id tag's inbound list instead, which
+      // names every link by source and slot. `stopImmediatePropagation` because
+      // the plugin's own listener sits on the socket element itself: capture
+      // here is the last moment the press is still ours.
+      const hub = target?.closest?.('[data-slot="id"]') as HTMLElement | null;
+      const current = propsRef.current;
+      if (hub && current.mode === 'edit' && current.onContextMenu) {
+        const blockKey = hub.closest('[data-block-id]')?.getAttribute('data-block-id');
+        if (blockKey && pressIsAmbiguous(inboundRef.current.get(blockKey)?.count)) {
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+          // NOT preventDefault: the compatibility mouse events still have to
+          // fire or the block loses click-to-select in that band.
+          //
+          // Opened on the RELEASE, not here. The menu mounts a `mousedown`
+          // dismisser once it renders, and `mousedown` follows this pointerdown
+          // inside the same gesture — opening now means opening and closing on
+          // one press. Waiting for pointerup puts the menu after the last event
+          // of the gesture that could dismiss it.
+          const at = { x: event.clientX, y: event.clientY };
+          const openMenu = current.onContextMenu;
+          const open = () => {
+            window.removeEventListener('pointerup', open, true);
+            openMenu({ kind: 'idTag', blockKey }, at);
+          };
+          window.addEventListener('pointerup', open, true);
+          return;
+        }
+      }
+
       pointerDownRef.current = {
         x: event.clientX,
         y: event.clientY,
