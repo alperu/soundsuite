@@ -755,3 +755,33 @@ model SearchPreset {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// Admin dashboard users (Users tab). Additive — no relations to case data.
+model AdminUser {
+  id           String    @id @default(uuid())
+  username     String    @unique
+  passwordHash String
+  role         String    @default("viewer") // 'admin' | 'viewer'
+  enabled      Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  lastLoginAt  DateTime?
+}
+
+// MCP / dashboard client sessions (Sessions tab). Captured by the MCP execute route.
+model McpSession {
+  id            String    @id @default(uuid())
+  sessionId     String    @unique
+  source        String    @default("mcp") // 'mcp' | 'dashboard'
+  clientName    String?
+  userId        String?
+  createdAt     DateTime  @default(now())
+  lastActivity  DateTime  @default(now())
+  userAgent     String?
+  ipAddress     String?
+  revokedAt     DateTime?
+  toolCallCount Int       @default(0)
+
+  @@index([lastActivity])
+  @@index([revokedAt])
+}

@@ -16,6 +16,10 @@ import AdminRoleAssignments from '@/components/admin-role-assignments';
 import AdminHostProvisioning from '@/components/admin-host-provisioning';
 import AdminAIServices from '@/components/admin-ai-services';
 import CacheManager from '@/components/admin/cache-manager';
+import UsersPanel from '@/components/admin/users-panel';
+import SessionsPanel from '@/components/admin/sessions-panel';
+import AdminUserMenu from '@/components/admin/admin-user-menu';
+import CloudflarePanel from '@/components/admin/cloudflare-panel';
 import WeightSection from '@/components/admin/weight-section';
 import { CopyButton } from '@/components/copy-button';
 import { AppConfig, ModelDownloadInfo } from '@/lib/db/config';
@@ -27,7 +31,7 @@ interface Props {
   initialTab?: TabKey;
 }
 
-type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'hostprov' | 'ocr' | 'localai' | 'rlm' | 'aikeys' | 'aiservices' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts';
+type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'hostprov' | 'ocr' | 'localai' | 'rlm' | 'aikeys' | 'aiservices' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts' | 'cloudflare' | 'users' | 'sessions';
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'general', label: 'General', icon: '⊞' },
@@ -50,6 +54,9 @@ const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'jobs', label: 'Jobs', icon: '▶' },
   { key: 'actionlog', label: 'Action Log', icon: '☰' },
   { key: 'drafts', label: 'Drafts', icon: '✎' },
+{ key: 'users', label: 'Users', icon: '☺' },
+{ key: 'sessions', label: 'Sessions', icon: '⛓' },
+  { key: 'cloudflare', label: 'Cloudflare', icon: '☁' },
 ];
 
 const TAB_DOCS: Record<TabKey, { title: string; description: string; details: string[]; extras?: () => React.ReactNode }> = {
@@ -329,6 +336,37 @@ const TAB_DOCS: Record<TabKey, { title: string; description: string; details: st
       'Margins apply to Page View mode in the draft editor',
     ],
   },
+  cloudflare: {
+    title: 'Cloudflare Tunnel',
+    description: 'Expose the MCP endpoint publicly through a Cloudflare Tunnel — no port forwarding, TLS at the edge.',
+    details: [
+      'Store the tunnel domain, account ID, API key, and tunnel credentials',
+      'Live status: cloudflared process, local metrics endpoint, public reachability',
+      'Generates a config.yml restricted to /api/mcp and the OAuth discovery path',
+      'Setup commands are shown for copy/paste — nothing is executed by the app',
+      'Secrets are stored server-side and shown masked (last 4 characters)',
+    ],
+  },
+  users: {
+    title: 'Users',
+    description: 'Manage admin dashboard accounts, roles, and access.',
+    details: [
+      'Create users with admin or viewer roles',
+      'Disable an account to block access without deleting it',
+      'Reset passwords and delete accounts',
+      'Passwords are bcrypt-hashed and never returned by the API',
+    ],
+  },
+  sessions: {
+    title: 'Sessions',
+    description: 'Monitor and revoke MCP and dashboard client sessions.',
+    details: [
+      'Sessions are captured automatically when clients call MCP tools',
+      'Filter between active and all (including revoked) sessions',
+      'Revoking a session refuses its further tool calls with 403',
+      'Sessions idle for more than 30 days are pruned automatically',
+    ],
+  },
 };
 
 export default function AdminDashboard({ initialConfig, initialModelDownloads, initialTab = 'general' }: Props) {
@@ -344,6 +382,7 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
         <h1 className="text-2xl font-bold text-gray-900">Admin</h1>
         <span className="text-sm text-gray-400">/</span>
         <span className="text-sm font-medium text-blue-600">{docs.title}</span>
+        <AdminUserMenu />
       </div>
 
       {/* 3-column layout */}
@@ -390,6 +429,9 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
           {activeTab === 'jobs' && <JobsPanel />}
           {activeTab === 'actionlog' && <ActionLogPanel />}
           {activeTab === 'drafts' && <DraftAdminPanel initialConfig={initialConfig} />}
+          {activeTab === 'users' && <UsersPanel />}
+          {activeTab === 'sessions' && <SessionsPanel />}
+          {activeTab === 'cloudflare' && <CloudflarePanel />}
         </div>
 
         {/* Right: Documentation panel */}

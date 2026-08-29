@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
+import { deriveSessionId, recordActivity } from '@/lib/admin/session-store';
 
 /**
  * API route for executing MCP tools from the Dashboard.
@@ -23,6 +24,29 @@ export async function POST(request: NextRequest) {
         { error: { code: 'INVALID_REQUEST', message: 'Missing or invalid tool name' } },
         { status: 400 },
       );
+    }
+
+    // Session capture for the admin Sessions tab — one upsert; bookkeeping
+    // failures never block tool execution, but a revoked session is refused.
+    try {
+      const headerSessionId = request.headers.get('mcp-session-id');
+      const userAgent = request.headers.get('user-agent') ?? '';
+      const ipAddress =
+        request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || '127.0.0.1';
+      const session = await recordActivity({
+        sessionId: headerSessionId || deriveSessionId(ipAddress, userAgent),
+        source: headerSessionId ? 'mcp' : 'dashboard',
+        userAgent,
+        ipAddress,
+      });
+      if (session.revokedAt) {
+        return NextResponse.json(
+          { error: { code: 'SESSION_REVOKED', message: 'This session has been revoked' } },
+          { status: 403 },
+        );
+      }
+    } catch (sessionErr) {
+      console.warn('[MCP Execute] session capture failed:', (sessionErr as Error).message);
     }
 
     if (provider && model) {
