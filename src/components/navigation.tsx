@@ -162,7 +162,7 @@ export default function Navigation() {
 /** Log off button pinned below the Docs link. Hidden unless an admin session is active. */
 function NavLogoffButton({ collapsed, pathname }: { collapsed: boolean; pathname: string | null }) {
   const router = useRouter();
-  const [signedIn, setSignedIn] = useState(false);
+  const [username, setUsername] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
 
   // Re-check on every route change so the button appears right after login
@@ -170,11 +170,12 @@ function NavLogoffButton({ collapsed, pathname }: { collapsed: boolean; pathname
   useEffect(() => {
     let cancelled = false;
     fetch('/api/admin/auth/me')
-      .then(res => {
-        if (!cancelled) setSignedIn(res.ok);
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (!cancelled) setUsername(data?.user?.username ?? null);
       })
       .catch(() => {
-        if (!cancelled) setSignedIn(false);
+        if (!cancelled) setUsername(null);
       });
     return () => {
       cancelled = true;
@@ -186,16 +187,22 @@ function NavLogoffButton({ collapsed, pathname }: { collapsed: boolean; pathname
     try {
       await fetch('/api/admin/auth/logout', { method: 'POST' });
     } finally {
-      setSignedIn(false);
+      setUsername(null);
       setLoggingOut(false);
       router.push('/admin/login');
       router.refresh();
     }
   };
 
-  if (!signedIn) return null;
+  if (!username) return null;
 
   return (
+    <>
+    {!collapsed && (
+      <div className="mx-1 px-3 py-1 text-xs text-gray-500 whitespace-nowrap overflow-hidden" title={`Logged in as ${username}`}>
+        Logged in <span className="font-medium text-gray-700">{username}</span>
+      </div>
+    )}
     <button
       onClick={logout}
       disabled={loggingOut}
@@ -218,5 +225,6 @@ function NavLogoffButton({ collapsed, pathname }: { collapsed: boolean; pathname
       </svg>
       {!collapsed && <span className="whitespace-nowrap">{loggingOut ? 'Signing out…' : 'Log off'}</span>}
     </button>
+    </>
   );
 }
