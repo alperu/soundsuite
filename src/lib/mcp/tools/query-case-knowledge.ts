@@ -119,6 +119,17 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     const { query, caseId, chatId, limit = 10, searchMode = 'hybrid', mode = 'legacy', whereClauses, softBoostRefs } = params;
     const chatHitChunkIds = new Set<string>();
 
+    // Per-phase wall-clock timings, logged as one [qck-timing] line at the end
+    // so slow phases (embed vs search vs rerank vs hydrate) are attributable.
+    const phaseTimings: Record<string, number> = {};
+    const phaseStart = Date.now();
+    let phaseMark = phaseStart;
+    const markPhase = (name: string) => {
+      const now = Date.now();
+      phaseTimings[name] = (phaseTimings[name] ?? 0) + (now - phaseMark);
+      phaseMark = now;
+    };
+
     // Tunable hybrid-fusion constants (Config-backed; defaults 60 / 1.2 preserve
     // prior behavior). See docs/tasks/04-learned-fusion-weighting.md.
     const appConfig = await getConfig();
@@ -145,6 +156,8 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       pageRef: processed.pageReferences,
     });
 
+    markPhase('preprocess');
+
     // Generate embedding for query (needed for vector and hybrid modes)
     let queryEmbedding: number[] | undefined;
     if (searchMode !== 'keyword') {
@@ -168,6 +181,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
         // Otherwise fall through — keyword search can still produce results.
       }
     }
+    markPhase('embed');
 
     // Build FTS query from extracted keywords using BooleanQuery
     let ftsQuery: FullTextQuery | undefined;
@@ -272,7 +286,9 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     }
 
     // Perform primary search
+    markPhase('buildQuery');
     let searchResults = await context.vectorStore.search(searchQuery);
+    markPhase('vectorSearch');
 
     // Per-chat attachment search — alongside docket results
     if (chatId) {
@@ -346,9 +362,29 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     // Pass explicit topN = retrievalLimit (not limit) so the reranker keeps
     // the full pool around for the transcript-intent boost below. We trim
     // to `limit` after that boost runs.
-    searchResults = await rerank(query, searchResults, retrievalLimit, context.pushWarning ? (w) => {
+    markPhase('chatAndSecondarySearch');
+
+    // Cap the candidate pool sent to the cross-encoder. Without a cap the
+    // full retrieval pool (≥200 docs) goes to vLLM in one request, which
+    // dominates tool latency (~60ms/doc on Qwen3-Reranker-8B ⇒ 200 docs ≈
+    // 12s of pure inference, before queueing behind concurrent reranks).
+    // This is an interactive tool returning `limit` results, so 8× the
+    // requested count (floor 40) is ample oversampling for the cross-encoder;
+    // the operator-wide rerankPoolSize (used as-is by deep-search's batch
+    // pipeline) stays the upper bound.
+    const rerankPool = Math.min(
+      appConfig.rerankPoolSize ?? 150,
+      Math.max(limit * 8, 40),
+    );
+    if (searchResults.length > rerankPool) {
+      searchResults.sort((a, b) => b.score - a.score);
+      searchResults = searchResults.slice(0, rerankPool);
+    }
+
+    searchResults = await rerank(query, searchResults, rerankPool, context.pushWarning ? (w) => {
       context.pushWarning!({ source: w.source, host: w.host, reason: w.reason, message: w.message });
     } : undefined, { interactive: true });
+    markPhase('rerank');
 
     // Transcript-intent boost — mirrors the same heuristic in
     // src/lib/search/deep-search.ts so /api/search/semantic doesn't punish
@@ -586,6 +622,12 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       }),
     );
 
+    markPhase('hydrate');
+    context.logger.info('[qck-timing] phase breakdown', {
+      searchMode,
+      totalMs: Date.now() - phaseStart,
+      ...phaseTimings,
+    });
     context.logger.info('Query completed', { resultCount: enrichedResults.length, formatter: formatter.id });
 
     return { results: enrichedResults };

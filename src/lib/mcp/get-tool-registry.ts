@@ -13,9 +13,27 @@ import { createLogger } from '../logger';
 const globalForRegistry = globalThis as unknown as {
   __toolRegistry: ToolRegistry | undefined;
   __toolRegistryPromise: Promise<ToolRegistry> | undefined;
+  __toolRegistryModuleStamp: object | undefined;
 };
 
+// Identity of THIS evaluation of the module. In dev, an HMR recompile of any
+// file in the tool graph re-evaluates this module and produces a new stamp;
+// a cached registry built by an older evaluation holds stale tool instances,
+// so it must be rebuilt or code changes to tools never take effect until the
+// server restarts. In production the module evaluates once, so the stamp
+// never changes and the singleton behaves exactly as before.
+const MODULE_STAMP = {};
+
 export async function getToolRegistry(): Promise<ToolRegistry> {
+  if (
+    process.env.NODE_ENV !== 'production' &&
+    globalForRegistry.__toolRegistry &&
+    globalForRegistry.__toolRegistryModuleStamp !== MODULE_STAMP
+  ) {
+    globalForRegistry.__toolRegistry = undefined;
+    globalForRegistry.__toolRegistryPromise = undefined;
+  }
+
   if (globalForRegistry.__toolRegistry) {
     // Re-attempt embedding provider init if it was null at startup
     await ensureEmbeddingProvider(globalForRegistry.__toolRegistry);
@@ -30,6 +48,7 @@ export async function getToolRegistry(): Promise<ToolRegistry> {
   globalForRegistry.__toolRegistryPromise = initRegistry();
   const registry = await globalForRegistry.__toolRegistryPromise;
   globalForRegistry.__toolRegistry = registry;
+  globalForRegistry.__toolRegistryModuleStamp = MODULE_STAMP;
   return registry;
 }
 
