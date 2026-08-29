@@ -3,8 +3,12 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
-/** Shows the signed-in admin username and a logout button in the admin header. */
-export default function AdminUserMenu() {
+/**
+ * Signed-in admin identity UI. Two placements:
+ * - variant="header": "Signed in as <username>" text in the admin header row
+ * - variant="aside": full-width Log off button below the docs panel
+ */
+export default function AdminUserMenu({ variant = 'header' }: { variant?: 'header' | 'aside' }) {
   const router = useRouter();
   const [username, setUsername] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -28,18 +32,25 @@ export default function AdminUserMenu() {
 
   if (!username) return null;
 
+  if (variant === 'aside') {
+    return (
+      <div className="border-t border-gray-200 pt-3">
+        <button
+          onClick={logout}
+          disabled={loggingOut}
+          className="w-full px-3 py-2 text-xs font-medium text-gray-600 hover:text-gray-900 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+        >
+          {loggingOut ? 'Signing out…' : 'Log off'}
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="ml-auto flex items-center gap-3">
+    <div className="ml-auto flex items-center">
       <span className="text-sm text-gray-500">
         Signed in as <span className="font-medium text-gray-700">{username}</span>
       </span>
-      <button
-        onClick={logout}
-        disabled={loggingOut}
-        className="text-xs font-medium text-gray-600 hover:text-gray-900 border border-gray-300 rounded-md px-2.5 py-1 disabled:opacity-50"
-      >
-        {loggingOut ? 'Signing out…' : 'Log out'}
-      </button>
     </div>
   );
 }

@@ -33,6 +33,9 @@ export default function Navigation() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
 
+  // The admin login page stands alone — no app chrome while logged off.
+  const isLoginPage = pathname?.startsWith('/admin/login');
+
   // Load persisted state
   useEffect(() => {
     try {
@@ -47,6 +50,8 @@ export default function Navigation() {
     // Dispatch custom event so other components (Draft page) can react
     window.dispatchEvent(new CustomEvent('nav-collapse-toggle', { detail: { collapsed: next } }));
   };
+
+  if (isLoginPage) return null;
 
   return (
     <aside

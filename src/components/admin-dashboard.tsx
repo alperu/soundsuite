@@ -453,6 +453,7 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
               </ul>
             </div>
             {docs.extras && docs.extras()}
+            <AdminUserMenu variant="aside" />
           </div>
         </aside>
       </div>
