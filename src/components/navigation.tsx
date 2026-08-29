@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 
 const LS_KEY = 'nav-collapsed';
 
@@ -136,6 +136,9 @@ export default function Navigation() {
         );
       })()}
 
+      {/* Log off — below Docs, only rendered while an admin session is active */}
+      <NavLogoffButton collapsed={collapsed} pathname={pathname} />
+
       {/* Collapse toggle */}
       <button
         onClick={toggle}
@@ -153,5 +156,67 @@ export default function Navigation() {
         </svg>
       </button>
     </aside>
+  );
+}
+
+/** Log off button pinned below the Docs link. Hidden unless an admin session is active. */
+function NavLogoffButton({ collapsed, pathname }: { collapsed: boolean; pathname: string | null }) {
+  const router = useRouter();
+  const [signedIn, setSignedIn] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  // Re-check on every route change so the button appears right after login
+  // and disappears right after logging off.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/admin/auth/me')
+      .then(res => {
+        if (!cancelled) setSignedIn(res.ok);
+      })
+      .catch(() => {
+        if (!cancelled) setSignedIn(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pathname]);
+
+  const logout = async () => {
+    setLoggingOut(true);
+    try {
+      await fetch('/api/admin/auth/logout', { method: 'POST' });
+    } finally {
+      setSignedIn(false);
+      setLoggingOut(false);
+      router.push('/admin/login');
+      router.refresh();
+    }
+  };
+
+  if (!signedIn) return null;
+
+  return (
+    <button
+      onClick={logout}
+      disabled={loggingOut}
+      title={collapsed ? 'Log off' : undefined}
+      className={`
+        flex items-center rounded-md text-sm font-medium transition-colors overflow-hidden mx-1 mb-1
+        ${collapsed ? 'justify-center px-0 py-2' : 'gap-3 px-3 py-2'}
+        text-gray-700 hover:bg-gray-100 disabled:opacity-50 w-auto text-left
+      `}
+    >
+      <svg
+        className="w-4 h-4 shrink-0 text-gray-400"
+        fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6A2.25 2.25 0 005.25 5.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3-3h-9m9 0l-3-3m3 3l-3 3"
+        />
+      </svg>
+      {!collapsed && <span className="whitespace-nowrap">{loggingOut ? 'Signing out…' : 'Log off'}</span>}
+    </button>
   );
 }
