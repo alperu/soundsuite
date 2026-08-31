@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.3.4](https://github.com/alperu/soundsuite/compare/v1.3.3...v1.3.4) (2026-08-31)
+
+
+### Features
+
+* **admin:** log-off button moved to left nav sidebar below Docs link (single instance, session-aware) ([f1bfde8](https://github.com/alperu/soundsuite/commit/f1bfde88dcd7193e1947445ede7e28063cd382cf))
+* **admin:** move log-off button below docs panel; hide sidebar on standalone login page ([7529a9f](https://github.com/alperu/soundsuite/commit/7529a9fa5f3e6a01e1c0d39bd2c1d103ad9e8533))
+* **admin:** show logged-in username above log-off button in sidebar ([2fedb2f](https://github.com/alperu/soundsuite/commit/2fedb2fb216d0e7e4254092b6d35f5be0c024d70))
+* **admin:** Users, Sessions, and Cloudflare tabs with cookie-based admin login ([8a0e05d](https://github.com/alperu/soundsuite/commit/8a0e05ded19104d3c3a21bccd9c06ab19732331a))
+
+
+### Bug Fixes
+
+* **scope:** multi-ref hub press opens the per-link menu instead of grabbing blind ([b622f4f](https://github.com/alperu/soundsuite/commit/b622f4fcd539f0e6efe4101a7823bb08b6dd5bcf))
+
+
+### Performance Improvements
+
+* **mcp:** cap query_case_knowledge rerank pool (115s→~5s), add phase timing + dev HMR registry rebuild; add MCP improvements report ([8fc8da6](https://github.com/alperu/soundsuite/commit/8fc8da6272dbf48e40a14e115b9b880f42b46bae))
+
+
+### Miscellaneous Chores
+
+* pin next release ([422c62e](https://github.com/alperu/soundsuite/commit/422c62ec7b4a51d7961b929ecd253bdcd5172552))
+
 ## [1.3.3](https://github.com/alperu/soundsuite/compare/v1.3.2...v1.3.3) (2026-08-20)
 
 
