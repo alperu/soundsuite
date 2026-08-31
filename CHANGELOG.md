@@ -3,6 +3,12 @@
 ## [1.3.4](https://github.com/alperu/soundsuite/compare/v1.3.3...v1.3.4) (2026-08-31)
 
 
+### Release Notes
+
+* **Cloudflare Tunnel integration (untested):** the plumbing is in place — an admin Cloudflare tab stores the tunnel domain/credentials (secrets masked), probes cloudflared/metrics/public reachability, and generates a locked-down `config.yml` — but the integration has **not been end-to-end tested against a live tunnel yet**.
+* **OAuth for remote MCP (Claude Desktop):** the generated tunnel config exposes only `/api/mcp` and the OAuth discovery path (`/.well-known/oauth-protected-resource`), so Claude Desktop can connect to Sound Suite as a remote MCP server with `MCP_AUTH_MODE=oauth` — no port forwarding, TLS at the Cloudflare edge.
+
+
 ### Features
 
 * **admin:** log-off button moved to left nav sidebar below Docs link (single instance, session-aware) ([f1bfde8](https://github.com/alperu/soundsuite/commit/f1bfde88dcd7193e1947445ede7e28063cd382cf))
