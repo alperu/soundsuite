@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.6](https://github.com/alperu/soundsuite/compare/v1.3.5...v1.3.6) (2026-09-03)
+
+
+### Features
+
+* **search:** always-visible delete on selected preset with confirm dialog ([47e09db](https://github.com/alperu/soundsuite/commit/47e09db3a1fd6c8dbd0c70c2e55469d9f145e85f))
+
+
+### Miscellaneous Chores
+
+* pin next release ([8708d99](https://github.com/alperu/soundsuite/commit/8708d99b88397789b120402da30ca5b12edfe1a2))
+
 ## [1.3.5](https://github.com/alperu/soundsuite/compare/v1.3.4...v1.3.5) (2026-09-03)
 
 
