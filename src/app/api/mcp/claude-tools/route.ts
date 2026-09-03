@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
+import { parseProfile } from '@/lib/mcp/research-types';
 
 /**
  * GET /api/mcp/claude-tools?variant=regex&eager=query_case_knowledge,scan_for_pattern
@@ -33,8 +34,13 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // `?profile=` filters like /api/mcp/tools: missing = every tool (dashboard
+    // use), present-but-malformed = `local` (fail-closed).
+    const rawProfile = request.nextUrl.searchParams.get('profile');
+    const profile = rawProfile === null ? undefined : parseProfile(rawProfile);
+
     const registry = await getToolRegistry();
-    const allTools = registry.listTools().filter(t => t.config.enabled);
+    const allTools = registry.listTools(profile).filter(t => t.config.enabled);
 
     // Tool search tool definition
     const searchToolType = variant === 'regex'
@@ -76,6 +82,7 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json({
+      ...(profile ? { profile } : {}),
       beta: 'advanced-tool-use-2025-11-20',
       model: 'claude-opus-5',
       tools,

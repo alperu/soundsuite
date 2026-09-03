@@ -18,8 +18,24 @@
  */
 
 import type { Segment } from './chip-segments';
+import type { ResearchTier } from '../mcp/research-types';
 
-export type QueryRoute = 'no-retrieval' | 'single-shot' | 'deep' | 'rlm';
+export type QueryRoute = 'no-retrieval' | 'single-shot' | 'deep' | 'deep-report' | 'rlm';
+
+/**
+ * Map a router decision onto the MCP research tier vocabulary
+ * (docs/tasks/06-mcp-two-profiles.md, Part B.2). `auto` is resolved here.
+ */
+export function routeToResearchMode(route: QueryRoute): ResearchTier {
+  switch (route) {
+    case 'rlm':         return 'deep-rlm';
+    case 'deep-report': return 'deep-report';
+    case 'deep':        return 'deep';
+    case 'single-shot':
+    case 'no-retrieval':
+    default:            return 'fast';
+  }
+}
 
 export interface RouteDecision {
   route: QueryRoute;
@@ -30,6 +46,12 @@ export interface RouteDecision {
 }
 
 // --- Signal patterns --------------------------------------------------------
+
+/** Asks for a written deliverable (report / memo / summary / brief) → deep with
+ *  multi-pass synthesis. Checked BEFORE the RLM regex: "write a memo tracing
+ *  how X evolved" is a report request that happens to use narrative words. */
+const REPORT_RE =
+  /\b(report|memo(?:randum)?|summari[sz]e|summary of|brief(?:ing)?|write[- ]?up|draft (?:a|an|the)|overview of)\b/i;
 
 /** Open-ended synthesis / relationship / evolution → RLM (agentic gap-filling). */
 const RLM_RE =
@@ -85,6 +107,13 @@ export function classifyQueryComplexity(query: string, segments?: Segment[]): Ro
   const words = text.split(/\s+/).filter(Boolean);
   const hasQuoted = /"[^"]+"/.test(query);
   const hasExactId = CAUSE_NUMBER_RE.test(query) || hasQuoted;
+
+  // 0. Deliverable language ("write a memo", "summarize", "brief") → deep with
+  //    multi-pass synthesis. Wins over RLM: the shape of the answer is the
+  //    stronger signal than the narrative verbs inside it.
+  if (REPORT_RE.test(text)) {
+    return { route: 'deep-report', reason: 'report / memo / summary language ("report", "memo", "summarize", "brief")', confidence: 0.8 };
+  }
 
   // 1. Strongest signal first: open-ended synthesis / relationship → RLM.
   if (RLM_RE.test(text)) {

@@ -6,6 +6,7 @@ import { VectorStore } from '../vector/vector-store';
 import { EmbeddingProvider } from '../ingestion/embedding-provider';
 import { PrismaClient } from '@prisma/client';
 import { Logger } from '../logger';
+import type { McpProfile } from './research-types';
 
 // ---------------------------------------------------------------------------
 // Tool categories
@@ -50,6 +51,11 @@ export interface ToolMetadata {
     properties: Record<string, any>;
     required: string[];
   };
+  /**
+   * MCP profiles this tool is exposed to (docs/tasks/06-mcp-two-profiles.md).
+   * Absent = both `local` and `routed`.
+   */
+  profiles?: McpProfile[];
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +109,14 @@ export interface ToolExecutionContext {
   /** Provider/model override from the UI toolbar (passed per-request). */
   aiProvider?: string;
   aiModel?: string;
+  /**
+   * MCP profile the call runs under. Set by `ToolRegistry.execute`; `local`
+   * pins every LLM call to Ollama (see llm-policy.ts). Absent for internal
+   * callers that bypass the registry.
+   */
+  profile?: McpProfile;
+  /** `mcp-session-id` header of the calling MCP client, when present. */
+  sessionId?: string;
   /** Per-request warning channel. Tools push non-fatal degradation warnings
    *  here; the deep-search / AI-search routes forward them to the UI. */
   pushWarning?: (w: BackendWarning) => void;

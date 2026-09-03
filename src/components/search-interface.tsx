@@ -1547,6 +1547,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
     query?: string,
     history?: Array<{ role: 'user' | 'assistant'; content: string }>,
     rlmOverride?: boolean,
+    multiPassOverride?: boolean,
   ): Promise<DeepSearchResult> => {
     const q = (query || aiQuery).trim();
     const result = await deepSearchRunner.start({
@@ -1558,7 +1559,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
       thinking: thinkingMode,
       maxTokens,
       effort,
-      multiPass,
+      multiPass: multiPassOverride ?? multiPass,
       useRlm: rlmOverride ?? useRlm,
       ...(history && history.length > 0 ? { history } : {}),
       ...(selectedWorkflowIds.length > 0 ? { workflowIds: selectedWorkflowIds } : {}),
@@ -1766,10 +1767,13 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
     // user turns Auto on. Compare mode is never auto-routed.
     let effectiveDeep = deepSearchMode;
     let effectiveRlm = useRlm;
+    let effectiveMultiPass: boolean | undefined;
     if (searchAuto && !compareMode) {
       const decision = classifyQueryComplexity(currentQuery, segmentChipsAndIntents(currentQuery));
-      effectiveDeep = decision.route === 'deep' || decision.route === 'rlm';
+      // `deep-report` is the deep tier with multi-pass synthesis switched on.
+      effectiveDeep = decision.route === 'deep' || decision.route === 'deep-report' || decision.route === 'rlm';
       effectiveRlm = decision.route === 'rlm';
+      if (decision.route === 'deep-report') effectiveMultiPass = true;
       setRouteNotice(`Auto → ${decision.route}: ${decision.reason}`);
     } else {
       setRouteNotice(null);
@@ -1844,7 +1848,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
         // append the turn here. The await resolves once the runner records
         // the completed turn. effectiveRlm reflects the Auto router (or the
         // manual RLM toggle when Auto is off).
-        await doDeepSearch(aiProvider, aiModel, currentQuery, history.length > 0 ? history : undefined, effectiveRlm);
+        await doDeepSearch(aiProvider, aiModel, currentQuery, history.length > 0 ? history : undefined, effectiveRlm, effectiveMultiPass);
         setDeepProgress(null);
         scrollChatToBottom();
       } else if (compareMode) {
@@ -2206,6 +2210,10 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
         params,
         provider: aiProvider,
         model: aiModel,
+        // The dashboard is the operator's own surface: the `routed` profile
+        // keeps its provider picker honoured. A missing profile would be
+        // treated as `local` (fail-closed) and refuse cloud providers.
+        profile: 'routed',
       };
       console.log('[AnalysisTool] Executing', selectedTool.name, 'with provider:', aiProvider, 'model:', aiModel);
       const res = await fetch('/api/mcp/execute', {

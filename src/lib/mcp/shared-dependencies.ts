@@ -59,6 +59,66 @@ export function groqApiKeyDependency(): ToolDependency {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Ollama availability probe (local-profile gating)
+// ---------------------------------------------------------------------------
+
+const OLLAMA_PROBE_TIMEOUT_MS = 3_000;
+const OLLAMA_PROBE_CACHE_MS = 30_000;
+
+let _ollamaProbe: { at: number; ok: boolean } | null = null;
+let _ollamaProbeInflight: Promise<boolean> | null = null;
+
+/**
+ * Is an Ollama endpoint reachable? Reads the same config the MCP AI helper
+ * uses (`ollamaCompletionHost || ollamaHost`), hits `GET /api/tags` with a
+ * 3 s timeout, and caches the answer for 30 s. Never throws.
+ *
+ * The `local` profile pins LLM tools to Ollama; when this returns false those
+ * tools report `ready: false` and the bridge hides them rather than falling
+ * back to a cloud provider.
+ */
+export async function ollamaAvailable(opts?: { force?: boolean }): Promise<boolean> {
+  const now = Date.now();
+  if (!opts?.force && _ollamaProbe && now - _ollamaProbe.at < OLLAMA_PROBE_CACHE_MS) {
+    return _ollamaProbe.ok;
+  }
+  if (_ollamaProbeInflight) return _ollamaProbeInflight;
+
+  _ollamaProbeInflight = (async () => {
+    let ok = false;
+    try {
+      const { getConfig } = await import('../db/config');
+      const config = await getConfig();
+      const host = (config.ollamaCompletionHost || config.ollamaHost || process.env.OLLAMA_HOST || '').trim();
+      if (host) {
+        const base = host.startsWith('http') ? host : `http://${host}`;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), OLLAMA_PROBE_TIMEOUT_MS);
+        try {
+          const res = await fetch(`${base.replace(/\/+$/, '')}/api/tags`, { signal: controller.signal });
+          ok = res.ok;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    } catch {
+      ok = false;
+    }
+    _ollamaProbe = { at: Date.now(), ok };
+    _ollamaProbeInflight = null;
+    return ok;
+  })();
+
+  return _ollamaProbeInflight;
+}
+
+/** Test hook — drop the cached probe result. */
+export function resetOllamaProbeCache(): void {
+  _ollamaProbe = null;
+  _ollamaProbeInflight = null;
+}
+
 /**
  * Vector store dependency.
  * Always returns true (the registry sets it up during init).

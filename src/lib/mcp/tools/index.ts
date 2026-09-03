@@ -14,9 +14,18 @@ import { AnalyzeCitationsTool } from './analyze-citations';
 import { DetectPrivilegeTool } from './detect-privilege';
 import { AnalyzeToneTool } from './analyze-tone';
 import { SearchWorkflowsTool } from './search-workflows';
+import { getResearchTools } from './research-tools';
+import { getPresetTools } from './preset-tools';
+import { getRoutedReportTools } from './routed-report-tools';
 
 export function getAllTools(): BaseMCPTool[] {
   return [
+    // Profile-scoped tools; see docs/tasks/06-mcp-two-profiles.md.
+    // research_* — local evidence engine (both profiles, always local-only).
+    ...getResearchTools(),
+    // preset_* / routing_explain and research_report / report_* — routed only.
+    ...getPresetTools(),
+    ...getRoutedReportTools(),
     new QueryCaseKnowledgeTool(),
     new QueryCaseGraphTool(),
     new ScanForPatternTool(),

@@ -44,7 +44,7 @@ export interface DeepSearchSource extends ChunkProvenance {
   matchedSubQueries: string[];
 }
 
-interface DecompositionResult {
+export interface DecompositionResult {
   subQueries: string[];
   intent: string;
 }
@@ -302,7 +302,7 @@ export async function decomposeQuery(
 // 2. Parallel Searches
 // ---------------------------------------------------------------------------
 
-interface SubQueryResult {
+export interface SubQueryResult {
   subQuery: string;
   sources: DeepSearchSource[];
 }
@@ -452,6 +452,8 @@ export async function executeParallelSearches(
   registry: ToolRegistry,
   pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
   chatId?: string,
+  /** Per-sub-query retrieval cap. Default 50 (the dashboard's value). */
+  limitPerSubQuery: number = 50,
 ): Promise<SubQueryResult[]> {
   // Normalize: plain strings become bare specs so the dispatch body has one shape.
   const specs: SubQuerySpec[] = subQueries.map(s => (typeof s === 'string' ? { query: s } : s));
@@ -464,7 +466,7 @@ export async function executeParallelSearches(
         ...(chatId ? { chatId } : {}),
         ...(spec.whereClauses && spec.whereClauses.length > 0 ? { whereClauses: spec.whereClauses } : {}),
         ...(spec.softBoostRefs && spec.softBoostRefs.length > 0 ? { softBoostRefs: spec.softBoostRefs } : {}),
-        limit: 50,
+        limit: limitPerSubQuery,
         searchMode: 'hybrid',
       }, pushWarning ? { pushWarning } : undefined);
 
@@ -678,7 +680,9 @@ export async function deduplicateAndMerge(
   subQueryResults: SubQueryResult[],
   originalQuery: string,
   onWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
-): Promise<{ sources: DeepSearchSource[]; stats: { totalRetrieved: number; uniqueAfterDedup: number; finalAfterRerank: number } }> {
+  /** Optional overrides — `rerankPoolSize` replaces the configured pool cap (MCP presets). */
+  mergeOptions?: { rerankPoolSize?: number },
+): Promise<{ sources: DeepSearchSource[]; stats: { totalRetrieved: number; uniqueAfterDedup: number; finalAfterRerank: number; rerankPool: number } }> {
   const seen = new Map<string, DeepSearchSource>();
   let totalRetrieved = 0;
 
@@ -720,12 +724,16 @@ export async function deduplicateAndMerge(
   // top_n only limits what's returned), so prefill cost scales with the pool.
   // Trimming by first-stage score keeps only the most promising candidates —
   // the dominant lever on interactive rerank latency. Master-side: no restart.
+  let rerankPool = 0;
   if (merged.length > 0) {
-    const poolSize = await getConfig().then((c) => c.rerankPoolSize ?? 150).catch(() => 150);
+    const poolSize = mergeOptions?.rerankPoolSize && mergeOptions.rerankPoolSize > 0
+      ? mergeOptions.rerankPoolSize
+      : await getConfig().then((c) => c.rerankPoolSize ?? 150).catch(() => 150);
     if (merged.length > poolSize) {
       merged.sort((a, b) => b.score - a.score);
       merged = merged.slice(0, poolSize);
     }
+    rerankPool = merged.length;
     const rerankable = merged as (DeepSearchSource & RerankableResult)[];
     merged = await rerank(originalQuery, rerankable, poolSize, onWarning ? (w) => onWarning({
       source: w.source,
@@ -835,6 +843,7 @@ export async function deduplicateAndMerge(
       totalRetrieved,
       uniqueAfterDedup,
       finalAfterRerank: merged.length,
+      rerankPool,
     },
   };
 }
@@ -1492,35 +1501,82 @@ function caseIdsFromWhereClauses(whereClauses?: string[]): string[] {
   return [...ids];
 }
 
-export async function generateReportWithRlm(
+export interface RlmEvidenceRoundsOptions {
+  caseId?: string;
+  chatId?: string;
+  history?: ConversationTurn[];
+  workflowContext?: string;
+  maxTokens?: number;
+  signal?: AbortSignal;
+  onToken?: (text: string) => void;
+  onProgress?: (p: DeepSearchProgress) => void;
+  pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void;
+  maxRounds?: number;
+  /**
+   * Inherited retrieval scope from the composer's filter chips. Every
+   * query_case_knowledge tool call the RLM agent makes during this run
+   * inherits these where-clauses so follow-up evidence-fetches stay
+   * inside the user's named chip refs (e.g. just that filing / just those
+   * four cases) rather than reaching corpus-wide. Single string per entry;
+   * already SQL-escaped at the call site by extractFieldFilters.
+   */
+  inheritedWhereClauses?: string[];
+  /**
+   * Called when a tool-use round completes (after its tool results are in)
+   * with the sources that round discovered and a one-line note describing
+   * what the model asked for. Used by the MCP evidence engine to stream
+   * evidence per round; the dashboard path leaves it unset.
+   */
+  onRound?: (info: { round: number; sources: DeepSearchSource[]; note: string; toolCalls: number }) => void;
+}
+
+export interface RlmEvidenceRoundsResult {
+  /** The model's closing narration (never a report — the prompt forbids it). */
+  finalText: string;
+  extraSources: DeepSearchSource[];
+  /** 1-based RLM round in which each `extraSources[i]` was discovered. */
+  roundOf: number[];
+  host: string | null;
+  model: string;
+  rounds: number;
+  toolCalls: number;
+  /** One note per tool-use round, plus the closing narration when non-empty. */
+  notes: string[];
+}
+
+/**
+ * Drive the RLM evidence-gathering loop (query_case_knowledge /
+ * query_case_graph tool calls against `registry`) and return what it found.
+ * Writes no prose: the model's own closing text is returned as `finalText`
+ * for callers that want the narration, and `generateReportWithRlm` is the
+ * dashboard-facing wrapper that has always exposed it as `report`.
+ */
+export async function runRlmEvidenceRounds(
   query: string,
   decomposition: DecompositionResult,
   initialSources: DeepSearchSource[],
   registry: ToolRegistry,
-  options: {
-    caseId?: string;
-    chatId?: string;
-    history?: ConversationTurn[];
-    workflowContext?: string;
-    maxTokens?: number;
-    signal?: AbortSignal;
-    onToken?: (text: string) => void;
-    onProgress?: (p: DeepSearchProgress) => void;
-    pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void;
-    maxRounds?: number;
-    /**
-     * Inherited retrieval scope from the composer's filter chips. Every
-     * query_case_knowledge tool call the RLM agent makes during this run
-     * inherits these where-clauses so follow-up evidence-fetches stay
-     * inside the user's named chip refs (e.g. just that filing / just those
-     * four cases) rather than reaching corpus-wide. Single string per entry;
-     * already SQL-escaped at the call site by extractFieldFilters.
-     */
-    inheritedWhereClauses?: string[];
-  } = {},
-): Promise<{ report: string; extraSources: DeepSearchSource[]; host: string | null; model: string }> {
+  options: RlmEvidenceRoundsOptions = {},
+): Promise<RlmEvidenceRoundsResult> {
   const emit = options.onProgress || (() => {});
   const extraSources: DeepSearchSource[] = [];
+  const roundOf: number[] = [];
+  // Round bookkeeping for the evidence engine. `runRlmWithTools` yields the
+  // tool-call event before it invokes `executeTool`, so the round observed
+  // in the event loop below is current when the executor pushes sources.
+  let currentRound = 0;
+  let toolCallCount = 0;
+  const roundLines = new Map<number, string[]>();
+  const roundSourceStart = new Map<number, number>();
+  const notes: string[] = [];
+  const closeRound = (round: number) => {
+    if (round <= 0 || !roundLines.has(round)) return;
+    const note = `rlm round ${round}: ${roundLines.get(round)!.join('; ')}`;
+    notes.push(note);
+    const from = roundSourceStart.get(round) ?? extraSources.length;
+    options.onRound?.({ round, sources: extraSources.slice(from), note, toolCalls: roundLines.get(round)!.length });
+    roundLines.delete(round);
+  };
   // Full-text keys — a slice(0,60) key collided on header-repeated table
   // fragments exactly like the main dedup bug (task #13 phase 0a).
   const seenKeys = new Set(initialSources.map(s => sourceDedupKey(s.document, s.page, s.text)));
@@ -1675,6 +1731,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
         };
         newSources.push(src);
         extraSources.push(src);
+        roundOf.push(currentRound);
       }
       // Build the tool-result content for the model: top excerpts with cites.
       // Truncate each chunk to RLM_TOOL_CHUNK_CHAR_CAP to keep the per-round
@@ -1705,6 +1762,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
 
   let host: string | null = null;
   let finalReport = '';
+  let roundsSeen = 0;
   const messages = [
     { role: 'system' as const, content: RLM_SYSTEM_PROMPT },
     { role: 'user' as const, content: userContent },
@@ -1737,6 +1795,18 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
       });
     } else if (ev.type === 'tool-call') {
       const sq = typeof ev.args.query === 'string' ? ev.args.query : '';
+      if (ev.round !== currentRound) {
+        closeRound(currentRound);
+        currentRound = ev.round;
+        roundsSeen = Math.max(roundsSeen, ev.round);
+        roundSourceStart.set(ev.round, extraSources.length);
+        roundLines.set(ev.round, []);
+      }
+      toolCallCount++;
+      const argPreview = ev.toolName === 'query_case_knowledge'
+        ? `"${sq.slice(0, 80)}"`
+        : String(ev.args.operation ?? '');
+      roundLines.get(ev.round)!.push(`${ev.toolName}(${argPreview})`);
       emit({
         step: 'rlm-subcall',
         message: `RLM round ${ev.round}: query_case_knowledge("${sq.slice(0, 80)}")`,
@@ -1746,6 +1816,10 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
         rlmSubQuery: sq,
       });
     } else if (ev.type === 'tool-result') {
+      const lines = roundLines.get(ev.round);
+      if (lines && lines.length > 0) {
+        lines[lines.length - 1] += ev.ok ? ` → ${ev.chunkCount ?? 0} excerpts` : ' → failed';
+      }
       emit({
         step: 'rlm-subcall',
         message: ev.ok
@@ -1761,6 +1835,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
       options.onToken?.(ev.text);
     } else if (ev.type === 'done') {
       if (!finalReport && ev.content) finalReport = ev.content;
+      roundsSeen = Math.max(roundsSeen, ev.rounds);
     } else if (ev.type === 'notice') {
       // Input had to be shortened to fit the RLM context window — surface it so
       // the user knows the answer may be missing some of the pasted text.
@@ -1770,7 +1845,61 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
     }
   }
 
-  return { report: finalReport, extraSources, host, model: RLM_MODEL_ID };
+  closeRound(currentRound);
+  const closing = finalReport.trim();
+  if (closing) notes.push(closing.slice(0, 500));
+
+  return {
+    finalText: finalReport,
+    extraSources,
+    roundOf,
+    host,
+    model: RLM_MODEL_ID,
+    rounds: roundsSeen,
+    toolCalls: toolCallCount,
+    notes,
+  };
+}
+
+/**
+ * Dashboard-facing RLM stage: identical to `runRlmEvidenceRounds`, exposing
+ * the model's closing text as `report` (the deep-search route has always
+ * routed it to the thoughts channel, never the answer).
+ */
+export async function generateReportWithRlm(
+  query: string,
+  decomposition: DecompositionResult,
+  initialSources: DeepSearchSource[],
+  registry: ToolRegistry,
+  options: RlmEvidenceRoundsOptions = {},
+): Promise<{ report: string; extraSources: DeepSearchSource[]; host: string | null; model: string }> {
+  const out = await runRlmEvidenceRounds(query, decomposition, initialSources, registry, options);
+  return { report: out.finalText, extraSources: out.extraSources, host: out.host, model: out.model };
+}
+
+/**
+ * Retrieval scope the RLM's follow-up tool calls inherit: the OR-union of
+ * every chip's AND-block (so follow-ups stay inside the user's named refs),
+ * AND'd with any active graph scope (appended as separate entries so it
+ * narrows the chip union rather than widening it). Undefined when neither.
+ */
+export function buildRlmInheritedWhereClauses(
+  chipSpecs: SubQuerySpec[] | null,
+  scopeWhere: string[] | undefined,
+): string[] | undefined {
+  let inherited: string[] | undefined;
+  if (chipSpecs && chipSpecs.length > 0) {
+    const perChipBlocks = chipSpecs
+      .filter(s => s.whereClauses && s.whereClauses.length > 0)
+      .map(s => `(${s.whereClauses!.join(' AND ')})`);
+    if (perChipBlocks.length > 0) {
+      inherited = [perChipBlocks.length === 1 ? perChipBlocks[0] : `(${perChipBlocks.join(' OR ')})`];
+    }
+  }
+  if (scopeWhere) {
+    inherited = [...(inherited ?? []), ...scopeWhere];
+  }
+  return inherited;
 }
 
 // ---------------------------------------------------------------------------
@@ -1979,20 +2108,7 @@ export async function deepSearch(
     // with " OR ", then ship as a single composite where-clause. The
     // vector-store ANDs entries of `_rawWhere`, so a single composite
     // string preserves the intended union semantics.
-    let inheritedWhereClauses: string[] | undefined;
-    if (chipSpecs && chipSpecs.length > 0) {
-      const perChipBlocks = chipSpecs
-        .filter(s => s.whereClauses && s.whereClauses.length > 0)
-        .map(s => `(${s.whereClauses!.join(' AND ')})`);
-      if (perChipBlocks.length > 0) {
-        inheritedWhereClauses = [perChipBlocks.length === 1 ? perChipBlocks[0] : `(${perChipBlocks.join(' OR ')})`];
-      }
-    }
-    // An active graph scope binds the RLM's follow-up tool calls too. Appended
-    // as separate entries so it AND's with any chip union rather than widening it.
-    if (scopeWhere) {
-      inheritedWhereClauses = [...(inheritedWhereClauses ?? []), ...scopeWhere];
-    }
+    const inheritedWhereClauses = buildRlmInheritedWhereClauses(chipSpecs, scopeWhere);
 
     // RLM is OPTIONAL supplemental evidence-gathering — it does NOT write the
     // report (Stage 2 does). If it's down/unreachable/timing out/erroring, skip

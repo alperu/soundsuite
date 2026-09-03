@@ -69,6 +69,7 @@ describe('POST /api/mcp/execute', () => {
       'query_case_knowledge',
       { query: 'test' },
       { aiProvider: 'openai', aiModel: 'gpt-4' },
+      'local',
     )
   })
 
@@ -77,7 +78,7 @@ describe('POST /api/mcp/execute', () => {
     const { POST } = await import('../execute/route')
     await POST(postReq({ tool: 'query_case_knowledge', params: { query: 'test' } }))
 
-    expect(mockRegistry.execute).toHaveBeenCalledWith('query_case_knowledge', { query: 'test' }, undefined)
+    expect(mockRegistry.execute).toHaveBeenCalledWith('query_case_knowledge', { query: 'test' }, undefined, 'local')
   })
 
   it('maps a tool error code to the right HTTP status', async () => {

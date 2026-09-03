@@ -1,7 +1,29 @@
-import { classifyQueryComplexity } from '../query-router';
+import { classifyQueryComplexity, routeToResearchMode } from '../query-router';
 import { segmentChipsAndIntents } from '../chip-segments';
 
 describe('classifyQueryComplexity', () => {
+  describe('deep-report — report / memo / summary deliverables', () => {
+    const reportQueries = [
+      'write a memo on the discovery disputes',
+      'summarize the arguments in the motion to compel',
+      'draft a brief overview of the custody filings',
+      'give me a report on the receivership motion',
+      'prepare a write-up of the sanctions hearing',
+      'summary of every affidavit filed in April',
+    ];
+    it.each(reportQueries)('routes %j to deep-report', (q) => {
+      const d = classifyQueryComplexity(q);
+      expect(d.route).toBe('deep-report');
+      expect(d.confidence).toBeGreaterThanOrEqual(0.8);
+    });
+    it('wins over RLM language when a deliverable is requested', () => {
+      expect(classifyQueryComplexity('write a memo tracing how the trust dispute evolved over time').route).toBe('deep-report');
+    });
+    it('wins over deep language when a deliverable is requested', () => {
+      expect(classifyQueryComplexity('summarize and compare the two motions to disqualify').route).toBe('deep-report');
+    });
+  });
+
   describe('rlm — synthesis / relationship / evolution', () => {
     const rlmQueries = [
       'trace how the trust dispute evolved across every filing',
@@ -76,10 +98,20 @@ describe('classifyQueryComplexity', () => {
   it('always returns a known route + bounded confidence', () => {
     for (const q of ['', 'a', 'compare X and Y', 'trace it', '"x"', '03-25-00333-CV']) {
       const d = classifyQueryComplexity(q);
-      expect(['no-retrieval', 'single-shot', 'deep', 'rlm']).toContain(d.route);
+      expect(['no-retrieval', 'single-shot', 'deep', 'deep-report', 'rlm']).toContain(d.route);
       expect(d.confidence).toBeGreaterThanOrEqual(0);
       expect(d.confidence).toBeLessThanOrEqual(1);
       expect(typeof d.reason).toBe('string');
     }
+  });
+});
+
+describe('routeToResearchMode', () => {
+  it('maps every router tier onto a research tier', () => {
+    expect(routeToResearchMode('single-shot')).toBe('fast');
+    expect(routeToResearchMode('no-retrieval')).toBe('fast');
+    expect(routeToResearchMode('deep')).toBe('deep');
+    expect(routeToResearchMode('deep-report')).toBe('deep-report');
+    expect(routeToResearchMode('rlm')).toBe('deep-rlm');
   });
 });

@@ -18,6 +18,7 @@ success · References. Nothing here is implemented — these are proposals for r
 | [03](./03-colpali-visual-retrieval.md) | ColPali/ColQwen3 layout-aware visual retrieval | L | Medium | Late-interaction (multi-vector MaxSim) retrieval over exhibit/scanned page-images, where text-only chunking loses stamps/tables/signatures. Feeds the existing `rerank()` stage. |
 | [04](./04-learned-fusion-weighting.md) | Learned / query-dependent fusion weighting | M | Medium | Replace the fixed RRF `k=60` and the arbitrary `SOFT_BOOST = 1.2` with tunable / query-dependent / learned weighting. Closes the one real gap vs. the blog's ideal. |
 | [05](./05-reranker-resilience-and-chunk-overlap.md) | Reranker resilience + chunk-overlap tuning | S | Medium | Two small, well-scoped hardening items: a graceful first-stage-order path for the 90s reranker timeout on a degraded fleet, and revisiting the 50-token chunk overlap for legal boilerplate. |
+| [06](./06-mcp-two-profiles.md) | MCP two profiles: `local` evidence engine + `routed` LLM router | L | High | Split the MCP surface into a fail-closed local-only evidence engine and a preset-driven cloud router, with async research/report jobs, PresetV2, provenance logging, and a profile-aware bridge. **Implemented 2026-09-03.** |
 
 ## On "are we already doing GraphRAG?"
 

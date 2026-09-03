@@ -11,6 +11,7 @@ import { completeAI, AIMessage } from '../../ai/ai-provider';
 import { AIProviderKey, AI_PROVIDERS } from '../../ai/models';
 import { getConfig, AppConfig } from '../../db/config';
 import { ToolExecutionContext } from '../tool-types';
+import { McpError } from '../llm-policy';
 import { SearchQuery, MatchQuery, BooleanQuery, Occur } from '../../vector/vector-store';
 import type { FullTextQuery } from '../../vector/vector-store';
 import { QueryPreprocessor } from '../../search/query-preprocessor';
@@ -23,7 +24,7 @@ import { rerank } from '../../search/reranker';
 let _providerOverride: { provider: AIProviderKey; model: string } | null = null;
 
 /** Default models per provider — pick a capable but cost-effective model. */
-const DEFAULT_MODELS: Record<AIProviderKey, string> = {
+export const DEFAULT_MODELS: Record<AIProviderKey, string> = {
   ollama: 'qwen2.5:14b',
   groq: 'llama-3.3-70b-versatile',
   openai: 'gpt-5.6-terra',
@@ -88,6 +89,16 @@ export async function callLLM(
         ? (source = 'module-global', _providerOverride)
         : (source = 'auto-detect', await getAvailableProvider());
   console.log(`[callLLM] Resolved provider=${provider} model=${model} via ${source}`);
+
+  // Profile policy choke point (llm-policy.ts): a `local` MCP session may
+  // only ever reach Ollama, whatever the resolution source above decided.
+  // callLLMJson funnels through here, so this guard covers both entry points.
+  if (options?.context?.profile === 'local' && provider !== 'ollama') {
+    throw new McpError(
+      'POLICY_VIOLATION',
+      `profile "local" refuses provider "${provider}" (resolved via ${source}); only "ollama" is permitted`,
+    );
+  }
   const messages: AIMessage[] = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userContent },

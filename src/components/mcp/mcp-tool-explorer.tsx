@@ -66,7 +66,9 @@ export function MCPToolExplorer({ tools, cases, documents }: MCPToolExplorerProp
       const response = await fetch('/api/mcp/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool: selectedTool.name, params }),
+        // Dashboard surface → `routed` profile (a missing profile is `local`,
+        // fail-closed, and would refuse the auto-detected cloud provider).
+        body: JSON.stringify({ tool: selectedTool.name, params, profile: 'routed' }),
       });
 
       const executionTimeMs = performance.now() - start;
