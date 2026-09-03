@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.5](https://github.com/alperu/soundsuite/compare/v1.3.4...v1.3.5) (2026-09-03)
+
+
+### Features
+
+* **ai:** add Claude Fable 5.1 to the Anthropic model catalog with adaptive-effort support ([0e907b7](https://github.com/alperu/soundsuite/commit/0e907b71ff1b195cb40b14b59fa8a4490ea31706))
+
+
+### Miscellaneous Chores
+
+* pin next release ([54b70a6](https://github.com/alperu/soundsuite/commit/54b70a60360b3b90d0ea0f7a321e20ce3e515475))
+
 ## [1.3.4](https://github.com/alperu/soundsuite/compare/v1.3.3...v1.3.4) (2026-08-31)
 
 
