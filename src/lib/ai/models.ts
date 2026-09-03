@@ -122,6 +122,7 @@ export const AI_PROVIDERS: Record<AIProviderKey, AIProviderDef> = {
     configKey: 'claudeApiKey',
     // Catalog policy: latest two generations per family only.
     models: [
+      { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', caps: ANTHROPIC_ADAPTIVE_CAPS },
       { id: 'claude-fable-5', label: 'Claude Fable 5', caps: ANTHROPIC_ADAPTIVE_CAPS },
       { id: 'claude-opus-5', label: 'Claude Opus 5', caps: ANTHROPIC_ADAPTIVE_CAPS },
       { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', caps: ANTHROPIC_ADAPTIVE_CAPS },
