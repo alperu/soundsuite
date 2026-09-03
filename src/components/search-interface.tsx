@@ -4041,7 +4041,7 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); deletePreset(p.id); }}
-                          className="opacity-0 group-hover/preset:opacity-100 transition-opacity p-0.5 rounded hover:bg-red-100 shrink-0"
+                          className={`${isActive ? 'opacity-100' : 'opacity-0 group-hover/preset:opacity-100'} transition-opacity p-0.5 rounded hover:bg-red-100 shrink-0`}
                           title="Delete preset"
                         >
                           <svg className="w-3.5 h-3.5 text-red-400 hover:text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -4060,6 +4060,18 @@ const [hoverChip, setHoverChip] = useState<{ expression: string; displayName: st
                           </span>
                         )}
                       </div>
+                      {isActive && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (window.confirm(`Delete preset "${p.name}"?`)) deletePreset(p.id);
+                          }}
+                          className="mt-2 w-full text-[11px] font-medium text-red-600 border border-red-200 rounded-md px-2 py-1 hover:bg-red-50 transition-colors"
+                        >
+                          Delete preset
+                        </button>
+                      )}
                     </div>
                   );
                 })}
