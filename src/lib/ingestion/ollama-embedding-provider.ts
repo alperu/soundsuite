@@ -125,6 +125,8 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
    * hung ~72s before undici noticed and there was NO application timeout.
    * Covers cold model loads (30-60s) with margin. */
   private static EMBED_TIMEOUT_MS = 120_000;
+  /** Ollama `keep_alive` for the embedding model (see embedOnce). */
+  private static EMBED_KEEP_ALIVE = process.env.SS_EMBED_KEEP_ALIVE || '30m';
   private static EMBED_MAX_ATTEMPTS = 3;
   private static EMBED_BASE_DELAY_MS = 3_000;
 
@@ -219,7 +221,10 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
       // Promise.race timeout: the underlying request may linger, but the
       // caller moves on to a retry instead of hanging on a dead socket.
       const response = await Promise.race([
-        client.embed({ model: this.model, input: texts }),
+        // keep_alive: the embedding model stays resident so a completion
+        // model loading on the same host doesn't evict it between batches
+        // and every search doesn't pay a cold load (report M-1).
+        client.embed({ model: this.model, input: texts, keep_alive: OllamaEmbeddingProvider.EMBED_KEEP_ALIVE }),
         new Promise<never>((_, reject) =>
           setTimeout(
             () => reject(new Error(`embed timeout after ${OllamaEmbeddingProvider.EMBED_TIMEOUT_MS}ms (host may be down or cold-loading)`)),

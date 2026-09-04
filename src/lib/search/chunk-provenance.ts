@@ -19,6 +19,10 @@ export interface ChunkProvenance {
   speakers?: string;
   /** Structured markdown for table chunks — synthesis/rendering form. */
   tableMarkdown?: string;
+  /** Record status of the source document: 'draft' = unfiled working copy
+   * (must never be presented as filed record), 'filed' = court file stamp
+   * recognised, 'unknown' / absent = no evidence either way. */
+  recordStatus?: 'filed' | 'draft' | 'unknown';
 }
 
 /** Pick the provenance fields off any richer object (typed spread helper). */
@@ -29,5 +33,6 @@ export function pickProvenance<T extends ChunkProvenance>(s: T): ChunkProvenance
     ...(s.headingPath ? { headingPath: s.headingPath } : {}),
     ...(s.speakers ? { speakers: s.speakers } : {}),
     ...(s.tableMarkdown ? { tableMarkdown: s.tableMarkdown } : {}),
+    ...(s.recordStatus ? { recordStatus: s.recordStatus } : {}),
   };
 }

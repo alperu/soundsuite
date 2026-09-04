@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
-import { parseProfile } from '@/lib/mcp/research-types';
+import { parseProfileStrict } from '@/lib/mcp/research-types';
 import { profilePolicyDescription, providersAllowed } from '@/lib/mcp/llm-policy';
 
 /**
@@ -10,26 +10,40 @@ import { profilePolicyDescription, providersAllowed } from '@/lib/mcp/llm-policy
  * `?profile=local|routed` filters the list to that profile and stamps the
  * response with `{ profile, policy, providersAllowed }` (the bridge sends it).
  *
- * Profile asymmetry — deliberate:
- *   - Here, a MISSING `profile` means "no filter": the dashboard's MCP tool
- *     manager calls this endpoint bare and must keep seeing every tool.
- *   - On POST /api/mcp/execute a missing `profile` means `local`
- *     (fail-closed): listing is harmless, executing is not.
- * A PRESENT but malformed value is parsed fail-closed to `local` in both.
+ * Profile handling:
+ *   - MISSING `profile` → `local`. Same default as POST /api/mcp/execute, so a
+ *     bridge that forgot to send a profile can only ever advertise the local
+ *     set (it used to see every tool, which let it advertise `routed` tools).
+ *   - `profile=all` → every tool, no policy stamp, `profile: 'all'`. This is
+ *     the dashboard's MCP tool manager's explicit opt-in; the bridge never
+ *     sends it.
+ *   - Any other value → 400 INVALID_PROFILE. Listing rejects rather than
+ *     coercing so a typo can't be silently mislabeled as `local`.
  */
 
 export async function GET(request?: NextRequest) {
   try {
     const rawProfile = request?.nextUrl?.searchParams.get('profile') ?? null;
-    const profile = rawProfile === null ? undefined : parseProfile(rawProfile);
+    const profile = parseProfileStrict(rawProfile);
+    if (profile === null) {
+      return NextResponse.json(
+        {
+          error: {
+            code: 'INVALID_PROFILE',
+            message: `Unknown profile "${rawProfile}". Expected "local", "routed" or "all".`,
+          },
+        },
+        { status: 400 },
+      );
+    }
 
     const registry = await getToolRegistry();
     await registry.refreshDependencies();
-    const tools = registry.listTools(profile);
 
-    if (!profile) {
-      return NextResponse.json({ tools });
+    if (profile === 'all') {
+      return NextResponse.json({ profile: 'all', tools: registry.listTools() });
     }
+    const tools = registry.listTools(profile);
     return NextResponse.json({
       profile,
       policy: profilePolicyDescription(profile),

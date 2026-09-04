@@ -6,6 +6,7 @@
  */
 
 jest.mock('../shared-dependencies', () => ({
+  ollamaReadiness: jest.fn(),
   ollamaAvailable: jest.fn(),
   resetOllamaProbeCache: jest.fn(),
 }));
@@ -17,10 +18,15 @@ jest.mock('../../db/config', () => ({
 import { ToolRegistry } from '../tool-registry';
 import { ToolExecutionLogger } from '../tool-execution-logger';
 import { BaseMCPTool } from '../tools/base-tool';
-import { ollamaAvailable } from '../shared-dependencies';
+import { ollamaReadiness, type OllamaReadiness } from '../shared-dependencies';
 import type { ToolMetadata, ToolExecutionContext } from '../tool-types';
 
-const mockOllama = ollamaAvailable as jest.MockedFunction<typeof ollamaAvailable>;
+const mockReadiness = ollamaReadiness as jest.MockedFunction<typeof ollamaReadiness>;
+const UP: OllamaReadiness = { reachable: true, generates: true, model: 'test-local-model' };
+const DOWN: OllamaReadiness = { reachable: false, generates: false, model: 'test-local-model', reason: 'http://ollama.test unreachable (fetch failed)' };
+const WEDGED: OllamaReadiness = { reachable: true, generates: false, model: 'test-local-model', reason: 'ollama reachable but test-local-model did not generate within 10 s' };
+/** Old boolean-style helper kept so the existing cases read the same. */
+const mockOllama = { mockResolvedValue: (ok: boolean) => mockReadiness.mockResolvedValue(ok ? UP : DOWN), mockReset: () => mockReadiness.mockReset() };
 
 class FakeTool extends BaseMCPTool {
   public lastContext: ToolExecutionContext | null = null;
@@ -102,7 +108,7 @@ describe('ToolRegistry profiles', () => {
       const local = new Map(registry.listTools('local').map((t) => [t.metadata.name, t]));
       expect(local.get('analyze_thing')!.ready).toBe(false);
       expect(local.get('analyze_thing')!.readyReasons).toEqual([
-        'Ollama unavailable — local profile pins LLM tools to Ollama',
+        'Ollama unavailable — local profile pins LLM tools to Ollama (http://ollama.test unreachable (fetch failed))',
       ]);
       expect(local.get('search_both')!.ready).toBe(true);
 
@@ -112,6 +118,19 @@ describe('ToolRegistry profiles', () => {
       const all = new Map(registry.listTools().map((t) => [t.metadata.name, t]));
       expect(all.get('analyze_thing')!.ready).toBe(true);
     });
+  });
+
+  it('reports the specific reason when Ollama is reachable but the model does not generate', async () => {
+    mockReadiness.mockResolvedValue(WEDGED);
+    await registry.refreshDependencies();
+    const local = new Map(registry.listTools('local').map((t) => [t.metadata.name, t]));
+    expect(local.get('analyze_thing')!.ready).toBe(false);
+    expect(local.get('analyze_thing')!.readyReasons[0]).toMatch(/reachable but test-local-model did not generate within 10 s/);
+    expect(local.get('search_both')!.ready).toBe(true);
+
+    const res = await registry.execute('analyze_thing', {}, undefined, 'local');
+    expect(res.errorCode).toBe('TOOL_NOT_READY');
+    expect(res.error).toMatch(/did not generate/);
   });
 
   describe('execute', () => {

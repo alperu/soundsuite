@@ -31,6 +31,22 @@ export function parseProfile(v: unknown): McpProfile {
   return v === 'routed' ? 'routed' : 'local';
 }
 
+/**
+ * Strict parser for LISTING endpoints (`GET /api/mcp/tools`,
+ * `GET /api/mcp/claude-tools`). Unlike `parseProfile` this does not coerce:
+ *   - `null` / `undefined` / `''` → `'local'` (missing = the safe default)
+ *   - `'local'` / `'routed'`      → that profile
+ *   - `'all'`                     → `'all'` (dashboard-only: every tool, no policy stamp)
+ *   - anything else               → `null` (caller answers 400 INVALID_PROFILE)
+ * Execute keeps `parseProfile` (fail-closed to `local`); listing must not
+ * silently mislabel a typo'd profile, so it rejects instead.
+ */
+export function parseProfileStrict(v: unknown): McpProfile | 'all' | null {
+  if (v === null || v === undefined || v === '') return 'local';
+  if (v === 'local' || v === 'routed' || v === 'all') return v;
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Research modes / tiers
 // ---------------------------------------------------------------------------
@@ -57,6 +73,8 @@ export interface EvidenceItem {
   headingPath?: string;
   speakers?: string;
   tableMarkdown?: string;
+  /** 'draft' = unfiled working copy; never present as filed record. */
+  recordStatus?: 'filed' | 'draft' | 'unknown';
   hits: number;
   source: 'retrieval' | 'pattern' | `rlm-round-${number}`;
   rlmNote?: string;
@@ -139,6 +157,12 @@ export interface RetrievalSettings {
   limitPerSubQuery?: number;
   rlmMaxRounds?: number;
   maxEvidence?: number;
+  /** Hard cap on the LLM decompose step (ms); on expiry the engine falls back
+   * to a zero-LLM heuristic split. Default 20 000. */
+  decomposeTimeoutMs?: number;
+  /** Hard cap on the LLM evidence-outline step (ms); on expiry the outline is
+   * a per-document grouping. Default 60 000. */
+  outlineTimeoutMs?: number;
 }
 
 export interface PresetV2 {
@@ -227,4 +251,8 @@ export interface ResearchJobStatusView {
   startedAt: number;
   updatedAt: number;
   elapsedMs: number;
+  /** When the current `phase` began (ms epoch) — job start until the first progress event. */
+  phaseStartedAt: number;
+  /** Time spent in the current `phase` so far (frozen once the job finishes). */
+  phaseElapsedMs: number;
 }

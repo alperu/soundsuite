@@ -51,7 +51,9 @@ Rules:
 - Every evidenceIds entry must be one of the [E#] labels given. Never invent labels.
 - Organise by topic, not by sub-question. An excerpt may appear in more than one section.
 - Omit excerpts that are irrelevant to the question.
-- List a gap only when the excerpts genuinely do not cover it.`;
+- List a gap only when the excerpts genuinely do not cover it.
+- Excerpts marked "DRAFT, filing not confirmed" are unfiled working copies: never describe them as filed, ruled on, or part of the record; a section title that relies on one must say "draft".
+- Never describe an unmarked excerpt as filed either — filing status is confirmed only where an excerpt says so.`;
 
 interface RawOutline {
   sections?: Array<{ title?: unknown; evidenceIds?: unknown; gap?: unknown }>;
@@ -117,6 +119,7 @@ export function buildOutlineContext(
     if (e.headingPath) meta.push(e.headingPath);
     if (e.speakers) meta.push(`speakers: ${e.speakers.split('|').filter(Boolean).join(', ')}`);
     if (e.blockType && e.blockType !== 'paragraph') meta.push(e.blockType);
+    if (e.recordStatus === 'draft') meta.push('DRAFT, filing not confirmed');
     const part = `[E${i + 1}]${meta.length ? ` (${meta.join(' · ')})` : ''}\n${body}`;
     const cost = part.length + (parts.length > 0 ? 5 : 0);
     if (total + cost > opts.maxTotalChars) continue; // skip-not-break, like buildCiteContext

@@ -145,6 +145,7 @@ export async function POST(request: NextRequest) {
             headingPath?: string;
             speakers?: string;
             tableMarkdown?: string;
+            recordStatus?: 'filed' | 'draft' | 'unknown';
           }> = searchResult.data?.results ?? [];
 
           send({ type: 'progress', step: 'searching', message: `Found ${sources.length} matches`, detail: { vectorHits: sources.length, searchMode } });

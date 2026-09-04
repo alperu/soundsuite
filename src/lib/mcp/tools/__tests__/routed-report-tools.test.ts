@@ -16,6 +16,7 @@ jest.mock('../ai-helper', () => ({
   getAvailableProvider: jest.fn(),
 }));
 jest.mock('../../routing-defaults', () => ({
+  getDefaultRoutingInfo: jest.fn().mockResolvedValue({ routing: {}, source: 'code:ollama-only', notes: [] }),
   getDefaultRouting: jest.fn().mockResolvedValue({
     fast: { provider: 'ollama', model: 'qwen2.5:14b' },
     deep: { provider: 'anthropic', model: 'claude-sonnet-5', effort: 'medium', thinking: true },

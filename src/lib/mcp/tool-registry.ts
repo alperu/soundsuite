@@ -17,13 +17,29 @@ import {
 } from './tool-types';
 import { ToolConfigStore } from './tool-config-store';
 import { ToolExecutionLogger } from './tool-execution-logger';
-import { ollamaAvailable } from './shared-dependencies';
+import { ollamaReadiness, type OllamaReadiness } from './shared-dependencies';
 import { enforceProvider, McpError, LOCAL_PROVIDER } from './llm-policy';
 import type { McpProfile } from './research-types';
 
-/** Reason string attached to LLM tools hidden from `local` while Ollama is down. */
+/** Generic reason attached to LLM tools hidden from `local` while Ollama is down. */
 export const OLLAMA_UNAVAILABLE_REASON =
   'Ollama unavailable — local profile pins LLM tools to Ollama';
+
+/**
+ * Specific reason string for the last readiness probe: distinguishes "host
+ * unreachable" from "reachable but the completion model did not generate"
+ * (report M-1) so operators see which half is broken.
+ */
+export function ollamaUnavailableReason(readiness?: OllamaReadiness | null): string {
+  if (!readiness) return OLLAMA_UNAVAILABLE_REASON;
+  if (readiness.reachable && !readiness.generates) {
+    return `${readiness.reason ?? `ollama reachable but ${readiness.model || 'the completion model'} did not generate`} — local profile pins LLM tools to Ollama`;
+  }
+  if (!readiness.reachable && readiness.reason) {
+    return `${OLLAMA_UNAVAILABLE_REASON} (${readiness.reason})`;
+  }
+  return OLLAMA_UNAVAILABLE_REASON;
+}
 
 export class ToolRegistry {
   private tools = new Map<string, BaseMCPTool>();
@@ -34,6 +50,19 @@ export class ToolRegistry {
   >();
   /** Last Ollama probe result, refreshed by `refreshDependencies()`. */
   private ollamaUp = false;
+  /** Full readiness of the last probe — feeds the specific `readyReasons` string. */
+  private ollamaState: OllamaReadiness | null = null;
+
+  private async probeOllama(): Promise<void> {
+    try {
+      const r = await ollamaReadiness();
+      this.ollamaState = r;
+      this.ollamaUp = r.reachable && r.generates;
+    } catch {
+      this.ollamaState = null;
+      this.ollamaUp = false;
+    }
+  }
 
   constructor(
     private configStore: ToolConfigStore,
@@ -92,11 +121,7 @@ export class ToolRegistry {
       );
     }
 
-    checks.push(
-      ollamaAvailable()
-        .then((ok) => { this.ollamaUp = ok; })
-        .catch(() => { this.ollamaUp = false; }),
-    );
+    checks.push(this.probeOllama());
 
     await Promise.all(checks);
   }
@@ -139,7 +164,7 @@ export class ToolRegistry {
     if (profile === 'local') {
       const tool = this.tools.get(toolName);
       if (tool && this.toolNeedsLlm(tool) && !this.ollamaUp) {
-        reasons.push(OLLAMA_UNAVAILABLE_REASON);
+        reasons.push(ollamaUnavailableReason(this.ollamaState));
       }
     }
 
@@ -184,11 +209,7 @@ export class ToolRegistry {
     // Under `local`, re-probe Ollama (cached 30 s) so a freshly-started
     // Ollama is picked up without waiting for the next refreshDependencies().
     if (profile === 'local' && this.toolNeedsLlm(tool)) {
-      try {
-        this.ollamaUp = await ollamaAvailable();
-      } catch {
-        this.ollamaUp = false;
-      }
+      await this.probeOllama();
     }
 
     const readiness = this.isToolReady(toolName, profile);

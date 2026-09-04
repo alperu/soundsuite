@@ -49,9 +49,26 @@ export interface RouteDecision {
 
 /** Asks for a written deliverable (report / memo / summary / brief) → deep with
  *  multi-pass synthesis. Checked BEFORE the RLM regex: "write a memo tracing
- *  how X evolved" is a report request that happens to use narrative words. */
-const REPORT_RE =
-  /\b(report|memo(?:randum)?|summari[sz]e|summary of|brief(?:ing)?|write[- ]?up|draft (?:a|an|the)|overview of)\b/i;
+ *  how X evolved" is a report request that happens to use narrative words.
+ *
+ *  Bare `report` / `brief` / `memo` are filing NOUNS in a legal corpus ("the
+ *  psychologist's report", "the brief filed in March"), so a noun alone is not
+ *  a signal. It fires only when:
+ *    (a) a report verb (write / draft / prepare / produce / give me / generate
+ *        / summarize / compile) is followed within three words by a
+ *        deliverable noun (report / memo / brief / summary / overview /
+ *        write-up), or
+ *    (b) the intent STARTS with `report|memo|summary|overview` + `on|of|about`
+ *        ("summary of every affidavit filed in April"), or
+ *    (c) the verb `summarize` appears at all — it is never a filing noun. */
+const REPORT_VERB = 'write|draft|prepare|produce|give me|generate|summari[sz]e|compile';
+const REPORT_NOUN = 'report|memo(?:randum)?|brief|summary|overview|write[- ]?up';
+const REPORT_RE = new RegExp(
+  `\\b(?:${REPORT_VERB})\\b(?:\\W+\\w+){0,3}?\\W+(?:${REPORT_NOUN})\\b` +
+  `|^\\W*(?:report|memo(?:randum)?|summary|overview)\\s+(?:on|of|about)\\b` +
+  `|\\bsummari[sz]e\\b`,
+  'i',
+);
 
 /** Open-ended synthesis / relationship / evolution → RLM (agentic gap-filling). */
 const RLM_RE =

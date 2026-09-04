@@ -47,9 +47,11 @@ jest.mock('../../mcp/routing-defaults', () => ({
     'deep-report': { provider: 'ollama', multiPass: true },
     'deep-rlm': { provider: 'ollama', useRlm: true, rlmMaxRounds: 2 },
   },
+  // No small tag on the synthetic host → falls through to the completion model.
+  localDecomposeModel: jest.fn(async (cfg: { ollamaCompletionModel?: string }) => cfg.ollamaCompletionModel ?? 'default-ollama'),
 }));
 
-import { gatherEvidence, resolveResearchMode } from '../gather-evidence';
+import { gatherEvidence, resolveResearchMode, DECOMPOSE_HEURISTIC_FALLBACK } from '../gather-evidence';
 import type { DeepSearchSource } from '../deep-search';
 import type { EvidenceItem } from '../../mcp/research-types';
 
@@ -206,6 +208,61 @@ describe('gatherEvidence', () => {
     expect(r.stats.rerankPool).toBe(2);
     expect(r.stats.chunksFused).toBe(2);
     expect(typeof r.stats.phases.retrieve).toBe('number');
+  });
+
+  it('(h) a decompose that never resolves falls back to the heuristic split within the timeout', async () => {
+    decomposeQueryMock.mockImplementation(() => new Promise(() => { /* never resolves */ }));
+    const warnings: string[] = [];
+    const t0 = Date.now();
+    const r = await gatherEvidence('what obligations did the parties agree to regarding the shared property', registry, {
+      profile: 'local', localOnly: true, mode: 'deep',
+      retrieval: { decomposeTimeoutMs: 50 },
+      onProgress: (p) => { if (p.phase === 'warning') warnings.push(p.message); },
+    });
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(r.modelsUsed.decompose).toBe(DECOMPOSE_HEURISTIC_FALLBACK);
+    expect(warnings.some((w) => /decomposition timed out/.test(w) && /heuristic/.test(w))).toBe(true);
+    expect(r.subQueries[0]).toBe('what obligations did the parties agree to regarding the shared property');
+    expect(r.subQueries.length).toBeGreaterThanOrEqual(2);
+    expect(executeParallelSearchesMock).toHaveBeenCalled();
+    expect(r.evidence).toHaveLength(2);
+    // The decompose call received a signal that aborts on timeout.
+    const opts = decomposeQueryMock.mock.calls[0][1] as { signal?: AbortSignal; thinking?: boolean };
+    expect(opts.signal).toBeInstanceOf(AbortSignal);
+    expect(opts.thinking).toBe(false);
+  });
+
+  it('(h′) a decompose that throws falls back to the heuristic split, a client abort still propagates', async () => {
+    decomposeQueryMock.mockRejectedValue(new Error('runner wedged'));
+    const r = await gatherEvidence('q one, q two', registry, { profile: 'local', localOnly: true, mode: 'deep' });
+    expect(r.modelsUsed.decompose).toBe(DECOMPOSE_HEURISTIC_FALLBACK);
+    expect(r.evidence).toHaveLength(2);
+
+    executeParallelSearchesMock.mockClear();
+    const controller = new AbortController();
+    decomposeQueryMock.mockImplementation(async () => { controller.abort(); throw new Error('aborted'); });
+    await expect(
+      gatherEvidence('q', registry, { profile: 'local', localOnly: true, mode: 'deep', signal: controller.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(executeParallelSearchesMock).not.toHaveBeenCalled();
+  });
+
+  it('(i) an outline that never resolves degrades to a per-document grouping within the timeout', async () => {
+    buildEvidenceOutlineMock.mockImplementation(() => new Promise(() => { /* never resolves */ }));
+    const warnings: string[] = [];
+    const r = await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep',
+      retrieval: { outlineTimeoutMs: 50 },
+      onProgress: (p) => { if (p.phase === 'warning') warnings.push(p.message); },
+    });
+    expect(r.modelsUsed.outline).toBe(DECOMPOSE_HEURISTIC_FALLBACK);
+    expect(r.modelsUsed.decompose).toBe('ollama/test-local-model');
+    expect(warnings.some((w) => /outline timed out/.test(w))).toBe(true);
+    expect(r.outline!.sections).toHaveLength(1);
+    expect(r.outline!.sections[0].evidenceIds).toEqual(r.evidence.map((e) => e.id));
+    const opts = buildEvidenceOutlineMock.mock.calls[0][3] as { signal?: AbortSignal; thinking?: boolean };
+    expect(opts.signal).toBeInstanceOf(AbortSignal);
+    expect(opts.thinking).toBe(false);
   });
 
   it('degrades to reranked evidence when the RLM sidecar is unavailable', async () => {

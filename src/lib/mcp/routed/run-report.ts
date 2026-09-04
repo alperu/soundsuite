@@ -38,6 +38,7 @@ import {
   type CostClass,
 } from './routing';
 import { recordRoutedCall } from './provenance';
+import { ensureDefaultPresetInBackground } from './default-preset';
 
 export interface RunReportOptions {
   profile: 'routed';
@@ -107,6 +108,10 @@ export async function planReport(
   query: string,
   opts: Pick<RunReportOptions, 'sessionId' | 'mode' | 'preset' | 'overrides'>,
 ): Promise<ReportPlan> {
+  // Materialise the saved "default" preset from the cloud-first code defaults
+  // on first use (M-3). Lazy and non-blocking: this call still plans against
+  // whatever exists right now.
+  ensureDefaultPresetInBackground();
   const requested: ResearchMode = opts.mode ?? 'auto';
   const decision = classifyTier(query, requested);
   const [inlinePreset, active, defaults] = await Promise.all([

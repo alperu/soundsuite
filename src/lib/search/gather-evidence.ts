@@ -27,7 +27,7 @@ import type {
   ResearchTier,
 } from '../mcp/research-types';
 import { enforceProvider, LOCAL_PROVIDER } from '../mcp/llm-policy';
-import { LOCAL_ROUTING } from '../mcp/routing-defaults';
+import { LOCAL_ROUTING, localDecomposeModel } from '../mcp/routing-defaults';
 import { DEFAULT_MODELS, getAvailableProvider } from '../mcp/tools/ai-helper';
 import { getConfig } from '../db/config';
 import { RLM_MODEL_ID } from '../ai/stream-rlm';
@@ -49,6 +49,7 @@ import {
 import { classifyQueryComplexity, routeToResearchMode } from './query-router';
 import { sourceToEvidenceItem } from './evidence-mapping';
 import { buildEvidenceOutline } from './evidence-outline';
+import { heuristicDecompose } from './heuristic-decompose';
 
 // ---------------------------------------------------------------------------
 // Routing
@@ -89,6 +90,72 @@ export function resolveResearchMode(query: string, requested?: ResearchMode): Re
 export const MCP_RLM_DEFAULT_ROUNDS = LOCAL_ROUTING['deep-rlm'].rlmMaxRounds ?? 2;
 /** Cap on RLM narration forwarded to `onThoughts` (mirrors deepSearch). */
 const RLM_THOUGHTS_CAP = 3000;
+/**
+ * Hard cap on the LLM decompose step (report M-1). A wedged or queued Ollama
+ * used to hold the pipeline in `decompose` until the 5-minute socket timeout;
+ * past this the engine switches to `heuristicDecompose` and carries on.
+ * Override per request via `retrieval.decomposeTimeoutMs`.
+ */
+export const DECOMPOSE_TIMEOUT_MS = 20_000;
+/**
+ * Hard cap on the LLM evidence-outline step. Same failure mode as decompose
+ * (a 60K-char prompt at ~16 tok/s on a queued Ollama); past this the outline
+ * degrades to a per-document grouping. Override via `retrieval.outlineTimeoutMs`.
+ */
+export const OUTLINE_TIMEOUT_MS = 60_000;
+/** `modelsUsed.decompose` / `.outline` when the LLM step was replaced by a heuristic. */
+export const DECOMPOSE_HEURISTIC_FALLBACK = 'heuristic-fallback';
+
+class PhaseTimeoutError extends Error {
+  constructor(phase: string, ms: number) {
+    super(`${phase} timed out after ${ms} ms`);
+    this.name = 'PhaseTimeoutError';
+  }
+}
+
+/**
+ * Run `fn` with a signal that aborts on the caller's signal OR after `ms`,
+ * and additionally race a timer so the pipeline moves on even if the
+ * transport ignores the abort. The loser is left to settle on its own.
+ */
+async function withPhaseTimeout<T>(
+  phase: string,
+  ms: number,
+  parent: AbortSignal | undefined,
+  fn: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const timeoutSignal = AbortSignal.timeout(ms);
+  const signal = parent ? AbortSignal.any([parent, timeoutSignal]) : timeoutSignal;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new PhaseTimeoutError(phase, ms)), ms);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  try {
+    return await Promise.race([fn(signal), deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Zero-LLM outline: one section per document in evidence-rank order, so a
+ * consumer still gets a sections→evidenceIds map when the model is unavailable.
+ */
+function heuristicOutline(evidence: EvidenceItem[]): NonNullable<EvidenceResult['outline']> {
+  const byDoc = new Map<string, { title: string; evidenceIds: string[] }>();
+  for (const item of evidence) {
+    const key = item.documentId || 'unknown';
+    let section = byDoc.get(key);
+    if (!section) {
+      const label = item.headingPath?.split(' > ')[0]?.trim();
+      section = { title: label ? `${label} (${key})` : `Document ${key}`, evidenceIds: [] };
+      byDoc.set(key, section);
+    }
+    section.evidenceIds.push(item.id);
+  }
+  return { sections: [...byDoc.values()], gaps: [] };
+}
 
 export type GatherEvidenceInput = GatherEvidenceOptions & {
   /** Request fields the caller already knows the local profile ignores (reported in `routing.ignored`). */
@@ -135,7 +202,12 @@ export async function gatherEvidence(
   if (options.localOnly) {
     llmProvider = enforceProvider('local', options.provider) ?? LOCAL_PROVIDER;
     const config = await getConfig().catch(() => ({} as { ollamaCompletionModel?: string }));
-    llmModel = options.model ?? LOCAL_ROUTING.deep.model ?? config.ollamaCompletionModel ?? DEFAULT_MODELS.ollama;
+    // Decompose and the outline are short JSON prompts: prefer the dedicated
+    // small model (config → env → small tag on the host → completion model).
+    llmModel =
+      options.model ??
+      LOCAL_ROUTING.deep.model ??
+      (await localDecomposeModel(config).catch(() => config.ollamaCompletionModel ?? DEFAULT_MODELS.ollama));
   } else {
     llmProvider = options.provider;
     llmModel = options.model;
@@ -151,6 +223,8 @@ export async function gatherEvidence(
   const retrieval = options.retrieval ?? {};
   const limitPerSubQuery = retrieval.limitPerSubQuery && retrieval.limitPerSubQuery > 0 ? retrieval.limitPerSubQuery : 50;
   const rlmMaxRounds = retrieval.rlmMaxRounds && retrieval.rlmMaxRounds > 0 ? retrieval.rlmMaxRounds : MCP_RLM_DEFAULT_ROUNDS;
+  const decomposeTimeoutMs = retrieval.decomposeTimeoutMs && retrieval.decomposeTimeoutMs > 0 ? retrieval.decomposeTimeoutMs : DECOMPOSE_TIMEOUT_MS;
+  const outlineTimeoutMs = retrieval.outlineTimeoutMs && retrieval.outlineTimeoutMs > 0 ? retrieval.outlineTimeoutMs : OUTLINE_TIMEOUT_MS;
   const scopeWhere = options.whereClauses && options.whereClauses.length > 0 ? options.whereClauses : undefined;
 
   // Warnings are informational for the evidence engine — surfaced as progress.
@@ -185,16 +259,36 @@ export async function gatherEvidence(
       return;
     }
     emit('decompose', options.history?.length ? 'analysing follow-up in context' : 'breaking question into sub-queries');
-    decomposition = await decomposeQuery(query, {
-      provider: llmProvider,
-      model: llmModel,
-      history: options.history,
-      thinking: options.thinking,
-      effort: options.effort,
-      signal,
-    });
+    try {
+      decomposition = await withPhaseTimeout('decompose', decomposeTimeoutMs, signal, (decomposeSignal) =>
+        decomposeQuery(query, {
+          provider: llmProvider,
+          model: llmModel,
+          history: options.history,
+          // Decompose is a structured-JSON task; reasoning models (qwen3.x)
+          // otherwise spend the whole token budget thinking and return no JSON.
+          thinking: options.thinking ?? false,
+          effort: options.effort,
+          signal: decomposeSignal,
+        }),
+      );
+      modelsUsed.decompose = `${llmProvider ?? 'auto'}/${llmModel ?? 'auto'}`;
+    } catch (err) {
+      // The client went away — propagate; anything else degrades to the heuristic.
+      checkAbort();
+      const timedOut = err instanceof PhaseTimeoutError;
+      const msg = err instanceof Error ? err.message : String(err);
+      decomposition = heuristicDecompose(query);
+      modelsUsed.decompose = DECOMPOSE_HEURISTIC_FALLBACK;
+      emit(
+        'warning',
+        timedOut
+          ? `decomposition timed out after ${decomposeTimeoutMs} ms (${llmProvider ?? 'auto'}/${llmModel ?? 'auto'}) — using heuristic keyword split (${decomposition.subQueries.length} sub-queries)`
+          : `decomposition failed (${msg.slice(0, 160)}) — using heuristic keyword split (${decomposition.subQueries.length} sub-queries)`,
+        { detail: { fallback: DECOMPOSE_HEURISTIC_FALLBACK, timedOut, timeoutMs: decomposeTimeoutMs } },
+      );
+    }
     dispatchSpecs = decomposition.subQueries;
-    modelsUsed.decompose = `${llmProvider ?? 'auto'}/${llmModel ?? 'auto'}`;
   });
 
   // -- Retrieve --------------------------------------------------------------
@@ -320,17 +414,35 @@ export async function gatherEvidence(
       provider = provider ?? auto.provider;
       model = model ?? auto.model;
     }
-    outline = await timed('outline', () =>
-      buildEvidenceOutline(query, decomposition!.subQueries, finalEvidence, {
-        provider: provider!,
-        model: model!,
-        thinking: options.thinking,
-        effort: options.effort,
-        signal,
-        profile: options.localOnly ? 'local' : options.profile,
-      }),
-    );
-    modelsUsed.outline = `${provider}/${model}`;
+    try {
+      outline = await timed('outline', () =>
+        withPhaseTimeout('outline', outlineTimeoutMs, signal, (outlineSignal) =>
+          buildEvidenceOutline(query, decomposition!.subQueries, finalEvidence, {
+            provider: provider!,
+            model: model!,
+            // Structured-JSON task — see the decompose note on reasoning models.
+            thinking: options.thinking ?? false,
+            effort: options.effort,
+            signal: outlineSignal,
+            profile: options.localOnly ? 'local' : options.profile,
+          }),
+        ),
+      );
+      modelsUsed.outline = `${provider}/${model}`;
+    } catch (err) {
+      checkAbort();
+      const timedOut = err instanceof PhaseTimeoutError;
+      const msg = err instanceof Error ? err.message : String(err);
+      outline = heuristicOutline(finalEvidence);
+      modelsUsed.outline = DECOMPOSE_HEURISTIC_FALLBACK;
+      emit(
+        'warning',
+        timedOut
+          ? `outline timed out after ${outlineTimeoutMs} ms (${provider}/${model}) — using per-document grouping (${outline.sections.length} sections)`
+          : `outline failed (${msg.slice(0, 160)}) — using per-document grouping (${outline.sections.length} sections)`,
+        { detail: { fallback: DECOMPOSE_HEURISTIC_FALLBACK, timedOut, timeoutMs: outlineTimeoutMs } },
+      );
+    }
   }
 
   return {

@@ -14,6 +14,8 @@ import { getChatVectorStore } from '../../chat/chat-vector-store';
 import { parseBooleanQuery } from '../../search/boolean-query';
 import { astToLanceQuery, BooleanFtsConversionError, extractFieldFilters, resolvePrismaFilters } from '../../search/boolean-to-fts';
 import { getConfig } from '../../db/config';
+import { recordStatusFromTags } from '../../ingestion/draft-detector';
+import { DRAFT_CITE_MARKER } from '../../search/context-builder';
 
 export interface QueryCaseKnowledgeParams {
   query: string;
@@ -38,6 +40,13 @@ export interface QueryCaseKnowledgeParams {
    * user's chip refs nudge ranking without hard-filtering out other docs.
    */
   softBoostRefs?: Array<{ field: 'documentId' | 'caseId' | 'filingId'; values: string[] }>;
+  /**
+   * Record-status filter. 'filed' = only chunks whose document carries a
+   * recognised court file stamp; 'draft' = only unfiled working copies;
+   * 'any' (default) = no filter. Drafts are ALWAYS labelled in the result
+   * (`recordStatus: 'draft'` + a DRAFT marker in `citation`) regardless.
+   */
+  recordStatus?: 'filed' | 'draft' | 'any';
 }
 
 export interface QueryCaseKnowledgeResult {
@@ -54,6 +63,8 @@ export interface QueryCaseKnowledgeResult {
     annotations?: string;
     source?: 'docket' | 'chat';
     chatAttachmentId?: string;
+    /** 'draft' = unfiled working copy — citation carries a DRAFT marker. */
+    recordStatus?: 'filed' | 'draft' | 'unknown';
   }>;
 }
 
@@ -70,8 +81,11 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
         'Each result carries citation fields plus structure metadata when available: ' +
         'documentId, blockType (paragraph|table|footnote|figure), headingPath (section ' +
         'the text sits under), speakers (|-delimited transcript speakers), and ' +
-        'tableMarkdown (structured form of table chunks).',
-      version: '1.2.0',
+        'tableMarkdown (structured form of table chunks). Each result also carries ' +
+        'recordStatus (filed|draft|unknown): DRAFT results are unfiled working copies — ' +
+        'their citation is suffixed "DRAFT, filing not confirmed" and they must never be ' +
+        'described as filed, ruled on, or part of the record.',
+      version: '1.3.0',
       category: 'search',
       inputSchema: {
         type: 'object',
@@ -97,6 +111,14 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
             description: 'Search mode: vector, hybrid, or keyword (default: hybrid)',
             enum: ['vector', 'hybrid', 'keyword'],
           },
+          recordStatus: {
+            type: 'string',
+            description:
+              'Filter by record status: "filed" returns only chunks from documents with a ' +
+              'recognised court file stamp, "draft" returns only unfiled working copies, ' +
+              '"any" (default) returns both. Drafts are always labelled in results.',
+            enum: ['filed', 'draft', 'any'],
+          },
         },
         required: ['query'],
       },
@@ -116,7 +138,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     context: ToolExecutionContext,
     _config: ToolConfigEntry,
   ): Promise<QueryCaseKnowledgeResult> {
-    const { query, caseId, chatId, limit = 10, searchMode = 'hybrid', mode = 'legacy', whereClauses, softBoostRefs } = params;
+    const { query, caseId, chatId, limit = 10, searchMode = 'hybrid', mode = 'legacy', whereClauses, softBoostRefs, recordStatus = 'any' } = params;
     const chatHitChunkIds = new Set<string>();
 
     // Per-phase wall-clock timings, logged as one [qck-timing] line at the end
@@ -267,6 +289,12 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     // Apply case filter if provided
     if (caseId) {
       searchQuery.filter = { caseId };
+    }
+
+    // Record-status filter (draft guard). 'any' keeps legacy behaviour.
+    if (recordStatus === 'filed' || recordStatus === 'draft') {
+      if (!searchQuery.filter) searchQuery.filter = {};
+      searchQuery.filter.recordStatus = recordStatus;
     }
 
     // Merge field-qualified filter clauses lifted from the boolean AST.
@@ -545,6 +573,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
             headingPath: result.metadata.headingPath || undefined,
             speakers: result.metadata.speakers || undefined,
             tableMarkdown: result.metadata.tableMarkdown || undefined,
+            recordStatus: result.metadata.recordStatus || undefined,
             source: 'chat' as const,
             chatAttachmentId: attachment?.id || result.metadata.documentId,
           };
@@ -599,13 +628,22 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
 
         const formatted = formatter.format(citationInput);
 
+        // Draft guard: prefer the chunk stamp, fall back to the Document tag
+        // (chunks indexed before the column existed and not yet backfilled).
+        const chunkRecordStatus = result.metadata.recordStatus
+          ?? (recordStatusFromTags((document as any)?.tags) === 'unknown'
+            ? undefined
+            : recordStatusFromTags((document as any)?.tags));
+        const draftSuffix = chunkRecordStatus === 'draft' ? ` — ${DRAFT_CITE_MARKER}` : '';
+
         return {
           text: result.text,
           document: document?.fileName || 'Unknown',
           page: result.metadata.pageNumber,
           score: result.score,
-          citation: formatted.full,
-          citationShort: formatted.short,
+          citation: formatted.full + draftSuffix,
+          citationShort: formatted.short + draftSuffix,
+          recordStatus: chunkRecordStatus,
           filingType,
           volumeNumber,
           caseNumber: caseNumber || undefined,

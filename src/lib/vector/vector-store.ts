@@ -91,6 +91,8 @@ export interface SearchResult {
     speakers?: string;
     /** Structured markdown for table chunks (synthesis/rendering form) */
     tableMarkdown?: string;
+    /** 'draft' = unfiled working copy (never cite as record); absent = unknown */
+    recordStatus?: 'filed' | 'draft' | 'unknown';
   };
   /** Similarity score (lower is better for L2 distance, higher for RRF) */
   score: number;
@@ -131,6 +133,8 @@ interface LanceDBRow {
   block_orders: string;
   /** JSON [x0,y0,x1,y1] union bbox (page pts, top-left). */
   block_bbox: string;
+  /** 'filed' | 'draft' | '' (unknown) — draft-detector record status. */
+  record_status: string;
   [key: string]: any; // Index signature for LanceDB compatibility
 }
 
@@ -279,6 +283,9 @@ export class VectorStore {
       table_markdown: chunk.metadata.tableMarkdown || '',
       block_orders: chunk.metadata.blockOrders?.length ? JSON.stringify(chunk.metadata.blockOrders) : '',
       block_bbox: chunk.metadata.blockBbox ? JSON.stringify(chunk.metadata.blockBbox) : '',
+      record_status: chunk.metadata.recordStatus && chunk.metadata.recordStatus !== 'unknown'
+        ? chunk.metadata.recordStatus
+        : '',
     }));
 
     try {
@@ -715,6 +722,37 @@ export class VectorStore {
   }
 
   /**
+   * Stamp the draft-detector record status on every chunk of a document.
+   * Adds the `record_status` column on tables that predate it. 'unknown' is
+   * stored as '' (the column's absent value). Non-fatal like the readiness
+   * stamp — the Document.tags row still carries the status.
+   */
+  async stampRecordStatus(documentId: string, status: 'filed' | 'draft' | 'unknown'): Promise<void> {
+    if (!this.db || !this.table) return;
+
+    try {
+      const schema = await this.table.schema();
+      const hasColumn = schema.fields.some((f: { name: string }) => f.name === 'record_status');
+      if (!hasColumn) {
+        logger.info('Adding record_status column to LanceDB table');
+        await this.table.addColumns([{ name: 'record_status', valueSql: "''" }]);
+      }
+      const escaped = documentId.replace(/'/g, "''");
+      const value = status === 'unknown' ? '' : status;
+      await this.table.update({
+        where: `document_id = '${escaped}'`,
+        values: { record_status: value },
+      });
+    } catch (error) {
+      logger.warn('Failed to stamp record status on chunks', {
+        documentId,
+        status,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
    * Re-stamp `case_id` / `case_number` on every chunk of the given documents.
    *
    * Chunks denormalize their case at index time, so moving a filing to another
@@ -866,6 +904,16 @@ export class VectorStore {
       conditions.push(`document_type = "${filter.documentType}"`);
     }
 
+    // Record status: 'filed' excludes drafts AND unknown rows (only stamped
+    // filings pass); 'draft' returns drafts only; 'any' / absent = no filter.
+    // Rows indexed before the column existed read as '' via the schema
+    // default, so `record_status != "draft"` would also be safe here.
+    if (filter.recordStatus === 'filed' || filter.recordStatus === 'draft') {
+      conditions.push(`record_status = "${filter.recordStatus}"`);
+    } else if (filter.recordStatus === 'not-draft') {
+      conditions.push(`record_status != "draft"`);
+    }
+
     // Escape hatch: raw SQL conditions injected by the boolean-query
     // field-filter extractor. Already SQL-escaped at the call site.
     if (Array.isArray(filter._rawWhere)) {
@@ -903,6 +951,7 @@ export class VectorStore {
         headingPath: row.heading_path && row.heading_path !== '' ? row.heading_path : undefined,
         speakers: row.speakers && row.speakers !== '' ? row.speakers : undefined,
         tableMarkdown: row.table_markdown && row.table_markdown !== '' ? row.table_markdown : undefined,
+        recordStatus: row.record_status === 'draft' || row.record_status === 'filed' ? row.record_status : undefined,
       },
       score: row._distance !== undefined ? row._distance : 0,
     };

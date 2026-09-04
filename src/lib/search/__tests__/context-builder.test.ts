@@ -61,6 +61,28 @@ describe('speaker attribution (phase 1d)', () => {
   });
 });
 
+describe('draft record guard (citation marker)', () => {
+  it('citeOf appends the DRAFT marker for draft sources only', () => {
+    expect(citeOf({ ...src('t', 1, '2 CR 140'), recordStatus: 'draft' })).toBe('2 CR 140 — DRAFT, filing not confirmed');
+    expect(citeOf({ ...src('t', 1, '2 CR 140'), recordStatus: 'filed' })).toBe('2 CR 140');
+    expect(citeOf({ ...src('t', 1, '2 CR 140'), recordStatus: 'unknown' })).toBe('2 CR 140');
+    expect(citeOf(src('t', 1, '2 CR 140'))).toBe('2 CR 140');
+  });
+
+  it('citeOf keeps the marker on the fallback label chain too', () => {
+    expect(citeOf({ text: 't', document: 'motion.pdf', page: 4, recordStatus: 'draft' }))
+      .toBe('motion.pdf, p.4 — DRAFT, filing not confirmed');
+  });
+
+  it('buildCiteContext renders the marker inside the bracketed cite line', () => {
+    const r = buildCiteContext(
+      [{ ...src('body', 1, '2 CR 140'), recordStatus: 'draft' }, src('other', 2, '2 CR 141')],
+      { maxTotalChars: 10_000 },
+    );
+    expect(r.contextBlock).toBe('[2 CR 140 — DRAFT, filing not confirmed]\nbody\n\n---\n[2 CR 141]\nother\n');
+  });
+});
+
 describe('sourceDedupKey', () => {
   it('distinguishes table fragments that share their first 100 chars', () => {
     const header = 'No. | Date | From | To | Snippet\n'.repeat(4); // >100 chars shared prefix

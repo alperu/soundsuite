@@ -81,6 +81,41 @@ describe('research-jobs', () => {
     expect(isJobFinished(view.id)).toBe(true);
   });
 
+  it('tracks phaseStartedAt / phaseElapsedMs per phase change', async () => {
+    const c = controlled();
+    const view = startJob({ kind: 'research', profile: 'local', query: 'q', run: c.run });
+    expect(view.phaseStartedAt).toBe(view.startedAt);
+    expect(view.phaseElapsedMs).toBeGreaterThanOrEqual(0);
+    await c.ready;
+
+    c.handle().progress({ phase: 'decompose', message: 'breaking question into sub-queries' });
+    const s1 = getJobStatus(view.id)!;
+    expect(s1.phase).toBe('decompose');
+    const decomposeStart = s1.phaseStartedAt;
+    expect(decomposeStart).toBeGreaterThanOrEqual(view.startedAt);
+
+    // Same phase again → the phase clock keeps running from the first event.
+    await new Promise((r) => setTimeout(r, 15));
+    c.handle().progress({ phase: 'decompose', message: 'still decomposing' });
+    const s2 = getJobStatus(view.id)!;
+    expect(s2.phaseStartedAt).toBe(decomposeStart);
+    expect(s2.phaseElapsedMs).toBeGreaterThanOrEqual(10);
+
+    // New phase → clock resets.
+    c.handle().progress({ phase: 'retrieve', message: 'searching' });
+    const s3 = getJobStatus(view.id)!;
+    expect(s3.phase).toBe('retrieve');
+    expect(s3.phaseStartedAt).toBeGreaterThanOrEqual(decomposeStart);
+    expect(s3.phaseElapsedMs).toBeLessThan(s2.phaseElapsedMs + 5);
+
+    c.resolve({ done: true });
+    await flush();
+    const final = getJobStatus(view.id)!;
+    const frozen = final.phaseElapsedMs;
+    await new Promise((r) => setTimeout(r, 10));
+    expect(getJobStatus(view.id)!.phaseElapsedMs).toBe(frozen);
+  });
+
   it('appends tokens to partialReport only for routed', async () => {
     const local = controlled();
     const routed = controlled();

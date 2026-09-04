@@ -3,7 +3,8 @@
 // Proxies tools/list and tools/call to the Sound Suite REST API.
 // stdout is the JSON-RPC channel — all logging goes to stderr.
 //
-// The bridge is a forwarder. It reads SOUND_SUITE_PROFILE, forwards it to the
+// The bridge is a forwarder. It requires SOUND_SUITE_PROFILE (exit 2 if it is
+// missing or not local|routed), forwards it to the
 // server, and relays job events as MCP notifications. It knows nothing about
 // presets, models, or evidence — every policy decision is Sound Suite's.
 
@@ -17,8 +18,21 @@ import {
 
 const BASE_URL = (process.env.SOUND_SUITE_URL || "http://127.0.0.1:3000").replace(/\/+$/, "");
 const API_KEY = process.env.MCP_API_KEY || "";
-// Fail-closed: anything other than the literal string "routed" is "local".
-const PROFILE = process.env.SOUND_SUITE_PROFILE === "routed" ? "routed" : "local";
+// The profile is REQUIRED and must be exactly "local" or "routed". The bridge
+// refuses to start otherwise: a missing/typo'd profile must never silently run
+// as either policy — the operator registers one process per profile and the
+// client-visible server name ("sound-suite-<profile>") has to match it.
+const VALID_PROFILES = ["local", "routed"];
+const RAW_PROFILE = process.env.SOUND_SUITE_PROFILE;
+if (!VALID_PROFILES.includes(RAW_PROFILE)) {
+  console.error(
+    `[sound-suite-bridge] fatal: SOUND_SUITE_PROFILE is ${RAW_PROFILE === undefined ? "not set" : `"${RAW_PROFILE}"`}; ` +
+      `it must be exactly "local" or "routed". Set it in the MCP client's "env" block ` +
+      `(one registration per profile) and restart.`,
+  );
+  process.exit(2);
+}
+const PROFILE = RAW_PROFILE;
 // stdio transports carry no MCP session id, so one bridge process = one
 // session. Without this every stdio client would share the server's
 // "anonymous" session (active presets, job listings).

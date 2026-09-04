@@ -44,7 +44,7 @@ Bridge environment variables:
 | Variable | Default | Meaning |
 |---|---|---|
 | `SOUND_SUITE_URL` | `http://127.0.0.1:3000` | Sound Suite master base URL |
-| `SOUND_SUITE_PROFILE` | `local` | `local` or `routed`. Any other value is treated as `local`. |
+| `SOUND_SUITE_PROFILE` | (required) | `local` or `routed`. If it is missing or anything else the bridge prints an error to stderr and exits with status 2 instead of starting. |
 | `MCP_API_KEY` | (none) | Sent as `Authorization: Bearer …` when auth mode is `apikey` |
 
 ---
@@ -160,6 +160,8 @@ Any client that can launch a stdio MCP server works with the same two commands. 
 ```
 
 **Native transport.** `{{MCP_HTTP_URL}}/local` and `{{MCP_HTTP_URL}}/routed` are reserved for a native Streamable HTTP transport with the profile fixed by path. They return `404 NOT_AVAILABLE` today. When they land, the registrations above keep their names; only the `command` becomes a `url`.
+
+**Legacy path removed.** Earlier builds also served the MCP API under `/sound-suite/mcp/…`. That prefix is gone: point every registration and script at `{{MCP_HTTP_URL}}/tools`, `{{MCP_HTTP_URL}}/execute` and the job routes as shown above. Requests to the old prefix get a plain Next.js 404.
 
 ---
 
@@ -362,10 +364,13 @@ curl -s "{{MCP_HTTP_URL}}/tools?profile=routed" | jq '{profile, policy, tools: [
 
 Each response is stamped with `profile`, a one-line `policy` statement and `providersAllowed`. Every tool entry carries `ready` and `readyReasons`, so you can see why something is missing from a client's list.
 
-And check the bridge on its own (it logs the profile to stderr and then waits on stdin; press Ctrl-C to exit):
+If `profile` is omitted the server answers with the `local` set (never the full catalog), and an unknown value such as `?profile=bogus` is rejected with `400 INVALID_PROFILE`. The only way to list every tool is the dashboard's explicit `?profile=all`, which the bridge never sends.
+
+And check the bridge on its own (it logs the profile to stderr and then waits on stdin; press Ctrl-C to exit). Started without `SOUND_SUITE_PROFILE` it refuses to run and exits with status 2:
 
 ```bash
 SOUND_SUITE_PROFILE=routed node ~/sound-suite-bridge/bridge.mjs
+node ~/sound-suite-bridge/bridge.mjs; echo "exit $?"   # error on stderr, exit 2
 ```
 
 ---

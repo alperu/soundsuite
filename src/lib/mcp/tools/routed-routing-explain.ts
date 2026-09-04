@@ -11,6 +11,9 @@ import type { ToolMetadata, ToolExecutionContext, ToolConfigEntry } from '../too
 import type { PresetV2, ResearchMode, ResearchTier, TierSettings } from '../research-types';
 import { planReport } from '../routed/run-report';
 import type { CostClass } from '../routed/routing';
+import { ensureDefaultPresetInBackground } from '../routed/default-preset';
+import { getActiveOrDefault } from '../presets/preset-session';
+import { getDefaultRoutingInfo, type DefaultsSource } from '../routing-defaults';
 
 export interface RoutingExplainParams {
   query: string;
@@ -29,6 +32,10 @@ export interface RoutingExplainResult {
   costClass: CostClass;
   estimatedSeconds: number;
   wouldPromoteToJob: boolean;
+  /** Where the base routing table came from: the saved `default` preset, or code defaults (cloud-first / Ollama-only). */
+  defaultsSource: DefaultsSource;
+  /** Caveats about the defaults, e.g. an Ollama-only host running report tiers locally without multi-pass. */
+  notes: string[];
 }
 
 export const TIER_SETTINGS_SCHEMA = {
@@ -90,12 +97,14 @@ export class RoutingExplainTool extends BaseMCPTool<RoutingExplainParams, Routin
     context: ToolExecutionContext,
     _config: ToolConfigEntry,
   ): Promise<RoutingExplainResult> {
+    ensureDefaultPresetInBackground();
     const plan = await planReport(params.query, {
       sessionId: context.sessionId,
       mode: params.mode,
       preset: params.preset,
       overrides: params.overrides,
     });
+    const { defaultsSource, notes } = await describeDefaults(context.sessionId);
     return {
       tier: plan.tier,
       reason: plan.reason,
@@ -106,6 +115,20 @@ export class RoutingExplainTool extends BaseMCPTool<RoutingExplainParams, Routin
       costClass: plan.costClass,
       estimatedSeconds: plan.estimatedSeconds,
       wouldPromoteToJob: plan.wouldPromoteToJob,
+      defaultsSource,
+      notes,
     };
   }
+}
+
+/**
+ * The base layer under any inline preset / overrides: the saved `default`
+ * preset when the session has no explicitly applied preset and one exists,
+ * else the code defaults with their provenance and caveats.
+ */
+async function describeDefaults(sessionId?: string): Promise<{ defaultsSource: DefaultsSource; notes: string[] }> {
+  const active = await getActiveOrDefault(sessionId);
+  if (active?.source === 'default') return { defaultsSource: 'preset:default', notes: [] };
+  const info = await getDefaultRoutingInfo();
+  return { defaultsSource: info.source, notes: [...info.notes] };
 }

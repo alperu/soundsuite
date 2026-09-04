@@ -10,11 +10,26 @@ describe('classifyQueryComplexity', () => {
       'give me a report on the receivership motion',
       'prepare a write-up of the sanctions hearing',
       'summary of every affidavit filed in April',
+      'write a report on the custody evaluations',
+      'summarize the motions across every hearing',
+      'draft a memo comparing the orders',
+      'prepare a brief overview of the property claims',
     ];
     it.each(reportQueries)('routes %j to deep-report', (q) => {
       const d = classifyQueryComplexity(q);
       expect(d.route).toBe('deep-report');
       expect(d.confidence).toBeGreaterThanOrEqual(0.8);
+    });
+    // "report" / "brief" / "memo" are filing nouns in a legal corpus. A bare
+    // noun (no deliverable verb, not leading "X of/on/about") must not route
+    // to deep-report.
+    const filingNounQueries = [
+      'the brief filed in March',
+      "what does the psychologist's report say",
+      'the report dated 2024',
+    ];
+    it.each(filingNounQueries)('does NOT route filing-noun query %j to deep-report', (q) => {
+      expect(classifyQueryComplexity(q).route).not.toBe('deep-report');
     });
     it('wins over RLM language when a deliverable is requested', () => {
       expect(classifyQueryComplexity('write a memo tracing how the trust dispute evolved over time').route).toBe('deep-report');

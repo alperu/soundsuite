@@ -88,7 +88,7 @@ export function MCPToolManager({ initialTab, initialTools, cases, documents }: M
   // Refresh tools from server
   const refreshTools = useCallback(async () => {
     try {
-      const resp = await fetch('/api/mcp/tools');
+      const resp = await fetch('/api/mcp/tools?profile=all');
       if (resp.ok) {
         const data = await resp.json();
         if (data.tools) setTools(data.tools);

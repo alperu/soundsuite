@@ -30,7 +30,13 @@ export interface CiteContextSource {
    * cell text (§6.3 item 7) — the per-block cap bounds it, so a large
    * table truncates instead of dropping later sources. */
   tableMarkdown?: string;
+  /** 'draft' sources are unfiled working copies — the cite label carries a
+   * visible DRAFT marker so no consumer can mistake them for the record. */
+  recordStatus?: 'filed' | 'draft' | 'unknown';
 }
+
+/** Marker appended to the cite label of draft sources. */
+export const DRAFT_CITE_MARKER = 'DRAFT, filing not confirmed';
 
 /** '|THE COURT|MR. DOE|' → 'THE COURT, MR. DOE' */
 export function speakerList(speakers: string | undefined): string {
@@ -38,9 +44,11 @@ export function speakerList(speakers: string | undefined): string {
   return speakers.split('|').filter(Boolean).join(', ');
 }
 
-/** Citation label fallback chain — identical across every call site. */
+/** Citation label fallback chain — identical across every call site.
+ *  Draft sources render as `<cite> — DRAFT, filing not confirmed`. */
 export function citeOf(s: CiteContextSource): string {
-  return s.citation || s.citationShort || `${s.document}, p.${s.page}`;
+  const base = s.citation || s.citationShort || `${s.document}, p.${s.page}`;
+  return s.recordStatus === 'draft' ? `${base} — ${DRAFT_CITE_MARKER}` : base;
 }
 
 /** Truncate a block's text to cap, marking the cut. */

@@ -157,10 +157,18 @@ async function ollamaStreamChat(
   url: string,
   body: object,
   socketTimeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ content: string; promptEvalCount: number; evalCount: number; promptEvalDurationMs: number; evalDurationMs: number }> {
   const http = await import('http');
   const https = await import('https');
   const { URL } = await import('url');
+
+  const abortError = () => {
+    const err = new Error('Ollama completion aborted by caller');
+    err.name = 'AbortError';
+    return err;
+  };
+  if (signal?.aborted) throw abortError();
 
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -224,6 +232,16 @@ async function ollamaStreamChat(
       );
     });
 
+    // Honour the caller's abort (report M-1): destroying the socket makes
+    // Ollama stop generating, so a timed-out decompose/outline frees the
+    // runner instead of holding every later request in its queue.
+    let onAbort: (() => void) | undefined;
+    if (signal) {
+      onAbort = () => req.destroy(abortError());
+      signal.addEventListener('abort', onAbort, { once: true });
+      req.on('close', () => signal.removeEventListener('abort', onAbort!));
+    }
+
     req.on('error', reject);
     req.write(JSON.stringify(body));
     req.end();
@@ -238,6 +256,7 @@ async function completeWithOllama(
   temperature: number,
   jsonMode?: boolean,
   thinking?: boolean,
+  signal?: AbortSignal,
 ): Promise<AICompletionResponse> {
   const totalChars = messages.reduce((s, m) => s + m.content.length, 0);
   console.log(`[OllamaCompletion] Starting chat — model=${model} host=${host} messages=${messages.length} totalChars=${totalChars} maxTokens=${maxTokens}`);
@@ -259,7 +278,7 @@ async function completeWithOllama(
     ...(jsonMode ? { format: 'json' } : {}),
     ...(thinking !== undefined ? { think: thinking } : {}),
     options: { temperature, num_predict: maxTokens, num_ctx: 6144 },
-  }, socketTimeoutMs);
+  }, socketTimeoutMs, signal);
 
   const durationMs = Date.now() - t0;
   const prefillTokS = result.promptEvalDurationMs > 0 ? Math.round(result.promptEvalCount / (result.promptEvalDurationMs / 1000)) : 0;
@@ -929,7 +948,7 @@ export async function completeAI(req: AICompletionRequest): Promise<AICompletion
         host = ep.host;
          console.log(`[completeAI] Route: completion → ${ep.host} (sidecar=${ep.sidecarUrl}), model=${req.model}, messages=${req.messages.length}, orchestrator=true`);
         // Release after completion (fire-and-forget)
-        const result = await completeWithOllama(host, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking);
+        const result = await completeWithOllama(host, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.signal);
         releaseEndpoint('completion', ep.sidecarUrl);
         return result;
       } catch (err) {
@@ -946,7 +965,7 @@ export async function completeAI(req: AICompletionRequest): Promise<AICompletion
     if (!host) {
       throw new Error('No Ollama host configured. Set it in Admin > Local AI or Embedding Config.');
     }
-    return completeWithOllama(host, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking);
+    return completeWithOllama(host, req.model, req.messages, maxTokens, temperature, req.jsonMode, req.thinking, req.signal);
   }
 
   const apiKey = getApiKey(config, req.provider);

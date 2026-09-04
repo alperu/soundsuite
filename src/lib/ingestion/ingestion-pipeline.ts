@@ -28,6 +28,7 @@ import type { ReadinessResult } from './readiness/types';
 import { READINESS_MODEL_VERSION } from './readiness/types';
 import { extractAnnotationsForDocument, PageAnnotation, buildAnnotationMarkers } from './annotation-extractor';
 import { detectLineNumbers } from '../citations/line-number-detector';
+import { detectDraftStatus, recordStatusFromTags, type RecordStatus } from './draft-detector';
 import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
@@ -77,6 +78,8 @@ export interface IngestionResult {
   chunkCount?: number;
   ocrFallbackPages?: number;
   filingDetection?: FilingDetectionResult;
+  /** Draft-detector outcome persisted to Document.tags.recordStatus. */
+  recordStatus?: RecordStatus;
   error?: string;
   failedStage?: string;
   stageTimings?: Record<string, number>;
@@ -739,6 +742,48 @@ export class IngestionPipeline {
         data: { pageCount },
       });
 
+      // Stage: draft-detection — is this an unfiled working copy? Persisted
+      // on Document.tags.recordStatus (no schema change) and later mirrored
+      // onto every chunk row so retrieval can filter and label it. Never
+      // fatal; a manual override (tags.recordStatusSource === 'manual') wins.
+      let recordStatus: RecordStatus | undefined;
+      try {
+        recordStatus = await this.runStage('draft-detection', documentId, stageTimings, async () => {
+          const existingTags = (document.tags && typeof document.tags === 'object' ? document.tags : {}) as Record<string, unknown>;
+          if (existingTags.recordStatusSource === 'manual') {
+            return recordStatusFromTags(existingTags);
+          }
+          const detection = detectDraftStatus({
+            fileName: path.basename(filePath),
+            firstPagesText: pages.slice(0, 5).map(p => p.text).join('\n\n'),
+            lastPagesText: pages.slice(-2).map(p => p.text).join('\n\n'),
+            pageCount,
+          });
+          await this.database.document.update({
+            where: { id: documentId },
+            data: {
+              tags: {
+                ...existingTags,
+                recordStatus: detection.recordStatus,
+                recordStatusConfidence: detection.confidence,
+                recordStatusSignals: detection.signals,
+                recordStatusSource: 'auto',
+              } as any,
+            },
+          });
+          if (detection.isDraft) {
+            this.logger.warn('Document detected as DRAFT — filing not confirmed', {
+              documentId,
+              confidence: detection.confidence,
+              signals: detection.signals,
+            });
+          }
+          return detection.recordStatus;
+        });
+      } catch (draftError) {
+        this.logger.warn('Draft detection failed, continuing with ingestion', { documentId });
+      }
+
       // ═══════════════════════════════════════════════════════════════════
       // POPPLER-FIRST FLOW: scan metadata → detect boundaries → targeted extraction
       // ═══════════════════════════════════════════════════════════════════
@@ -1051,12 +1096,14 @@ export class IngestionPipeline {
           }
           const stampCompare = { agree: 0, disagree: 0, legacyOnly: 0, blockOnly: 0 };
 
+          const chunkRecordStatus = recordStatus ?? recordStatusFromTags(docWithFiling.tags);
           for (const chunk of combined) {
             chunk.metadata.filingId = docWithFiling.filing?.id;
             chunk.metadata.filingType = chunkFilingType;
             chunk.metadata.volumeNumber = (docWithFiling.filing as any)?.volumeNumber ?? undefined;
             chunk.metadata.caseNumber = docWithFiling.case?.caseNumber || undefined;
             chunk.metadata.documentType = docWithFiling.documentType || undefined;
+            chunk.metadata.recordStatus = chunkRecordStatus;
 
             // Extract line numbers for RR chunks from properly formatted text
             if (isChunkRR) {

@@ -103,6 +103,8 @@ interface AISearchResult {
     caseNumber?: string;
     filingSlug?: string;
     annotations?: string;
+    /** 'draft' = unfiled working copy — rendered with an amber DRAFT badge. */
+    recordStatus?: 'filed' | 'draft' | 'unknown';
     documentId?: string;
     blockType?: string;
     headingPath?: string;
@@ -181,6 +183,8 @@ interface DeepSearchResult {
     caseNumber?: string;
     filingSlug?: string;
     annotations?: string;
+    /** 'draft' = unfiled working copy — rendered with an amber DRAFT badge. */
+    recordStatus?: 'filed' | 'draft' | 'unknown';
     documentId?: string;
     blockType?: string;
     headingPath?: string;
@@ -4541,6 +4545,9 @@ const AIResultCard = React.memo(function AIResultCard({ result, compact = false,
                     {s.filingType && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">{s.filingType}</span>
                     )}
+                    {s.recordStatus === 'draft' && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300 font-medium" title="Detected as a draft — no court file stamp found; not confirmed as part of the record">DRAFT · filing not confirmed</span>
+                    )}
                     <span className="text-gray-400 ml-auto">{(s.score * 100).toFixed(0)}%</span>
                   </div>
                   <p className="text-[10px] text-gray-400 mb-1">{s.document}</p>
@@ -4913,6 +4920,9 @@ const DeepSearchResultCard = React.memo(function DeepSearchResultCard({ result, 
                     {!s.citation && <span className="text-gray-400">p.{s.page}</span>}
                     {s.filingType && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">{s.filingType}</span>
+                    )}
+                    {s.recordStatus === 'draft' && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300 font-medium" title="Detected as a draft — no court file stamp found; not confirmed as part of the record">DRAFT · filing not confirmed</span>
                     )}
                     <span className="text-gray-400 ml-auto">{(s.score * 100).toFixed(0)}%</span>
                   </div>

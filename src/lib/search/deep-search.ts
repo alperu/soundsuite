@@ -19,7 +19,7 @@ import { segmentChipsAndIntents, type Segment as ChipQuerySegment } from './chip
 import { extractFieldFilters } from './boolean-to-fts';
 import { sourceDedupKey } from './source-dedup';
 import { buildCiteContext, citeOf, truncateBlock } from './context-builder';
-import { capThoughts, createPreambleSplitter, splitReportPreamble } from './report-preamble';
+import { capThoughts, createPreambleSplitter, splitReportPreamble, type PreambleSplit } from './report-preamble';
 import { pickProvenance, type ChunkProvenance } from './chunk-provenance';
 import { extractStructureHint, speakersInclude } from './structure-hints';
 
@@ -597,6 +597,7 @@ export async function executePatternSearch(
       volumeNumber: r.volumeNumber,
       caseNumber: r.caseNumber,
       filingSlug: r.filingSlug,
+      ...pickProvenance(r),
       matchedSubQueries: [`[pattern: ${keywords.join(', ')}]`],
     }));
 
@@ -656,6 +657,7 @@ export async function executePerChipPatternSearches(
         volumeNumber: r.volumeNumber,
         caseNumber: r.caseNumber,
         filingSlug: r.filingSlug,
+        ...pickProvenance(r),
         matchedSubQueries: [`[pattern${spec.label ? ` ${spec.label}` : ''}: ${keywords.join(', ')}]`],
       }));
 
@@ -873,7 +875,13 @@ const REPORT_SYSTEM_PROMPT = `You are an expert legal research analyst. Generate
 - Base your analysis ONLY on the provided document excerpts
 - If certain aspects of the question cannot be answered from the excerpts, say so in the Gaps section
 - Be thorough but concise — quality over quantity
-- Use markdown formatting for readability`;
+- Use markdown formatting for readability
+
+## Draft Documents
+- Excerpts whose citation is marked "DRAFT, filing not confirmed" are unfiled working copies. NEVER state or imply they were filed, served, ruled on, or are part of the record.
+- When you rely on such an excerpt, say explicitly that it is a draft (filing not confirmed) and keep the DRAFT marker in the citation, e.g. [2 CR 140 — DRAFT, filing not confirmed].
+- Do not treat a draft as evidence of what a party actually argued or what the court decided.
+- For any excerpt NOT marked as filed, filing status is unconfirmed: do not state or imply it was filed, served, ruled on, or is part of the record. Describe what the document says, not the procedural status it never confirmed.`;
 
 /**
  * Closing instruction block. The synthesis prompt must NOT end on the raw
@@ -1028,7 +1036,7 @@ ${CONTEXT_CLOSING_INSTRUCTIONS}`;
       const resolved = (options?.provider && options?.model)
         ? { provider: options.provider as AIProviderKey, model: options.model }
         : await getAvailableProvider();
-      const runStream = async (over: { thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; maxTokens?: number }): Promise<string> => {
+      const runStream = async (over: { thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; maxTokens?: number }): Promise<PreambleSplit> => {
         // Everything the model emits on the text channel goes through the
         // preamble splitter: `onToken` (the answer channel) must only ever
         // receive report prose, and any echoed context / out-loud planning in
@@ -1201,7 +1209,9 @@ Rules:
 - Each findingsSection must be a meaningfully different angle (no overlap)
 - summary, gaps, legalSignificance must be COMPLETE prose, not placeholders
 - Use the citation format from the excerpts
-- Base everything ONLY on the provided excerpts`;
+- Base everything ONLY on the provided excerpts
+- Excerpts marked "DRAFT, filing not confirmed" are unfiled working copies: never state or imply they were filed, ruled on, or are part of the record; when citing them say "draft (filing not confirmed)" and keep the DRAFT marker in the citation
+- Filing status is confirmed only where an excerpt says so: never assert that an unmarked excerpt was filed, served, or ruled on`;
 
 const SECTION_SYSTEM_PROMPT = `You are writing ONE subsection of the Findings portion of a legal research report.
 
@@ -1218,7 +1228,9 @@ Rules:
 - Quote pertinent language directly when material
 - Be analytical, not just descriptive — connect excerpts to the question
 - This subsection will NOT be truncated, so be thorough; stop when the analysis is complete, not at an arbitrary length
-- Base your analysis ONLY on the provided excerpts`;
+- Base your analysis ONLY on the provided excerpts
+- Excerpts marked "DRAFT, filing not confirmed" are unfiled working copies: never state or imply they were filed, ruled on, or are part of the record; when citing them say "draft (filing not confirmed)" and keep the DRAFT marker in the citation
+- Filing status is confirmed only where an excerpt says so: never assert that an unmarked excerpt was filed, served, or ruled on`;
 
 function buildSourceContext(sources: DeepSearchSource[], maxChars = 120000): { contextBlock: string; chars: number } {
   const ctx = buildCiteContext(sources, { maxTotalChars: maxChars });
@@ -1727,6 +1739,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
           volumeNumber: r.volumeNumber,
           caseNumber: r.caseNumber,
           filingSlug: r.filingSlug,
+          ...pickProvenance(r),
           matchedSubQueries: [`[rlm] ${subQuery}`],
         };
         newSources.push(src);

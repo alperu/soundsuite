@@ -61,6 +61,8 @@ interface JobRecord {
   startedAt: number;
   updatedAt: number;
   finishedAt?: number;
+  /** When `phase` last changed (report M-6d). */
+  phaseStartedAt: number;
   events: ResearchJobEvent[];
   subscribers: Set<(e: ResearchJobEvent) => void>;
   controller: AbortController;
@@ -153,6 +155,8 @@ function toView(job: JobRecord, cursor: number): ResearchJobStatusView {
     startedAt: job.startedAt,
     updatedAt: job.updatedAt,
     elapsedMs: (job.finishedAt ?? now) - job.startedAt,
+    phaseStartedAt: job.phaseStartedAt,
+    phaseElapsedMs: Math.max(0, (job.finishedAt ?? now) - job.phaseStartedAt),
   };
 }
 
@@ -163,6 +167,7 @@ function makeHandle(job: JobRecord): JobHandle {
     signal: job.controller.signal,
     progress(p) {
       if (!live()) return;
+      if (p.phase !== job.phase) job.phaseStartedAt = Date.now();
       job.phase = p.phase;
       emit(job, 'progress', p);
     },
@@ -235,6 +240,7 @@ export function startJob(opts: StartJobOptions): ResearchJobStatusView {
     result: null,
     startedAt: now,
     updatedAt: now,
+    phaseStartedAt: now,
     events: [],
     subscribers: new Set<Subscriber>(),
     controller: new AbortController(),

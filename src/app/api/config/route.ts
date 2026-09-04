@@ -120,6 +120,7 @@ export async function POST(request: NextRequest) {
       codeOllamaModel: body.codeOllamaModel,
       ollamaCompletionHost: body.ollamaCompletionHost,
       ollamaCompletionModel: body.ollamaCompletionModel,
+      ollamaDecomposeModel: body.ollamaDecomposeModel,
       // AI Services — primary/fallback selection
       aiPrimaryProvider: body.aiPrimaryProvider,
       aiPrimaryModel: body.aiPrimaryModel,

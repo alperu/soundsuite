@@ -40,6 +40,7 @@ export function sourceToEvidenceItem(
     ...(source.headingPath ? { headingPath: source.headingPath } : {}),
     ...(source.speakers ? { speakers: source.speakers } : {}),
     ...(source.tableMarkdown ? { tableMarkdown: source.tableMarkdown } : {}),
+    ...(source.recordStatus ? { recordStatus: source.recordStatus } : {}),
     hits: Math.max(1, source.matchedSubQueries?.length ?? 1),
     source: origin,
   };

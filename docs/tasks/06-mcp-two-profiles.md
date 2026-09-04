@@ -75,11 +75,34 @@ evidence, or jobs is Sound Suite's.
 | 15 | Tests | all | ✅ |
 | 16 | Final docs pass: update `public/docs/install-mcp.md` (rendered at `/docs#install-mcp`) from the finished tool registry — tool matrix, schemas, job flow, presets — and verify the page renders | docs | ✅ |
 
+## v3 follow-up round (2026-09-04)
+
+See `docs/MCP-Improvements/REPORT-v3.1-verification-and-fixes.md`.
+
+| # | Item | Status |
+|---|---|---|
+| 17 | M-1 decompose hang: timeout, heuristic fallback, readiness smoke, `phaseStartedAt` | Code ✅ · live run blocked on an unreachable embedding host |
+| 18 | M-2 proxy reload + strict `?profile=` parsing (`bogus` → 400, bare → local) | ✅ |
+| 19 | M-3 routed defaults resolve cloud-first from the default preset | ✅ |
+| 20 | M-4 proxy progress relay by token | ✅ |
+| 21 | M-5 security (v2 §6) | ⛔ open — not attempted |
+| 22 | M-6a report-language regex tightened | ✅ |
+| 23 | M-6b per-tool tests for the 12 analysis tools | ⚠️ not written |
+| 24 | M-6c pre-existing test/type failures | ✅ |
+| 25 | Draft-record guard (detector, chunk column, citations, prompts, MCP filter, UI, backfill) | ✅ code · backfill **not applied** |
+
 ## Operator follow-ups (not automated)
 
-- Reload the mcp-proxy so the two new upstreams are served: `cd ~/Code/mcp-proxy && pm2 reload mcp-proxy`. This also restarts the other upstreams it hosts, so do it at a quiet moment. Re-register any client that used the old `/sound-suite/mcp` path.
+- **Apply the draft backfill**: `npx tsx scripts/backfill-draft-status.ts --apply` (run without a
+  `DATABASE_URL` override). Until then no pre-existing document carries `recordStatus`, so the
+  guard has no effect on already-indexed data.
+- The mcp-proxy has been restarted with the two upstreams (`/sound-suite-local/mcp`,
+  `/sound-suite-routed/mcp`); the legacy `/sound-suite/mcp` path is gone. `~/.claude.json` is
+  migrated — **re-register any other client** that used the old path. The proxy change is committed
+  locally in `~/Code/mcp-proxy` as `d36c0a1` and is **unpushed**.
 - The installed bridge at `~/sound-suite-bridge/bridge.mjs` was synced from `scripts/mcp-bridge/bridge.mjs` (old copy kept as `bridge.mjs.bak`). Claude Desktop entries must set `SOUND_SUITE_PROFILE`.
-- The report-language regex in `query-router.ts` matches bare `report` / `brief`, which are also filing nouns; tighten if Auto mode over-routes to `deep-report`.
+- The embedding host `10.10.20.5:11434` is unreachable; M-1's live verification waits on it.
+- The `default` preset is memoised per process — editing it needs a dev-server restart.
 
 ## Registration
 

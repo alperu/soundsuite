@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
-import { parseProfile } from '@/lib/mcp/research-types';
+import { parseProfileStrict } from '@/lib/mcp/research-types';
 
 /**
  * GET /api/mcp/claude-tools?variant=regex&eager=query_case_knowledge,scan_for_pattern
@@ -34,13 +34,26 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // `?profile=` filters like /api/mcp/tools: missing = every tool (dashboard
-    // use), present-but-malformed = `local` (fail-closed).
+    // `?profile=` filters like /api/mcp/tools: missing = `local`,
+    // `all` = every tool (dashboard-only), anything else = 400.
     const rawProfile = request.nextUrl.searchParams.get('profile');
-    const profile = rawProfile === null ? undefined : parseProfile(rawProfile);
+    const profile = parseProfileStrict(rawProfile);
+    if (profile === null) {
+      return NextResponse.json(
+        {
+          error: {
+            code: 'INVALID_PROFILE',
+            message: `Unknown profile "${rawProfile}". Expected "local", "routed" or "all".`,
+          },
+        },
+        { status: 400 },
+      );
+    }
 
     const registry = await getToolRegistry();
-    const allTools = registry.listTools(profile).filter(t => t.config.enabled);
+    const allTools = registry
+      .listTools(profile === 'all' ? undefined : profile)
+      .filter(t => t.config.enabled);
 
     // Tool search tool definition
     const searchToolType = variant === 'regex'

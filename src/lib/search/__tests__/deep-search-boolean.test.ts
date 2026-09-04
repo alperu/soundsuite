@@ -40,11 +40,26 @@ describe('decomposeQuery — boolean bypass', () => {
     expect(r.subQueries.length).toBeGreaterThan(0);
   });
 
-  test('boolean query with parens + or skips LLM, splits at or', async () => {
-    const r = await decomposeQuery('(motion and compel) or appeal');
+  test('chip-syntax boolean query skips LLM, splits at top-level or', async () => {
+    // Product rule (commit 9b15196): boolean operators are honored ONLY inside
+    // `{{ … }}` chip syntax. Chip queries bypass LLM decomposition and split
+    // at top-level OR into parallel sub-queries.
+    const q = '{{motion and compel}} or {{appeal}}';
+    const r = await decomposeQuery(q);
     expect(callLLMJsonMock).not.toHaveBeenCalled();
-    expect(r.subQueries.length).toBe(2);
-    expect(r.intent).toBe('(motion and compel) or appeal');
+    expect(r.subQueries).toEqual(['{{motion and compel}}', '{{appeal}}']);
+    expect(r.intent).toBe(q);
+  });
+
+  test('plain boolean text with parens + or (no chips) goes through LLM', async () => {
+    // Incidental parens/quotes in prose ("(via Mr. X)") used to trigger the
+    // bypass and mangle the paragraph; without `{{ }}` chips the query must
+    // fall through to LLM decomposition.
+    callLLMJsonMock.mockResolvedValueOnce({ subQueries: ['x', 'y'], intent: 'i' });
+    const r = await decomposeQuery('(motion and compel) or appeal');
+    expect(callLLMJsonMock).toHaveBeenCalledTimes(1);
+    // The LLM path prepends the original query to the decomposed sub-queries.
+    expect(r.subQueries).toEqual(expect.arrayContaining(['x', 'y']));
   });
 
   test('natural-language "X and Y" — bare lowercase and is NOT structured, calls LLM', async () => {
@@ -58,9 +73,12 @@ describe('decomposeQuery — boolean bypass', () => {
     expect(callLLMJsonMock).toHaveBeenCalledTimes(1);
   });
 
-  test('phrase-only query skips LLM (quoted phrase counts as structured)', async () => {
+  test('phrase-only query (no chips) goes through LLM — quotes alone are not structured', async () => {
+    // Quoted phrases no longer count as boolean syntax on their own; only
+    // `{{ }}` chips gate the bypass.
+    callLLMJsonMock.mockResolvedValueOnce({ subQueries: ['"motion to compel"'], intent: 'i' });
     const r = await decomposeQuery('"motion to compel"');
-    expect(callLLMJsonMock).not.toHaveBeenCalled();
+    expect(callLLMJsonMock).toHaveBeenCalledTimes(1);
     expect(r.subQueries).toEqual(['"motion to compel"']);
   });
 

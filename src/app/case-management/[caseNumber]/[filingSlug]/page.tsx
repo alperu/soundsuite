@@ -75,6 +75,21 @@ interface DocumentRecord {
   detectedExhibits: number;
   documentSummary: string | null;
   createdAt: string;
+  /** XETO tag bag — `recordStatus: 'draft'` marks an unfiled working copy. */
+  tags?: { recordStatus?: 'filed' | 'draft' | 'unknown' } | null;
+}
+
+/** Amber badge for documents the draft-detector flagged as unfiled. */
+function DraftBadge({ tags }: { tags?: DocumentRecord['tags'] }) {
+  if (tags?.recordStatus !== 'draft') return null;
+  return (
+    <span
+      className="text-xs px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 flex-shrink-0"
+      title="Detected as a draft — no court file stamp found; not confirmed as part of the record"
+    >
+      DRAFT · filing not confirmed
+    </span>
+  );
 }
 
 interface FilingRecord {
@@ -835,6 +850,7 @@ export default function FilingDetailPage() {
                     <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clipRule="evenodd" />
                   </svg>
                   <span className="text-sm text-gray-800 flex-1 truncate font-medium">{doc.fileName}</span>
+                  <DraftBadge tags={doc.tags} />
                   <span className={`text-xs px-1.5 py-0.5 rounded-full ${getStatusBadge(doc.status)}`}>{doc.status}</span>
                   {doc.detectedExhibits > 0 && (
                     <span className="text-xs px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700">{doc.detectedExhibits} exhibits</span>
@@ -873,6 +889,7 @@ export default function FilingDetailPage() {
                 <div className="flex items-center gap-3">
                   <span className="text-xs font-medium text-blue-700 bg-blue-50 px-2 py-0.5 rounded flex-shrink-0">{doc.exhibitLabel}</span>
                   <span className="text-sm text-gray-800 flex-1 truncate">{doc.fileName}</span>
+                  <DraftBadge tags={doc.tags} />
                   <span className={`text-xs px-1.5 py-0.5 rounded-full ${getStatusBadge(doc.status)}`}>{doc.status}</span>
                   <button onClick={() => handleDemoteExhibit(doc.id)}
                     className="text-xs text-gray-400 hover:text-blue-600 hover:underline flex-shrink-0"

@@ -12,7 +12,8 @@
  */
 
 import { getConfig } from '../db/config';
-import { getModelCaps, AI_PROVIDER_KEYS, type AIProviderKey } from '../ai/models';
+import { getModelCaps, clampEffort, AI_PROVIDER_KEYS, type AIProviderKey } from '../ai/models';
+import { isProviderConfigured } from './presets/preset-schema';
 import { getAvailableProvider, DEFAULT_MODELS } from './tools/ai-helper';
 import { LOCAL_PROVIDER } from './llm-policy';
 import type { ResearchTier, TierSettings } from './research-types';
@@ -23,6 +24,83 @@ export const LOCAL_ROUTING: Record<ResearchTier, TierSettings> = {
   'deep-report': { provider: LOCAL_PROVIDER, multiPass: true },
   'deep-rlm':    { provider: LOCAL_PROVIDER, useRlm: true, rlmMaxRounds: 2 },
 };
+
+// ---------------------------------------------------------------------------
+// Dedicated small decompose model (report M-1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Preferred tag for the local decompose / outline calls. These are short
+ * JSON-structured prompts; a ~1.5–4B instruct model answers them in seconds
+ * where the 9B completion model (thinking on by default) burns its whole
+ * token budget. Override with `SS_LOCAL_DECOMPOSE_MODEL`.
+ */
+export const LOCAL_DECOMPOSE_MODEL = process.env.SS_LOCAL_DECOMPOSE_MODEL || 'qwen3:4b';
+
+/** Small-instruct tags we will pick from `/api/tags` when nothing is configured. */
+const SMALL_DECOMPOSE_TAG = /(qwen3(\.5)?:(1\.7|4)b|llama3\.2:3b|gemma3:4b|phi4-mini)/;
+
+const TAGS_PROBE_TIMEOUT_MS = 3_000;
+const TAGS_CACHE_MS = 60_000;
+let _tagsCache: { at: number; host: string; tags: string[] } | null = null;
+
+function ollamaBase(config: { ollamaCompletionHost?: string; ollamaHost?: string }): string {
+  const host = (config.ollamaCompletionHost || config.ollamaHost || process.env.OLLAMA_HOST || '').trim();
+  if (!host) return '';
+  return (host.startsWith('http') ? host : `http://${host}`).replace(/\/+$/, '');
+}
+
+/** Model tags on the completion host, cached 60 s. Never throws; empty when unreachable. */
+export async function listOllamaTags(config: { ollamaCompletionHost?: string; ollamaHost?: string }): Promise<string[]> {
+  const base = ollamaBase(config);
+  if (!base) return [];
+  const now = Date.now();
+  if (_tagsCache && _tagsCache.host === base && now - _tagsCache.at < TAGS_CACHE_MS) return _tagsCache.tags;
+  let tags: string[] = [];
+  try {
+    const res = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(TAGS_PROBE_TIMEOUT_MS) });
+    if (res.ok) {
+      const body = (await res.json()) as { models?: Array<{ name?: string; model?: string }> };
+      tags = (body.models ?? []).map((m) => m.name || m.model || '').filter(Boolean);
+    }
+  } catch {
+    tags = [];
+  }
+  _tagsCache = { at: Date.now(), host: base, tags };
+  return tags;
+}
+
+/** Test hook — drop the cached tag list. */
+export function resetOllamaTagsCache(): void {
+  _tagsCache = null;
+}
+
+/**
+ * Resolve the Ollama model the local profile uses for decompose and the
+ * evidence outline. Preference order:
+ *   1. `config.ollamaDecomposeModel` (Admin → AI Services, `ai.ollamaDecomposeModel`)
+ *   2. `SS_LOCAL_DECOMPOSE_MODEL` (env)
+ *   3. `LOCAL_DECOMPOSE_MODEL` when that tag is present on the host
+ *   4. any small instruct tag on the host (`SMALL_DECOMPOSE_TAG`)
+ *   5. the configured completion model / `DEFAULT_MODELS.ollama`
+ *
+ * Async because steps 3–4 read `/api/tags` (cached 60 s). The chosen tag is
+ * only used when it exists on the host or was explicitly configured.
+ */
+export async function localDecomposeModel(config: {
+  ollamaDecomposeModel?: string;
+  ollamaCompletionModel?: string;
+  ollamaCompletionHost?: string;
+  ollamaHost?: string;
+}): Promise<string> {
+  if (config.ollamaDecomposeModel?.trim()) return config.ollamaDecomposeModel.trim();
+  if (process.env.SS_LOCAL_DECOMPOSE_MODEL?.trim()) return process.env.SS_LOCAL_DECOMPOSE_MODEL.trim();
+  const tags = await listOllamaTags(config);
+  if (tags.includes(LOCAL_DECOMPOSE_MODEL)) return LOCAL_DECOMPOSE_MODEL;
+  const small = tags.find((t) => SMALL_DECOMPOSE_TAG.test(t));
+  if (small) return small;
+  return config.ollamaCompletionModel || DEFAULT_MODELS.ollama;
+}
 
 function isProviderKey(v: unknown): v is AIProviderKey {
   return typeof v === 'string' && (AI_PROVIDER_KEYS as string[]).includes(v);
@@ -51,27 +129,100 @@ async function resolvePrimary(config: Awaited<ReturnType<typeof getConfig>>): Pr
 }
 
 export async function getDefaultRouting(): Promise<Record<ResearchTier, TierSettings>> {
-  const config = await getConfig();
+  return (await getDefaultRoutingInfo()).routing;
+}
+
+// ---------------------------------------------------------------------------
+// Cloud-first defaults for the routed profile (report item M-3)
+// ---------------------------------------------------------------------------
+
+/** Where the base routing table for the routed profile came from. */
+export type DefaultsSource = 'preset:default' | 'code:cloud' | 'code:ollama-only';
+
+export interface DefaultRoutingInfo {
+  routing: Record<ResearchTier, TierSettings>;
+  source: Exclude<DefaultsSource, 'preset:default'>;
+  /** Human-readable caveats for `routing_explain` (empty when a cloud provider serves the report tiers). */
+  notes: string[];
+}
+
+export type CloudProviderKey = Exclude<AIProviderKey, 'ollama'>;
+
+/** Order in which a configured cloud provider is picked when the primary is not one. */
+export const CLOUD_PROVIDER_ORDER: readonly CloudProviderKey[] = ['anthropic', 'openai', 'gemini', 'groq', 'grok'];
+
+export const OLLAMA_ONLY_NOTE =
+  'no cloud provider configured; report tiers fall back to Ollama with multiPass disabled';
+
+function isCloudProviderKey(v: unknown): v is CloudProviderKey {
+  return isProviderKey(v) && v !== LOCAL_PROVIDER;
+}
+
+/**
+ * The cloud provider/model the `deep*` tiers default to: the primary from
+ * Admin → AI Services when it is a configured cloud provider, else the first
+ * configured provider in `CLOUD_PROVIDER_ORDER`, else null (Ollama-only host).
+ */
+async function resolveCloudProvider(
+  config: Awaited<ReturnType<typeof getConfig>>,
+): Promise<{ provider: CloudProviderKey; model: string } | null> {
   const primary = await resolvePrimary(config);
+  if (isCloudProviderKey(primary.provider) && isProviderConfigured(primary.provider, config)) {
+    return { provider: primary.provider, model: primary.model || DEFAULT_MODELS[primary.provider] };
+  }
+  for (const provider of CLOUD_PROVIDER_ORDER) {
+    if (isProviderConfigured(provider, config)) return { provider, model: DEFAULT_MODELS[provider] };
+  }
+  return null;
+}
 
-  const thinking = isProviderKey(primary.provider)
-    ? getModelCaps(primary.provider, primary.model).thinking
-    : false;
+/**
+ * Same table as `getDefaultRouting()` plus its provenance. `fast` is always
+ * Ollama. The `deep*` tiers go to a configured cloud provider whenever one
+ * exists; only an Ollama-only host routes them locally, and then
+ * `deep-report` runs single-pass so a local model never does nine passes.
+ */
+export async function getDefaultRoutingInfo(): Promise<DefaultRoutingInfo> {
+  const config = await getConfig();
+  const localModel = config.ollamaCompletionModel ? { model: config.ollamaCompletionModel } : {};
+  const fast: TierSettings = { provider: LOCAL_PROVIDER, ...localModel };
 
-  const cloud = (): TierSettings => ({
-    provider: primary.provider,
-    ...(primary.model ? { model: primary.model } : {}),
-    effort: 'medium',
-    ...(thinking ? { thinking: true } : {}),
+  const cloud = await resolveCloudProvider(config);
+  if (!cloud) {
+    const local: TierSettings = { provider: LOCAL_PROVIDER, ...localModel };
+    const notes = [OLLAMA_ONLY_NOTE];
+    if (!isProviderConfigured(LOCAL_PROVIDER, config)) {
+      notes.push('no Ollama host configured either; routed research will fail until a provider is set up in Admin → AI Services');
+    }
+    return {
+      routing: {
+        fast,
+        deep: { ...local },
+        'deep-report': { ...local, multiPass: false },
+        'deep-rlm': { ...local, useRlm: true, rlmMaxRounds: 2 },
+      },
+      source: 'code:ollama-only',
+      notes,
+    };
+  }
+
+  const caps = getModelCaps(cloud.provider, cloud.model);
+  const effort = caps.effort ? clampEffort('medium', caps.effort) : 'medium';
+  const tier = (): TierSettings => ({
+    provider: cloud.provider,
+    model: cloud.model,
+    effort,
+    ...(caps.thinking ? { thinking: true } : {}),
   });
 
   return {
-    fast: {
-      provider: LOCAL_PROVIDER,
-      ...(config.ollamaCompletionModel ? { model: config.ollamaCompletionModel } : {}),
+    routing: {
+      fast,
+      deep: tier(),
+      'deep-report': { ...tier(), multiPass: true },
+      'deep-rlm': { ...tier(), useRlm: true, rlmMaxRounds: 4 },
     },
-    deep: cloud(),
-    'deep-report': { ...cloud(), multiPass: true },
-    'deep-rlm': { ...cloud(), useRlm: true, rlmMaxRounds: 4 },
+    source: 'code:cloud',
+    notes: [],
   };
 }

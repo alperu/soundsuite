@@ -49,6 +49,9 @@ export interface ChunkMetadata {
   blockOrders?: number[];
   /** Union bbox of contributing blocks (page pts, top-left origin). */
   blockBbox?: [number, number, number, number];
+  /** Record status of the parent document (draft-detector): 'draft' chunks
+   * must never be cited as filed record. Absent = unknown. */
+  recordStatus?: 'filed' | 'draft' | 'unknown';
 }
 
 /**

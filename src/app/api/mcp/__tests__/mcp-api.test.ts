@@ -110,20 +110,72 @@ describe('POST /api/mcp/execute', () => {
   })
 })
 
+function toolsReq(query = '') {
+  return new NextRequest(`http://localhost:3000/api/mcp/tools${query}`)
+}
+
 describe('GET /api/mcp/tools', () => {
-  it('lists available tools from the registry', async () => {
+  it('defaults a missing profile to local and stamps the policy', async () => {
     mockRegistry.listTools.mockReturnValueOnce([
       { name: 'query_case_knowledge', description: 'Semantic search' },
       { name: 'scan_for_pattern', description: 'Pattern search' },
     ])
     const { GET } = await import('../tools/route')
-    const res = await GET()
+    const res = await GET(toolsReq())
     const data = await res.json()
 
     expect(res.status).toBe(200)
+    expect(mockRegistry.listTools).toHaveBeenCalledWith('local')
+    expect(data.profile).toBe('local')
+    expect(typeof data.policy).toBe('string')
+    expect(data.providersAllowed).toEqual(['ollama'])
     expect(data.tools).toHaveLength(2)
     expect(data.tools[0].name).toBe('query_case_knowledge')
     expect(data.tools[1].name).toBe('scan_for_pattern')
+  })
+
+  it('treats a bare call (no request object) as local too', async () => {
+    mockRegistry.listTools.mockReturnValueOnce([])
+    const { GET } = await import('../tools/route')
+    const res = await GET()
+    const data = await res.json()
+    expect(res.status).toBe(200)
+    expect(mockRegistry.listTools).toHaveBeenCalledWith('local')
+    expect(data.profile).toBe('local')
+  })
+
+  it('filters and stamps ?profile=routed', async () => {
+    mockRegistry.listTools.mockReturnValueOnce([{ name: 'research_start' }])
+    const { GET } = await import('../tools/route')
+    const res = await GET(toolsReq('?profile=routed'))
+    const data = await res.json()
+    expect(res.status).toBe(200)
+    expect(mockRegistry.listTools).toHaveBeenCalledWith('routed')
+    expect(data.profile).toBe('routed')
+    expect(data.providersAllowed).toContain('anthropic')
+  })
+
+  it('returns every tool, unstamped, for the dashboard-only ?profile=all', async () => {
+    mockRegistry.listTools.mockReturnValueOnce([{ name: 'a' }, { name: 'b' }, { name: 'c' }])
+    const { GET } = await import('../tools/route')
+    const res = await GET(toolsReq('?profile=all'))
+    const data = await res.json()
+    expect(res.status).toBe(200)
+    expect(mockRegistry.listTools).toHaveBeenCalledWith()
+    expect(data.profile).toBe('all')
+    expect(data.policy).toBeUndefined()
+    expect(data.providersAllowed).toBeUndefined()
+    expect(data.tools).toHaveLength(3)
+  })
+
+  it('returns 400 INVALID_PROFILE for an unknown profile', async () => {
+    const { GET } = await import('../tools/route')
+    const res = await GET(toolsReq('?profile=bogus'))
+    const data = await res.json()
+    expect(res.status).toBe(400)
+    expect(data.error.code).toBe('INVALID_PROFILE')
+    expect(data.error.message).toMatch(/bogus/)
+    expect(mockRegistry.listTools).not.toHaveBeenCalled()
   })
 
   it('returns 500 FETCH_FAILED when the registry is unavailable', async () => {

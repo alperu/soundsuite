@@ -25,7 +25,7 @@ cd ~/sound-suite-bridge && npm install
 | Variable | Default | Meaning |
 |---|---|---|
 | `SOUND_SUITE_URL` | `http://127.0.0.1:3000` | Sound Suite master base URL |
-| `SOUND_SUITE_PROFILE` | `local` | `local` or `routed`. Anything else is treated as `local` (fail-closed). |
+| `SOUND_SUITE_PROFILE` | (required) | `local` or `routed`. Missing or any other value: the bridge logs the problem to stderr and exits with status 2. |
 | `MCP_API_KEY` | (none) | Sent as `Authorization: Bearer …` when the server runs in `apikey` auth mode |
 
 Run one process per profile. The server name the client sees is `sound-suite-<profile>`.
@@ -36,4 +36,5 @@ Registration snippets for Claude Desktop and mcp-proxy are in `public/docs/insta
 ```bash
 node --check scripts/mcp-bridge/bridge.mjs
 SOUND_SUITE_PROFILE=routed node ~/sound-suite-bridge/bridge.mjs   # logs the profile to stderr, waits on stdin
+node ~/sound-suite-bridge/bridge.mjs; echo "exit $?"                # no profile → error on stderr, exit 2
 ```

@@ -25,6 +25,10 @@ export interface AppConfig {
   codeOllamaModel?: string;
   ollamaCompletionHost?: string;
   ollamaCompletionModel?: string;
+  /** Small Ollama model for local-profile decompose / outline calls (report M-1).
+   * Optional; `localDecomposeModel()` falls back to a small tag on the host, then
+   * the completion model. */
+  ollamaDecomposeModel?: string;
   // RLM (Recursive Language Model) — long-context recursive reasoning role
   // served by vLLM. Picked on /admin/rlm and exposed as the ss-rlm mode.
   rlmModel?: string;
@@ -207,6 +211,7 @@ export async function getConfig(): Promise<AppConfig> {
     codeOllamaModel: configMap.get('embedding.codeOllamaModel'),
     ollamaCompletionHost: configMap.get('ai.ollamaCompletionHost'),
     ollamaCompletionModel: configMap.get('ai.ollamaCompletionModel'),
+    ollamaDecomposeModel: configMap.get('ai.ollamaDecomposeModel'),
     rlmModel: configMap.get('rlm.model'),
     rlmQuant: (configMap.get('rlm.quant') as AppConfig['rlmQuant']) || undefined,
     rlmMaxContext: configMap.has('rlm.maxContext')
@@ -454,6 +459,10 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
 
   if (config.ollamaCompletionModel !== undefined) {
     updates.push({ key: 'ai.ollamaCompletionModel', value: config.ollamaCompletionModel });
+  }
+
+  if (config.ollamaDecomposeModel !== undefined) {
+    updates.push({ key: 'ai.ollamaDecomposeModel', value: config.ollamaDecomposeModel });
   }
 
   if (config.rlmModel !== undefined) {
