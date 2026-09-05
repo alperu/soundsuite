@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.0](https://github.com/alperu/soundsuite/compare/v1.3.6...v1.4.0) (2026-09-05)
+
+
+### Features
+
+* **mcp:** close v5 residual gaps; wire the outline model to admin config ([931ae89](https://github.com/alperu/soundsuite/commit/931ae891ccd85d2d1f2f5990a42893996f3fd377))
+* **mcp:** make local evidence citable and bounded (v4 fixes) ([c4cee6f](https://github.com/alperu/soundsuite/commit/c4cee6fa83eaea466d333cdfbe46e9a86e9cba94))
+* **mcp:** split the MCP surface into local (evidence) and routed (LLM router) profiles ([59a9236](https://github.com/alperu/soundsuite/commit/59a92365fa04f093184bdb50bb4a32b3f390ac07))
+* **search:** draft-record guard + v3 MCP follow-up fixes ([0cb5dd8](https://github.com/alperu/soundsuite/commit/0cb5dd8f4ce28d78fa1842664485a34128d5f0da))
+
 ## [1.3.6](https://github.com/alperu/soundsuite/compare/v1.3.5...v1.3.6) (2026-09-03)
 
 
