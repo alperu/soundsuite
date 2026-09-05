@@ -19,6 +19,7 @@ import {
   getDefaultRoutingInfo,
   OLLAMA_ONLY_NOTE,
   LOCAL_ROUTING,
+  localDecomposeModel,
   localOutlineModel,
   resetOllamaTagsCache,
 } from '../routing-defaults';
@@ -161,5 +162,82 @@ describe('localOutlineModel', () => {
   it('never regresses below the decompose model when nothing small is pulled', async () => {
     withTags(['local-9b']);
     await expect(localOutlineModel(config)).resolves.toBe('local-9b');
+  });
+
+  // --- Admin config is the top of the chain (stream D) -----------------------
+
+  it('admin config beats the env override', async () => {
+    process.env.SS_LOCAL_OUTLINE_MODEL = 'env-tiny:1b';
+    withTags(['local-9b', LOCAL_ROUTING.outline.model]);
+    await expect(
+      localOutlineModel({ ...config, ollamaOutlineModel: 'admin-picked:2b' }),
+    ).resolves.toBe('admin-picked:2b');
+  });
+
+  it('admin config is honoured even when the host does not report the tag', async () => {
+    withTags(['local-9b']);
+    await expect(
+      localOutlineModel({ ...config, ollamaOutlineModel: '  admin-picked:2b  ' }),
+    ).resolves.toBe('admin-picked:2b');
+  });
+
+  it('"Auto" (empty string) falls through to the env override', async () => {
+    process.env.SS_LOCAL_OUTLINE_MODEL = 'env-tiny:1b';
+    withTags(['local-9b']);
+    await expect(localOutlineModel({ ...config, ollamaOutlineModel: '' })).resolves.toBe('env-tiny:1b');
+  });
+
+  it('"Auto" with no env falls through to the host scan', async () => {
+    withTags(['local-9b', 'llama3.2:3b']);
+    await expect(localOutlineModel({ ...config, ollamaOutlineModel: '' })).resolves.toBe('llama3.2:3b');
+  });
+
+  it('outline "Auto" inherits the admin-picked decompose model as its floor', async () => {
+    withTags(['local-9b']);
+    await expect(
+      localOutlineModel({ ...config, ollamaOutlineModel: '', ollamaDecomposeModel: 'admin-decompose:4b' }),
+    ).resolves.toBe('admin-decompose:4b');
+  });
+
+  it('outline and decompose are independent knobs', async () => {
+    withTags(['local-9b']);
+    const cfg = { ...config, ollamaOutlineModel: 'outline:1b', ollamaDecomposeModel: 'decompose:4b' };
+    await expect(localOutlineModel(cfg)).resolves.toBe('outline:1b');
+    await expect(localDecomposeModel(cfg)).resolves.toBe('decompose:4b');
+  });
+});
+
+describe('localDecomposeModel preference order', () => {
+  const realFetch = global.fetch;
+  const withTags = (tags: string[]) => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ models: tags.map((name) => ({ name })) }),
+    }) as unknown as typeof fetch;
+  };
+
+  beforeEach(() => {
+    resetOllamaTagsCache();
+    delete process.env.SS_LOCAL_DECOMPOSE_MODEL;
+  });
+  afterEach(() => {
+    global.fetch = realFetch;
+    resetOllamaTagsCache();
+  });
+
+  const config = { ollamaCompletionHost: 'http://localhost:11434', ollamaCompletionModel: 'local-9b' };
+
+  it('config beats env beats host scan', async () => {
+    withTags(['local-9b', 'llama3.2:3b']);
+    process.env.SS_LOCAL_DECOMPOSE_MODEL = 'env-small:3b';
+    await expect(localDecomposeModel({ ...config, ollamaDecomposeModel: 'admin:2b' })).resolves.toBe('admin:2b');
+    await expect(localDecomposeModel(config)).resolves.toBe('env-small:3b');
+    delete process.env.SS_LOCAL_DECOMPOSE_MODEL;
+    await expect(localDecomposeModel(config)).resolves.toBe('llama3.2:3b');
+  });
+
+  it('"Auto" (empty string) does not pin anything', async () => {
+    withTags(['local-9b']);
+    await expect(localDecomposeModel({ ...config, ollamaDecomposeModel: '' })).resolves.toBe('local-9b');
   });
 });

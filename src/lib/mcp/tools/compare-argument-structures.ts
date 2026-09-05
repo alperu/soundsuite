@@ -5,6 +5,7 @@ import {
   ToolExecutionContext,
 } from '../tool-types';
 import { llmProviderDependency } from '../shared-dependencies';
+import { McpError } from '../llm-policy';
 import { callLLMJson, getDocumentChunks, buildContext } from './ai-helper';
 
 export interface CompareArgumentStructuresParams {
@@ -118,10 +119,21 @@ Rules:
 
     const userContent = `=== DOCUMENT 1: ${name1} ===\n${context1}\n\n=== DOCUMENT 2: ${name2} ===\n${context2}`;
 
-    return callLLMJson<CompareArgumentStructuresResult>(
+    const result = await callLLMJson<CompareArgumentStructuresResult>(
       systemPrompt,
       userContent,
       { maxTokens: 4096, context },
     );
+
+    // Guard against parseable JSON that omits the documented `comparison`
+    // object — mirrors the Array.isArray checks the list-shaped tools make.
+    if (!result?.comparison || typeof result.comparison !== 'object' || Array.isArray(result.comparison)) {
+      throw new McpError(
+        'LLM_SHAPE_ERROR',
+        'The model returned JSON without a "comparison" object, so no comparison could be produced.',
+      );
+    }
+
+    return result;
   }
 }

@@ -35,10 +35,20 @@ function postReq(body: unknown) {
   })
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   mockRegistry.refreshDependencies.mockReset().mockResolvedValue(undefined)
   mockRegistry.execute.mockReset()
   mockRegistry.listTools.mockReset()
+  // Every /api/mcp route now consults execute-auth (R-1), so the auth env has
+  // to be neutral for suites that are not testing auth — otherwise the
+  // AUTH_MISCONFIGURED case below leaks a 401 into the listing tests.
+  delete process.env.MCP_API_KEYS
+  delete process.env.MCP_API_KEY
+  delete process.env.MCP_AUTH_STRICT_LOOPBACK
+  delete process.env.MCP_TRUST_PROXY
+  process.env.MCP_AUTH_MODE = 'none'
+  const { resetMcpApiKeyCache } = await import('@/lib/mcp/execute-auth')
+  resetMcpApiKeyCache()
 })
 
 describe('POST /api/mcp/execute', () => {
@@ -341,5 +351,185 @@ describe('GET /api/mcp/tools', () => {
 
     expect(res.status).toBe(500)
     expect(data.error.code).toBe('FETCH_FAILED')
+  })
+})
+
+// --- R-1: the catalogue and its siblings take the execute gate -----------
+describe('GET /api/mcp/* — surface gating (R-1)', () => {
+  const SYNTHETIC_KEY = 'synthetic-key-bbbb'
+
+  function get(path: string, headers: Record<string, string> = {}) {
+    return new NextRequest(`http://localhost:3000${path}`, { headers })
+  }
+
+  it('serves the dashboard shape: ?profile=all, same-origin loopback, no headers', async () => {
+    mockRegistry.listTools.mockReturnValueOnce([{ name: 'a' }])
+    const { GET } = await import('../tools/route')
+    const res = await GET(get('/api/mcp/tools?profile=all', { host: 'localhost:3000' }))
+    expect(res.status).toBe(200)
+  })
+
+  it('serves the bridge shape: ?profile=local on loopback with a bearer token', async () => {
+    mockRegistry.listTools.mockReturnValueOnce([{ name: 'a' }])
+    const { GET } = await import('../tools/route')
+    const res = await GET(
+      get('/api/mcp/tools?profile=local', { authorization: `Bearer ${SYNTHETIC_KEY}` }),
+    )
+    expect(res.status).toBe(200)
+  })
+
+  it('refuses the catalogue from a forged remote origin — the R-1 finding', async () => {
+    const { GET } = await import('../tools/route')
+    const res = await GET(get('/api/mcp/tools?profile=local', { 'x-forwarded-for': '203.0.113.9' }))
+    const data = await res.json()
+    expect(res.status).toBe(401)
+    expect(data.error.code).toBe('AUTH_REQUIRED')
+    expect(mockRegistry.listTools).not.toHaveBeenCalled()
+  })
+
+  it('refuses before parsing the profile, so 400 vs 401 cannot enumerate profiles', async () => {
+    const { GET } = await import('../tools/route')
+    const res = await GET(get('/api/mcp/tools?profile=bogus', { host: 'mcp.example.test' }))
+    const data = await res.json()
+    expect(res.status).toBe(401)
+    expect(data.error.code).toBe('AUTH_REQUIRED')
+  })
+
+  it('lets a remote caller through with a configured key', async () => {
+    process.env.MCP_API_KEYS = SYNTHETIC_KEY
+    const { resetMcpApiKeyCache } = await import('@/lib/mcp/execute-auth')
+    resetMcpApiKeyCache()
+    mockRegistry.listTools.mockReturnValueOnce([{ name: 'a' }])
+    const { GET } = await import('../tools/route')
+    const res = await GET(
+      get('/api/mcp/tools?profile=local', {
+        'x-forwarded-for': '203.0.113.9',
+        'x-api-key': SYNTHETIC_KEY,
+      }),
+    )
+    expect(res.status).toBe(200)
+  })
+
+  it('gates /api/mcp/claude-tools the same way', async () => {
+    const { GET } = await import('../claude-tools/route')
+    const res = await GET(get('/api/mcp/claude-tools', { 'x-forwarded-for': '203.0.113.9' }))
+    expect(res.status).toBe(401)
+
+    mockRegistry.listTools.mockReturnValueOnce([])
+    const ok = await GET(get('/api/mcp/claude-tools', { host: 'localhost:3000' }))
+    expect(ok.status).toBe(200)
+  })
+
+  it('gates /api/mcp/stats and /api/mcp/execution-history', async () => {
+    const stats = await import('../stats/route')
+    const history = await import('../execution-history/route')
+    expect((await stats.GET(get('/api/mcp/stats', { 'x-forwarded-for': '203.0.113.9' }))).status).toBe(401)
+    expect(
+      (await history.GET(get('/api/mcp/execution-history', { 'x-forwarded-for': '203.0.113.9' }))).status,
+    ).toBe(401)
+  })
+
+  it('gates /api/mcp/tool-config, read and write alike', async () => {
+    const cfg = await import('../tool-config/route')
+    expect((await cfg.GET(get('/api/mcp/tool-config', { host: 'mcp.example.test' }))).status).toBe(401)
+    const write = new NextRequest('http://localhost:3000/api/mcp/tool-config', {
+      method: 'POST',
+      headers: { host: 'mcp.example.test' },
+      body: JSON.stringify({ query_case_knowledge: { enabled: true } }),
+    })
+    expect((await cfg.POST(write)).status).toBe(401)
+  })
+
+  it('gates /api/mcp/tool-health', async () => {
+    const health = await import('../tool-health/route')
+    expect((await health.GET(get('/api/mcp/tool-health', { 'x-forwarded-for': '203.0.113.9' }))).status).toBe(401)
+  })
+
+  // Job routes: a routed report spends API credit, so the gate runs before
+  // anything is started. POST reads the body first (only to learn `profile`),
+  // so these also cover that reordering.
+  it('gates the job routes, and refuses before a job can be started', async () => {
+    const jobs = await import('../[kind]/route')
+    const ctx = { params: Promise.resolve({ kind: 'report' }) }
+    const start = new NextRequest('http://localhost:3000/api/mcp/report', {
+      method: 'POST',
+      headers: { 'x-forwarded-for': '203.0.113.9' },
+      body: JSON.stringify({ query: 'synthetic probe', profile: 'routed' }),
+    })
+    const res = await jobs.POST(start, ctx)
+    expect(res.status).toBe(401)
+    expect((await res.json()).error.code).toBe('AUTH_REQUIRED')
+
+    const list = await jobs.GET(get('/api/mcp/research', { 'x-forwarded-for': '203.0.113.9' }), {
+      params: Promise.resolve({ kind: 'research' }),
+    })
+    expect(list.status).toBe(401)
+  })
+})
+
+// --- M-5: an untrusted X-Forwarded-For no longer establishes loopback ----
+describe('X-Forwarded-For trust (M-5 / v5 §R-2)', () => {
+  const call = { tool: 'query_case_knowledge', params: { query: 'synthetic probe' } }
+
+  function post(headers: Record<string, string>) {
+    return new NextRequest('http://localhost:3000/api/mcp/execute', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(call),
+    })
+  }
+
+  it('allows the single loopback XFF entry Next.js injects from the socket peer', async () => {
+    mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
+    const { POST } = await import('../execute/route')
+    expect((await POST(post({ 'x-forwarded-for': '127.0.0.1' }))).status).toBe(200)
+  })
+
+  it('refuses a loopback-first multi-hop chain — new beyond the v5 table', async () => {
+    const { POST } = await import('../execute/route')
+    const res = await POST(post({ 'x-forwarded-for': '127.0.0.1, 203.0.113.9' }))
+    expect(res.status).toBe(401)
+    expect(mockRegistry.execute).not.toHaveBeenCalled()
+  })
+
+  it('refuses a loopback X-Real-IP and a Forwarded header', async () => {
+    const { POST } = await import('../execute/route')
+    expect((await POST(post({ 'x-real-ip': '127.0.0.1' }))).status).toBe(401)
+    expect((await POST(post({ forwarded: 'for=127.0.0.1' }))).status).toBe(401)
+  })
+
+  it('keeps refusing a public XFF and the v5 proxy chain', async () => {
+    const { POST } = await import('../execute/route')
+    expect((await POST(post({ 'x-forwarded-for': '203.0.113.9' }))).status).toBe(401)
+    expect((await POST(post({ 'x-forwarded-for': '203.0.113.9, 127.0.0.1' }))).status).toBe(401)
+  })
+
+  it('still allows a header-free loopback request — the dashboard and bridge shape', async () => {
+    mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
+    const { POST } = await import('../execute/route')
+    expect((await POST(post({ host: 'localhost:3000' }))).status).toBe(200)
+  })
+
+  it('accepts a declared proxy chain under MCP_TRUST_PROXY=1', async () => {
+    process.env.MCP_TRUST_PROXY = '1'
+    mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
+    const { POST } = await import('../execute/route')
+    expect((await POST(post({ 'x-forwarded-for': '127.0.0.1, 10.0.0.5' }))).status).toBe(200)
+    // …and a public client behind that trusted proxy is still refused.
+    expect((await POST(post({ 'x-forwarded-for': '203.0.113.9, 10.0.0.5' }))).status).toBe(401)
+  })
+
+  it('applies the same rules to the catalogue', async () => {
+    const { GET } = await import('../tools/route')
+    const chained = new NextRequest('http://localhost:3000/api/mcp/tools?profile=local', {
+      headers: { 'x-forwarded-for': '127.0.0.1, 203.0.113.9' },
+    })
+    expect((await GET(chained)).status).toBe(401)
+
+    mockRegistry.listTools.mockReturnValueOnce([])
+    const direct = new NextRequest('http://localhost:3000/api/mcp/tools?profile=local', {
+      headers: { 'x-forwarded-for': '127.0.0.1' },
+    })
+    expect((await GET(direct)).status).toBe(200)
   })
 })

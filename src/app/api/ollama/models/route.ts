@@ -83,7 +83,13 @@ export async function GET() {
     }
     // Filter out embedding-only models (they can't be used for chat/completion)
     const allModels = (data.models || []) as any[];
-    const models: Array<{ id: string; label: string; size?: number }> = allModels
+    // `family` / `families` are passed through verbatim from Ollama's
+    // `details`. Multimodal builds carry a projector family (`clip`, `qwen2vl`,
+    // `paddleocr`) alongside the text one, which is the only reliable way to
+    // tell an OCR/vision tag from an instruct tag — the name often doesn't say.
+    // Consumers that need text-only generation filter on it; this route stays a
+    // passthrough so the general model list is unchanged.
+    const models: Array<{ id: string; label: string; size?: number; family?: string; families?: string[] }> = allModels
       .filter((m: any) => {
         const name = (m.name || m.model || '').toLowerCase();
         // Skip models that are clearly embedding-only
@@ -93,6 +99,8 @@ export async function GET() {
         id: m.name || m.model,
         label: m.name || m.model,
         size: m.size,
+        family: m.details?.family,
+        families: m.details?.families,
       }));
 
     const defaultModel = config.ollamaCompletionModel || null;

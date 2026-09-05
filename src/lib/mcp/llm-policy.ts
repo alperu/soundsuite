@@ -17,6 +17,12 @@ export const LOCAL_PROVIDER = 'ollama';
 
 export class McpError extends Error {
   code: string;
+  /**
+   * Optional redacted twin of `message`, used by `BaseMCPTool.execute` for the
+   * log line when `message` may embed document text (CLAUDE.md § Privacy).
+   * The full `message` still reaches the caller that asked for the analysis.
+   */
+  logSafeMessage?: string;
   constructor(code: string, message: string) {
     super(message);
     this.name = 'McpError';

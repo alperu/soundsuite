@@ -4,6 +4,7 @@ import { parseProfile } from '@/lib/mcp/research-types';
 import { McpError } from '@/lib/mcp/llm-policy';
 import { startResearchJob } from '@/lib/mcp/research/start-research-job';
 import { startReportJob } from '@/lib/mcp/routed/start-report-job';
+import { guardMcpRoute } from '@/lib/mcp/execute-auth';
 
 /**
  * /api/mcp/{research|report}
@@ -31,11 +32,20 @@ function invalidKind() {
 
 export async function POST(request: NextRequest, ctx: Ctx) {
   const params = await ctx.params;
+
+  // Auth first — starting a job is the most expensive thing on this surface
+  // (a routed report spends API credit and sends case text to a third party).
+  // The body is read before the gate only to learn the profile, so
+  // MCP_AUTH_STRICT_LOOPBACK=routed can apply; nothing acts on it yet.
+  let body: Record<string, unknown> = {};
+  try { body = await request.json(); } catch { /* empty body */ }
+  const profile = parseProfile(body.profile);
+  const guard = await guardMcpRoute(request, { profile, label: 'Job' });
+  if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
+
   const kind = parseJobKind(params.kind);
   if (!kind) return invalidKind();
 
-  let body: Record<string, unknown> = {};
-  try { body = await request.json(); } catch { /* empty body */ }
   const query = typeof body.query === 'string' ? body.query.trim() : '';
   if (!query) {
     return NextResponse.json({ error: { code: 'INVALID_PARAMS', message: 'query is required' } }, { status: 400 });
@@ -44,7 +54,6 @@ export async function POST(request: NextRequest, ctx: Ctx) {
   // `report` jobs spend API credit and send case text to a third party, so
   // they are only ever started under the routed profile. Missing profile →
   // local (fail-closed), which refuses `report`.
-  const profile = parseProfile(body.profile);
   if (kind === 'report' && profile !== 'routed') {
     return NextResponse.json(
       { error: { code: 'POLICY_VIOLATION', message: 'report jobs require profile "routed"' } },
@@ -72,6 +81,9 @@ export async function POST(request: NextRequest, ctx: Ctx) {
 }
 
 export async function GET(request: NextRequest, ctx: Ctx) {
+  const guard = await guardMcpRoute(request, { label: 'Job' });
+  if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
+
   const params = await ctx.params;
   const kind = parseJobKind(params.kind);
   if (!kind) return invalidKind();

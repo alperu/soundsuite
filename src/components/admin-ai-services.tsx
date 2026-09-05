@@ -18,11 +18,15 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { AI_PROVIDERS, AI_PROVIDER_KEYS, type AIProviderKey } from '@/lib/ai/models';
+import { isTextGenerationTag } from '@/lib/mcp/model-capabilities';
 
 interface OllamaModelEntry {
   id: string;
   label: string;
   size?: number;
+  /** Ollama `details.family` / `details.families` — used to spot OCR/vision builds. */
+  family?: string;
+  families?: string[];
 }
 
 interface OllamaModelsResponse {
@@ -57,6 +61,14 @@ export default function AdminAIServices() {
   const [primaryProvider, setPrimaryProvider] = useState<string>('ollama');
   const [primaryModel, setPrimaryModel] = useState<string>('');
 
+  // MCP local-profile helper models. '' means "Auto" — fall back to the
+  // resolution chain in routing-defaults.ts rather than pinning a tag.
+  const [decomposeModel, setDecomposeModel] = useState<string>('');
+  const [outlineModel, setOutlineModel] = useState<string>('');
+  // What the resolver returns today for those two roles (admin config → env →
+  // host tags). Fetched from /api/config?resolve=localModels.
+  const [resolvedLocal, setResolvedLocal] = useState<{ decompose: string | null; outline: string | null } | null>(null);
+
   // Cloud fallback
   const [fallbackEnabled, setFallbackEnabled] = useState<boolean>(false);
   // Anthropic prompt-cache TTL for the deep-search shared-prefix breakpoint
@@ -87,11 +99,25 @@ export default function AdminAIServices() {
         if (typeof cfg.aiFallbackProvider === 'string') setFallbackProvider(cfg.aiFallbackProvider);
         if (typeof cfg.aiFallbackModel === 'string') setFallbackModel(cfg.aiFallbackModel);
         if (cfg.cacheTtl === '5m' || cfg.cacheTtl === '1h') setCacheTtl(cfg.cacheTtl);
+        setDecomposeModel(typeof cfg.ollamaDecomposeModel === 'string' ? cfg.ollamaDecomposeModel : '');
+        setOutlineModel(typeof cfg.ollamaOutlineModel === 'string' ? cfg.ollamaOutlineModel : '');
       }
     } catch {
       /* silent */
     }
     setLoading(false);
+  }, []);
+
+  /** Ask the server what the local profile resolves to right now. Never throws. */
+  const loadResolvedLocal = useCallback(async () => {
+    try {
+      const res = await fetch('/api/config?resolve=localModels');
+      if (!res.ok) return setResolvedLocal(null);
+      const body = (await res.json()) as { decompose?: string | null; outline?: string | null };
+      setResolvedLocal({ decompose: body.decompose ?? null, outline: body.outline ?? null });
+    } catch {
+      setResolvedLocal(null);
+    }
   }, []);
 
   const loadOllamaModels = useCallback(async () => {
@@ -117,7 +143,8 @@ export default function AdminAIServices() {
   useEffect(() => {
     loadConfig();
     loadOllamaModels();
-  }, [loadConfig, loadOllamaModels]);
+    loadResolvedLocal();
+  }, [loadConfig, loadOllamaModels, loadResolvedLocal]);
 
   const recordSaved = (section: string) => {
     setSavedAt(prev => ({ ...prev, [section]: Date.now() }));
@@ -140,6 +167,8 @@ export default function AdminAIServices() {
         aiFallbackEnabled: boolean;
         aiFallbackProvider: string;
         aiFallbackModel: string;
+        ollamaDecomposeModel: string;
+        ollamaOutlineModel: string;
       }>,
       section: string,
     ) => {
@@ -174,6 +203,20 @@ export default function AdminAIServices() {
     setPrimaryProvider('ollama');
     setPrimaryModel(modelId);
     persist({ aiPrimaryProvider: 'ollama', aiPrimaryModel: modelId }, 'primary');
+  };
+
+  // Deliberately NOT reusing handlePrimaryModelChange: that one pins
+  // aiPrimaryProvider to 'ollama', which has nothing to do with these two.
+  const handleDecomposeModelChange = async (modelId: string) => {
+    setDecomposeModel(modelId);
+    await persist({ ollamaDecomposeModel: modelId }, 'localhelpers');
+    await loadResolvedLocal();
+  };
+
+  const handleOutlineModelChange = async (modelId: string) => {
+    setOutlineModel(modelId);
+    await persist({ ollamaOutlineModel: modelId }, 'localhelpers');
+    await loadResolvedLocal();
   };
 
   const handleFallbackToggle = (enabled: boolean) => {
@@ -286,6 +329,21 @@ export default function AdminAIServices() {
   }
 
   const recommendedInstalled = ollamaModels.some(m => m.id === RECOMMENDED_LOCAL_MODEL);
+  // Decompose and the outline are constrained JSON generation over text: an
+  // OCR/vision build cannot do them, so offering one would be a trap. Filters
+  // fail open — anything not clearly vision/embedding stays listed.
+  const helperModels = ollamaModels.filter(isTextGenerationTag);
+  const hiddenHelperCount = ollamaModels.length - helperModels.length;
+  /**
+   * A pinned tag must stay visible even when it is not in `helperModels`, so it
+   * can be seen and changed rather than silently reverting to Auto. The two
+   * cases are different and the label says which: the host no longer has it, or
+   * the host has it but it is the wrong kind of model.
+   */
+  const stalePinNote = (value: string): string | null => {
+    if (!value || helperModels.some(m => m.id === value)) return null;
+    return ollamaModels.some(m => m.id === value) ? 'not a text model' : 'not installed';
+  };
   const fallbackModels = AI_PROVIDERS[fallbackProvider as AIProviderKey]?.models ?? [];
 
   return (
@@ -400,6 +458,102 @@ export default function AdminAIServices() {
               </div>
             )}
           </div>
+        )}
+      </section>
+
+      {/* 1b. MCP local-profile helper models (decompose + evidence outline) */}
+      <section className="bg-white shadow rounded-lg p-5">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-semibold text-gray-900">MCP local research models</h3>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
+              Advanced
+            </span>
+          </div>
+          {savedAt.localhelpers && <span className="text-xs text-green-700 font-medium">Saved</span>}
+        </div>
+
+        <p className="text-sm text-gray-600 mb-4">
+          Two short, JSON-shaped steps the <code className="px-1 py-0.5 bg-gray-100 rounded">local</code> MCP
+          profile runs before it answers: splitting the question into sub-queries, and outlining the
+          evidence it retrieved. Both are fine on a small instruct model and are much faster there
+          than on the full completion model. Leave on <span className="font-medium">Auto</span> to let
+          the server pick from what is installed.
+        </p>
+
+        {ollamaError && (
+          <div className="mb-3 rounded-md bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
+            Model list unavailable: {ollamaError}. Auto still works — it resolves on the server.
+          </div>
+        )}
+
+        <div className="space-y-4">
+          {([
+            {
+              key: 'decompose' as const,
+              label: 'Decompose',
+              value: decomposeModel,
+              onChange: handleDecomposeModelChange,
+              hint: 'Splits the query into sub-queries before retrieval.',
+            },
+            {
+              key: 'outline' as const,
+              label: 'Outline',
+              value: outlineModel,
+              onChange: handleOutlineModelChange,
+              hint: 'Extracts a structured outline over the retrieved excerpts.',
+            },
+          ]).map(row => (
+            <div key={row.key}>
+              <div className="flex items-center gap-3">
+                <label htmlFor={`mcp-local-${row.key}`} className="text-sm font-medium text-gray-700 w-24">
+                  {row.label}
+                </label>
+                <select
+                  id={`mcp-local-${row.key}`}
+                  value={row.value}
+                  onChange={e => void row.onChange(e.target.value)}
+                  disabled={ollamaLoading}
+                  className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none disabled:bg-gray-50"
+                >
+                  <option value="">Auto (resolve from host)</option>
+                  {/* A saved tag that isn't offered still has to be visible. */}
+                  {stalePinNote(row.value) && (
+                    <option value={row.value}>{row.value} ({stalePinNote(row.value)})</option>
+                  )}
+                  {helperModels.map(m => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="mt-1 ml-[7.5rem] text-xs text-gray-500">
+                {row.hint}
+                {resolvedLocal?.[row.key] && (
+                  <>
+                    {' '}Currently resolves to{' '}
+                    <span className="font-mono text-gray-700">{resolvedLocal[row.key]}</span>.
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {!ollamaLoading && !ollamaError && hiddenHelperCount > 0 && (
+          <p className="mt-3 text-xs text-gray-500">
+            {hiddenHelperCount} OCR/vision model{hiddenHelperCount === 1 ? '' : 's'} on this host{' '}
+            {hiddenHelperCount === 1 ? 'is' : 'are'} not listed here — they cannot do constrained JSON
+            generation.
+          </p>
+        )}
+        {!ollamaLoading && !ollamaError && helperModels.length === 0 && (
+          <p className="mt-3 text-xs text-gray-600">
+            No text-generation model is installed on this host, so only Auto is available. Pull a
+            small instruct model — e.g.{' '}
+            <code className="px-1 py-0.5 bg-gray-100 rounded">ollama pull qwen3:1.7b</code> — to pin one.
+          </p>
         )}
       </section>
 

@@ -6,6 +6,7 @@ import {
   readEvents,
   subscribe,
 } from '@/lib/mcp/research-jobs';
+import { guardMcpRoute } from '@/lib/mcp/execute-auth';
 import type { ResearchJobEvent } from '@/lib/mcp/research-types';
 
 /**
@@ -21,6 +22,12 @@ export const dynamic = 'force-dynamic';
 type Ctx = { params: Promise<{ kind: string; id: string }> };
 
 export async function GET(request: NextRequest, ctx: Ctx) {
+  // Gated (R-1) before the stream opens — the events carry evidence text.
+  // The bridge calls this on loopback with no forwarding headers, so the
+  // default allowance covers it unchanged.
+  const guard = await guardMcpRoute(request, { label: 'JobEvents' });
+  if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
+
   const params = await ctx.params;
   const kind = parseJobKind(params.kind);
   if (!kind) {

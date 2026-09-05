@@ -19,10 +19,12 @@ import { LOCAL_PROVIDER } from './llm-policy';
 import type { ResearchTier, TierSettings } from './research-types';
 
 /**
- * Preferred tag for the local evidence outline. Smaller than the decompose
- * model on purpose: this is JSON extraction over ≤40 already-retrieved
- * excerpts. Override with `SS_LOCAL_OUTLINE_MODEL`. Resolution falls back to
- * whatever the host actually has — see `localOutlineModel()`.
+ * Preferred tag for the local evidence outline — a *preference*, not a default.
+ * Smaller than the decompose model on purpose: this is JSON extraction over ≤40
+ * already-retrieved excerpts. It is only ever used when the host actually has
+ * the tag; `localOutlineModel()` resolves against `/api/tags` and never returns
+ * this literal blind. Admin → AI Services (`ai.ollamaOutlineModel`) outranks it,
+ * as does `SS_LOCAL_OUTLINE_MODEL`.
  */
 export const LOCAL_OUTLINE_MODEL = process.env.SS_LOCAL_OUTLINE_MODEL || 'qwen3:1.7b';
 
@@ -33,7 +35,11 @@ export const LOCAL_OUTLINE_MODEL = process.env.SS_LOCAL_OUTLINE_MODEL || 'qwen3:
  * clock. Caps the input, the model size, and the ceiling.
  */
 export interface OutlineRouting {
-  /** Preferred Ollama tag; resolve at call time with `localOutlineModel()`. */
+  /**
+   * Preferred Ollama tag — a wish, not a guarantee. Nothing may use it
+   * directly: resolve at call time with `localOutlineModel()`, which only
+   * returns it when the host reports it in `/api/tags`.
+   */
   model: string;
   timeoutMs: number;
   maxItems: number;
@@ -62,6 +68,14 @@ export const LOCAL_DECOMPOSE_MODEL = process.env.SS_LOCAL_DECOMPOSE_MODEL || 'qw
 
 /** Small-instruct tags we will pick from `/api/tags` when nothing is configured. */
 const SMALL_DECOMPOSE_TAG = /(qwen3(\.5)?:(1\.7|4)b|llama3\.2:3b|gemma3:4b|phi4-mini)/;
+
+/**
+ * Which tags are eligible for decompose / the outline at all. Defined in
+ * `./model-capabilities` (a leaf module with no prisma import) so the admin
+ * pickers can apply the same rule client-side; re-exported here so the
+ * eligibility rule and `SMALL_DECOMPOSE_TAG` sit together.
+ */
+export { isTextGenerationTag, isVisionTag, isEmbeddingTag, type OllamaTagInfo } from './model-capabilities';
 
 const TAGS_PROBE_TIMEOUT_MS = 3_000;
 const TAGS_CACHE_MS = 60_000;
@@ -127,21 +141,26 @@ export async function localDecomposeModel(config: {
 
 /**
  * Resolve the Ollama model for the evidence outline. Preference order:
- *   1. `SS_LOCAL_OUTLINE_MODEL` (env, explicit operator choice)
- *   2. `LOCAL_ROUTING.outline.model` when that tag is present on the host
- *   3. any small instruct tag on the host (`SMALL_DECOMPOSE_TAG`)
- *   4. `localDecomposeModel(config)` — never worse than today's behaviour
+ *   1. `config.ollamaOutlineModel` (Admin → AI Services, `ai.ollamaOutlineModel`)
+ *   2. `SS_LOCAL_OUTLINE_MODEL` (env)
+ *   3. `LOCAL_ROUTING.outline.model` when that tag is present on the host
+ *   4. any small instruct tag on the host (`SMALL_DECOMPOSE_TAG`)
+ *   5. `localDecomposeModel(config)` — never worse than today's behaviour
  *
- * Step 2 matters only if the operator has pulled the small tag; without it we
- * land on the same model decompose uses, and the win is the input cap and the
- * 25 s ceiling rather than the model swap.
+ * Step 1 is empty ("Auto") on a stock install, which leaves the old chain
+ * intact. Step 3 matters only if the operator has pulled the small tag; without
+ * it we land on the same model decompose uses — itself admin-controlled through
+ * `config.ollamaDecomposeModel` — and the win is the input cap and the 25 s
+ * ceiling rather than the model swap.
  */
 export async function localOutlineModel(config: {
+  ollamaOutlineModel?: string;
   ollamaDecomposeModel?: string;
   ollamaCompletionModel?: string;
   ollamaCompletionHost?: string;
   ollamaHost?: string;
 }): Promise<string> {
+  if (config.ollamaOutlineModel?.trim()) return config.ollamaOutlineModel.trim();
   if (process.env.SS_LOCAL_OUTLINE_MODEL?.trim()) return process.env.SS_LOCAL_OUTLINE_MODEL.trim();
   const tags = await listOllamaTags(config);
   if (tags.includes(LOCAL_ROUTING.outline.model)) return LOCAL_ROUTING.outline.model;

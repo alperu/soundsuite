@@ -23,6 +23,12 @@
  * (neither can set `Host`), not a determined direct attacker. The real
  * exposure controls remain binding the server to loopback and the Cloudflare
  * ingress interlock.
+ *
+ * v5 §R-2 measured one hole in that heuristic: a forged `X-Forwarded-For:
+ * 127.0.0.1` classified as loopback and passed. `MCP_TRUST_PROXY` closes it —
+ * see `classifyOrigin`. v5 §R-1 measured a second: only `execute` consulted
+ * this module, so the whole tool catalogue was readable. `guardMcpRoute` is
+ * the shared entry point every `/api/mcp/*` handler now calls.
  */
 
 import type { McpProfile } from './research-types';
@@ -81,21 +87,84 @@ export function isLoopbackHost(host: string | null | undefined): boolean {
   return /^127(?:\.\d{1,3}){3}$/.test(h);
 }
 
+/**
+ * `MCP_TRUST_PROXY` — declare that a real reverse proxy fronts this server, so
+ * a multi-hop `X-Forwarded-For` and an `X-Real-IP` are expected rather than
+ * suspicious. Off by default. See `classifyOrigin`.
+ */
+export function parseTrustProxy(raw: string | undefined): boolean {
+  const v = (raw ?? '').trim().replace(/^["']|["']$/g, '').toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
 export interface OriginSignals {
   /** `request.nextUrl.hostname` — always present, in tests and in production. */
   urlHostname?: string | null;
   hostHeader?: string | null;
   forwardedFor?: string | null;
   realIp?: string | null;
+  /** `Forwarded:` (RFC 7239). Present only if a proxy or a client set it. */
+  forwarded?: string | null;
+  /** `MCP_TRUST_PROXY`. Default `false`: no reverse proxy is expected. */
+  trustProxy?: boolean;
 }
 
 /**
  * Classify the request origin. Any signal that names a non-loopback peer wins:
  * a proxied or tunnelled request carries the public host and the client IP,
  * so it is remote even though the TCP peer is 127.0.0.1.
+ *
+ * **Forwarding headers (M-5 / v5 §R-2), and why the residual bypass stands.**
+ * `X-Forwarded-For` is not an attacker-only header here: Next.js fills it in
+ * from the socket peer when the client did not send one —
+ * `next/dist/server/base-server.js:576`, `req.headers['x-forwarded-for'] ??=
+ * originalRequest.socket.remoteAddress`. That `??=` is the whole story:
+ *
+ *  - On a direct connection the header **is** the real peer address, and is
+ *    exactly one entry. This is what makes the gate work at all.
+ *  - A client that sends its own value keeps it — Next does not append. So a
+ *    forged single-value `X-Forwarded-For: 127.0.0.1` is byte-identical to a
+ *    genuine loopback request. Refusing headers "because a proxy set them"
+ *    is therefore not available: it would 401 every loopback request
+ *    (measured — bare `GET http://127.0.0.1:3000/...` came back 401 while
+ *    that rule was in place).
+ *
+ * What is still worth closing, and is closed here when `trustProxy` is off:
+ *
+ * | signal | before | now |
+ * |---|---|---|
+ * | XFF absent / single loopback entry | loopback | loopback (unchanged) |
+ * | XFF single `<public IP>` | remote | remote (unchanged) |
+ * | XFF `<public>, 127.0.0.1` | remote (leftmost) | remote (unchanged) |
+ * | XFF `127.0.0.1, <public>` | **loopback** | **remote** — ≥2 entries cannot come from `??=` |
+ * | `X-Real-IP: 127.0.0.1` | loopback | **remote** — Next never injects it |
+ * | `Forwarded: for=127.0.0.1` | ignored | **remote** — same reason |
+ * | XFF single forged `127.0.0.1` | loopback | loopback — **not closable here** |
+ *
+ * `MCP_TRUST_PROXY=1` restores the leftmost-entry reading for a deployment
+ * that genuinely sits behind a reverse proxy, where several hops and an
+ * `X-Real-IP` are normal. First-party callers send none of these headers: the
+ * dashboard is a same-origin browser fetch and the stdio bridge (repo and
+ * installed copies alike) sets only `Authorization` / `Content-Type` /
+ * `mcp-session-id`.
+ *
+ * The bottom line is unchanged from the module header: this is a browser
+ * control. An exposed port needs `MCP_AUTH_STRICT_LOOPBACK=1` plus keys, and
+ * the real controls remain the loopback bind and the Cloudflare interlock.
  */
 export function classifyOrigin(signals: OriginSignals): RequestOrigin {
-  const firstHop = signals.forwardedFor?.split(',')[0]?.trim();
+  const hops = (signals.forwardedFor ?? '')
+    .split(',')
+    .map((h) => h.trim())
+    .filter(Boolean);
+  if (!signals.trustProxy) {
+    // No proxy is declared, so nothing should have added a hop. Anything that
+    // did is either an undeclared proxy or a hand-crafted header; neither is
+    // a loopback client.
+    if (hops.length > 1) return 'remote';
+    if (signals.realIp?.trim() || signals.forwarded?.trim()) return 'remote';
+  }
+  const firstHop = hops[0];
   if (firstHop && !isLoopbackHost(firstHop)) return 'remote';
   if (signals.realIp?.trim() && !isLoopbackHost(signals.realIp)) return 'remote';
   if (signals.hostHeader?.trim() && !isLoopbackHost(signals.hostHeader)) return 'remote';
@@ -292,4 +361,76 @@ export async function loadMcpApiKeys(): Promise<string[]> {
   const list = [...keys];
   _keyCache = { at: now, keys: list };
   return list;
+}
+
+// ---------------------------------------------------------------------------
+// Shared route guard (R-1)
+// ---------------------------------------------------------------------------
+
+/** The slice of `NextRequest` the guard reads — kept structural so tests and
+ *  non-Next callers can pass a plain object. */
+export interface McpGuardRequest {
+  nextUrl?: { hostname?: string | null } | null;
+  headers?: { get(name: string): string | null } | null;
+}
+
+export type McpRouteGuardResult =
+  | { ok: true; origin: RequestOrigin }
+  | { ok: false; status: number; body: { error: { code: string; message: string } } };
+
+/**
+ * Apply the execute auth decision to any `/api/mcp/*` handler.
+ *
+ * v5 §R-1: `POST /api/mcp/execute` was gated but `GET /api/mcp/tools` was not,
+ * so every tool name, description and input schema stayed readable from a
+ * forged non-loopback origin. The catalogue is a map of the system and is not
+ * deliberately public, so it takes the same gate — and so do the sibling
+ * config / telemetry / job routes, which are strictly more sensitive.
+ *
+ * Call this **before** parsing parameters and before touching the registry:
+ * a refused caller then learns nothing about the request shape, and a refused
+ * request never runs a dependency smoke test.
+ *
+ * `request` may be omitted — some routes are invoked in-process with no
+ * request object at all. That is not an HTTP request and is treated as
+ * loopback.
+ */
+export async function guardMcpRoute(
+  request: McpGuardRequest | null | undefined,
+  opts: { profile?: McpProfile; label: string },
+): Promise<McpRouteGuardResult> {
+  const headers = request?.headers ?? null;
+  const origin: RequestOrigin = request
+    ? classifyOrigin({
+        urlHostname: request.nextUrl?.hostname,
+        hostHeader: headers?.get('host'),
+        forwardedFor: headers?.get('x-forwarded-for'),
+        realIp: headers?.get('x-real-ip'),
+        forwarded: headers?.get('forwarded'),
+        trustProxy: parseTrustProxy(process.env.MCP_TRUST_PROXY),
+      })
+    : 'loopback';
+
+  const decision = decideExecuteAuth({
+    origin,
+    modeRaw: process.env.MCP_AUTH_MODE,
+    keys: await loadMcpApiKeys(),
+    credential: extractCredential({
+      authorization: headers?.get('authorization'),
+      apiKey: headers?.get('x-api-key'),
+    }),
+    strictLoopback: parseStrictLoopback(process.env.MCP_AUTH_STRICT_LOOPBACK),
+    profile: opts.profile ?? 'local',
+  });
+
+  if (decision.ok) return { ok: true, origin: decision.origin };
+
+  console.warn(
+    `[MCP ${opts.label}] auth refused: ${decision.code} origin=${decision.origin} mode=${decision.mode}`,
+  );
+  return {
+    ok: false,
+    status: decision.status ?? 401,
+    body: { error: { code: decision.code ?? 'AUTH_REQUIRED', message: decision.message ?? 'Unauthorized' } },
+  };
 }

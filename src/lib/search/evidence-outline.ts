@@ -244,6 +244,10 @@ Group the excerpts above into sections and list the gaps. JSON only — no prose
     const raw = await callLLMJson<unknown>(EVIDENCE_OUTLINE_SYSTEM_PROMPT, userContent, {
       maxTokens: 2048,
       temperature: 0.1,
+      // Dashboard path: normaliseOutline() already degrades {_markdown} to null
+      // with a warning. Throwing instead would put a raw model snippet into
+      // the persisted event-stream warning (CLAUDE.md § Privacy).
+      allowMarkdownFallback: true,
       provider,
       model,
       thinking: options.thinking,

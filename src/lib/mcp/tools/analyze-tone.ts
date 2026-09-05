@@ -5,6 +5,7 @@ import {
   ToolExecutionContext,
 } from '../tool-types';
 import { llmProviderDependency } from '../shared-dependencies';
+import { McpError } from '../llm-policy';
 import { callLLMJson, getDocumentChunks, buildContext } from './ai-helper';
 
 export interface AnalyzeToneParams {
@@ -123,10 +124,21 @@ Rules:
 - Keep segment text excerpts brief
 - page is where the segment appears (0 if unknown)`;
 
-    return callLLMJson<AnalyzeToneResult>(
+    const result = await callLLMJson<AnalyzeToneResult>(
       systemPrompt,
       textContext,
       { maxTokens: 4096, context },
     );
+
+    // Guard against parseable JSON that omits the documented `analysis`
+    // object — mirrors the Array.isArray checks the list-shaped tools make.
+    if (!result?.analysis || typeof result.analysis !== 'object' || Array.isArray(result.analysis)) {
+      throw new McpError(
+        'LLM_SHAPE_ERROR',
+        'The model returned JSON without an "analysis" object, so no tone analysis could be produced.',
+      );
+    }
+
+    return result;
   }
 }

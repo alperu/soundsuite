@@ -28,7 +28,7 @@ import type {
 } from '../mcp/research-types';
 import { EVIDENCE_DEFAULTS } from '../mcp/research-types';
 import { enforceProvider, LOCAL_PROVIDER } from '../mcp/llm-policy';
-import { LOCAL_ROUTING, localDecomposeModel } from '../mcp/routing-defaults';
+import { LOCAL_ROUTING, localDecomposeModel, localOutlineModel } from '../mcp/routing-defaults';
 import { DEFAULT_MODELS } from '../mcp/tools/ai-helper';
 import { getConfig } from '../db/config';
 import { RLM_MODEL_ID } from '../ai/stream-rlm';
@@ -155,6 +155,40 @@ export function truncateChunkText(text: string, max: number): string {
   return `${head} …`;
 }
 
+/**
+ * Marker appended to a shortened `tableMarkdown`. Deliberately a separate
+ * line rather than a fake row: a markdown table cut mid-row renders as
+ * garbage, whereas a table followed by a plain line renders as a table plus a
+ * note.
+ */
+export const TABLE_TRUNCATION_MARKER = '\n… (table truncated)';
+
+/**
+ * Shorten a markdown table to `max` characters on a ROW boundary. The marker's
+ * length is reserved inside `max`, so the returned string is a true bound.
+ *
+ * Whole lines are kept in order, which means the header and its `|---|`
+ * delimiter survive whenever `max` admits them — the prefix still renders as a
+ * table. If not even the first line fits the budget the cut degrades to a hard
+ * slice of that line (nothing renders as a table at that size anyway).
+ */
+export function truncateTableMarkdown(md: string, max: number): string {
+  if (max <= 0 || md.length <= max) return md;
+  const budget = max - TABLE_TRUNCATION_MARKER.length;
+  // Too small to carry both content and the marker — bound it and stop.
+  if (budget <= 0) return md.slice(0, max);
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of md.split('\n')) {
+    const cost = kept.length === 0 ? line.length : line.length + 1;
+    if (used + cost > budget) break;
+    kept.push(line);
+    used += cost;
+  }
+  const head = kept.length > 0 ? kept.join('\n') : md.slice(0, budget).trimEnd();
+  return `${head}${TABLE_TRUNCATION_MARKER}`;
+}
+
 export type GatherEvidenceInput = GatherEvidenceOptions & {
   /** Request fields the caller already knows the local profile ignores (reported in `routing.ignored`). */
   ignored?: string[];
@@ -197,9 +231,9 @@ export async function gatherEvidence(
   // -- Policy: resolve before touching anything (fail-closed) ---------------
   let llmProvider: string | undefined;
   let llmModel: string | undefined;
+  const config = await getConfig().catch(() => ({} as { ollamaCompletionModel?: string }));
   if (options.localOnly) {
     llmProvider = enforceProvider('local', options.provider) ?? LOCAL_PROVIDER;
-    const config = await getConfig().catch(() => ({} as { ollamaCompletionModel?: string }));
     // Decompose and the outline are short JSON prompts: prefer the dedicated
     // small model (config → env → small tag on the host → completion model).
     llmModel =
@@ -232,6 +266,8 @@ export async function gatherEvidence(
     : EVIDENCE_DEFAULTS.maxCharsPerChunk;
   /** Ids of items whose text was shortened — counted over the RETURNED set. */
   const truncatedIds = new Set<string>();
+  /** Same, for items whose `tableMarkdown` was shortened (separate counter). */
+  const truncatedTableIds = new Set<string>();
   const scopeWhere = options.whereClauses && options.whereClauses.length > 0 ? options.whereClauses : undefined;
 
   // Warnings are informational for the evidence engine — surfaced as progress.
@@ -353,14 +389,24 @@ export async function gatherEvidence(
    * applied here, not at the final cap, because `onEvidence` streams items to
    * job clients before the cap runs — truncating later would leave that path
    * unbounded, which is the flood N-2 is about. Which ids were shortened is
-   * remembered so `stats.caps.chunksTruncated` can be counted over the
-   * returned set only.
+   * remembered so `stats.caps.chunksTruncated` / `.tablesTruncated` can be
+   * counted over the returned set only.
+   *
+   * `tableMarkdown` is bounded by the same knob (R-3): capping `text` alone
+   * left a table-heavy result set able to defeat the payload bound N-2 exists
+   * to enforce. It gets its own counter because `chunksTruncated` is defined
+   * as "returned items whose TEXT was shortened" — folding tables in would
+   * make it mean "text or table" and stop answering that question.
    */
   const toItem = (source: DeepSearchSource, origin: EvidenceItem['source'], rerankScore?: number): EvidenceItem => {
     const item = sourceToEvidenceItem(source, origin, rerankScore);
     if (item.text.length > maxCharsPerChunk) {
       item.text = truncateChunkText(item.text, maxCharsPerChunk);
       truncatedIds.add(item.id);
+    }
+    if (item.tableMarkdown && item.tableMarkdown.length > maxCharsPerChunk) {
+      item.tableMarkdown = truncateTableMarkdown(item.tableMarkdown, maxCharsPerChunk);
+      truncatedTableIds.add(item.id);
     }
     return item;
   };
@@ -431,11 +477,16 @@ export async function gatherEvidence(
   // -- Cap -------------------------------------------------------------------
   // Count is capped only on the final list: RLM rounds add high-value items
   // late, so trimming the stream by count would hide them from a job client.
+  // Reported unconditionally: `evidenceTruncated: true` tells a caller items
+  // were dropped but not how many existed. The `cap` progress event carries
+  // it, but a client that only polls `research_result` never sees that stream.
+  const evidenceTotalBeforeCap = evidence.length;
   const evidenceTruncated = evidence.length > maxEvidence;
   const finalEvidence = evidenceTruncated ? evidence.slice(0, maxEvidence) : evidence;
   // Never counts chunks the caller does not receive: "63 truncations" in a
   // 3-item result is only confusing to someone debugging a short response.
   const chunksTruncated = finalEvidence.reduce((n, it) => n + (truncatedIds.has(it.id) ? 1 : 0), 0);
+  const tablesTruncated = finalEvidence.reduce((n, it) => n + (truncatedTableIds.has(it.id) ? 1 : 0), 0);
   if (evidenceTruncated) {
     emit('cap', `evidence capped at ${maxEvidence} of ${evidence.length} items`, {
       detail: { maxEvidence, total: evidence.length, maxCharsPerChunk, chunksTruncated },
@@ -452,9 +503,18 @@ export async function gatherEvidence(
     // passing it inward would hand the builder the whole phase budget, which
     // is how the outline came to burn 60 s every run (report v4, N-3).
     const provider = options.localOnly ? LOCAL_PROVIDER : (llmProvider ?? LOCAL_PROVIDER);
+    // Resolved independently of decompose (report N-3). This used to read
+    // `llmModel ?? LOCAL_ROUTING.outline?.model`, and `llmModel` is the
+    // already-resolved DECOMPOSE model, so it always won: the outline ran on
+    // the decompose model and `localOutlineModel()` was never called from
+    // anywhere. A resolver failure falls back to the preferred tag rather than
+    // breaking the run — same defensiveness as the decompose resolution.
+    const outlineModel = options.localOnly
+      ? await localOutlineModel(config).catch(() => LOCAL_ROUTING.outline?.model)
+      : (options.model ?? LOCAL_ROUTING.outline?.model);
     const outlineOptions = {
       timeoutMs: LOCAL_ROUTING.outline?.timeoutMs,
-      model: llmModel ?? LOCAL_ROUTING.outline?.model,
+      model: outlineModel,
       maxItems: LOCAL_ROUTING.outline?.maxItems,
       maxCharsPerItem: LOCAL_ROUTING.outline?.maxCharsPerItem,
       // Policy stamp and abort plumbing stay on the call: the outline is an
@@ -520,7 +580,7 @@ export async function gatherEvidence(
       rerankPool: stats.rerankPool,
       ms: Date.now() - t0,
       phases,
-      caps: { maxEvidence, maxCharsPerChunk, evidenceTruncated, chunksTruncated },
+      caps: { maxEvidence, maxCharsPerChunk, evidenceTruncated, evidenceTotalBeforeCap, chunksTruncated, tablesTruncated },
     },
     profile: 'local',
     localOnly: true,

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getJobResult, getJobStatus, parseJobKind } from '@/lib/mcp/research-jobs';
+import { guardMcpRoute } from '@/lib/mcp/execute-auth';
 
 /**
  * GET /api/mcp/{research|report}/:id/result
@@ -10,7 +11,11 @@ import { getJobResult, getJobStatus, parseJobKind } from '@/lib/mcp/research-job
 
 type Ctx = { params: Promise<{ kind: string; id: string }> };
 
-export async function GET(_request: NextRequest, ctx: Ctx) {
+export async function GET(request: NextRequest, ctx: Ctx) {
+  // Gated (R-1): the result body is evidence text over case data.
+  const guard = await guardMcpRoute(request, { label: 'JobResult' });
+  if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
+
   const params = await ctx.params;
   const kind = parseJobKind(params.kind);
   if (!kind) {

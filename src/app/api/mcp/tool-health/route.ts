@@ -1,11 +1,19 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
+import { guardMcpRoute } from '@/lib/mcp/execute-auth';
 
 /**
  * GET /api/mcp/tool-health — readiness status for all tools
+ *
+ * Gated like the catalogue (R-1): it names every tool, and refreshing
+ * dependencies runs smoke tests, which an unauthenticated caller should not
+ * be able to trigger.
  */
-export async function GET() {
+export async function GET(request?: NextRequest) {
   try {
+    const guard = await guardMcpRoute(request, { label: 'ToolHealth' });
+    if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
+
     const registry = await getToolRegistry();
     await registry.refreshDependencies();
     const tools = registry.listTools();

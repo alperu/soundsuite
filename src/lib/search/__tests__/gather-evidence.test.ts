@@ -28,6 +28,9 @@ jest.mock('../deep-search', () => ({
   }),
 }));
 
+/** Deliberately returns a tag the decompose resolver never produces. */
+const localOutlineModelMock = jest.fn();
+
 const buildEvidenceOutlineMock = jest.fn();
 jest.mock('../evidence-outline', () => ({
   buildEvidenceOutline: (...a: unknown[]) => buildEvidenceOutlineMock(...a),
@@ -54,6 +57,7 @@ jest.mock('../../mcp/routing-defaults', () => ({
   },
   // No small tag on the synthetic host → falls through to the completion model.
   localDecomposeModel: jest.fn(async (cfg: { ollamaCompletionModel?: string }) => cfg.ollamaCompletionModel ?? 'default-ollama'),
+  localOutlineModel: (...a: unknown[]) => localOutlineModelMock(...a),
 }));
 
 import { gatherEvidence, resolveResearchMode, DECOMPOSE_HEURISTIC_FALLBACK } from '../gather-evidence';
@@ -94,6 +98,7 @@ function setupHappyPath() {
     return { finalText: 'done', extraSources: [C], roundOf: [1], host: 'sidecar', model: 'test-rlm', rounds: 1, toolCalls: 1, notes: ['rlm round 1: …'] };
   });
   buildEvidenceOutlineMock.mockResolvedValue({ sections: [], gaps: [] });
+  localOutlineModelMock.mockResolvedValue('test-outline-tag');
 }
 
 beforeEach(() => {
@@ -173,10 +178,39 @@ describe('gatherEvidence', () => {
     expect(buildEvidenceOutlineMock).toHaveBeenCalledWith(
       expect.any(Array), 'q', ['q', 'sub one', 'sub two'],
       expect.objectContaining({
-        provider: 'ollama', model: 'test-local-model', profile: 'local',
+        // The outline model is the outline resolver's, not decompose's.
+        provider: 'ollama', model: 'test-outline-tag', profile: 'local',
         timeoutMs: 25_000, maxItems: 40, maxCharsPerItem: 400,
       }),
     );
+  });
+
+  it('(d″) resolves the outline model independently of the decompose model', async () => {
+    // Regression guard for N-3: `model: llmModel ?? …` made the decompose
+    // model always win, so `localOutlineModel()` was never called at all.
+    localOutlineModelMock.mockResolvedValue('outline-only-tag:1b');
+    const r = await gatherEvidence('q', registry, { profile: 'local', localOnly: true, mode: 'deep' });
+
+    expect(localOutlineModelMock).toHaveBeenCalledWith(
+      expect.objectContaining({ ollamaCompletionModel: 'test-local-model' }),
+    );
+    expect(decomposeQueryMock).toHaveBeenCalledWith('q', expect.objectContaining({ model: 'test-local-model' }));
+    expect(buildEvidenceOutlineMock).toHaveBeenCalledWith(
+      expect.any(Array), 'q', expect.any(Array),
+      expect.objectContaining({ model: 'outline-only-tag:1b' }),
+    );
+    expect(r.modelsUsed.outline).toBe('ollama/outline-only-tag:1b');
+    expect(r.modelsUsed.decompose).toBe('ollama/test-local-model');
+  });
+
+  it('(d‴) a failing outline resolver falls back to the preferred tag, not to the run', async () => {
+    localOutlineModelMock.mockRejectedValue(new Error('ollama unreachable'));
+    const r = await gatherEvidence('q', registry, { profile: 'local', localOnly: true, mode: 'deep' });
+    expect(buildEvidenceOutlineMock).toHaveBeenCalledWith(
+      expect.any(Array), 'q', expect.any(Array),
+      expect.objectContaining({ model: 'test-outline-model' }), // LOCAL_ROUTING.outline.model
+    );
+    expect(r.modelsUsed.outline).toBe('ollama/test-outline-model');
   });
 
   it('(e) reports the fields the local profile ignored', async () => {
@@ -235,8 +269,10 @@ describe('gatherEvidence', () => {
       maxEvidence: EVIDENCE_DEFAULTS.maxEvidence,
       maxCharsPerChunk: EVIDENCE_DEFAULTS.maxCharsPerChunk,
       evidenceTruncated: true,
+      evidenceTotalBeforeCap: 45,
       // Counted over the RETURNED items, not the fused pool.
       chunksTruncated: EVIDENCE_DEFAULTS.maxEvidence,
+      tablesTruncated: 0,
     });
   });
 
@@ -268,6 +304,108 @@ describe('gatherEvidence', () => {
     });
     expect(untouched.evidence[0].text).toBe(A.text);
     expect(untouched.stats.caps).toMatchObject({ evidenceTruncated: false, chunksTruncated: 0 });
+  });
+
+  // -- tableMarkdown bound (R-3) --------------------------------------------
+
+  /** Synthetic table: header, delimiter, then `rows` identical-shaped rows. */
+  function tableMarkdown(rows: number): string {
+    const lines = ['| Filing | Filed | Page |', '| --- | --- | --- |'];
+    for (let i = 0; i < rows; i++) {
+      lines.push(`| Motion to compel (CAUSE NO. 00-0000-XX) | 2020-01-${String((i % 28) + 1).padStart(2, '0')} | ${i + 1} |`);
+    }
+    return lines.join('\n');
+  }
+
+  it('bounds tableMarkdown by maxCharsPerChunk and leaves a valid table prefix', async () => {
+    const big = tableMarkdown(200);
+    expect(big.length).toBeGreaterThan(1_000);
+    executeParallelSearchesMock.mockResolvedValue([
+      { subQuery: 'q', sources: [src('short synthetic passage', 1, { tableMarkdown: big })] },
+    ]);
+    const streamed: EvidenceItem[] = [];
+    const r = await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep',
+      retrieval: { maxCharsPerChunk: 400 },
+      onEvidence: (items) => streamed.push(...items),
+    });
+
+    // The cut happens at item construction, so a job client streaming via
+    // onEvidence — which runs before the count cap exists — is bounded too.
+    expect(streamed.length).toBeGreaterThan(0);
+    for (const it of streamed) expect(it.tableMarkdown!.length).toBeLessThanOrEqual(400);
+
+    const md = r.evidence[0].tableMarkdown!;
+    expect(md.length).toBeLessThanOrEqual(400);
+    expect(md.endsWith('… (table truncated)')).toBe(true);
+    // Still renders as a table: header, delimiter row, then whole rows only.
+    const rows = md.slice(0, md.length - '\n… (table truncated)'.length).split('\n');
+    expect(rows[0]).toBe('| Filing | Filed | Page |');
+    expect(rows[1]).toBe('| --- | --- | --- |');
+    expect(rows.length).toBeGreaterThan(2);
+    for (const row of rows) expect(/^\|.*\|$/.test(row)).toBe(true);
+    // Every kept row is one of the originals — never cut mid-row.
+    const original = big.split('\n');
+    for (const row of rows) expect(original).toContain(row);
+
+    expect(r.stats.caps).toMatchObject({ tablesTruncated: 1, chunksTruncated: 0 });
+  });
+
+  it('leaves a short tableMarkdown untouched and counts tables over the returned set', async () => {
+    const small = tableMarkdown(2);
+    const big = tableMarkdown(200);
+    executeParallelSearchesMock.mockResolvedValue([{
+      subQuery: 'q',
+      sources: [
+        src('first synthetic passage', 1, { documentId: 'doc-a', tableMarkdown: small }),
+        src('second synthetic passage', 2, { documentId: 'doc-b', tableMarkdown: big }),
+        // Dropped by maxEvidence — its truncated table must not be counted.
+        src('third synthetic passage', 3, { documentId: 'doc-c', tableMarkdown: big }),
+      ],
+    }]);
+    const r = await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep',
+      retrieval: { maxEvidence: 2, maxCharsPerChunk: 400 },
+    });
+
+    expect(r.evidence).toHaveLength(2);
+    expect(r.evidence[0].tableMarkdown).toBe(small);
+    expect(r.evidence[1].tableMarkdown!.length).toBeLessThanOrEqual(400);
+    expect(r.stats.caps!.tablesTruncated).toBe(1);
+    expect(r.stats.caps!.tablesTruncated).toBeLessThanOrEqual(r.evidence.length);
+  });
+
+  it('bounds tableMarkdown even when the cap admits no whole row', async () => {
+    executeParallelSearchesMock.mockResolvedValue([
+      { subQuery: 'q', sources: [src('short synthetic passage', 1, { tableMarkdown: tableMarkdown(200) })] },
+    ]);
+    const r = await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep',
+      retrieval: { maxCharsPerChunk: 12 },
+    });
+    expect(r.evidence[0].tableMarkdown!.length).toBeLessThanOrEqual(12);
+    expect(r.stats.caps!.tablesTruncated).toBe(1);
+  });
+
+  // -- pre-cap total (R-3) ---------------------------------------------------
+
+  it('reports the pre-cap evidence total whether or not the cap bit', async () => {
+    const pool = Array.from({ length: 9 }, (_, i) => src(`synthetic passage ${i}`, i + 1, { documentId: `doc-${i}` }));
+    executeParallelSearchesMock.mockResolvedValue([{ subQuery: 'q', sources: pool }]);
+
+    const capped = await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep', retrieval: { maxEvidence: 4 },
+    });
+    expect(capped.evidence).toHaveLength(4);
+    expect(capped.stats.caps).toMatchObject({ evidenceTruncated: true, evidenceTotalBeforeCap: 9 });
+
+    const uncapped = await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep', retrieval: { maxEvidence: 50 },
+    });
+    expect(uncapped.evidence).toHaveLength(9);
+    expect(uncapped.stats.caps).toMatchObject({ evidenceTruncated: false, evidenceTotalBeforeCap: 9 });
+    // When nothing was dropped the two agree, so a client can compare them.
+    expect(uncapped.stats.caps!.evidenceTotalBeforeCap).toBe(uncapped.evidence.length);
   });
 
   it('bounds streamed evidence too — a job client never sees an untruncated chunk', async () => {

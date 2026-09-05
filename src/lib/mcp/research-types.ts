@@ -139,11 +139,23 @@ export interface EvidenceResult {
       maxCharsPerChunk: number;
       /** True when items were dropped to satisfy `maxEvidence`. */
       evidenceTruncated: boolean;
-      /** How many chunk texts were shortened to satisfy `maxCharsPerChunk`,
-       * counted over every item built — including items streamed to a job
-       * client and items later dropped by `maxEvidence`, so it can exceed
-       * `evidence.length`. Only `text` is capped; `tableMarkdown` is not. */
+      /** How many items the pipeline accumulated BEFORE `maxEvidence` trimmed
+       * them — always present, equal to `evidence.length` when nothing was
+       * dropped. `evidenceTruncated` says items are missing; this says how
+       * many there were, for a client that polls `research_result` and never
+       * sees the `cap` progress event. */
+      evidenceTotalBeforeCap: number;
+      /** How many of the RETURNED items had their `text` shortened to satisfy
+       * `maxCharsPerChunk`. Counted over the returned set only, so
+       * `chunksTruncated <= evidence.length` holds by construction (the slice
+       * itself still happens at item construction, before the count cap, so
+       * items streamed via `onEvidence` are bounded too). Covers `text` only —
+       * `tableMarkdown` has its own counter. */
       chunksTruncated: number;
+      /** Same shape and same counting rule, for items whose `tableMarkdown`
+       * was shortened to satisfy `maxCharsPerChunk`. Separate from
+       * `chunksTruncated` so that counter keeps meaning "text was cut". */
+      tablesTruncated: number;
     };
   };
   profile: 'local';
@@ -199,8 +211,10 @@ export interface RetrievalSettings {
   limitPerSubQuery?: number;
   rlmMaxRounds?: number;
   maxEvidence?: number;
-  /** Hard cap on the characters of each chunk's `text`; longer chunks are cut
-   * at a word boundary with a trailing ellipsis. Default 1200. */
+  /** Hard cap on the characters of each chunk's `text` AND of its
+   * `tableMarkdown`, applied to the two independently. Longer text is cut at a
+   * word boundary with a trailing ellipsis; a longer table is cut on a row
+   * boundary with a `… (table truncated)` marker. Default 1200. */
   maxCharsPerChunk?: number;
   /** Hard cap on the LLM decompose step (ms); on expiry the engine falls back
    * to a zero-LLM heuristic split. Default 20 000. */

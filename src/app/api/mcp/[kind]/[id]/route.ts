@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cancelJob, getJobStatus, parseJobKind } from '@/lib/mcp/research-jobs';
+import { guardMcpRoute } from '@/lib/mcp/execute-auth';
 
 /**
  * /api/mcp/{research|report}/:id
@@ -7,6 +8,9 @@ import { cancelJob, getJobStatus, parseJobKind } from '@/lib/mcp/research-jobs';
  * GET    — job status; `?cursor=N` returns only evidence with index >= N and
  *          the new cursor to pass back next time.
  * DELETE — cancel (aborts the job's signal).
+ *
+ * Both gated (R-1): the status body streams evidence text, and DELETE kills
+ * someone else's job.
  */
 
 type Ctx = { params: Promise<{ kind: string; id: string }> };
@@ -16,6 +20,9 @@ function notFound(message: string) {
 }
 
 export async function GET(request: NextRequest, ctx: Ctx) {
+  const guard = await guardMcpRoute(request, { label: 'JobStatus' });
+  if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
+
   const params = await ctx.params;
   const kind = parseJobKind(params.kind);
   if (!kind) return notFound('kind must be "research" or "report"');
@@ -28,7 +35,10 @@ export async function GET(request: NextRequest, ctx: Ctx) {
   return NextResponse.json(status);
 }
 
-export async function DELETE(_request: NextRequest, ctx: Ctx) {
+export async function DELETE(request: NextRequest, ctx: Ctx) {
+  const guard = await guardMcpRoute(request, { label: 'JobCancel' });
+  if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
+
   const params = await ctx.params;
   const kind = parseJobKind(params.kind);
   if (!kind) return notFound('kind must be "research" or "report"');

@@ -241,6 +241,9 @@ export async function decomposeQuery(
       {
         maxTokens: 512,
         temperature: 0.1,
+        // Dashboard path: prose output degrades to the single-query fallback below
+        // rather than surfacing an LLM_PARSE_ERROR to the searcher.
+        allowMarkdownFallback: true,
         provider: options?.provider,
         model: options?.model,
         thinking: options?.thinking,
@@ -1334,6 +1337,8 @@ The excerpts above are your evidence — do not repeat or quote them back in bul
       {
         maxTokens: 4096,
         temperature: 0.2,
+        // Dashboard path: prose output falls back to the single-pass report below.
+        allowMarkdownFallback: true,
         provider: options?.provider,
         model: options?.model,
         thinking: options?.thinking,

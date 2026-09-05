@@ -28,6 +28,20 @@ export async function GET(request: NextRequest) {
       const row = await prisma.config.findUnique({ where: { key: singleKey } });
       return NextResponse.json({ key: singleKey, value: row?.value ?? null });
     }
+    // `?resolve=localModels` returns what the MCP local profile would actually
+    // use for decompose and the evidence outline right now — the full chain
+    // (admin config → env → host tags), not just the stored keys. Opt-in
+    // because it probes the Ollama host; the plain GET stays DB-only.
+    if (url.searchParams.get('resolve') === 'localModels') {
+      const config = await getConfig();
+      const { localDecomposeModel, localOutlineModel } = await import('@/lib/mcp/routing-defaults');
+      const [decompose, outline] = await Promise.all([
+        localDecomposeModel(config).catch(() => null),
+        localOutlineModel(config).catch(() => null),
+      ]);
+      return NextResponse.json({ decompose, outline });
+    }
+
     const config = await getConfig();
     return NextResponse.json(config);
   } catch (error: any) {
@@ -121,6 +135,7 @@ export async function POST(request: NextRequest) {
       ollamaCompletionHost: body.ollamaCompletionHost,
       ollamaCompletionModel: body.ollamaCompletionModel,
       ollamaDecomposeModel: body.ollamaDecomposeModel,
+      ollamaOutlineModel: body.ollamaOutlineModel,
       // AI Services — primary/fallback selection
       aiPrimaryProvider: body.aiPrimaryProvider,
       aiPrimaryModel: body.aiPrimaryModel,

@@ -9,6 +9,7 @@ import {
   extractCredential,
   loadMcpApiKeys,
   parseStrictLoopback,
+  parseTrustProxy,
 } from '@/lib/mcp/execute-auth';
 import type { ToolExecutionContext } from '@/lib/mcp/tool-types';
 
@@ -51,6 +52,11 @@ export async function POST(request: NextRequest) {
       hostHeader: request.headers.get('host'),
       forwardedFor: request.headers.get('x-forwarded-for'),
       realIp: request.headers.get('x-real-ip'),
+      forwarded: request.headers.get('forwarded'),
+      // M-5: without a declared proxy, an extra XFF hop / X-Real-IP /
+      // Forwarded can no longer establish loopback. See classifyOrigin for
+      // what that does and does not close.
+      trustProxy: parseTrustProxy(process.env.MCP_TRUST_PROXY),
     });
     const auth = decideExecuteAuth({
       origin,

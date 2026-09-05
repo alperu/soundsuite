@@ -13,6 +13,9 @@ import {
   isLoopbackHost,
   normalizeAuthMode,
   parseStrictLoopback,
+  parseTrustProxy,
+  guardMcpRoute,
+  resetMcpApiKeyCache,
   type ExecuteAuthInput,
 } from '../execute-auth';
 
@@ -83,6 +86,69 @@ describe('classifyOrigin', () => {
 
   it('is remote when nothing identifies the peer', () => {
     expect(classifyOrigin({})).toBe('remote');
+  });
+
+  // --- M-5 / v5 §R-2 -----------------------------------------------------
+  // Next.js sets `x-forwarded-for` from the socket peer when the client did
+  // not (base-server.js:576, `??=`), so a single loopback entry is the normal
+  // shape of a direct request and must stay allowed.
+  it('is loopback for the single Next-injected IPv4 peer entry', () => {
+    expect(
+      classifyOrigin({ urlHostname: 'localhost', hostHeader: 'localhost:3000', forwardedFor: '127.0.0.1' }),
+    ).toBe('loopback');
+  });
+
+  it('is loopback for the single Next-injected IPv6 peer entry', () => {
+    expect(classifyOrigin({ urlHostname: 'localhost', hostHeader: 'localhost:3000', forwardedFor: '::1' })).toBe(
+      'loopback',
+    );
+  });
+
+  // New beyond v5: v5 only probed `<public>, 127.0.0.1`. The reversed chain
+  // used to pass, because the leftmost entry won and `??=` cannot produce a
+  // second entry.
+  it('is remote for a loopback-first multi-hop chain (trustProxy off)', () => {
+    expect(
+      classifyOrigin({
+        urlHostname: 'localhost',
+        hostHeader: 'localhost:3000',
+        forwardedFor: '127.0.0.1, 203.0.113.9',
+      }),
+    ).toBe('remote');
+  });
+
+  it('is remote for a loopback X-Real-IP — Next never injects that header', () => {
+    expect(classifyOrigin({ urlHostname: 'localhost', realIp: '127.0.0.1' })).toBe('remote');
+  });
+
+  it('is remote for a Forwarded header — same reason', () => {
+    expect(classifyOrigin({ urlHostname: 'localhost', forwarded: 'for=127.0.0.1' })).toBe('remote');
+  });
+
+  it('accepts a declared proxy chain and reads the leftmost entry under MCP_TRUST_PROXY', () => {
+    expect(
+      classifyOrigin({ urlHostname: 'localhost', forwardedFor: '127.0.0.1, 10.0.0.5', trustProxy: true }),
+    ).toBe('loopback');
+    expect(
+      classifyOrigin({ urlHostname: 'localhost', forwardedFor: '203.0.113.9, 10.0.0.5', trustProxy: true }),
+    ).toBe('remote');
+  });
+
+  // Documented, deliberately: a forged single-value header is indistinguishable
+  // from the injected one inside a route handler.
+  it('KNOWN GAP: a forged single-value loopback XFF still classifies as loopback', () => {
+    expect(
+      classifyOrigin({ urlHostname: 'localhost', hostHeader: 'localhost:3000', forwardedFor: '127.0.0.1' }),
+    ).toBe('loopback');
+  });
+});
+
+describe('parseTrustProxy', () => {
+  it.each(['1', 'true', 'yes', 'on', 'TRUE', '"1"'])('accepts %s', (v) => {
+    expect(parseTrustProxy(v)).toBe(true);
+  });
+  it.each([undefined, '', '0', 'false', 'no', 'maybe'])('rejects %s', (v) => {
+    expect(parseTrustProxy(v)).toBe(false);
   });
 });
 
@@ -187,6 +253,63 @@ describe('decideExecuteAuth — MCP_AUTH_STRICT_LOOPBACK', () => {
   it('=routed gates only the profile that spends money', () => {
     expect(decide({ strictLoopback: 'routed', keys: [KEY], profile: 'local' }).ok).toBe(true);
     expect(decide({ strictLoopback: 'routed', keys: [KEY], profile: 'routed' }).ok).toBe(false);
+  });
+});
+
+// R-1: the guard every /api/mcp/* handler calls.
+describe('guardMcpRoute', () => {
+  function fakeRequest(hostname: string, headers: Record<string, string> = {}) {
+    return {
+      nextUrl: { hostname },
+      headers: { get: (n: string) => headers[n.toLowerCase()] ?? null },
+    };
+  }
+
+  beforeEach(() => {
+    delete process.env.MCP_API_KEYS;
+    delete process.env.MCP_API_KEY;
+    delete process.env.MCP_AUTH_STRICT_LOOPBACK;
+    delete process.env.MCP_TRUST_PROXY;
+    process.env.MCP_AUTH_MODE = 'none';
+    resetMcpApiKeyCache();
+  });
+
+  it('allows a loopback request with no credential', async () => {
+    const r = await guardMcpRoute(fakeRequest('localhost', { host: 'localhost:3000' }), { label: 'T' });
+    expect(r.ok).toBe(true);
+  });
+
+  it('refuses a remote request with a 401 body the route can return verbatim', async () => {
+    const r = await guardMcpRoute(fakeRequest('localhost', { 'x-forwarded-for': '203.0.113.9' }), { label: 'T' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('unreachable');
+    expect(r.status).toBe(401);
+    expect(r.body.error.code).toBe('AUTH_REQUIRED');
+  });
+
+  it('accepts a configured key from a remote caller', async () => {
+    process.env.MCP_API_KEYS = KEY;
+    resetMcpApiKeyCache();
+    const r = await guardMcpRoute(
+      fakeRequest('localhost', { 'x-forwarded-for': '203.0.113.9', 'x-api-key': KEY }),
+      { label: 'T' },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it('treats an in-process call with no request object as loopback', async () => {
+    const r = await guardMcpRoute(undefined, { label: 'T' });
+    expect(r.ok).toBe(true);
+  });
+
+  it('defaults the profile to local so a listing call is not caught by =routed', async () => {
+    process.env.MCP_API_KEYS = KEY;
+    process.env.MCP_AUTH_STRICT_LOOPBACK = 'routed';
+    resetMcpApiKeyCache();
+    const listing = await guardMcpRoute(fakeRequest('localhost'), { label: 'T' });
+    expect(listing.ok).toBe(true);
+    const routedJob = await guardMcpRoute(fakeRequest('localhost'), { label: 'T', profile: 'routed' });
+    expect(routedJob.ok).toBe(false);
   });
 });
 

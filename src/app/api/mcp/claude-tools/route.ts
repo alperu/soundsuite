@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 import { parseProfileStrict } from '@/lib/mcp/research-types';
+import { guardMcpRoute } from '@/lib/mcp/execute-auth';
 
 /**
  * GET /api/mcp/claude-tools?variant=regex&eager=query_case_knowledge,scan_for_pattern
@@ -23,6 +24,11 @@ import { parseProfileStrict } from '@/lib/mcp/research-types';
  */
 export async function GET(request: NextRequest) {
   try {
+    // Same gate as /api/mcp/tools — this is the same catalogue in another
+    // shape, so it cannot be the unlocked door next to the locked one (R-1).
+    const guard = await guardMcpRoute(request, { label: 'ClaudeTools' });
+    if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
+
     const variant = request.nextUrl.searchParams.get('variant') || 'regex';
     const eagerParam = request.nextUrl.searchParams.get('eager') || '';
     const eagerSet = new Set(eagerParam.split(',').map(s => s.trim()).filter(Boolean));

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 import { parseProfileStrict } from '@/lib/mcp/research-types';
 import { profilePolicyDescription, providersAllowed } from '@/lib/mcp/llm-policy';
+import { guardMcpRoute } from '@/lib/mcp/execute-auth';
 
 /**
  * API route for listing available MCP tools.
@@ -19,10 +20,18 @@ import { profilePolicyDescription, providersAllowed } from '@/lib/mcp/llm-policy
  *     sends it.
  *   - Any other value → 400 INVALID_PROFILE. Listing rejects rather than
  *     coercing so a typo can't be silently mislabeled as `local`.
+ *
+ * Gated on the same origin/auth decision as POST /api/mcp/execute (v5 §R-1:
+ * the catalogue was readable from a forged remote origin). The gate runs
+ * before the profile is parsed, so a refused caller cannot enumerate valid
+ * profile names by telling 400 from 401.
  */
 
 export async function GET(request?: NextRequest) {
   try {
+    const guard = await guardMcpRoute(request, { label: 'Tools' });
+    if (!guard.ok) return NextResponse.json(guard.body, { status: guard.status });
+
     const rawProfile = request?.nextUrl?.searchParams.get('profile') ?? null;
     const profile = parseProfileStrict(rawProfile);
     if (profile === null) {

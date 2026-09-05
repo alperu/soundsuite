@@ -157,19 +157,35 @@ function extractJson<T>(raw: string): T {
 const JSON_REINFORCEMENT = '\n\nCRITICAL: You MUST respond with ONLY a valid JSON object. No markdown, no explanations, no text outside the JSON. Start your response with { and end with }.';
 
 /**
+ * Truncated raw snippet for a parse-failure message.
+ *
+ * The snippet may contain case text, so it is only ever placed on the error
+ * *message* (which travels back to the caller that asked for the analysis) —
+ * never on `logSafeMessage`, which is what gets written to the log
+ * (CLAUDE.md § Privacy).
+ */
+const RAW_SNIPPET_CHARS = 300;
+
+/**
  * Call the LLM and parse the response as JSON.
  * Reinforces JSON-only output in the system prompt to help smaller models.
  * On parse failure, retries the full call (same context) with stronger JSON
  * enforcement so the model gets a second attempt with all source material.
- * If both attempts fail, returns the raw response as markdown via `_markdown`.
+ *
+ * If both attempts fail the call throws `McpError('LLM_PARSE_ERROR')`. Callers
+ * that render prose rather than consuming the parsed shape may opt back into
+ * the legacy `{ _markdown: raw }` degradation with `allowMarkdownFallback:
+ * true`; it defaults **off** so an MCP tool never reports an unparseable model
+ * response as a successful (and, on guarded tools, empty) analysis.
  */
 export async function callLLMJson<T>(
   systemPrompt: string,
   userContent: string,
-  options?: { maxTokens?: number; temperature?: number; provider?: string; model?: string; thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; context?: ToolExecutionContext; jsonSchema?: { type: 'object'; properties?: Record<string, unknown>; required?: string[]; [k: string]: unknown }; signal?: AbortSignal },
+  options?: { maxTokens?: number; temperature?: number; provider?: string; model?: string; thinking?: boolean; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; context?: ToolExecutionContext; jsonSchema?: { type: 'object'; properties?: Record<string, unknown>; required?: string[]; [k: string]: unknown }; signal?: AbortSignal; allowMarkdownFallback?: boolean },
 ): Promise<T> {
+  const { allowMarkdownFallback, ...llmOptions } = options ?? {};
   const reinforcedPrompt = systemPrompt + JSON_REINFORCEMENT;
-  const raw = await callLLM(reinforcedPrompt, userContent, { ...options, jsonMode: true });
+  const raw = await callLLM(reinforcedPrompt, userContent, { ...llmOptions, jsonMode: true });
 
   try {
     return extractJson<T>(raw);
@@ -184,15 +200,28 @@ export async function callLLMJson<T>(
     const retryRaw = await callLLM(
       strongerPrompt,
       userContent,
-      { ...options, jsonMode: true, temperature: 0.1, maxTokens: options?.maxTokens ?? 4096 },
+      { ...llmOptions, jsonMode: true, temperature: 0.1, maxTokens: options?.maxTokens ?? 4096 },
     );
 
     try {
       return extractJson<T>(retryRaw);
     } catch {
-      // All JSON attempts failed — return the raw markdown so the UI can render it.
-      // The _markdown field is picked up by MCPResultRenderer for display.
-      return { _markdown: raw } as unknown as T;
+      if (allowMarkdownFallback) {
+        // Opt-in only: the caller renders prose rather than consuming the
+        // parsed shape. The _markdown field is picked up by MCPResultRenderer.
+        return { _markdown: raw } as unknown as T;
+      }
+      // Fail loudly. An unparseable response is not "nothing found".
+      const err = new McpError(
+        'LLM_PARSE_ERROR',
+        'The model did not return valid JSON after a retry, so no analysis could be produced. ' +
+          `First ${Math.min(RAW_SNIPPET_CHARS, retryRaw.length)} characters of the response: ` +
+          JSON.stringify(retryRaw.slice(0, RAW_SNIPPET_CHARS)),
+      );
+      // Log-safe twin: shape only, never the model's words (may be case text).
+      err.logSafeMessage =
+        `The model did not return valid JSON after a retry (${retryRaw.length} chars); response withheld from logs.`;
+      throw err;
     }
   }
 }
