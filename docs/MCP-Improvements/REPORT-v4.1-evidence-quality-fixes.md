@@ -95,9 +95,37 @@ or client-side defaulting.
 - Bug found while scoping and fixed: `RETRIEVAL_KEYS` omitted `decomposeTimeoutMs` and
   `outlineTimeoutMs`, so both v3 timeout knobs were unreachable from tool parameters.
 
-A counter defect caught in review: `chunksTruncated` initially counted truncations across the full
-fused pool before the item cap trimmed it, so a 3-item result reported 63 truncations. Now counted
-over the returned set.
+### What the two cap counters mean
+
+- **`evidenceTruncated`** — true when the accumulated pool exceeded `maxEvidence` and items were
+  dropped: literally `evidence.length > maxEvidence`, evaluated after retrieval, dedup, rerank and
+  any RLM rounds have contributed, before the outline runs. It concerns **item count only**. When
+  true, the caller holds the top `maxEvidence` items by pipeline rank and there were more. The
+  pre-cap total is on the progress stream (`phase: 'cap'`, `detail.total`), not in `stats`.
+- **`chunksTruncated`** — how many of the **returned** items had their `text` shortened.
+
+A counter defect caught in review: `chunksTruncated` initially counted across the full fused pool
+before the item cap trimmed it, so a 3-item result reported 63 truncations. It now counts over the
+returned set, so `chunksTruncated <= evidence.length` holds by construction.
+
+Note the mechanism, because it is a deliberate design choice rather than an oversight: the text
+*slice* still happens at item construction, before the count cap. Truncating after the cap would
+leave `onEvidence` unbounded — it streams items to job clients (`research_status`) before the cap
+exists, so a `research_start` caller would receive full-length chunks, which is the exact flood N-2
+exists to prevent. What changed is that construction records an id in a set rather than
+incrementing a counter, and the count is computed after `maxEvidence` trims. The cost is one
+discarded `String.slice` per dropped chunk.
+
+**Residual gap:** `maxCharsPerChunk` bounds `item.text` only — **`tableMarkdown` passes through
+uncapped**, so a table-heavy result set can still be large. Documented in the type comment; outside
+this round's brief.
+
+**`outline` is now three-valued:** absent (the `fast` tier has no outline phase), `null` (it ran and
+produced nothing), or an outline object. All four consumers guard with truthiness, so `null`
+narrows out safely.
+
+**The dashboard is unaffected in either direction** — it calls `deepSearch()`, not
+`gatherEvidence()`, whose only callers are the two MCP entry points.
 
 ## N-3 · The outline fails honestly instead of faking it
 
@@ -216,5 +244,8 @@ sent as `Authorization: Bearer <key>` or `X-API-Key: <key>`.
 ## Still open
 
 - **Retrieval serialisation** (the 91 s) — diagnosed precisely, unchanged. Largest remaining win.
+- **`tableMarkdown` is uncapped** by `maxCharsPerChunk`; a table-heavy result set can still be large.
+- **Pre-cap evidence total** is on the progress stream but not in `stats.caps`; add it there if a
+  client needs to know how many items it did not get.
 - **SS-3** per-tool tests for the 12 analysis tools.
 - **M-5** as above: real exposure control is network-level, not this gate.
