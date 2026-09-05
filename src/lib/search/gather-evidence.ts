@@ -26,9 +26,10 @@ import type {
   ResearchProgress,
   ResearchTier,
 } from '../mcp/research-types';
+import { EVIDENCE_DEFAULTS } from '../mcp/research-types';
 import { enforceProvider, LOCAL_PROVIDER } from '../mcp/llm-policy';
 import { LOCAL_ROUTING, localDecomposeModel } from '../mcp/routing-defaults';
-import { DEFAULT_MODELS, getAvailableProvider } from '../mcp/tools/ai-helper';
+import { DEFAULT_MODELS } from '../mcp/tools/ai-helper';
 import { getConfig } from '../db/config';
 import { RLM_MODEL_ID } from '../ai/stream-rlm';
 import {
@@ -40,6 +41,7 @@ import {
   executePatternSearch,
   executePerChipPatternSearches,
   runRlmEvidenceRounds,
+  summariseSubQueryTimings,
   type DecompositionResult,
   type DeepSearchProgress,
   type DeepSearchSource,
@@ -98,9 +100,11 @@ const RLM_THOUGHTS_CAP = 3000;
  */
 export const DECOMPOSE_TIMEOUT_MS = 20_000;
 /**
- * Hard cap on the LLM evidence-outline step. Same failure mode as decompose
- * (a 60K-char prompt at ~16 tok/s on a queued Ollama); past this the outline
- * degrades to a per-document grouping. Override via `retrieval.outlineTimeoutMs`.
+ * Fallback hard cap on the LLM evidence-outline step, used only when
+ * `LOCAL_ROUTING.outline.timeoutMs` is absent. Same failure mode as decompose
+ * (a 60K-char prompt at ~16 tok/s on a queued Ollama); past this the result
+ * carries `outline: null` rather than a fabricated grouping. Override via
+ * `retrieval.outlineTimeoutMs`.
  */
 export const OUTLINE_TIMEOUT_MS = 60_000;
 /** `modelsUsed.decompose` / `.outline` when the LLM step was replaced by a heuristic. */
@@ -139,22 +143,16 @@ async function withPhaseTimeout<T>(
 }
 
 /**
- * Zero-LLM outline: one section per document in evidence-rank order, so a
- * consumer still gets a sections→evidenceIds map when the model is unavailable.
+ * Shorten a chunk to `max` characters on a word boundary with a visible
+ * ellipsis. Never cuts mid-word: if the last space sits implausibly early
+ * (a long unbroken run, e.g. a table row), the hard slice is used instead.
  */
-function heuristicOutline(evidence: EvidenceItem[]): NonNullable<EvidenceResult['outline']> {
-  const byDoc = new Map<string, { title: string; evidenceIds: string[] }>();
-  for (const item of evidence) {
-    const key = item.documentId || 'unknown';
-    let section = byDoc.get(key);
-    if (!section) {
-      const label = item.headingPath?.split(' > ')[0]?.trim();
-      section = { title: label ? `${label} (${key})` : `Document ${key}`, evidenceIds: [] };
-      byDoc.set(key, section);
-    }
-    section.evidenceIds.push(item.id);
-  }
-  return { sections: [...byDoc.values()], gaps: [] };
+export function truncateChunkText(text: string, max: number): string {
+  if (max <= 0 || text.length <= max) return text;
+  const slice = text.slice(0, max);
+  const lastSpace = slice.lastIndexOf(' ');
+  const head = (lastSpace > max * 0.5 ? slice.slice(0, lastSpace) : slice).trimEnd();
+  return `${head} …`;
 }
 
 export type GatherEvidenceInput = GatherEvidenceOptions & {
@@ -224,7 +222,16 @@ export async function gatherEvidence(
   const limitPerSubQuery = retrieval.limitPerSubQuery && retrieval.limitPerSubQuery > 0 ? retrieval.limitPerSubQuery : 50;
   const rlmMaxRounds = retrieval.rlmMaxRounds && retrieval.rlmMaxRounds > 0 ? retrieval.rlmMaxRounds : MCP_RLM_DEFAULT_ROUNDS;
   const decomposeTimeoutMs = retrieval.decomposeTimeoutMs && retrieval.decomposeTimeoutMs > 0 ? retrieval.decomposeTimeoutMs : DECOMPOSE_TIMEOUT_MS;
-  const outlineTimeoutMs = retrieval.outlineTimeoutMs && retrieval.outlineTimeoutMs > 0 ? retrieval.outlineTimeoutMs : OUTLINE_TIMEOUT_MS;
+  const outlineTimeoutMs = retrieval.outlineTimeoutMs && retrieval.outlineTimeoutMs > 0
+    ? retrieval.outlineTimeoutMs
+    : (LOCAL_ROUTING.outline?.timeoutMs ?? OUTLINE_TIMEOUT_MS);
+  // Caps always apply: an uncapped payload is what flooded callers in v4.
+  const maxEvidence = retrieval.maxEvidence && retrieval.maxEvidence > 0 ? retrieval.maxEvidence : EVIDENCE_DEFAULTS.maxEvidence;
+  const maxCharsPerChunk = retrieval.maxCharsPerChunk && retrieval.maxCharsPerChunk > 0
+    ? retrieval.maxCharsPerChunk
+    : EVIDENCE_DEFAULTS.maxCharsPerChunk;
+  /** Ids of items whose text was shortened — counted over the RETURNED set. */
+  const truncatedIds = new Set<string>();
   const scopeWhere = options.whereClauses && options.whereClauses.length > 0 ? options.whereClauses : undefined;
 
   // Warnings are informational for the evidence engine — surfaced as progress.
@@ -305,6 +312,13 @@ export async function gatherEvidence(
   const subQueryResults: SubQueryResult[] = await timed('retrieve', () =>
     executeParallelSearches(scopedSpecs, options.caseId, registry, pushWarning, options.chatId, limitPerSubQuery),
   );
+  // Per-sub-query timings (stream B's instrumentation): summed >> wall clock
+  // means the fan-out really is parallel; summed ≈ wall clock means something
+  // downstream serialised it. Retrieve is 91 s of the local `deep` run.
+  const retrieveTimings = summariseSubQueryTimings(subQueryResults);
+  emit('retrieve', `retrieved ${retrieveTimings.count} sub-quer${retrieveTimings.count === 1 ? 'y' : 'ies'} in ${phases.retrieve ?? 0} ms`, {
+    detail: { timings: retrieveTimings },
+  });
 
   // -- Pattern backstop ------------------------------------------------------
   checkAbort();
@@ -334,6 +348,22 @@ export async function gatherEvidence(
 
   const evidence: EvidenceItem[] = [];
   const seenIds = new Set<string>();
+  /**
+   * The single construction point for evidence items. `maxCharsPerChunk` is
+   * applied here, not at the final cap, because `onEvidence` streams items to
+   * job clients before the cap runs — truncating later would leave that path
+   * unbounded, which is the flood N-2 is about. Which ids were shortened is
+   * remembered so `stats.caps.chunksTruncated` can be counted over the
+   * returned set only.
+   */
+  const toItem = (source: DeepSearchSource, origin: EvidenceItem['source'], rerankScore?: number): EvidenceItem => {
+    const item = sourceToEvidenceItem(source, origin, rerankScore);
+    if (item.text.length > maxCharsPerChunk) {
+      item.text = truncateChunkText(item.text, maxCharsPerChunk);
+      truncatedIds.add(item.id);
+    }
+    return item;
+  };
   const addItems = (items: EvidenceItem[]): EvidenceItem[] => {
     const fresh: EvidenceItem[] = [];
     for (const it of items) {
@@ -345,7 +375,7 @@ export async function gatherEvidence(
     return fresh;
   };
   const reranked = stats.rerankPool > 0;
-  const initial = addItems(sources.map((s) => sourceToEvidenceItem(s, evidenceOrigin(s), reranked ? s.score : undefined)));
+  const initial = addItems(sources.map((s) => toItem(s, evidenceOrigin(s), reranked ? s.score : undefined)));
   if (initial.length > 0) options.onEvidence?.(initial);
 
   // -- RLM rounds (deep-rlm only) --------------------------------------------
@@ -380,7 +410,7 @@ export async function gatherEvidence(
           inheritedWhereClauses: buildRlmInheritedWhereClauses(chipSpecs, scopeWhere),
           onRound: ({ round, sources: roundSources, note }) => {
             const items = addItems(roundSources.map((s) => ({
-              ...sourceToEvidenceItem(s, `rlm-round-${round}`),
+              ...toItem(s, `rlm-round-${round}`),
               rlmNote: note,
             })));
             if (items.length > 0) options.onEvidence?.(items);
@@ -399,48 +429,72 @@ export async function gatherEvidence(
   }
 
   // -- Cap -------------------------------------------------------------------
-  const maxEvidence = retrieval.maxEvidence && retrieval.maxEvidence > 0 ? retrieval.maxEvidence : undefined;
-  const finalEvidence = maxEvidence ? evidence.slice(0, maxEvidence) : evidence;
+  // Count is capped only on the final list: RLM rounds add high-value items
+  // late, so trimming the stream by count would hide them from a job client.
+  const evidenceTruncated = evidence.length > maxEvidence;
+  const finalEvidence = evidenceTruncated ? evidence.slice(0, maxEvidence) : evidence;
+  // Never counts chunks the caller does not receive: "63 truncations" in a
+  // 3-item result is only confusing to someone debugging a short response.
+  const chunksTruncated = finalEvidence.reduce((n, it) => n + (truncatedIds.has(it.id) ? 1 : 0), 0);
+  if (evidenceTruncated) {
+    emit('cap', `evidence capped at ${maxEvidence} of ${evidence.length} items`, {
+      detail: { maxEvidence, total: evidence.length, maxCharsPerChunk, chunksTruncated },
+    });
+  }
 
   // -- Outline (skipped for fast) --------------------------------------------
   let outline: EvidenceResult['outline'] | undefined;
   if (mode !== 'fast') {
     checkAbort();
     emit('outline', `outlining ${finalEvidence.length} evidence items`);
-    let provider = llmProvider;
-    let model = llmModel;
-    if (!provider || !model) {
-      const auto = await getAvailableProvider();
-      provider = provider ?? auto.provider;
-      model = model ?? auto.model;
-    }
+    // The builder owns its own budget (`LOCAL_ROUTING.outline.timeoutMs`,
+    // 25 s). `retrieval.outlineTimeoutMs` is the OUTER phase bound only —
+    // passing it inward would hand the builder the whole phase budget, which
+    // is how the outline came to burn 60 s every run (report v4, N-3).
+    const provider = options.localOnly ? LOCAL_PROVIDER : (llmProvider ?? LOCAL_PROVIDER);
+    const outlineOptions = {
+      timeoutMs: LOCAL_ROUTING.outline?.timeoutMs,
+      model: llmModel ?? LOCAL_ROUTING.outline?.model,
+      maxItems: LOCAL_ROUTING.outline?.maxItems,
+      maxCharsPerItem: LOCAL_ROUTING.outline?.maxCharsPerItem,
+      // Policy stamp and abort plumbing stay on the call: the outline is an
+      // LLM step and `local` must never reach a non-Ollama provider.
+      provider,
+      profile: options.localOnly ? ('local' as const) : options.profile,
+      // Structured-JSON task — see the decompose note on reasoning models.
+      thinking: options.thinking ?? false,
+      effort: options.effort,
+      onWarn: (reason: string) => emit('warning', `outline: ${reason}`),
+    };
     try {
+      // `null` means the outline step produced nothing usable — that is a
+      // reported absence, not a licence to fabricate a per-document grouping.
       outline = await timed('outline', () =>
         withPhaseTimeout('outline', outlineTimeoutMs, signal, (outlineSignal) =>
-          buildEvidenceOutline(query, decomposition!.subQueries, finalEvidence, {
-            provider: provider!,
-            model: model!,
-            // Structured-JSON task — see the decompose note on reasoning models.
-            thinking: options.thinking ?? false,
-            effort: options.effort,
-            signal: outlineSignal,
-            profile: options.localOnly ? 'local' : options.profile,
-          }),
+          buildEvidenceOutline(finalEvidence, query, decomposition!.subQueries, { ...outlineOptions, signal: outlineSignal }),
         ),
       );
-      modelsUsed.outline = `${provider}/${model}`;
+      if (outline) {
+        modelsUsed.outline = `${provider}/${outlineOptions.model}`;
+      } else {
+        outline = null;
+        modelsUsed.outline = 'none';
+        emit('warning', `outline unavailable (${provider}/${outlineOptions.model}) — returning evidence without one`, {
+          detail: { timeoutMs: outlineTimeoutMs },
+        });
+      }
     } catch (err) {
       checkAbort();
       const timedOut = err instanceof PhaseTimeoutError;
       const msg = err instanceof Error ? err.message : String(err);
-      outline = heuristicOutline(finalEvidence);
-      modelsUsed.outline = DECOMPOSE_HEURISTIC_FALLBACK;
+      outline = null;
+      modelsUsed.outline = 'none';
       emit(
         'warning',
         timedOut
-          ? `outline timed out after ${outlineTimeoutMs} ms (${provider}/${model}) — using per-document grouping (${outline.sections.length} sections)`
-          : `outline failed (${msg.slice(0, 160)}) — using per-document grouping (${outline.sections.length} sections)`,
-        { detail: { fallback: DECOMPOSE_HEURISTIC_FALLBACK, timedOut, timeoutMs: outlineTimeoutMs } },
+          ? `outline timed out after ${outlineTimeoutMs} ms (${provider}/${outlineOptions.model}) — returning evidence without an outline`
+          : `outline failed (${msg.slice(0, 160)}) — returning evidence without an outline`,
+        { detail: { timedOut, timeoutMs: outlineTimeoutMs } },
       );
     }
   }
@@ -456,7 +510,9 @@ export async function gatherEvidence(
     },
     subQueries: decomposition!.subQueries,
     evidence: finalEvidence,
-    ...(outline ? { outline } : {}),
+    // `undefined` = the tier has no outline phase (fast); `null` = it ran and
+    // produced nothing. The two are not the same to a caller.
+    ...(outline !== undefined ? { outline } : {}),
     ...(rlm ? { rlm } : {}),
     stats: {
       retrievals,
@@ -464,6 +520,7 @@ export async function gatherEvidence(
       rerankPool: stats.rerankPool,
       ms: Date.now() - t0,
       phases,
+      caps: { maxEvidence, maxCharsPerChunk, evidenceTruncated, chunksTruncated },
     },
     profile: 'local',
     localOnly: true,

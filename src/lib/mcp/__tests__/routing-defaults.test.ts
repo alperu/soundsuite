@@ -14,7 +14,14 @@ jest.mock('../tools/ai-helper', () => ({
 }));
 
 import { getConfig } from '../../db/config';
-import { getDefaultRouting, getDefaultRoutingInfo, OLLAMA_ONLY_NOTE } from '../routing-defaults';
+import {
+  getDefaultRouting,
+  getDefaultRoutingInfo,
+  OLLAMA_ONLY_NOTE,
+  LOCAL_ROUTING,
+  localOutlineModel,
+  resetOllamaTagsCache,
+} from '../routing-defaults';
 
 const mockedGetConfig = getConfig as jest.MockedFunction<typeof getConfig>;
 const ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GROQ_API_KEY', 'GROK_API_KEY', 'XAI_API_KEY'];
@@ -99,5 +106,60 @@ describe('getDefaultRouting (routed profile, cloud-first)', () => {
     expect(info.routing.deep).toMatchObject({ provider: 'groq' });
     // Groq's catalog model has no thinking knob → no `thinking: true`.
     expect(info.routing.deep.thinking).toBeUndefined();
+  });
+});
+
+describe('LOCAL_ROUTING.outline (v4 N-3)', () => {
+  it('caps the outline at 25 s over 40 items of 400 chars', () => {
+    expect(LOCAL_ROUTING.outline).toEqual({
+      model: expect.any(String),
+      timeoutMs: 25_000,
+      maxItems: 40,
+      maxCharsPerItem: 400,
+    });
+    // Must fire before the caller's own outline phase budget (60 s).
+    expect(LOCAL_ROUTING.outline.timeoutMs).toBeLessThan(60_000);
+  });
+});
+
+describe('localOutlineModel', () => {
+  const realFetch = global.fetch;
+  const withTags = (tags: string[]) => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ models: tags.map((name) => ({ name })) }),
+    }) as unknown as typeof fetch;
+  };
+
+  beforeEach(() => {
+    resetOllamaTagsCache();
+    delete process.env.SS_LOCAL_OUTLINE_MODEL;
+    delete process.env.SS_LOCAL_DECOMPOSE_MODEL;
+  });
+  afterEach(() => {
+    global.fetch = realFetch;
+    resetOllamaTagsCache();
+  });
+
+  const config = { ollamaCompletionHost: 'http://localhost:11434', ollamaCompletionModel: 'local-9b' };
+
+  it('prefers the explicit env override', async () => {
+    process.env.SS_LOCAL_OUTLINE_MODEL = 'tiny-instruct:1b';
+    await expect(localOutlineModel(config)).resolves.toBe('tiny-instruct:1b');
+  });
+
+  it('uses the preferred small tag when the host has it', async () => {
+    withTags(['local-9b', LOCAL_ROUTING.outline.model]);
+    await expect(localOutlineModel(config)).resolves.toBe(LOCAL_ROUTING.outline.model);
+  });
+
+  it('falls back to any small instruct tag on the host', async () => {
+    withTags(['local-9b', 'llama3.2:3b']);
+    await expect(localOutlineModel(config)).resolves.toBe('llama3.2:3b');
+  });
+
+  it('never regresses below the decompose model when nothing small is pulled', async () => {
+    withTags(['local-9b']);
+    await expect(localOutlineModel(config)).resolves.toBe('local-9b');
   });
 });

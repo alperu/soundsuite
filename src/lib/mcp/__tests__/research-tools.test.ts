@@ -94,11 +94,11 @@ describe('tool set', () => {
 });
 
 describe('research_evidence', () => {
-  it('runs synchronously for non-RLM tiers, local-only, reporting ignored steering fields', async () => {
+  it('runs synchronously for tiers that fit one call, local-only, reporting ignored steering fields', async () => {
     gatherEvidenceMock.mockImplementation(async (q: string, _r: unknown, o: GatherEvidenceOptions & { ignored?: string[] }) =>
-      ({ ...evidenceResult(q, [item(0)]), routing: { requested: 'deep', mode: 'deep', reason: 'r', confidence: 1, ignored: o.ignored } }));
+      ({ ...evidenceResult(q, [item(0)]), routing: { requested: 'fast', mode: 'fast', reason: 'r', confidence: 1, ignored: o.ignored } }));
     const res = await tools.research_evidence.execute(
-      { query: 'what did the order say', mode: 'deep', provider: 'anthropic', preset: { routing: { deep: {} }, retrieval: { maxEvidence: 5 } } },
+      { query: 'what did the order say', mode: 'fast', provider: 'anthropic', preset: { routing: { deep: {} }, retrieval: { maxEvidence: 5 } } },
       context, config,
     );
     expect(res.success).toBe(true);
@@ -106,8 +106,24 @@ describe('research_evidence', () => {
     expect(res.data.routing.ignored).toEqual(['provider', 'preset.routing']);
     const [, registry, opts] = gatherEvidenceMock.mock.calls[0];
     expect(registry).toBe(fakeRegistry);
-    expect(opts).toMatchObject({ localOnly: true, profile: 'local', mode: 'deep', retrieval: { maxEvidence: 5 }, sessionId: 'session-1' });
+    expect(opts).toMatchObject({ localOnly: true, profile: 'local', mode: 'fast', retrieval: { maxEvidence: 5 }, sessionId: 'session-1' });
     expect(opts.provider).toBeUndefined();
+  });
+
+  it('rejects an unknown parameter instead of silently dropping it', async () => {
+    const res = await tools.research_evidence.execute({ query: 'q', mode: 'fast', maxResults: 10 }, context, config);
+    expect(res).toMatchObject({ success: false, errorCode: 'INVALID_PARAMS' });
+    expect(res.error).toMatch(/maxResults/);
+  });
+
+  it('promotes any tier the shared estimate expects to outrun one call — local `deep` included', async () => {
+    const g = controlledGather();
+    const res = await tools.research_evidence.execute({ query: 'what did the order say', mode: 'deep' }, context, config);
+    expect(res.success).toBe(true);
+    expect(res.data).toMatchObject({ promoted: true, kind: 'research' });
+    expect(res.data.hint).toMatch(/research_status/);
+    await g.started;
+    g.finish(evidenceResult('what did the order say', []));
   });
 
   it('promotes deep-rlm to a job', async () => {

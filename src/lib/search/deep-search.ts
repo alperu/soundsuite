@@ -305,6 +305,37 @@ export async function decomposeQuery(
 export interface SubQueryResult {
   subQuery: string;
   sources: DeepSearchSource[];
+  /**
+   * Wall clock for this one dispatch (ms). Set by `executeParallelSearches`;
+   * absent on pattern-search results. Retrieve-phase instrumentation for
+   * report v4 N-8 — the fan-out is a `Promise.all`, so a per-sub-query time
+   * close to the phase total means the queueing is downstream, not here.
+   */
+  ms?: number;
+}
+
+/** One-line retrieve-phase profile: total, slowest/fastest dispatch, per-query ms. */
+export function summariseSubQueryTimings(results: ReadonlyArray<SubQueryResult>): {
+  count: number;
+  slowestMs: number;
+  fastestMs: number;
+  totalMs: number;
+  perSubQuery: Array<{ subQuery: string; ms: number; sources: number }>;
+} {
+  const timed = results.filter((r): r is SubQueryResult & { ms: number } => typeof r.ms === 'number');
+  const perSubQuery = timed.map((r) => ({
+    subQuery: r.subQuery.slice(0, 80),
+    ms: r.ms,
+    sources: r.sources.length,
+  }));
+  const values = timed.map((r) => r.ms);
+  return {
+    count: timed.length,
+    slowestMs: values.length ? Math.max(...values) : 0,
+    fastestMs: values.length ? Math.min(...values) : 0,
+    totalMs: values.reduce((a, b) => a + b, 0),
+    perSubQuery,
+  };
 }
 
 /**
@@ -459,6 +490,7 @@ export async function executeParallelSearches(
   const specs: SubQuerySpec[] = subQueries.map(s => (typeof s === 'string' ? { query: s } : s));
   const promises = specs.map(async (spec): Promise<SubQueryResult> => {
     const subQuery = spec.query;
+    const startedAt = Date.now();
     try {
       const searchResult = await registry.execute('query_case_knowledge', {
         query: subQuery,
@@ -474,10 +506,10 @@ export async function executeParallelSearches(
         if (searchResult.error && pushWarning) {
           pushWarning({ source: 'query_case_knowledge', reason: 'tool-error', message: searchResult.error });
         }
-        return { subQuery, sources: [] };
+        return { subQuery, sources: [], ms: Date.now() - startedAt };
       }
       if (!searchResult.data?.results) {
-        return { subQuery, sources: [] };
+        return { subQuery, sources: [], ms: Date.now() - startedAt };
       }
 
       const sources: DeepSearchSource[] = searchResult.data.results.map(
@@ -497,14 +529,28 @@ export async function executeParallelSearches(
         }),
       );
 
-      return { subQuery, sources };
+      return { subQuery, sources, ms: Date.now() - startedAt };
     } catch {
       // Individual sub-query failure — skip it
-      return { subQuery, sources: [] };
+      return { subQuery, sources: [], ms: Date.now() - startedAt };
     }
   });
 
-  return Promise.all(promises);
+  const results = await Promise.all(promises);
+
+  // Retrieve-phase profile (report v4 N-8). The dispatch above is a true
+  // fan-out, so when every sub-query takes about as long as the whole phase
+  // the contention is downstream (embedding / rerank on one Ollama host).
+  const t = summariseSubQueryTimings(results);
+  if (t.count > 0) {
+    console.log(
+      `[Deep Search] retrieve fan-out: ${t.count} sub-quer${t.count === 1 ? 'y' : 'ies'}, ` +
+      `slowest ${t.slowestMs} ms, fastest ${t.fastestMs} ms, summed ${t.totalMs} ms ` +
+      `(summed >> wall clock means parallel; summed ~= wall clock means serialised downstream)`,
+    );
+  }
+
+  return results;
 }
 
 // ---------------------------------------------------------------------------

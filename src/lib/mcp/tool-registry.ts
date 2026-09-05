@@ -76,6 +76,17 @@ export class ToolRegistry {
   }
 
   /**
+   * Last Ollama readiness seen by the registry, after hysteresis.
+   *
+   * `degraded: true` means a smoke failed but the last-known-good value is
+   * still being served, so LLM tools remain visible to `local` — surfaced by
+   * `GET /api/mcp/tool-health` as "degraded, still serving" (N-4).
+   */
+  getOllamaReadiness(): OllamaReadiness | null {
+    return this.ollamaState;
+  }
+
+  /**
    * Register tools and load persisted configs (or fall back to defaults).
    */
   async registerAll(tools: BaseMCPTool[]): Promise<void> {

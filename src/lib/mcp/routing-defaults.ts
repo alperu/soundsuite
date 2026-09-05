@@ -18,11 +18,34 @@ import { getAvailableProvider, DEFAULT_MODELS } from './tools/ai-helper';
 import { LOCAL_PROVIDER } from './llm-policy';
 import type { ResearchTier, TierSettings } from './research-types';
 
-export const LOCAL_ROUTING: Record<ResearchTier, TierSettings> = {
+/**
+ * Preferred tag for the local evidence outline. Smaller than the decompose
+ * model on purpose: this is JSON extraction over ≤40 already-retrieved
+ * excerpts. Override with `SS_LOCAL_OUTLINE_MODEL`. Resolution falls back to
+ * whatever the host actually has — see `localOutlineModel()`.
+ */
+export const LOCAL_OUTLINE_MODEL = process.env.SS_LOCAL_OUTLINE_MODEL || 'qwen3:1.7b';
+
+/**
+ * Budget for the local evidence outline (report v4, N-3). The outline is
+ * constrained JSON extraction over text that has already been retrieved — it
+ * does not need the 9B completion model, all 150 items, or a minute of wall
+ * clock. Caps the input, the model size, and the ceiling.
+ */
+export interface OutlineRouting {
+  /** Preferred Ollama tag; resolve at call time with `localOutlineModel()`. */
+  model: string;
+  timeoutMs: number;
+  maxItems: number;
+  maxCharsPerItem: number;
+}
+
+export const LOCAL_ROUTING: Record<ResearchTier, TierSettings> & { outline: OutlineRouting } = {
   fast:          { provider: LOCAL_PROVIDER },
   deep:          { provider: LOCAL_PROVIDER },
   'deep-report': { provider: LOCAL_PROVIDER, multiPass: true },
   'deep-rlm':    { provider: LOCAL_PROVIDER, useRlm: true, rlmMaxRounds: 2 },
+  outline:       { model: LOCAL_OUTLINE_MODEL, timeoutMs: 25_000, maxItems: 40, maxCharsPerItem: 400 },
 };
 
 // ---------------------------------------------------------------------------
@@ -100,6 +123,31 @@ export async function localDecomposeModel(config: {
   const small = tags.find((t) => SMALL_DECOMPOSE_TAG.test(t));
   if (small) return small;
   return config.ollamaCompletionModel || DEFAULT_MODELS.ollama;
+}
+
+/**
+ * Resolve the Ollama model for the evidence outline. Preference order:
+ *   1. `SS_LOCAL_OUTLINE_MODEL` (env, explicit operator choice)
+ *   2. `LOCAL_ROUTING.outline.model` when that tag is present on the host
+ *   3. any small instruct tag on the host (`SMALL_DECOMPOSE_TAG`)
+ *   4. `localDecomposeModel(config)` — never worse than today's behaviour
+ *
+ * Step 2 matters only if the operator has pulled the small tag; without it we
+ * land on the same model decompose uses, and the win is the input cap and the
+ * 25 s ceiling rather than the model swap.
+ */
+export async function localOutlineModel(config: {
+  ollamaDecomposeModel?: string;
+  ollamaCompletionModel?: string;
+  ollamaCompletionHost?: string;
+  ollamaHost?: string;
+}): Promise<string> {
+  if (process.env.SS_LOCAL_OUTLINE_MODEL?.trim()) return process.env.SS_LOCAL_OUTLINE_MODEL.trim();
+  const tags = await listOllamaTags(config);
+  if (tags.includes(LOCAL_ROUTING.outline.model)) return LOCAL_ROUTING.outline.model;
+  const small = tags.find((t) => SMALL_DECOMPOSE_TAG.test(t));
+  if (small) return small;
+  return localDecomposeModel(config);
 }
 
 function isProviderKey(v: unknown): v is AIProviderKey {

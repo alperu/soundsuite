@@ -5,8 +5,11 @@
 //
 // The bridge is a forwarder. It requires SOUND_SUITE_PROFILE (exit 2 if it is
 // missing or not local|routed), forwards it to the
-// server, and relays job events as MCP notifications. It knows nothing about
-// presets, models, or evidence — every policy decision is Sound Suite's.
+// server, relays job events as MCP notifications, and mirrors JSON tool
+// results into structuredContent verbatim. It knows nothing about presets,
+// models, or evidence — every policy decision is Sound Suite's. In
+// particular it never trims, caps or reshapes a result: size policy belongs
+// to the server.
 
 import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -42,6 +45,10 @@ const POLL_INTERVAL_MS = 60_000;
 const log = (...args) => console.error(`[sound-suite-bridge:${PROFILE}]`, ...args);
 
 let cachedTools = null; // last successfully fetched, filtered tool list
+
+function isPlainObject(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
 
 function authHeaders(extra = {}) {
   const headers = { ...extra };
@@ -254,6 +261,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     maybeStartRelay(data, progressToken, sessionId);
 
     const resultText = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    // The text block stays exactly as it was — clients that never look at
+    // structuredContent must not regress, and the spec's own backward-compat
+    // guidance is to serve both. structuredContent must be a JSON *object*
+    // (the CallToolResult schema is a record), so arrays and scalars that
+    // happen to parse are forwarded as text only. The bridge does not invent
+    // an envelope for them: shaping the result is Sound Suite's job.
+    if (isPlainObject(data)) {
+      return { content: [{ type: "text", text: resultText }], structuredContent: data };
+    }
     return { content: [{ type: "text", text: resultText }] };
   } catch (err) {
     return {

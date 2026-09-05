@@ -136,3 +136,36 @@ describe('recordStatusFromTags', () => {
     expect(recordStatusFromTags('{}')).toBe('unknown');
   });
 });
+
+describe('detectDraftStatus — prose false positives', () => {
+  // Regression: bare "not filed" matched ordinary litigation prose about a
+  // party's conduct and flagged genuinely filed documents as drafts.
+  it('does not treat "has not filed a bond" prose as a draft marker', () => {
+    const r = detectDraftStatus({
+      fileName: 'motion.pdf',
+      firstPagesText:
+        'CAUSE NO. 00-0000-XX\nRespondent has not filed a supersedeas bond, cash deposit in lieu ' +
+        'of bond, or other security pursuant to the applicable rule.',
+    });
+    expect(r.signals).not.toContain('body:not-for-filing');
+    expect(r.recordStatus).not.toBe('draft');
+    expect(r.isDraft).toBe(false);
+  });
+
+  it('still flags an explicit NOT FOR FILING marker', () => {
+    const r = detectDraftStatus({
+      fileName: 'order.pdf',
+      firstPagesText: 'DRAFT — NOT FOR FILING\nCAUSE NO. 00-0000-XX\nProposed order granting relief.',
+    });
+    expect(r.signals).toContain('body:not-for-filing');
+    expect(r.recordStatus).toBe('draft');
+  });
+
+  it('still flags an explicit DO NOT FILE marker', () => {
+    const r = detectDraftStatus({
+      fileName: 'order.pdf',
+      firstPagesText: 'DO NOT FILE — attorney working copy\nCAUSE NO. 00-0000-XX\nDated: ______',
+    });
+    expect(r.signals).toContain('body:not-for-filing');
+  });
+});

@@ -63,12 +63,41 @@ export const RESEARCH_TIERS: readonly ResearchTier[] = ['fast', 'deep', 'deep-re
 // Evidence (Appendix A)
 // ---------------------------------------------------------------------------
 
+/**
+ * Default caps on what leaves the machine in one evidence payload. Without
+ * them a `fast` run returned 80 items / ~97 KB in a single block (REPORT-v4
+ * N-2), which floods the caller's context. Overridable per request via
+ * `retrieval.maxEvidence` / `retrieval.maxCharsPerChunk` (or the same two
+ * knobs at the top level of the tool params).
+ */
+export const EVIDENCE_DEFAULTS = { maxEvidence: 40, maxCharsPerChunk: 1200 } as const;
+
 export interface EvidenceItem {
   id: string;
   documentId: string;
   text: string;
   score: number;
   rerankScore?: number;
+  // -- Citation family (REPORT-v4 N-1) --------------------------------------
+  // The retrieval layer already produces these; without them a client holds a
+  // UUID and a paragraph and cannot cite anything. All optional: a chunk from
+  // a chat attachment or a document without filing metadata carries fewer.
+  /** Full citation string as the retrieval layer formatted it. */
+  citation?: string;
+  /** Abbreviated citation for inline use. */
+  citationShort?: string;
+  /** 1-based page number the chunk was found on. */
+  page?: number;
+  /** Human-readable document name (`documentId` stays the opaque id). */
+  document?: string;
+  /** Filing type of the source document (e.g. 'motion', 'order'). */
+  filingType?: string;
+  /** Volume number for multi-volume records. */
+  volumeNumber?: number;
+  /** Cause / case number of the source document. */
+  caseNumber?: string;
+  /** Slug of the filing the document belongs to — dashboard deep links. */
+  filingSlug?: string;
   blockType?: 'paragraph' | 'table' | 'footnote' | 'figure';
   headingPath?: string;
   speakers?: string;
@@ -92,10 +121,11 @@ export interface EvidenceResult {
   };
   subQueries: string[];
   evidence: EvidenceItem[];
+  /** `null` when the outline step produced nothing — never a fabricated one. */
   outline?: {
     sections: { title: string; evidenceIds: string[]; gap?: string }[];
     gaps: string[];
-  };
+  } | null;
   rlm?: { rounds: number; toolCalls: number; notes: string[] };
   stats: {
     retrievals: number;
@@ -103,6 +133,18 @@ export interface EvidenceResult {
     rerankPool: number;
     ms: number;
     phases: Record<string, number>;
+    /** Caps applied to this payload, so truncation is visible to the caller. */
+    caps?: {
+      maxEvidence: number;
+      maxCharsPerChunk: number;
+      /** True when items were dropped to satisfy `maxEvidence`. */
+      evidenceTruncated: boolean;
+      /** How many chunk texts were shortened to satisfy `maxCharsPerChunk`,
+       * counted over every item built — including items streamed to a job
+       * client and items later dropped by `maxEvidence`, so it can exceed
+       * `evidence.length`. Only `text` is capped; `tableMarkdown` is not. */
+      chunksTruncated: number;
+    };
   };
   profile: 'local';
   localOnly: true;
@@ -157,6 +199,9 @@ export interface RetrievalSettings {
   limitPerSubQuery?: number;
   rlmMaxRounds?: number;
   maxEvidence?: number;
+  /** Hard cap on the characters of each chunk's `text`; longer chunks are cut
+   * at a word boundary with a trailing ellipsis. Default 1200. */
+  maxCharsPerChunk?: number;
   /** Hard cap on the LLM decompose step (ms); on expiry the engine falls back
    * to a zero-LLM heuristic split. Default 20 000. */
   decomposeTimeoutMs?: number;

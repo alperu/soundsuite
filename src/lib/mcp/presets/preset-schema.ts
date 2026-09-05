@@ -35,7 +35,11 @@ const TIER_SETTING_KEYS: readonly (keyof TierSettings)[] = [
   'provider', 'model', 'effort', 'thinking', 'maxTokens', 'multiPass', 'useRlm', 'rlmMaxRounds',
 ];
 
-const RETRIEVAL_KEYS = ['rerankPoolSize', 'limitPerSubQuery', 'rlmMaxRounds', 'maxEvidence'] as const;
+const RETRIEVAL_KEYS = [
+  'rerankPoolSize', 'limitPerSubQuery', 'rlmMaxRounds', 'maxEvidence', 'maxCharsPerChunk',
+  // ms budgets for the two LLM phases (see RetrievalSettings).
+  'decomposeTimeoutMs', 'outlineTimeoutMs',
+] as const;
 
 /** Top-level v1/v2 knobs that carry over verbatim when they have the right type. */
 const TOP_LEVEL_BOOL = ['deep', 'rlm', 'multiPass', 'thinking', 'includeCaseScope'] as const;

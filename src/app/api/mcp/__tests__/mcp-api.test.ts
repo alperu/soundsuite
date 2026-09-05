@@ -22,6 +22,12 @@ jest.mock('@/lib/mcp/get-tool-registry', () => ({
   getToolRegistry: jest.fn(async () => mockRegistry),
 }))
 
+// The execute route reads the `mcp.apiKeys` config row when authenticating;
+// keep the suite off the real database.
+jest.mock('@/lib/db/prisma', () => ({
+  prisma: { config: { findUnique: jest.fn(async () => null) } },
+}))
+
 function postReq(body: unknown) {
   return new NextRequest('http://localhost:3000/api/mcp/execute', {
     method: 'POST',
@@ -63,13 +69,16 @@ describe('POST /api/mcp/execute', () => {
   it('passes provider/model through as a context override', async () => {
     mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
     const { POST } = await import('../execute/route')
-    await POST(postReq({ tool: 'query_case_knowledge', params: { query: 'test' }, provider: 'openai', model: 'gpt-4' }))
+    // `routed`: a cloud provider under `local` is a policy violation (N-6).
+    await POST(
+      postReq({ tool: 'query_case_knowledge', params: { query: 'test' }, provider: 'openai', model: 'gpt-4', profile: 'routed' }),
+    )
 
     expect(mockRegistry.execute).toHaveBeenCalledWith(
       'query_case_knowledge',
       { query: 'test' },
       { aiProvider: 'openai', aiModel: 'gpt-4' },
-      'local',
+      'routed',
     )
   })
 
@@ -107,6 +116,152 @@ describe('POST /api/mcp/execute', () => {
     expect(res.status).toBe(500)
     expect(data.error.code).toBe('EXECUTION_FAILED')
     expect(data.error.message).toContain('Boom')
+  })
+})
+
+// --- N-6: the policy choke point must see the raw request fields ----------
+describe('POST /api/mcp/execute — LLM policy on raw fields', () => {
+  it.each([
+    ['provider only', { provider: 'anthropic' }],
+    ['provider + model', { provider: 'anthropic', model: 'claude-sonnet-5' }],
+  ])('refuses a non-Ollama provider under local (%s) with 403 POLICY_VIOLATION', async (_label, extra) => {
+    const { POST } = await import('../execute/route')
+    const res = await POST(postReq({ tool: 'query_case_knowledge', params: { query: 'test' }, ...extra }))
+    const data = await res.json()
+
+    expect(res.status).toBe(403)
+    expect(data.error.code).toBe('POLICY_VIOLATION')
+    expect(data.error.message).toContain('routed')
+    expect(mockRegistry.execute).not.toHaveBeenCalled()
+  })
+
+  it('allows provider: ollama under local', async () => {
+    mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
+    const { POST } = await import('../execute/route')
+    const res = await POST(postReq({ tool: 'query_case_knowledge', params: { query: 'test' }, provider: 'ollama' }))
+    expect(res.status).toBe(200)
+  })
+
+  it('allows a bare provider under routed', async () => {
+    mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
+    const { POST } = await import('../execute/route')
+    const res = await POST(
+      postReq({ tool: 'query_case_knowledge', params: { query: 'test' }, provider: 'anthropic', profile: 'routed' }),
+    )
+    expect(res.status).toBe(200)
+  })
+})
+
+// --- N-9 / M-5: authentication ------------------------------------------
+// Keys here are synthetic placeholders, never a real key.
+describe('POST /api/mcp/execute — authentication', () => {
+  const SYNTHETIC_KEY = 'synthetic-key-aaaa'
+
+  function req(url: string, headers: Record<string, string>, body: unknown) {
+    return new NextRequest(url, { method: 'POST', headers, body: JSON.stringify(body) })
+  }
+
+  const call = { tool: 'query_case_knowledge', params: { query: 'test' } }
+
+  beforeEach(async () => {
+    delete process.env.MCP_API_KEYS
+    delete process.env.MCP_API_KEY
+    delete process.env.MCP_AUTH_STRICT_LOOPBACK
+    process.env.MCP_AUTH_MODE = 'none'
+    const { resetMcpApiKeyCache } = await import('@/lib/mcp/execute-auth')
+    resetMcpApiKeyCache()
+  })
+
+  it.each(['local', 'routed'])('allows an unauthenticated loopback call (%s) — dev must keep working', async (profile) => {
+    mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
+    const { POST } = await import('../execute/route')
+    const res = await POST(req('http://localhost:3000/api/mcp/execute', {}, { ...call, profile }))
+    expect(res.status).toBe(200)
+  })
+
+  it.each(['local', 'routed'])('refuses an unauthenticated remote call (%s) with 401', async (profile) => {
+    const { POST } = await import('../execute/route')
+    const res = await POST(
+      req('http://localhost:3000/api/mcp/execute', { 'x-forwarded-for': '203.0.113.9' }, { ...call, profile }),
+    )
+    const data = await res.json()
+    expect(res.status).toBe(401)
+    expect(data.error.code).toBe('AUTH_REQUIRED')
+    expect(data.error.message).toContain('MCP_API_KEYS')
+    expect(mockRegistry.execute).not.toHaveBeenCalled()
+  })
+
+  it('accepts a remote call carrying a configured key as a bearer token', async () => {
+    process.env.MCP_API_KEYS = SYNTHETIC_KEY
+    mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
+    const { POST } = await import('../execute/route')
+    const res = await POST(
+      req(
+        'http://localhost:3000/api/mcp/execute',
+        { 'x-forwarded-for': '203.0.113.9', authorization: `Bearer ${SYNTHETIC_KEY}` },
+        call,
+      ),
+    )
+    expect(res.status).toBe(200)
+  })
+
+  it('refuses a remote call with a wrong key', async () => {
+    process.env.MCP_API_KEYS = SYNTHETIC_KEY
+    const { POST } = await import('../execute/route')
+    const res = await POST(
+      req(
+        'http://localhost:3000/api/mcp/execute',
+        { 'x-forwarded-for': '203.0.113.9', 'x-api-key': 'synthetic-key-wrong' },
+        call,
+      ),
+    )
+    const data = await res.json()
+    expect(res.status).toBe(401)
+    expect(data.error.code).toBe('AUTH_FAILED')
+  })
+
+  it('allows a loopback call that carries a real Host header (the dashboard shape)', async () => {
+    mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
+    const { POST } = await import('../execute/route')
+    const res = await POST(req('http://localhost:3000/api/mcp/execute', { host: 'localhost:3000' }, call))
+    expect(res.status).toBe(200)
+  })
+
+  it('refuses a tunnelled request — cloudflared connects to loopback but sets a public Host', async () => {
+    const { POST } = await import('../execute/route')
+    const res = await POST(req('http://localhost:3000/api/mcp/execute', { host: 'mcp.example.test' }, call))
+    expect(res.status).toBe(401)
+    expect(mockRegistry.execute).not.toHaveBeenCalled()
+  })
+
+  it('refuses a LAN-IP request (server-info advertises this endpoint on the LAN)', async () => {
+    const { POST } = await import('../execute/route')
+    const res = await POST(req('http://192.168.1.20:3000/api/mcp/execute', { host: '192.168.1.20:3000' }, call))
+    expect(res.status).toBe(401)
+  })
+
+  it('fails closed on an unparseable MCP_AUTH_MODE', async () => {
+    process.env.MCP_AUTH_MODE = 'api_key'
+    const { POST } = await import('../execute/route')
+    const res = await POST(req('http://localhost:3000/api/mcp/execute', {}, call))
+    const data = await res.json()
+    expect(res.status).toBe(401)
+    expect(data.error.code).toBe('AUTH_MISCONFIGURED')
+    expect(data.error.message).toContain('api_key')
+  })
+
+  it('gates loopback too under MCP_AUTH_STRICT_LOOPBACK=1', async () => {
+    process.env.MCP_API_KEYS = SYNTHETIC_KEY
+    process.env.MCP_AUTH_STRICT_LOOPBACK = '1'
+    const { POST } = await import('../execute/route')
+    const denied = await POST(req('http://localhost:3000/api/mcp/execute', {}, call))
+    expect(denied.status).toBe(401)
+
+    mockRegistry.execute.mockResolvedValueOnce({ success: true, data: {} })
+    const allowed = await POST(
+      req('http://localhost:3000/api/mcp/execute', { 'x-api-key': SYNTHETIC_KEY }, call),
+    )
+    expect(allowed.status).toBe(200)
   })
 })
 

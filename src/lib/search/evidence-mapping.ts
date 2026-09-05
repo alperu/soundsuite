@@ -36,6 +36,17 @@ export function sourceToEvidenceItem(
     text: source.text,
     score: source.score,
     ...(typeof rerankScore === 'number' ? { rerankScore } : {}),
+    // Citation family — the caller cites from these; a UUID is not a citation.
+    ...(source.citation ? { citation: source.citation } : {}),
+    ...(source.citationShort ? { citationShort: source.citationShort } : {}),
+    ...(typeof source.page === 'number' && Number.isFinite(source.page) ? { page: source.page } : {}),
+    ...(source.document ? { document: source.document } : {}),
+    ...(source.filingType ? { filingType: source.filingType } : {}),
+    ...(typeof source.volumeNumber === 'number' && Number.isFinite(source.volumeNumber)
+      ? { volumeNumber: source.volumeNumber }
+      : {}),
+    ...(source.caseNumber ? { caseNumber: source.caseNumber } : {}),
+    ...(source.filingSlug ? { filingSlug: source.filingSlug } : {}),
     ...(blockType ? { blockType } : {}),
     ...(source.headingPath ? { headingPath: source.headingPath } : {}),
     ...(source.speakers ? { speakers: source.speakers } : {}),

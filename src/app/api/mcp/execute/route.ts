@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 import { deriveSessionId, recordActivity } from '@/lib/admin/session-store';
 import { parseProfile } from '@/lib/mcp/research-types';
+import { enforceProvider, McpError } from '@/lib/mcp/llm-policy';
+import {
+  classifyOrigin,
+  decideExecuteAuth,
+  extractCredential,
+  loadMcpApiKeys,
+  parseStrictLoopback,
+} from '@/lib/mcp/execute-auth';
 import type { ToolExecutionContext } from '@/lib/mcp/tool-types';
 
 /**
@@ -12,6 +20,14 @@ import type { ToolExecutionContext } from '@/lib/mcp/tool-types';
  * missing or malformed value is `local` (fail-closed) — unlike the tools
  * listing, where a missing profile means "no filter". The dashboard sends
  * `profile: 'routed'` explicitly so its provider picker keeps working.
+ *
+ * Two gates run before the registry (report v4, stream C):
+ *  - Authentication (`execute-auth.ts`): loopback stays open by default,
+ *    non-loopback callers must present a configured API key.
+ *  - The LLM policy, applied to the **raw** request fields: a `local` call
+ *    naming a non-Ollama provider is refused with 403 `POLICY_VIOLATION`
+ *    whether or not a `model` accompanied it (N-6). The registry's own
+ *    `enforceProvider` on the context overlay stays as defence in depth.
  */
 
 interface ExecuteRequest {
@@ -28,11 +44,53 @@ export async function POST(request: NextRequest) {
     const { tool, params, provider, model } = body;
     const profile = parseProfile(body.profile);
 
+    // --- Authentication (N-9 / M-5) — before any request validation, so an
+    // unauthenticated caller learns nothing about the request shape. -------
+    const origin = classifyOrigin({
+      urlHostname: request.nextUrl?.hostname,
+      hostHeader: request.headers.get('host'),
+      forwardedFor: request.headers.get('x-forwarded-for'),
+      realIp: request.headers.get('x-real-ip'),
+    });
+    const auth = decideExecuteAuth({
+      origin,
+      modeRaw: process.env.MCP_AUTH_MODE,
+      keys: await loadMcpApiKeys(),
+      credential: extractCredential({
+        authorization: request.headers.get('authorization'),
+        apiKey: request.headers.get('x-api-key'),
+      }),
+      strictLoopback: parseStrictLoopback(process.env.MCP_AUTH_STRICT_LOOPBACK),
+      profile,
+    });
+    if (!auth.ok) {
+      console.warn(
+        `[MCP Execute] auth refused: ${auth.code} origin=${auth.origin} mode=${auth.mode} tool=${tool} profile=${profile}`,
+      );
+      return NextResponse.json(
+        { error: { code: auth.code, message: auth.message } },
+        { status: auth.status ?? 401 },
+      );
+    }
+
     if (!tool || typeof tool !== 'string') {
       return NextResponse.json(
         { error: { code: 'INVALID_REQUEST', message: 'Missing or invalid tool name' } },
         { status: 400 },
       );
+    }
+
+    // --- LLM policy on the raw request fields (N-6) ----------------------
+    // `contextOverride` below only carries `aiProvider` when a `model` came
+    // with it, so enforcing on the overlay let `provider` alone slip through
+    // and run locally with a 200. Enforce on what the caller actually sent.
+    try {
+      enforceProvider(profile, provider);
+    } catch (err) {
+      if (err instanceof McpError) {
+        return NextResponse.json({ error: { code: err.code, message: err.message } }, { status: 403 });
+      }
+      throw err;
     }
 
     const headerSessionId = request.headers.get('mcp-session-id');

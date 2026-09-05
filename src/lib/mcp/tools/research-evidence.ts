@@ -11,6 +11,8 @@
 import { BaseMCPTool } from './base-tool';
 import type { ToolMetadata, ToolDependency, ToolExecutionContext, ToolConfigEntry } from '../tool-types';
 import type { EvidenceResult, ResearchJobStatusView, McpProfile } from '../research-types';
+import { EVIDENCE_DEFAULTS } from '../research-types';
+import { estimateResearchSeconds } from '../research/estimate';
 import { McpError } from '../llm-policy';
 import { ollamaAvailable } from '../shared-dependencies';
 import { parseResearchParams } from '../research/research-params';
@@ -33,6 +35,19 @@ export const RESEARCH_INPUT_SCHEMA: ToolMetadata['inputSchema'] = {
       description:
         'Retrieval tier. `auto` (default) lets the query router choose. `fast`: one retrieval on the query as written, no outline. `deep` / `deep-report`: LLM decomposition into sub-queries, rerank, outline. `deep-rlm`: adds recursive RLM evidence rounds on the sidecar — always runs as a job.',
     },
+    whereClauses: {
+      type: 'array',
+      description: 'Extra SQL-style filters applied to every retrieval (advanced).',
+      items: { type: 'string' },
+    },
+    maxEvidence: {
+      type: 'integer',
+      description: `Cap on the returned evidence list (default ${EVIDENCE_DEFAULTS.maxEvidence}). Same as retrieval.maxEvidence; this wins if both are given.`,
+    },
+    maxCharsPerChunk: {
+      type: 'integer',
+      description: `Cap on each chunk's text, truncated on a word boundary (default ${EVIDENCE_DEFAULTS.maxCharsPerChunk}). Same as retrieval.maxCharsPerChunk; this wins if both are given.`,
+    },
     retrieval: {
       type: 'object',
       description: 'Retrieval knobs — the only settings the local engine honours.',
@@ -40,7 +55,10 @@ export const RESEARCH_INPUT_SCHEMA: ToolMetadata['inputSchema'] = {
         rerankPoolSize: { type: 'integer', description: 'Candidates sent to the reranker (default: configured pool size, 150).' },
         limitPerSubQuery: { type: 'integer', description: 'Chunks fetched per sub-query (default 50).' },
         rlmMaxRounds: { type: 'integer', description: 'RLM tool-use rounds for deep-rlm (default 2).' },
-        maxEvidence: { type: 'integer', description: 'Cap on the returned evidence list.' },
+        maxEvidence: { type: 'integer', description: `Cap on the returned evidence list (default ${EVIDENCE_DEFAULTS.maxEvidence}).` },
+        maxCharsPerChunk: { type: 'integer', description: `Cap on each chunk's text (default ${EVIDENCE_DEFAULTS.maxCharsPerChunk}); longer chunks are cut at a word boundary with an ellipsis.` },
+        decomposeTimeoutMs: { type: 'integer', description: 'Budget for the LLM decomposition step in ms (default 20000); on expiry a keyword split is used.' },
+        outlineTimeoutMs: { type: 'integer', description: 'Budget for the LLM outline step in ms; on expiry the result carries outline: null.' },
       },
     },
     history: {
@@ -113,7 +131,7 @@ export class ResearchEvidenceTool extends BaseMCPTool<ResearchToolParams, Eviden
       name: 'research_evidence',
       displayName: 'Research Evidence',
       description:
-        'Gather ranked evidence for a legal research question — decomposition, hybrid retrieval, keyword backstop, rerank and a sections→evidence outline. Returns EVIDENCE ONLY (chunks with citations, sub-queries, outline, gaps): it never writes a report or any prose — you write that from the evidence. Everything runs locally (Ollama, sidecar reranker, sidecar RLM); nothing leaves this machine. Any provider/model/routing fields in the request are ignored and reported in routing.ignored[]. A deep-rlm request is promoted to a job: poll research_status with the returned jobId.',
+        'Gather ranked evidence for a legal research question — decomposition, hybrid retrieval, keyword backstop, rerank and a sections→evidence outline. Returns EVIDENCE ONLY (chunks with citations, sub-queries, outline, gaps): it never writes a report or any prose — you write that from the evidence. Everything runs locally (Ollama, sidecar reranker, sidecar RLM); nothing leaves this machine. Any provider/model/routing fields in the request are ignored and reported in routing.ignored[]; unknown fields are rejected. Evidence is capped (defaults: ' + `${EVIDENCE_DEFAULTS.maxEvidence} items, ${EVIDENCE_DEFAULTS.maxCharsPerChunk} chars per chunk` + ') and the applied caps are reported in stats.caps — raise maxEvidence / maxCharsPerChunk if you need more. A request the router expects to run long is promoted to a job: poll research_status with the returned jobId.',
       version: '1.0.0',
       category: 'search',
       profiles: ['local', 'routed'],
@@ -138,14 +156,22 @@ export class ResearchEvidenceTool extends BaseMCPTool<ResearchToolParams, Eviden
     // Self-promotion: RLM rounds run for minutes, past any MCP call timeout.
     const { resolveResearchMode, gatherEvidence } = await import('../../search/gather-evidence');
     const routing = resolveResearchMode(query, options.mode);
-    if (routing.mode === 'deep-rlm') {
+    // Anything the shared estimator expects to outrun the caller's MCP timeout
+    // becomes a job — not just deep-rlm, which was the only self-promoting
+    // tier while `deep` sat 2.5 s under the proxy timeout (REPORT-v4 N-8).
+    // Research is always local-only, whatever the session profile.
+    const { wouldPromoteToJob } = estimateResearchSeconds(routing.mode, {
+      localOnly: true,
+      settings: { useRlm: routing.mode === 'deep-rlm' },
+    });
+    if (wouldPromoteToJob) {
       const job = await startResearchJob({ query, profile, sessionId: context.sessionId, params: rest });
       return {
         promoted: true as const,
         jobId: job.id,
         kind: 'research' as const,
         status: job.status,
-        hint: `deep-rlm runs as a job — poll research_status { jobId: "${job.id}", cursor } for evidence as it arrives, then research_result`,
+        hint: `${routing.mode} runs longer than one MCP call allows — poll research_status { jobId: "${job.id}", cursor } for evidence as it arrives, then research_result`,
       };
     }
 

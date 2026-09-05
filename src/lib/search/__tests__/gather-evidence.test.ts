@@ -22,6 +22,10 @@ jest.mock('../deep-search', () => ({
   deduplicateAndMerge: (...a: unknown[]) => deduplicateAndMergeMock(...a),
   runRlmEvidenceRounds: (...a: unknown[]) => runRlmEvidenceRoundsMock(...a),
   buildRlmInheritedWhereClauses: () => undefined,
+  summariseSubQueryTimings: (results: Array<{ subQuery: string; sources: unknown[] }>) => ({
+    count: results.length, slowestMs: 0, fastestMs: 0, totalMs: 0,
+    perSubQuery: results.map((r) => ({ subQuery: r.subQuery, ms: 0, sources: r.sources.length })),
+  }),
 }));
 
 const buildEvidenceOutlineMock = jest.fn();
@@ -46,6 +50,7 @@ jest.mock('../../mcp/routing-defaults', () => ({
     deep: { provider: 'ollama' },
     'deep-report': { provider: 'ollama', multiPass: true },
     'deep-rlm': { provider: 'ollama', useRlm: true, rlmMaxRounds: 2 },
+    outline: { model: 'test-outline-model', timeoutMs: 25_000, maxItems: 40, maxCharsPerItem: 400 },
   },
   // No small tag on the synthetic host → falls through to the completion model.
   localDecomposeModel: jest.fn(async (cfg: { ollamaCompletionModel?: string }) => cfg.ollamaCompletionModel ?? 'default-ollama'),
@@ -54,6 +59,7 @@ jest.mock('../../mcp/routing-defaults', () => ({
 import { gatherEvidence, resolveResearchMode, DECOMPOSE_HEURISTIC_FALLBACK } from '../gather-evidence';
 import type { DeepSearchSource } from '../deep-search';
 import type { EvidenceItem } from '../../mcp/research-types';
+import { EVIDENCE_DEFAULTS } from '../../mcp/research-types';
 
 const registry = {} as any;
 
@@ -165,8 +171,11 @@ describe('gatherEvidence', () => {
     await gatherEvidence('q', registry, { profile: 'local', localOnly: true, mode: 'deep' });
     expect(decomposeQueryMock).toHaveBeenCalledWith('q', expect.objectContaining({ provider: 'ollama', model: 'test-local-model' }));
     expect(buildEvidenceOutlineMock).toHaveBeenCalledWith(
-      'q', ['q', 'sub one', 'sub two'], expect.any(Array),
-      expect.objectContaining({ provider: 'ollama', model: 'test-local-model', profile: 'local' }),
+      expect.any(Array), 'q', ['q', 'sub one', 'sub two'],
+      expect.objectContaining({
+        provider: 'ollama', model: 'test-local-model', profile: 'local',
+        timeoutMs: 25_000, maxItems: 40, maxCharsPerItem: 400,
+      }),
     );
   });
 
@@ -210,6 +219,78 @@ describe('gatherEvidence', () => {
     expect(typeof r.stats.phases.retrieve).toBe('number');
   });
 
+  it('caps evidence count and chunk text by default and reports it in stats.caps', async () => {
+    const many = Array.from({ length: 45 }, (_, i) => src(`synthetic passage number ${i} `.repeat(120), i + 1, { documentId: `doc-${i}` }));
+    executeParallelSearchesMock.mockResolvedValue([{ subQuery: 'q', sources: many }]);
+    const r = await gatherEvidence('q', registry, { profile: 'local', localOnly: true, mode: 'deep' });
+
+    expect(r.evidence).toHaveLength(EVIDENCE_DEFAULTS.maxEvidence);
+    for (const item of r.evidence) {
+      expect(item.text.length).toBeLessThanOrEqual(EVIDENCE_DEFAULTS.maxCharsPerChunk + 2);
+      expect(item.text.endsWith(' …')).toBe(true);
+      // Word boundary: the ellipsis never lands mid-word.
+      expect(/\S…/.test(item.text)).toBe(false);
+    }
+    expect(r.stats.caps).toEqual({
+      maxEvidence: EVIDENCE_DEFAULTS.maxEvidence,
+      maxCharsPerChunk: EVIDENCE_DEFAULTS.maxCharsPerChunk,
+      evidenceTruncated: true,
+      // Counted over the RETURNED items, not the fused pool.
+      chunksTruncated: EVIDENCE_DEFAULTS.maxEvidence,
+    });
+  });
+
+  it('never reports more truncated chunks than it returns items', async () => {
+    const pool = Array.from({ length: 70 }, (_, i) => src(`synthetic passage number ${i} `.repeat(40), i + 1, { documentId: `doc-${i}` }));
+    executeParallelSearchesMock.mockResolvedValue([{ subQuery: 'q', sources: pool }]);
+    const r = await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep',
+      retrieval: { maxEvidence: 3, maxCharsPerChunk: 200 },
+    });
+    expect(r.evidence).toHaveLength(3);
+    expect(r.stats.caps!.chunksTruncated).toBeLessThanOrEqual(r.evidence.length);
+    expect(r.stats.caps!.chunksTruncated).toBe(3);
+    expect(r.stats.caps!.evidenceTruncated).toBe(true);
+  });
+
+  it('honours explicit caps and leaves short chunks untouched', async () => {
+    const r = await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep',
+      retrieval: { maxEvidence: 1, maxCharsPerChunk: 20 },
+    });
+    expect(r.evidence).toHaveLength(1);
+    expect(r.evidence[0].text).toBe('synthetic passage …');
+    expect(r.stats.caps).toMatchObject({ maxEvidence: 1, maxCharsPerChunk: 20, evidenceTruncated: true, chunksTruncated: 1 });
+
+    const untouched = await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep',
+      retrieval: { maxCharsPerChunk: 5_000 },
+    });
+    expect(untouched.evidence[0].text).toBe(A.text);
+    expect(untouched.stats.caps).toMatchObject({ evidenceTruncated: false, chunksTruncated: 0 });
+  });
+
+  it('bounds streamed evidence too — a job client never sees an untruncated chunk', async () => {
+    const streamed: EvidenceItem[] = [];
+    await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep-rlm',
+      retrieval: { maxCharsPerChunk: 20 },
+      onEvidence: (items) => streamed.push(...items),
+    });
+    expect(streamed.length).toBeGreaterThan(2); // initial + the RLM round
+    for (const item of streamed) expect(item.text.length).toBeLessThanOrEqual(22);
+  });
+
+  it('reports per-sub-query retrieve timings on the progress stream', async () => {
+    const details: unknown[] = [];
+    await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep',
+      onProgress: (p) => { if (p.phase === 'retrieve' && p.detail?.timings) details.push(p.detail.timings); },
+    });
+    expect(details).toHaveLength(1);
+    expect(details[0]).toMatchObject({ count: 1, perSubQuery: [{ subQuery: 'q', sources: 2 }] });
+  });
+
   it('(h) a decompose that never resolves falls back to the heuristic split within the timeout', async () => {
     decomposeQueryMock.mockImplementation(() => new Promise(() => { /* never resolves */ }));
     const warnings: string[] = [];
@@ -247,7 +328,7 @@ describe('gatherEvidence', () => {
     expect(executeParallelSearchesMock).not.toHaveBeenCalled();
   });
 
-  it('(i) an outline that never resolves degrades to a per-document grouping within the timeout', async () => {
+  it('(i) an outline that never resolves returns outline: null within the timeout — never a fabricated grouping', async () => {
     buildEvidenceOutlineMock.mockImplementation(() => new Promise(() => { /* never resolves */ }));
     const warnings: string[] = [];
     const r = await gatherEvidence('q', registry, {
@@ -255,14 +336,25 @@ describe('gatherEvidence', () => {
       retrieval: { outlineTimeoutMs: 50 },
       onProgress: (p) => { if (p.phase === 'warning') warnings.push(p.message); },
     });
-    expect(r.modelsUsed.outline).toBe(DECOMPOSE_HEURISTIC_FALLBACK);
+    expect(r.modelsUsed.outline).toBe('none');
     expect(r.modelsUsed.decompose).toBe('ollama/test-local-model');
     expect(warnings.some((w) => /outline timed out/.test(w))).toBe(true);
-    expect(r.outline!.sections).toHaveLength(1);
-    expect(r.outline!.sections[0].evidenceIds).toEqual(r.evidence.map((e) => e.id));
+    expect(r.outline).toBeNull();
     const opts = buildEvidenceOutlineMock.mock.calls[0][3] as { signal?: AbortSignal; thinking?: boolean };
     expect(opts.signal).toBeInstanceOf(AbortSignal);
     expect(opts.thinking).toBe(false);
+  });
+
+  it('(i′) a builder that returns null reports no outline rather than inventing one', async () => {
+    buildEvidenceOutlineMock.mockResolvedValue(null);
+    const warnings: string[] = [];
+    const r = await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep',
+      onProgress: (p) => { if (p.phase === 'warning') warnings.push(p.message); },
+    });
+    expect(r.outline).toBeNull();
+    expect(r.modelsUsed.outline).toBe('none');
+    expect(warnings.some((w) => /outline unavailable/.test(w))).toBe(true);
   });
 
   it('degrades to reranked evidence when the RLM sidecar is unavailable', async () => {

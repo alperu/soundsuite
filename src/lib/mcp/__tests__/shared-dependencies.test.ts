@@ -12,7 +12,13 @@ jest.mock('../../db/config', () => ({
   }),
 }));
 
-import { ollamaAvailable, ollamaReadiness, resetOllamaProbeCache } from '../shared-dependencies';
+import {
+  ReadinessHysteresis,
+  ollamaAvailable,
+  ollamaReadiness,
+  resetOllamaProbeCache,
+  type OllamaReadiness,
+} from '../shared-dependencies';
 
 type FetchMock = jest.Mock<Promise<Response>, [string, RequestInit?]>;
 
@@ -45,7 +51,13 @@ describe('ollamaReadiness', () => {
       return jsonResponse({ done: true, response: 'OK' });
     });
     const r = await ollamaReadiness();
-    expect(r).toEqual({ reachable: true, generates: true, model: 'synthetic-model:1b' });
+    expect(r).toEqual({
+      reachable: true,
+      generates: true,
+      model: 'synthetic-model:1b',
+      degraded: false,
+      pendingFailures: 0,
+    });
     expect(await ollamaAvailable()).toBe(true);
 
     const gen = fetchMock.mock.calls.find(([u]) => String(u).endsWith('/api/generate'))!;
@@ -89,5 +101,112 @@ describe('ollamaReadiness', () => {
     expect(generates).toHaveLength(1);
     await ollamaReadiness({ force: true });
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/api/generate'))).toHaveLength(2);
+  });
+
+  // --- N-4: one failed smoke must not pull tools out of tools/list ---------
+  it('serves the last-known-good value on a single failed smoke, then flips on the second', async () => {
+    let generateOk = true;
+    fetchMock.mockImplementation(async (url) => {
+      if (String(url).endsWith('/api/tags')) return jsonResponse({ models: [] });
+      if (!generateOk) throw timeoutError();
+      return jsonResponse({ done: true });
+    });
+
+    const good = await ollamaReadiness({ force: true });
+    expect(good.generates).toBe(true);
+    expect(good.degraded).toBe(false);
+
+    generateOk = false;
+    const degraded = await ollamaReadiness({ force: true });
+    expect(degraded.generates).toBe(true); // still serving last-known-good
+    expect(degraded.degraded).toBe(true);
+    expect(degraded.pendingFailures).toBe(1);
+    expect(degraded.pendingReason).toMatch(/did not generate/);
+    expect(await ollamaAvailable()).toBe(true);
+
+    const down = await ollamaReadiness({ force: true });
+    expect(down.generates).toBe(false);
+    expect(down.degraded).toBe(false);
+    expect(down.pendingFailures).toBe(2);
+    expect(await ollamaAvailable({ force: true })).toBe(false);
+  });
+
+  it('recovers on a single success after the flip', async () => {
+    let generateOk = false;
+    fetchMock.mockImplementation(async (url) => {
+      if (String(url).endsWith('/api/tags')) return jsonResponse({ models: [] });
+      if (!generateOk) throw timeoutError();
+      return jsonResponse({ done: true });
+    });
+
+    await ollamaReadiness({ force: true });
+    await ollamaReadiness({ force: true });
+    expect((await ollamaReadiness()).generates).toBe(false);
+
+    generateOk = true;
+    const recovered = await ollamaReadiness({ force: true });
+    expect(recovered.generates).toBe(true);
+    expect(recovered.degraded).toBe(false);
+    expect(recovered.pendingFailures).toBe(0);
+  });
+});
+
+describe('ReadinessHysteresis', () => {
+  const ok: OllamaReadiness = { reachable: true, generates: true, model: 'synthetic-model:1b' };
+  const bad: OllamaReadiness = {
+    reachable: true,
+    generates: false,
+    model: 'synthetic-model:1b',
+    reason: 'did not generate within 10 s',
+  };
+
+  it('reports a cold-start failure immediately — there is no last-known-good to serve', () => {
+    const m = new ReadinessHysteresis();
+    const r = m.observe(bad);
+    expect(r.generates).toBe(false);
+    expect(r.degraded).toBe(false);
+    expect(r.pendingFailures).toBe(1);
+  });
+
+  it('holds last-known-good for one failure and flips on the second', () => {
+    const m = new ReadinessHysteresis();
+    m.observe(ok);
+    expect(m.observe(bad)).toMatchObject({ generates: true, degraded: true, pendingFailures: 1 });
+    expect(m.observe(bad)).toMatchObject({ generates: false, degraded: false, pendingFailures: 2 });
+  });
+
+  it('recovers on one success and resets the failure count', () => {
+    const m = new ReadinessHysteresis();
+    m.observe(ok);
+    m.observe(bad);
+    m.observe(bad);
+    expect(m.observe(ok)).toMatchObject({ generates: true, degraded: false, pendingFailures: 0 });
+    expect(m.observe(bad)).toMatchObject({ generates: true, degraded: true, pendingFailures: 1 });
+  });
+
+  it('carries the failing probe reason as pendingReason while degraded', () => {
+    const m = new ReadinessHysteresis();
+    m.observe(ok);
+    expect(m.observe(bad).pendingReason).toBe('did not generate within 10 s');
+  });
+
+  it('survives a module re-evaluation via snapshot/restore', () => {
+    // The N-4 flap: a second evaluation of the module (dev HMR) starts with an
+    // empty machine, hits the cold-start rule, and reports not-ready on the
+    // first failure. Restoring the persisted snapshot keeps the LKG.
+    const first = new ReadinessHysteresis();
+    first.observe(ok);
+    const persisted = first.snapshot();
+
+    const second = new ReadinessHysteresis();
+    second.restore(persisted);
+    expect(second.observe(bad)).toMatchObject({ generates: true, degraded: true, pendingFailures: 1 });
+  });
+
+  it('reset() clears the last-known-good', () => {
+    const m = new ReadinessHysteresis();
+    m.observe(ok);
+    m.reset();
+    expect(m.observe(bad)).toMatchObject({ generates: false, degraded: false, pendingFailures: 1 });
   });
 });

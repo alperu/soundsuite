@@ -63,7 +63,11 @@ const FILENAME_FINAL_RE = /\b(?:filed|file[-_ ]?stamped|as[-_ ]filed|signed|ente
 /** Standalone upper-case DRAFT token (watermark / header / footer). Prose
  *  mentions ("the draft agreement") are lower-case and never match. */
 const DRAFT_TOKEN_RE = /(?:^|[^A-Za-z])DRAFT(?![A-Za-z])/g;
-const NOT_FOR_FILING_RE = /\bNOT\s+FOR\s+FILING\b|\bDO\s+NOT\s+FILE\b|\bNOT\s+FILED\b/i;
+/** Document-status markers only. Bare "not filed" is deliberately EXCLUDED:
+ *  in litigation prose "has not filed a supersedeas bond" is a statement about
+ *  a party's conduct, not a marker on the document, and matching it flagged
+ *  genuinely filed documents as drafts. */
+const NOT_FOR_FILING_RE = /\bNOT\s+FOR\s+FILING\b|\bDO\s+NOT\s+FILE\b/i;
 const CONFIDENTIAL_DRAFT_RE = /\bCONFIDENTIAL\s+DRAFT\b|\bDRAFT\s+(?:ONLY|COPY)\b|\bDISCUSSION\s+DRAFT\b/i;
 const WORK_PRODUCT_RE = /\bATTORNEY\s+WORK\s+PRODUCT\b/i;
 const PRIVILEGED_RE = /\bPRIVILEGED\s*(?:&|AND)\s*CONFIDENTIAL\b/i;

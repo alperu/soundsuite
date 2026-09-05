@@ -182,6 +182,21 @@ That is 20 tools under `local` and 32 under `routed` when everything is ready. T
 
 ---
 
+## How results arrive
+
+Every successful tool call comes back **twice, in the same response**:
+
+- a `text` content block holding the pretty-printed JSON — what clients have always received, unchanged;
+- `structuredContent`, the same object as real JSON, so a client can read `evidence[0].citation` directly instead of re-parsing a string out of a text block.
+
+`structuredContent` is present whenever the tool's result is a JSON object, which is every tool listed below. A client that does not know the field ignores it and reads the text block as before, and this is true regardless of which MCP protocol revision the session negotiated — the bridge does not pin a version, and `structuredContent` is an optional additive field.
+
+Errors keep their old shape: a single text block with the error message and `isError: true`, no `structuredContent`.
+
+The bridge sends the result through verbatim. It does not trim, cap or paginate — sending both forms roughly doubles the bytes on the wire, so the size limits below are enforced by Sound Suite, on the server, before the response is built.
+
+---
+
 ## Tool reference
 
 ### Retrieval tools (both profiles)
@@ -218,15 +233,55 @@ Gathers ranked evidence for a research question: decomposition into sub-queries,
 | `query` | string, **required** | The research question. |
 | `caseId` | string | Restrict retrieval to one case. |
 | `mode` | `auto` \| `fast` \| `deep` \| `deep-report` \| `deep-rlm` | Retrieval tier. `auto` (default) lets the query router choose. `fast` is one retrieval with no outline. `deep` and `deep-report` add decomposition, rerank and outline. `deep-rlm` adds recursive RLM rounds on the sidecar and **always runs as a job**. |
-| `retrieval` | object | `rerankPoolSize` (default 150), `limitPerSubQuery` (default 50), `rlmMaxRounds` (default 2), `maxEvidence`. The only settings the local engine honours. |
+| `retrieval` | object | `rerankPoolSize` (default 150), `limitPerSubQuery` (default 50), `rlmMaxRounds` (default 2), `maxEvidence` (default 40), `maxCharsPerChunk` (default 1200), `decomposeTimeoutMs` (default 20000), `outlineTimeoutMs` (default 60000). The only settings the local engine honours. |
+| `maxEvidence` | integer | Top-level shorthand for `retrieval.maxEvidence`. |
+| `maxCharsPerChunk` | integer | Top-level shorthand for `retrieval.maxCharsPerChunk`. |
 | `history` | array of `{ role: "user" \| "assistant", content }` | Prior turns, for follow-up questions. |
 | `preset` | string or object | A saved preset name or an inline preset. Only its `retrieval` section is used. |
 
-Result: an `EvidenceResult` with `routing` (requested and chosen mode, reason, confidence, and `ignored[]` listing any provider / model / routing fields that were dropped), `subQueries`, ranked `evidence[]` items (each with `documentId`, `text`, `score`, `rerankScore`, `hits`, `source`, structure metadata), an `outline` of sections mapped to evidence ids with `gaps`, optional `rlm` stats, timing `stats`, `modelsUsed`, and `localOnly: true`. A `deep-rlm` request returns `{ promoted: true, jobId, hint }` instead; poll `research_status`.
+**Size caps.** Uncapped, one `fast` run returned 80 evidence items in a single ~97 KB block, which floods the caller's context. Two caps now apply by default: **`maxEvidence: 40`** items and **`maxCharsPerChunk: 1200`** characters per chunk (longer chunks are cut at a word boundary with a trailing ellipsis). Both are settable **either at the top level of the tool params or under `retrieval`** — the top-level form wins, because that is where a model naturally puts them and silently dropping it was the old bug. Truncation is never silent: `stats.caps` reports `{ maxEvidence, maxCharsPerChunk, evidenceTruncated, chunksTruncated }` on every result.
+
+Result: an `EvidenceResult` with `routing` (requested and chosen mode, reason, confidence, and `ignored[]` listing any provider / model / routing fields that were dropped), `subQueries`, ranked `evidence[]`, an `outline` of sections mapped to evidence ids with `gaps`, optional `rlm` stats, timing `stats` (including `caps`), `modelsUsed`, and `localOnly: true`. A `deep-rlm` request returns `{ promoted: true, jobId, hint }` instead; poll `research_status`.
+
+**The `outline` key has three states, and they are not the same.** Absent entirely means the tier has no outline phase (`fast`). `null` means the phase ran and produced nothing — the engine returns `null` rather than fabricating a per-document grouping. An object means a real outline. Check for the key before checking for `null`.
+
+**Evidence items are citable.** Each entry in `evidence[]` carries `id`, `documentId`, `text`, `score`, `rerankScore`, `hits`, `source`, structure metadata (`blockType`, `headingPath`, `speakers`, `tableMarkdown`), `recordStatus` (`filed` | `draft` | `unknown` — `draft` means an unfiled working copy), and the **citation family**:
+
+| Field | Meaning |
+|---|---|
+| `citation` | Full citation string, as the retrieval layer formatted it. |
+| `citationShort` | Abbreviated form for inline use. |
+| `page` | 1-based page number the chunk was found on. |
+| `document` | Human-readable document name (`documentId` stays the opaque id). |
+| `filingType` | Filing type of the source document, e.g. `motion`, `order`. |
+| `volumeNumber` | Volume number for multi-volume records. |
+| `caseNumber` | Cause / case number of the source document. |
+| `filingSlug` | Slug of the filing the document belongs to, for dashboard deep links. |
+
+Every one is optional — a chunk from a chat attachment or a document with no filing metadata carries fewer. Read them off `structuredContent.evidence[]`; they are data, not prose to be re-parsed.
+
+```json
+{
+  "id": "ev_3",
+  "documentId": "d0f1…",
+  "document": "motion.pdf",
+  "citation": "Motion to Compel, CAUSE NO. 00-0000-XX, at 4",
+  "citationShort": "Mot. Compel at 4",
+  "page": 4,
+  "filingType": "motion",
+  "caseNumber": "00-0000-XX",
+  "filingSlug": "motion-to-compel",
+  "recordStatus": "filed",
+  "score": 0.82,
+  "hits": 3,
+  "source": "retrieval",
+  "text": "…"
+}
+```
 
 ### `research_start` / `research_status` / `research_result` / `research_cancel` (both profiles)
 
-The asynchronous form of `research_evidence`, same parameters and same evidence-only contract.
+The asynchronous form of `research_evidence`, same parameters and same evidence-only contract — including the `maxEvidence` / `maxCharsPerChunk` caps and the citation family on every item, which arrive on the `evidence[]` batches `research_status` hands back as well as on the final result.
 
 - `research_start` — same parameters as `research_evidence`. Returns `{ jobId, kind: "research", status, startedAt }` immediately.
 - `research_status` — `jobId` (required), `cursor` (integer, default 0). Returns the job view: `status` (`queued` | `running` | `done` | `error` | `cancelled`), `phase`, `evidence[]` added since `cursor`, `newEvidenceCount`, the new `cursor`, `outline` once ready, `rlmNotes[]`, `error`, `startedAt`, `updatedAt`, `elapsedMs`.
@@ -250,7 +305,7 @@ The full pipeline with synthesis: route the question to a tier, gather evidence 
 | `includeEvidence` | boolean | Include the evidence items behind the report (default true). |
 | `includeThoughts` | boolean | Stream model and RLM narration as thoughts (default false). |
 
-Result: a `ReportResult`, which is an `EvidenceResult` plus `report` (the cited text), `routing.resolved` (the tier settings actually used) and `routing.presetUsed`, `cost` (`provider`, `model`, `inputTokens`, `outputTokens`, `estimated`), `provenance` (`documentIdsSent`, `provider`) and `modelsUsed` including `synthesis`. Every routed call also writes an `ActionLog` row of type `mcp-routed` recording tier, provider, model, effort, tokens, duration and the document ids whose text left the machine.
+Result: a `ReportResult`, which is an `EvidenceResult` — same `evidence[]` items with the citation family, same `maxEvidence` / `maxCharsPerChunk` caps and `stats.caps`, same three-state `outline`, all as described under `research_evidence` above — plus `report` (the cited text), `routing.resolved` (the tier settings actually used) and `routing.presetUsed`, `cost` (`provider`, `model`, `inputTokens`, `outputTokens`, `estimated`), `provenance` (`documentIdsSent`, `provider`) and `modelsUsed` including `synthesis`. Every routed call also writes an `ActionLog` row of type `mcp-routed` recording tier, provider, model, effort, tokens, duration and the document ids whose text left the machine.
 
 When the router expects the run to take longer than 45 seconds it self-promotes and returns `{ promoted: true, jobId, hint }`; continue with `report_status` and `report_result`.
 
@@ -295,12 +350,13 @@ A **PresetV2** is the settings blob stored on a saved search preset. The MCP sur
   "retrieval": {
     "rerankPoolSize": 150,
     "limitPerSubQuery": 50,
-    "maxEvidence": 60
+    "maxEvidence": 60,
+    "maxCharsPerChunk": 1600
   }
 }
 ```
 
-Rules the validator enforces: `version` must be `2`; tier keys are `fast`, `deep`, `deep-report`, `deep-rlm`; each tier names a known `provider`, a `model` from that provider's catalog when given, an `effort` from `low` / `medium` / `high` / `xhigh` / `max`, and positive numbers for `maxTokens` and `rlmMaxRounds`. `retrieval` accepts only `rerankPoolSize`, `limitPerSubQuery`, `rlmMaxRounds` and `maxEvidence` (other keys are dropped with a warning). Version 1 presets saved from the dashboard are upgraded when read: the flat `provider` / `model` / `effort` / `thinking` / `maxTokens` fields become the `deep`, `deep-report` (`multiPass` true unless set) and `deep-rlm` (`useRlm` true) tiers, and they are written back as version 2 on the next save.
+Rules the validator enforces: `version` must be `2`; tier keys are `fast`, `deep`, `deep-report`, `deep-rlm`; each tier names a known `provider`, a `model` from that provider's catalog when given, an `effort` from `low` / `medium` / `high` / `xhigh` / `max`, and positive numbers for `maxTokens` and `rlmMaxRounds`. `retrieval` accepts only `rerankPoolSize`, `limitPerSubQuery`, `rlmMaxRounds`, `maxEvidence`, `maxCharsPerChunk`, `decomposeTimeoutMs` and `outlineTimeoutMs` (other keys are dropped with a warning). Version 1 presets saved from the dashboard are upgraded when read: the flat `provider` / `model` / `effort` / `thinking` / `maxTokens` fields become the `deep`, `deep-report` (`multiPass` true unless set) and `deep-rlm` (`useRlm` true) tiers, and they are written back as version 2 on the next save.
 
 **How a `routed` call resolves its tier settings.** The router first picks a tier (`mode`, or the query router under `auto`), then layers settings field by field in this order, highest precedence first:
 
@@ -407,4 +463,6 @@ Set the mode with the `MCP_AUTH_MODE` environment variable on the master and res
 
 **Claude Desktop / Cursor not picking up changes** — fully quit the app (not just the window) and relaunch. MCP server connections are established on startup.
 
-**Wrong profile?** — the bridge prints `profile local` or `profile routed` on stderr at startup. Anything other than the literal `routed` falls back to `local`.
+**Wrong profile?** — the bridge prints `profile local` or `profile routed` on stderr at startup. There is no fallback: if `SOUND_SUITE_PROFILE` is missing or anything other than the literal `local` or `routed`, the bridge refuses to start and exits with status 2, so a typo can never quietly run under the wrong policy.
+
+**Client shows results as a wall of JSON text** — that is the text content block, which is always sent. Clients that read `structuredContent` get the same data as an object; if yours does not, it is a client-side limitation, not a server setting.

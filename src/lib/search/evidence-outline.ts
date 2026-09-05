@@ -7,20 +7,26 @@
  * `EvidenceItem.id`; the model sees short `[E1]…[En]` labels and we map them
  * back, dropping anything it invented.
  *
- * Never throws: any failure (provider, parse, policy) yields an empty outline
- * with a single 'outline unavailable' gap so the evidence result still lands.
+ * Never throws except on a caller abort: any failure (provider, parse, policy,
+ * or our own `timeoutMs` ceiling) yields `null` plus a one-line reason on
+ * `options.onWarn`. `null` means "no outline" — the caller must NOT substitute
+ * a per-document re-keying of the input, which costs a minute and says nothing
+ * (report v4, N-3).
  */
 
 import { callLLMJson } from '../mcp/tools/ai-helper';
 import type { ToolExecutionContext } from '../mcp/tool-types';
 import type { EvidenceItem, EvidenceResult, McpProfile, EffortLevel } from '../mcp/research-types';
 import { truncateBlock } from './context-builder';
+import { LOCAL_PROVIDER } from '../mcp/llm-policy';
 
 export type EvidenceOutline = NonNullable<EvidenceResult['outline']>;
 
 export interface EvidenceOutlineOptions {
-  provider: string;
-  model: string;
+  /** Defaults to the local provider — the outline is a local-profile step. */
+  provider?: string;
+  /** Resolve from `LOCAL_ROUTING.outline.model` via `localOutlineModel()`. */
+  model?: string;
   thinking?: boolean;
   effort?: EffortLevel;
   signal?: AbortSignal;
@@ -28,11 +34,29 @@ export interface EvidenceOutlineOptions {
   profile?: McpProfile;
   /** Total prompt budget for the evidence block. Default 60 000 chars. */
   maxContextChars?: number;
-  /** Per-item cap. Default 1 200 chars. */
+  /**
+   * Hard ceiling on the whole call (ms). Enforced here so the outline can
+   * never burn the caller's much larger phase budget. Default 25 000.
+   */
+  timeoutMs?: number;
+  /** Highest-scoring N items the model is shown. Default 40. */
+  maxItems?: number;
+  /** Per-item char cap. Default 400. */
+  maxCharsPerItem?: number;
+  /** Deprecated alias for `maxCharsPerItem`. */
   perItemChars?: number;
+  /** Reason sink for the event stream when the outline yields null. */
+  onWarn?: (reason: string, detail?: Record<string, unknown>) => void;
 }
 
-export const OUTLINE_UNAVAILABLE: EvidenceOutline = { sections: [], gaps: ['outline unavailable'] };
+export const OUTLINE_DEFAULTS = {
+  provider: LOCAL_PROVIDER,
+  /** Hard ceiling — a caller-supplied `timeoutMs` may lower it, never raise it. */
+  timeoutMs: 25_000,
+  maxItems: 40,
+  maxCharsPerItem: 400,
+  maxContextChars: 60_000,
+} as const;
 
 const EVIDENCE_OUTLINE_SYSTEM_PROMPT = `You are a legal research planner organising evidence for someone else to write up.
 
@@ -72,14 +96,18 @@ function labelIndex(v: unknown): number | null {
  * Validate a raw model response against the evidence list: unknown labels
  * are dropped, sections with no surviving ids are dropped, duplicates are
  * collapsed, and gap strings are trimmed. Exported for tests.
+ *
+ * Returns `null` when nothing usable survives — sections AND gaps both empty.
+ * Sections without gaps is a valid outline; gaps without sections is the most
+ * valuable answer of all ("no filing addresses X"), so neither is nulled.
  */
-export function normaliseOutline(raw: unknown, evidence: EvidenceItem[]): EvidenceOutline {
-  if (!raw || typeof raw !== 'object') return OUTLINE_UNAVAILABLE;
+export function normaliseOutline(raw: unknown, evidence: EvidenceItem[]): EvidenceOutline | null {
+  if (!raw || typeof raw !== 'object') return null;
   const r = raw as RawOutline;
-  if (!Array.isArray(r.sections)) return OUTLINE_UNAVAILABLE;
+  if (!Array.isArray(r.sections) && !Array.isArray(r.gaps)) return null;
 
   const sections: EvidenceOutline['sections'] = [];
-  for (const s of r.sections) {
+  for (const s of Array.isArray(r.sections) ? r.sections : []) {
     if (!s || typeof s !== 'object') continue;
     const title = typeof s.title === 'string' ? s.title.trim() : '';
     if (!title) continue;
@@ -101,7 +129,27 @@ export function normaliseOutline(raw: unknown, evidence: EvidenceItem[]): Eviden
     .filter((g): g is string => typeof g === 'string' && g.trim().length > 0)
     .map((g) => g.trim());
 
+  if (sections.length === 0 && gaps.length === 0) return null;
   return { sections, gaps };
+}
+
+/**
+ * The slice of evidence the model actually sees: the `maxItems`
+ * highest-scoring items, kept in their original (already-ranked) order so the
+ * `[E#]` labels stay stable. Showing all 150 items is what made the outline
+ * unaffordable — v4 N-3. Exported for tests.
+ */
+export function selectOutlineItems(evidence: EvidenceItem[], maxItems: number): EvidenceItem[] {
+  if (maxItems <= 0 || evidence.length <= maxItems) return evidence.slice();
+  const score = (e: EvidenceItem) => e.rerankScore ?? e.score ?? 0;
+  const keep = new Set(
+    evidence
+      .map((e, i) => ({ i, s: score(e) }))
+      .sort((a, b) => b.s - a.s || a.i - b.i)
+      .slice(0, maxItems)
+      .map((x) => x.i),
+  );
+  return evidence.filter((_, i) => keep.has(i));
 }
 
 /** Build the `[E#]` labelled evidence block within the char budget. */
@@ -131,18 +179,32 @@ export function buildOutlineContext(
 }
 
 export async function buildEvidenceOutline(
+  evidence: EvidenceItem[],
   query: string,
   subQueries: string[],
-  evidence: EvidenceItem[],
   options: EvidenceOutlineOptions,
-): Promise<EvidenceOutline> {
+): Promise<EvidenceOutline | null> {
+  const provider = options.provider ?? OUTLINE_DEFAULTS.provider;
+  // No model default here: the tag belongs to `LOCAL_ROUTING.outline.model`,
+  // resolved against the host by `localOutlineModel()`. Empty means "let the
+  // provider pick", which is what the pre-v4 code did.
+  const model = options.model;
+  const warn = (reason: string, detail?: Record<string, unknown>) => {
+    options.onWarn?.(reason, detail);
+    console.warn(`[evidence-outline] ${reason}`, { provider, model, ...detail });
+  };
+
   if (evidence.length === 0) return { sections: [], gaps: ['no evidence retrieved'] };
 
-  const { block, used } = buildOutlineContext(evidence, {
-    maxTotalChars: options.maxContextChars ?? 60_000,
-    perItemChars: options.perItemChars ?? 1_200,
+  const items = selectOutlineItems(evidence, options.maxItems ?? OUTLINE_DEFAULTS.maxItems);
+  const { block, used } = buildOutlineContext(items, {
+    maxTotalChars: options.maxContextChars ?? OUTLINE_DEFAULTS.maxContextChars,
+    perItemChars: options.maxCharsPerItem ?? options.perItemChars ?? OUTLINE_DEFAULTS.maxCharsPerItem,
   });
-  if (used === 0) return OUTLINE_UNAVAILABLE;
+  if (used === 0) {
+    warn('no evidence fit the outline context budget');
+    return null;
+  }
 
   const userContent = `## Research Question
 ${query}
@@ -150,7 +212,7 @@ ${query}
 ## Sub-Questions Searched
 ${subQueries.map((sq, i) => `${i + 1}. ${sq}`).join('\n')}
 
-## Evidence (${used} of ${evidence.length} excerpts shown)
+## Evidence (${used} of ${evidence.length} excerpts shown, highest-scoring first)
 
 ${block}
 
@@ -164,15 +226,29 @@ Group the excerpts above into sections and list the gaps. JSON only — no prose
     ? ({ profile: options.profile } as unknown as ToolExecutionContext)
     : undefined;
 
+  // Own ceiling: a 25 s null is honest, a 60 s fake outline is worse than
+  // nothing. Fires before any caller-level phase timeout, so the caller's
+  // fallback path is never reached.
+  // Clamp, don't just default: a caller that hands us its own (much larger)
+  // phase budget must not be able to raise this ceiling, or the outline is
+  // back to burning a minute before anyone hears about it (v4 N-3).
+  const timeoutMs = Math.min(options.timeoutMs ?? OUTLINE_DEFAULTS.timeoutMs, OUTLINE_DEFAULTS.timeoutMs);
+  const ceiling = new AbortController();
+  const timer = setTimeout(() => ceiling.abort(), timeoutMs);
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, ceiling.signal])
+    : ceiling.signal;
+  const startedAt = Date.now();
+
   try {
     const raw = await callLLMJson<unknown>(EVIDENCE_OUTLINE_SYSTEM_PROMPT, userContent, {
       maxTokens: 2048,
       temperature: 0.1,
-      provider: options.provider,
-      model: options.model,
+      provider,
+      model,
       thinking: options.thinking,
       effort: options.effort,
-      signal: options.signal,
+      signal,
       context,
       jsonSchema: {
         type: 'object',
@@ -196,15 +272,30 @@ Group the excerpts above into sections and list the gaps. JSON only — no prose
         required: ['sections', 'gaps'],
       },
     });
-    return normaliseOutline(raw, evidence);
+    const outline = normaliseOutline(raw, items);
+    if (!outline) {
+      warn(`outline unusable — model returned no sections and no gaps (${model ?? 'auto'})`, {
+        model,
+        itemsShown: used,
+        ms: Date.now() - startedAt,
+      });
+      return null;
+    }
+    return outline;
   } catch (err) {
-    // A user abort must still propagate; everything else degrades to "no outline".
-    if ((err as Error)?.name === 'AbortError' || options.signal?.aborted) throw err;
-    console.warn('[evidence-outline] outline call failed — returning empty outline', {
-      provider: options.provider,
-      model: options.model,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return OUTLINE_UNAVAILABLE;
+    // Only a caller abort propagates. Our own ceiling — and every provider or
+    // parse failure — degrades to null with a reason for the event stream.
+    if (options.signal?.aborted) throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    const timedOut = ceiling.signal.aborted;
+    warn(
+      timedOut
+        ? `outline timed out after ${timeoutMs} ms (${provider}/${model ?? 'auto'}) — no outline`
+        : `outline failed (${msg.slice(0, 160)}) — no outline`,
+      { model, timedOut, timeoutMs, itemsShown: used, ms: Date.now() - startedAt },
+    );
+    return null;
+  } finally {
+    clearTimeout(timer);
   }
 }

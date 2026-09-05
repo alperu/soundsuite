@@ -69,6 +69,12 @@ const OLLAMA_GENERATE_TIMEOUT_MS = 10_000;
 /** Readiness (tags + generation smoke) is cached this long — the smoke runs at most once per window. */
 const OLLAMA_PROBE_CACHE_MS = 60_000;
 
+/**
+ * Consecutive failed smokes required before readiness flips to not-ready
+ * (report N-4). One success recovers immediately.
+ */
+export const OLLAMA_FAILURE_THRESHOLD = 2;
+
 export interface OllamaReadiness {
   /** `GET /api/tags` answered 200. */
   reachable: boolean;
@@ -78,10 +84,99 @@ export interface OllamaReadiness {
   model: string;
   /** Why `reachable && generates` is false, for tool `readyReasons`. */
   reason?: string;
+  /**
+   * The raw probe failed but a last-known-good result is still being served
+   * (hysteresis). `reachable`/`generates` are the last-known-good values, not
+   * the values the failing probe returned — so tools stay visible.
+   */
+  degraded?: boolean;
+  /** Consecutive raw-probe failures observed so far (0 when the last probe passed). */
+  pendingFailures?: number;
+  /** The failing probe's reason, while `degraded`. */
+  pendingReason?: string;
 }
 
-let _ollamaProbe: { at: number; result: OllamaReadiness } | null = null;
+// ---------------------------------------------------------------------------
+// Readiness hysteresis (report N-4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Turns a stream of raw probe results into a readiness signal that does not
+ * flap.
+ *
+ * - N consecutive failures (default 2) before reporting not-ready.
+ * - A single success recovers immediately.
+ * - In between, the last-known-good result is served, flagged `degraded`.
+ * - Cold start (no last-known-good yet) reports the failure straight away —
+ *   there is nothing honest to serve instead.
+ */
+export class ReadinessHysteresis {
+  private lastGood: OllamaReadiness | null = null;
+  private consecutiveFailures = 0;
+
+  constructor(private readonly threshold: number = OLLAMA_FAILURE_THRESHOLD) {}
+
+  observe(raw: OllamaReadiness): OllamaReadiness {
+    if (raw.reachable && raw.generates) {
+      this.consecutiveFailures = 0;
+      this.lastGood = { reachable: raw.reachable, generates: raw.generates, model: raw.model };
+      return { ...this.lastGood, degraded: false, pendingFailures: 0 };
+    }
+
+    this.consecutiveFailures += 1;
+    if (this.lastGood && this.consecutiveFailures < this.threshold) {
+      return {
+        ...this.lastGood,
+        degraded: true,
+        pendingFailures: this.consecutiveFailures,
+        pendingReason: raw.reason,
+      };
+    }
+    this.lastGood = null;
+    return { ...raw, degraded: false, pendingFailures: this.consecutiveFailures };
+  }
+
+  /** Serialisable state, so the machine survives a module re-evaluation. */
+  snapshot(): { lastGood: OllamaReadiness | null; consecutiveFailures: number } {
+    return { lastGood: this.lastGood, consecutiveFailures: this.consecutiveFailures };
+  }
+
+  restore(state: { lastGood: OllamaReadiness | null; consecutiveFailures: number } | undefined | null): void {
+    if (!state) return;
+    this.lastGood = state.lastGood;
+    this.consecutiveFailures = state.consecutiveFailures;
+  }
+
+  reset(): void {
+    this.lastGood = null;
+    this.consecutiveFailures = 0;
+  }
+}
+
+/**
+ * Probe cache and hysteresis state live on `globalThis`, not in module scope.
+ *
+ * Under dev HMR (and whenever two evaluations of this module coexist) a
+ * module-level cache is empty for the new instance, so the cold-start rule
+ * would fire and readiness would flip to not-ready on a single failed smoke —
+ * which is exactly the flap N-4 observed. Keyed state survives that.
+ */
+const globalForReadiness = globalThis as unknown as {
+  __mcpOllamaProbe?: { at: number; result: OllamaReadiness } | null;
+  __mcpOllamaHysteresis?: { lastGood: OllamaReadiness | null; consecutiveFailures: number };
+};
+
 let _ollamaProbeInflight: Promise<OllamaReadiness> | null = null;
+
+function loadHysteresis(): ReadinessHysteresis {
+  const machine = new ReadinessHysteresis();
+  machine.restore(globalForReadiness.__mcpOllamaHysteresis);
+  return machine;
+}
+
+function saveHysteresis(machine: ReadinessHysteresis): void {
+  globalForReadiness.__mcpOllamaHysteresis = machine.snapshot();
+}
 
 function ollamaBase(config: { ollamaCompletionHost?: string; ollamaHost?: string }): string {
   const host = (config.ollamaCompletionHost || config.ollamaHost || process.env.OLLAMA_HOST || '').trim();
@@ -162,22 +257,30 @@ async function probeOllama(): Promise<OllamaReadiness> {
  * (3 s) and then — at most once per 60 s — runs a 5-token generation smoke
  * against the configured completion model (10 s). Cached for 60 s; concurrent
  * callers share one in-flight probe. Never throws.
+ *
+ * The raw probe result goes through `ReadinessHysteresis` before it is
+ * returned or cached: one failed smoke leaves readiness at its last-known-good
+ * value with `degraded: true`, two consecutive failures flip it (N-4).
  */
 export async function ollamaReadiness(opts?: { force?: boolean }): Promise<OllamaReadiness> {
   const now = Date.now();
-  if (!opts?.force && _ollamaProbe && now - _ollamaProbe.at < OLLAMA_PROBE_CACHE_MS) {
-    return _ollamaProbe.result;
+  const cached = globalForReadiness.__mcpOllamaProbe;
+  if (!opts?.force && cached && now - cached.at < OLLAMA_PROBE_CACHE_MS) {
+    return cached.result;
   }
   if (_ollamaProbeInflight) return _ollamaProbeInflight;
 
   _ollamaProbeInflight = (async () => {
-    let result: OllamaReadiness;
+    let raw: OllamaReadiness;
     try {
-      result = await probeOllama();
+      raw = await probeOllama();
     } catch (err) {
-      result = { reachable: false, generates: false, model: '', reason: err instanceof Error ? err.message : String(err) };
+      raw = { reachable: false, generates: false, model: '', reason: err instanceof Error ? err.message : String(err) };
     }
-    _ollamaProbe = { at: Date.now(), result };
+    const machine = loadHysteresis();
+    const result = machine.observe(raw);
+    saveHysteresis(machine);
+    globalForReadiness.__mcpOllamaProbe = { at: Date.now(), result };
     _ollamaProbeInflight = null;
     return result;
   })();
@@ -198,9 +301,10 @@ export async function ollamaAvailable(opts?: { force?: boolean }): Promise<boole
   return r.reachable && r.generates;
 }
 
-/** Test hook — drop the cached probe result. */
+/** Test hook — drop the cached probe result and the hysteresis state. */
 export function resetOllamaProbeCache(): void {
-  _ollamaProbe = null;
+  globalForReadiness.__mcpOllamaProbe = null;
+  globalForReadiness.__mcpOllamaHysteresis = undefined;
   _ollamaProbeInflight = null;
 }
 

@@ -15,7 +15,12 @@ export async function GET() {
       reasons: t.readyReasons,
       dependencies: t.dependencies,
     }));
-    return NextResponse.json({ tools: health });
+    // Readiness after hysteresis (N-4): when a smoke has failed but the
+    // last-known-good value is still being served, `ollama.degraded` is true
+    // and `ollama.pendingReason` names the failure — the tools below stay
+    // ready on purpose rather than flapping out of `tools/list`.
+    const ollama = registry.getOllamaReadiness();
+    return NextResponse.json({ tools: health, ollama });
   } catch (error) {
     return NextResponse.json(
       { error: { code: 'HEALTH_CHECK_FAILED', message: error instanceof Error ? error.message : 'Failed' } },
