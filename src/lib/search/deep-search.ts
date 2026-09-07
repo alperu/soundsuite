@@ -488,6 +488,8 @@ export async function executeParallelSearches(
   chatId?: string,
   /** Per-sub-query retrieval cap. Default 50 (the dashboard's value). */
   limitPerSubQuery: number = 50,
+  /** Subset scope (docs/tasks/12). Mutually exclusive with `caseId` upstream. */
+  caseIds?: string[],
 ): Promise<SubQueryResult[]> {
   // Normalize: plain strings become bare specs so the dispatch body has one shape.
   const specs: SubQuerySpec[] = subQueries.map(s => (typeof s === 'string' ? { query: s } : s));
@@ -498,6 +500,7 @@ export async function executeParallelSearches(
       const searchResult = await registry.execute('query_case_knowledge', {
         query: subQuery,
         ...(caseId ? { caseId } : {}),
+        ...(caseIds && caseIds.length > 0 ? { caseIds } : {}),
         ...(chatId ? { chatId } : {}),
         ...(spec.whereClauses && spec.whereClauses.length > 0 ? { whereClauses: spec.whereClauses } : {}),
         ...(spec.softBoostRefs && spec.softBoostRefs.length > 0 ? { softBoostRefs: spec.softBoostRefs } : {}),
@@ -611,6 +614,8 @@ export async function executePatternSearch(
   registry: ToolRegistry,
   pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
   scopeWhereClauses?: string[],
+  /** Subset scope (docs/tasks/12). Mutually exclusive with `caseId` upstream. */
+  caseIds?: string[],
 ): Promise<SubQueryResult> {
   const keywords = extractPatternKeywords(query);
 
@@ -626,6 +631,7 @@ export async function executePatternSearch(
     const result = await registry.execute('scan_for_pattern', {
       pattern,
       ...(caseId ? { caseId } : {}),
+      ...(caseIds && caseIds.length > 0 ? { caseIds } : {}),
       ...(scopeWhereClauses && scopeWhereClauses.length > 0 ? { whereClauses: scopeWhereClauses } : {}),
       limit: 50,
     }, pushWarning ? { pushWarning } : undefined);
@@ -673,6 +679,8 @@ export async function executePerChipPatternSearches(
   registry: ToolRegistry,
   pushWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
   scopeWhereClauses?: string[],
+  /** Subset scope (docs/tasks/12). Mutually exclusive with `caseId` upstream. */
+  caseIds?: string[],
 ): Promise<SubQueryResult[]> {
   const promises = specs.map(async (spec): Promise<SubQueryResult> => {
     const keywords = extractPatternKeywords(spec.query);
@@ -684,6 +692,7 @@ export async function executePerChipPatternSearches(
       const result = await registry.execute('scan_for_pattern', {
         pattern,
         ...(caseId ? { caseId } : {}),
+        ...(caseIds && caseIds.length > 0 ? { caseIds } : {}),
         ...(() => {
           const merged = [...(spec.whereClauses ?? []), ...(scopeWhereClauses ?? [])];
           return merged.length > 0 ? { whereClauses: merged } : {};
@@ -1566,6 +1575,8 @@ function caseIdsFromWhereClauses(whereClauses?: string[]): string[] {
 
 export interface RlmEvidenceRoundsOptions {
   caseId?: string;
+  /** Subset scope (docs/tasks/12), threaded into the RLM's own retrievals. */
+  caseIds?: string[];
   chatId?: string;
   history?: ConversationTurn[];
   workflowContext?: string;
@@ -1760,6 +1771,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
         {
           query: subQuery,
           ...(options.caseId ? { caseId: options.caseId } : {}),
+          ...(options.caseIds && options.caseIds.length > 0 ? { caseIds: options.caseIds } : {}),
           ...(options.chatId ? { chatId: options.chatId } : {}),
           ...(options.inheritedWhereClauses && options.inheritedWhereClauses.length > 0
             ? { whereClauses: options.inheritedWhereClauses }

@@ -346,7 +346,7 @@ export async function gatherEvidence(
     detail: { subQueries: decomposition!.subQueries },
   });
   const subQueryResults: SubQueryResult[] = await timed('retrieve', () =>
-    executeParallelSearches(scopedSpecs, options.caseId, registry, pushWarning, options.chatId, limitPerSubQuery),
+    executeParallelSearches(scopedSpecs, options.caseId, registry, pushWarning, options.chatId, limitPerSubQuery, options.caseIds),
   );
   // Per-sub-query timings (stream B's instrumentation): summed >> wall clock
   // means the fan-out really is parallel; summed ≈ wall clock means something
@@ -361,10 +361,10 @@ export async function gatherEvidence(
   emit('pattern', 'keyword pattern backstop for exact text matches');
   await timed('pattern', async () => {
     if (chipSpecs && chipSpecs.length > 0) {
-      const perChip = await executePerChipPatternSearches(chipSpecs, options.caseId, registry, pushWarning, scopeWhere);
+      const perChip = await executePerChipPatternSearches(chipSpecs, options.caseId, registry, pushWarning, scopeWhere, options.caseIds);
       for (const r of perChip) if (r.sources.length > 0) subQueryResults.push(r);
     } else {
-      const r = await executePatternSearch(query, options.caseId, registry, pushWarning, scopeWhere);
+      const r = await executePatternSearch(query, options.caseId, registry, pushWarning, scopeWhere, options.caseIds);
       if (r.sources.length > 0) subQueryResults.push(r);
     }
   });
@@ -446,6 +446,7 @@ export async function gatherEvidence(
       const out = await timed('rlm', () =>
         runRlmEvidenceRounds(query, decomposition!, sources, registry, {
           caseId: options.caseId,
+          caseIds: options.caseIds,
           chatId: options.chatId,
           history: options.history,
           signal,

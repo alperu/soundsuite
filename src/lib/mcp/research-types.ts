@@ -270,6 +270,8 @@ export interface GatherEvidenceOptions {
   localOnly: boolean;
   mode?: ResearchMode;
   caseId?: string;
+  /** Subset scope — mutually exclusive with `caseId` (docs/tasks/12 §2). */
+  caseIds?: string[];
   whereClauses?: string[];
   history?: { role: 'user' | 'assistant'; content: string }[];
   provider?: string;

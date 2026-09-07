@@ -25,8 +25,15 @@ export async function GET(request: NextRequest) {
 
     if (!result.success) {
       const errorMsg = result.error ?? 'Search failed';
-      const isDimMismatch = errorMsg.includes('dimension mismatch') || errorMsg.includes('query dim');
-      const isEmbedError = errorMsg.includes("Cannot read properties of null") && errorMsg.includes("embed");
+      // Match on the error CODE: BaseMCPTool only forwards a tool's own message
+      // for allowlisted codes, so substring-matching the text is no longer a
+      // reliable signal (docs/tasks/12 §5).
+      const isDimMismatch =
+        result.errorCode === 'EMBEDDING_DIMENSION_MISMATCH' ||
+        errorMsg.includes('dimension mismatch') || errorMsg.includes('query dim');
+      const isEmbedError =
+        result.errorCode === 'EMBEDDING_UNAVAILABLE' ||
+        (errorMsg.includes("Cannot read properties of null") && errorMsg.includes("embed"));
       return NextResponse.json(
         {
           error: {

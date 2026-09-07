@@ -17,10 +17,13 @@ import { getConfig } from '../../db/config';
 import { recordStatusFromTags } from '../../ingestion/draft-detector';
 import { DRAFT_CITE_MARKER } from '../../search/context-builder';
 import { attachMotionIds } from '../motion-resolution';
+import { resolveCaseScope, caseScopeFilter } from '../case-scope';
 
 export interface QueryCaseKnowledgeParams {
   query: string;
   caseId?: string;
+  /** Subset scope — mutually exclusive with `caseId`. Becomes `case_id IN (…)`. */
+  caseIds?: string[];
   chatId?: string;
   limit?: number;
   searchMode?: 'vector' | 'hybrid' | 'keyword';
@@ -92,8 +95,10 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
         'tableMarkdown (structured form of table chunks). Each result also carries ' +
         'recordStatus (filed|draft|unknown): DRAFT results are unfiled working copies — ' +
         'their citation is suffixed "DRAFT, filing not confirmed" and they must never be ' +
-        'described as filed, ruled on, or part of the record.',
-      version: '1.3.0',
+        'described as filed, ruled on, or part of the record. Scope with `caseId` (one ' +
+        'case) or `caseIds` (a subset); unscoped searches every case. Scoping selects ' +
+        'WHICH cases are searched — it does not raise the candidate pool or the `limit`.',
+      version: '1.4.0',
       category: 'search',
       inputSchema: {
         type: 'object',
@@ -104,7 +109,15 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
           },
           caseId: {
             type: 'string',
-            description: 'Optional case ID to filter results',
+            description:
+              'Restrict the search to one case (Case id, from list_cases). Omit to search every case. Mutually exclusive with caseIds.',
+          },
+          caseIds: {
+            type: 'array',
+            items: { type: 'string' },
+            minItems: 1,
+            description:
+              'Restrict the search to a subset of cases (Case ids, from list_cases). Mutually exclusive with caseId. Selects which cases are searched; it does not raise the candidate pool.',
           },
           chatId: {
             type: 'string',
@@ -127,10 +140,35 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
               '"any" (default) returns both. Drafts are always labelled in results.',
             enum: ['filed', 'draft', 'any'],
           },
+          // Declared because internal callers pass them (deep-search's per-chip
+          // dispatch, /api/search/unified, /api/search/ai). Undeclared params
+          // are now rejected, so anything a caller sends must appear here.
+          mode: {
+            type: 'string',
+            enum: ['legacy', 'boolean'],
+            description:
+              '"boolean" parses the query as a boolean expression (AND/OR/NOT, "phrases", -exclusion). Default "legacy".',
+          },
+          whereClauses: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Extra SQL-style filter clauses ANDed into the retrieval filter (advanced; used by the dashboard\'s scope chips).',
+          },
+          softBoostRefs: {
+            type: 'array',
+            items: { type: 'object' },
+            description:
+              'Soft ranking boosts: [{ field: documentId|caseId|filingId, values: [...] }]. Nudges ranking without hard-filtering (advanced).',
+          },
         },
         required: ['query'],
       },
     };
+  }
+
+  protected rejectsUnknownParams(): boolean {
+    return true;
   }
 
   validateParams(params: QueryCaseKnowledgeParams): void {
@@ -146,8 +184,17 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     context: ToolExecutionContext,
     _config: ToolConfigEntry,
   ): Promise<QueryCaseKnowledgeResult> {
-    const { query, caseId, chatId, limit = 10, searchMode = 'hybrid', mode = 'legacy', whereClauses, softBoostRefs, recordStatus = 'any' } = params;
+    const { query, chatId, limit = 10, searchMode = 'hybrid', mode = 'legacy', whereClauses, softBoostRefs, recordStatus = 'any' } = params;
     const chatHitChunkIds = new Set<string>();
+
+    // Mutual exclusion + existence in one place; a bad id fails here with
+    // INVALID_PARAMS rather than returning an empty page (docs/tasks/12 §4).
+    const scope = await resolveCaseScope(params, context.database);
+    const scopeFilter = caseScopeFilter(scope);
+    const hasScope = Object.keys(scopeFilter).length > 0;
+    // Single-case metadata lookups (citation formatter, volume counts) still
+    // key off one id; a subset scope leaves them on the corpus-wide defaults.
+    const caseId = scope.caseId;
 
     // Per-phase wall-clock timings, logged as one [qck-timing] line at the end
     // so slow phases (embed vs search vs rerank vs hydrate) are attributable.
@@ -206,8 +253,15 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
           reason: 'embed-failed',
           message: msg,
         });
-        // Re-throw if no fallback path possible (pure vector search would have nothing to do)
-        if (searchMode === 'vector') throw err;
+        // Re-throw if no fallback path possible (pure vector search would have
+        // nothing to do). Coded so `BaseMCPTool` forwards the provider's own
+        // message — the dashboard turns it into "configure an embedding
+        // provider" guidance, which a generic EXECUTION_ERROR cannot support.
+        if (searchMode === 'vector') {
+          const coded: any = err instanceof Error ? err : new Error(String(err));
+          if (!coded.code) coded.code = 'EMBEDDING_UNAVAILABLE';
+          throw coded;
+        }
         // Otherwise fall through — keyword search can still produce results.
       }
     }
@@ -294,9 +348,9 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       searchQuery.hybridQuery = query;
     }
 
-    // Apply case filter if provided
-    if (caseId) {
-      searchQuery.filter = { caseId };
+    // Apply case scope if provided (`caseId` → `case_id = …`, `caseIds` → IN).
+    if (hasScope) {
+      searchQuery.filter = { ...scopeFilter };
     }
 
     // Record-status filter (draft guard). 'any' keeps legacy behaviour.
@@ -352,7 +406,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     // If page references were extracted, run a secondary metadata-filtered search and merge
     if (processed.pageReferences && searchResults.length < retrievalLimit) {
       const pageRef = processed.pageReferences;
-      const metadataFilter: Record<string, any> = { ...(caseId ? { caseId } : {}) };
+      const metadataFilter: Record<string, any> = { ...scopeFilter };
       if (pageRef.page !== undefined) metadataFilter.pageNumber = pageRef.page;
       if (pageRef.filingType) metadataFilter.filingType = pageRef.filingType;
 

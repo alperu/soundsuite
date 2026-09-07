@@ -151,6 +151,23 @@ const TEXT_SCAN_COLUMNS = [
 ];
 
 /**
+ * Operator-actionable error, so it must reach the caller intact:
+ * `BaseMCPTool` only forwards a message when the throw carries a code on its
+ * allowlist, and the dashboard's search routes key off that code to tell the
+ * user to reindex. The text names dimensions and a settings path — no case
+ * text — so it is safe to surface.
+ */
+export function dimensionMismatchError(queryDim: number, storedDim: number): Error {
+  const err: any = new Error(
+    `Embedding dimension mismatch: query=${queryDim}, stored=${storedDim}. ` +
+    `The embedding model was changed after documents were indexed. ` +
+    `Reindex documents from Admin > Embedding Config.`,
+  );
+  err.code = 'EMBEDDING_DIMENSION_MISMATCH';
+  return err;
+}
+
+/**
  * VectorStore manages document embeddings in LanceDB.
  *
  * This class provides high-level operations for storing and searching
@@ -510,11 +527,7 @@ export class VectorStore {
     // Check for dimension mismatch before searching
     const storedDim = await this.getStoredVectorDimension();
     if (storedDim !== null && storedDim !== vector.length) {
-      throw new Error(
-        `Embedding dimension mismatch: query=${vector.length}, stored=${storedDim}. ` +
-        `The embedding model was changed after documents were indexed. ` +
-        `Reindex documents from Admin > Embedding Config.`
-      );
+      throw dimensionMismatchError(vector.length, storedDim);
     }
 
     let queryBuilder = this.table.search(vector).limit(limit);
@@ -585,11 +598,7 @@ export class VectorStore {
     // Check for dimension mismatch
     const storedDim = await this.getStoredVectorDimension();
     if (storedDim !== null && storedDim !== vector.length) {
-      throw new Error(
-        `Embedding dimension mismatch: query=${vector.length}, stored=${storedDim}. ` +
-        `The embedding model was changed after documents were indexed. ` +
-        `Reindex documents from Admin > Embedding Config.`
-      );
+      throw dimensionMismatchError(vector.length, storedDim);
     }
 
     // Build the FTS query object if given a plain string
@@ -941,7 +950,15 @@ export class VectorStore {
   private buildWhereClause(filter: Record<string, any>): string {
     const conditions: string[] = [];
 
-    if (filter.caseId) {
+    // Subset scoping wins over the single-case form and is never ANDed with
+    // it — the two together are unsatisfiable. Emitted as `IN (…)` even for a
+    // one-element list so the clause shape is stable.
+    if (Array.isArray(filter.caseIds) && filter.caseIds.length > 0) {
+      const quoted = filter.caseIds
+        .filter((id: unknown) => typeof id === 'string' && id.length > 0)
+        .map((id: string) => `"${id}"`);
+      if (quoted.length > 0) conditions.push(`case_id IN (${quoted.join(', ')})`);
+    } else if (filter.caseId) {
       conditions.push(`case_id = "${filter.caseId}"`);
     }
 

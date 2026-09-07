@@ -16,6 +16,7 @@ import { estimateResearchSeconds } from '../research/estimate';
 import { McpError } from '../llm-policy';
 import { ollamaAvailable } from '../shared-dependencies';
 import { parseResearchParams } from '../research/research-params';
+import { resolveCaseScope } from '../case-scope';
 import { startResearchJob } from '../research/start-research-job';
 
 export const RESEARCH_INPUT_SCHEMA: ToolMetadata['inputSchema'] = {
@@ -27,7 +28,14 @@ export const RESEARCH_INPUT_SCHEMA: ToolMetadata['inputSchema'] = {
     },
     caseId: {
       type: 'string',
-      description: 'Restrict retrieval to one case (Case id).',
+      description: 'Restrict retrieval to one case (Case id, from list_cases). Mutually exclusive with caseIds.',
+    },
+    caseIds: {
+      type: 'array',
+      items: { type: 'string' },
+      minItems: 1,
+      description:
+        'Restrict retrieval to a subset of cases (Case ids, from list_cases). Mutually exclusive with caseId. Selects which cases are searched; it does not raise the candidate pool — raise maxEvidence for more evidence.',
     },
     mode: {
       type: 'string',
@@ -131,7 +139,7 @@ export class ResearchEvidenceTool extends BaseMCPTool<ResearchToolParams, Eviden
       name: 'research_evidence',
       displayName: 'Research Evidence',
       description:
-        'Gather ranked evidence for a legal research question — decomposition, hybrid retrieval, keyword backstop, rerank and a sections→evidence outline. Returns EVIDENCE ONLY (chunks with citations, sub-queries, outline, gaps): it never writes a report or any prose — you write that from the evidence. Everything runs locally (Ollama, sidecar reranker, sidecar RLM); nothing leaves this machine. Any provider/model/routing fields in the request are ignored and reported in routing.ignored[]; unknown fields are rejected. Evidence is capped (defaults: ' + `${EVIDENCE_DEFAULTS.maxEvidence} items, ${EVIDENCE_DEFAULTS.maxCharsPerChunk} chars per chunk` + ') and the applied caps are reported in stats.caps — raise maxEvidence / maxCharsPerChunk if you need more. A request the router expects to run long is promoted to a job: poll research_status with the returned jobId.',
+        'Gather ranked evidence for a legal research question — decomposition, hybrid retrieval, keyword backstop, rerank and a sections→evidence outline. Returns EVIDENCE ONLY (chunks with citations, sub-queries, outline, gaps): it never writes a report or any prose — you write that from the evidence. Everything runs locally (Ollama, sidecar reranker, sidecar RLM); nothing leaves this machine. Any provider/model/routing fields in the request are ignored and reported in routing.ignored[]; unknown fields are rejected. Evidence is capped (defaults: ' + `${EVIDENCE_DEFAULTS.maxEvidence} items, ${EVIDENCE_DEFAULTS.maxCharsPerChunk} chars per chunk` + ') and the applied caps are reported in stats.caps — raise maxEvidence / maxCharsPerChunk if you need more. Scope with `caseId` (one case) or `caseIds` (a subset); unscoped covers every case. Scoping selects WHICH cases are searched — it does not raise the evidence cap or the candidate pool. A request the router expects to run long is promoted to a job: poll research_status with the returned jobId.',
       version: '1.0.0',
       category: 'search',
       profiles: ['local', 'routed'],
@@ -152,6 +160,9 @@ export class ResearchEvidenceTool extends BaseMCPTool<ResearchToolParams, Eviden
     const profile = profileOf(context);
     const { query: _q, ...rest } = params;
     const { options, ignored } = await parseResearchParams(rest);
+    // Before the promotion branch: a bogus id must be a 400, not a jobId that
+    // fails minutes later (docs/tasks/12 §4).
+    await resolveCaseScope(options, context.database);
 
     // Self-promotion: RLM rounds run for minutes, past any MCP call timeout.
     const { resolveResearchMode, gatherEvidence } = await import('../../search/gather-evidence');
@@ -223,6 +234,10 @@ export class ResearchStartTool extends BaseMCPTool<ResearchToolParams, ResearchS
   async executeImpl(params: ResearchToolParams, context: ToolExecutionContext, _config: ToolConfigEntry): Promise<ResearchStartResult> {
     const query = requireQuery(params);
     const { query: _q, ...rest } = params;
+    // Parse + validate the scope up front so a bad id fails the start call
+    // rather than the job (docs/tasks/12 §4).
+    const { options } = await parseResearchParams(rest);
+    await resolveCaseScope(options, context.database);
     const job = await startResearchJob({ query, profile: profileOf(context), sessionId: context.sessionId, params: rest });
     return { jobId: job.id, kind: 'research', status: job.status, startedAt: job.startedAt };
   }

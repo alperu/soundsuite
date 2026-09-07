@@ -113,8 +113,15 @@ export async function POST(request: NextRequest) {
 
           if (!searchResult.success) {
             const errorMsg = searchResult.error ?? 'Unknown error';
-            const isEmbedError = errorMsg.includes("Cannot read properties of null") && errorMsg.includes("embed");
-            const isDimMismatch = errorMsg.includes('dimension mismatch') || errorMsg.includes('query dim');
+            // Match on the error CODE: BaseMCPTool only forwards a tool's own
+            // message for allowlisted codes, so substring-matching the text is
+            // no longer a reliable signal (docs/tasks/12 §5).
+            const isEmbedError =
+              searchResult.errorCode === 'EMBEDDING_UNAVAILABLE' ||
+              (errorMsg.includes("Cannot read properties of null") && errorMsg.includes("embed"));
+            const isDimMismatch =
+              searchResult.errorCode === 'EMBEDDING_DIMENSION_MISMATCH' ||
+              errorMsg.includes('dimension mismatch') || errorMsg.includes('query dim');
             send({
               type: 'error',
               error: isDimMismatch
@@ -159,7 +166,8 @@ export async function POST(request: NextRequest) {
               const patternResult = await registry.execute('scan_for_pattern', {
                 pattern,
                 ...(caseId ? { caseId } : {}),
-                ...(chatId ? { chatId } : {}),
+                // NB: no `chatId` — scan_for_pattern never searched per-chat
+                // attachments, so passing it only looked like it did.
                 // The pattern arm feeds the same `sources` array as the vector
                 // arm, so it has to honour the scope too — otherwise an active
                 // graph scope leaks out-of-scope excerpts into the answer.

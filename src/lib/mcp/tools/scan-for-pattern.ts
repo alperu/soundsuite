@@ -8,6 +8,7 @@ import { SearchQuery, SearchResult, MatchQuery, Operator } from '../../vector/ve
 import { getCitationFormatter, CitationInput } from '../../citations/citation-formatter';
 import { detectLineNumbers } from '../../citations/line-number-detector';
 import { attachMotionIds } from '../motion-resolution';
+import { resolveCaseScope, caseScopeFilter, caseScopeIds, type CaseScope } from '../case-scope';
 
 /** How a page of results was produced. Always present on the result. */
 export type ScanStrategy = 'fts+regex' | 'full-scan';
@@ -15,6 +16,8 @@ export type ScanStrategy = 'fts+regex' | 'full-scan';
 export interface ScanForPatternParams {
   pattern: string;
   caseId?: string;
+  /** Subset scope — mutually exclusive with `caseId`. Becomes `case_id IN (…)`. */
+  caseIds?: string[];
   limit?: number;
   /** Opaque page token returned as `nextCursor` by a previous call. */
   cursor?: string;
@@ -297,8 +300,9 @@ interface ScanCursor {
   p: string;
 }
 
-function cursorKey(pattern: string, caseId?: string): string {
-  return `${pattern}|${caseId ?? ''}`.slice(0, 200);
+function cursorKey(pattern: string, scope?: CaseScope): string {
+  const ids = scope ? caseScopeIds(scope) : [];
+  return `${pattern}|${ids.join(',')}`.slice(0, 200);
 }
 
 function encodeCursor(c: ScanCursor): string {
@@ -344,8 +348,11 @@ export class ScanForPatternTool extends BaseMCPTool<
         'result reports `strategy`, recall counts and `warnings[]`; page with ' +
         '`cursor` / `nextCursor` rather than raising `limit`. Results carry the ' +
         'same structure metadata as query_case_knowledge when available (documentId, ' +
-        'blockType, headingPath, speakers, tableMarkdown).',
-      version: '1.3.0',
+        'blockType, headingPath, speakers, tableMarkdown). Scope with `caseId` (one ' +
+        'case) or `caseIds` (a subset); unscoped spans every case. Scoping selects ' +
+        'WHICH cases are searched — it does not raise the candidate pool, so exhaust ' +
+        'a scoped search with `nextCursor` exactly as you would an unscoped one.',
+      version: '1.4.0',
       category: 'search',
       inputSchema: {
         type: 'object',
@@ -356,7 +363,21 @@ export class ScanForPatternTool extends BaseMCPTool<
           },
           caseId: {
             type: 'string',
-            description: 'Optional case ID to filter results',
+            description:
+              'Restrict the scan to one case (Case id, from list_cases). Omit to scan every case. Mutually exclusive with caseIds.',
+          },
+          caseIds: {
+            type: 'array',
+            items: { type: 'string' },
+            minItems: 1,
+            description:
+              'Restrict the scan to a subset of cases (Case ids, from list_cases). Mutually exclusive with caseId. Selects which cases are searched; it does not raise the candidate pool.',
+          },
+          whereClauses: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Extra SQL-style filter clauses ANDed into the retrieval filter (advanced; used by the dashboard\'s scope chips).',
           },
           limit: {
             type: 'number',
@@ -372,6 +393,10 @@ export class ScanForPatternTool extends BaseMCPTool<
         required: ['pattern'],
       },
     };
+  }
+
+  protected rejectsUnknownParams(): boolean {
+    return true;
   }
 
   validateParams(params: ScanForPatternParams): void {
@@ -472,18 +497,25 @@ export class ScanForPatternTool extends BaseMCPTool<
     context: ToolExecutionContext,
     _config: ToolConfigEntry,
   ): Promise<ScanForPatternResult> {
-    const { pattern, caseId, whereClauses } = params;
+    const { pattern, whereClauses } = params;
     const limit = Math.max(1, Math.min(params.limit ?? 10, MAX_PAGE_LIMIT));
     const warnings: string[] = [];
 
-    context.logger.info('Handling scan_for_pattern', { pattern, caseId, limit });
+    // Mutual exclusion + existence in one place; a bad id fails here with
+    // INVALID_PARAMS rather than returning an empty page (docs/tasks/12 §4).
+    const scope = await resolveCaseScope(params, context.database);
+    const scopeIds = caseScopeIds(scope);
+    // Single-case metadata lookups below still key off one id.
+    const caseId = scope.caseId;
+
+    context.logger.info('Handling scan_for_pattern', { pattern, caseCount: scopeIds.length, limit });
 
     // Resume a previous page. A cursor minted for a different pattern/case
     // would silently page through the wrong answer, so reject it outright.
     let cursor: ScanCursor | null = null;
     if (params.cursor) {
       cursor = decodeCursor(params.cursor);
-      if (!cursor || cursor.p !== cursorKey(pattern, caseId)) {
+      if (!cursor || cursor.p !== cursorKey(pattern, scope)) {
         const err: any = new Error('Invalid or mismatched cursor for this pattern');
         err.code = 'INVALID_PARAMS';
         throw err;
@@ -541,7 +573,8 @@ export class ScanForPatternTool extends BaseMCPTool<
 
     // Retrieval scope, shared by both paths so the full scan never widens it.
     let filter: Record<string, any> | undefined;
-    if (caseId) filter = { caseId };
+    const scopeFilter = caseScopeFilter(scope);
+    if (Object.keys(scopeFilter).length > 0) filter = { ...scopeFilter };
     if (whereClauses && whereClauses.length > 0) {
       filter = { ...(filter ?? {}), _rawWhere: [...whereClauses] };
     }
@@ -575,7 +608,7 @@ export class ScanForPatternTool extends BaseMCPTool<
       scanned = scan.scanned;
       truncated = scan.truncated;
       if (scan.nextOffset !== null) {
-        nextCursor = encodeCursor({ s: 'full-scan', o: scan.nextOffset, p: cursorKey(pattern, caseId) });
+        nextCursor = encodeCursor({ s: 'full-scan', o: scan.nextOffset, p: cursorKey(pattern, scope) });
       }
     } else {
       // ── FTS recall + regex post-filter (unchanged path) ─────────────────
@@ -647,7 +680,7 @@ export class ScanForPatternTool extends BaseMCPTool<
         truncated = scan.truncated;
         candidatePool = 0;
         if (scan.nextOffset !== null) {
-          nextCursor = encodeCursor({ s: 'full-scan', o: scan.nextOffset, p: cursorKey(pattern, caseId) });
+          nextCursor = encodeCursor({ s: 'full-scan', o: scan.nextOffset, p: cursorKey(pattern, scope) });
         }
       } else {
         if (searchResults.length === 0) {
@@ -666,7 +699,7 @@ export class ScanForPatternTool extends BaseMCPTool<
           nextCursor = encodeCursor({
             s: 'fts+regex',
             o: pageOffset + limit,
-            p: cursorKey(pattern, caseId),
+            p: cursorKey(pattern, scope),
           });
         }
       }

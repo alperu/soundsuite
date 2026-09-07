@@ -38,7 +38,7 @@ function hit(over: Partial<SearchResult['metadata']> & { chunkId: string; text: 
 function makeContext(results: SearchResult[], docTags: Record<string, unknown> = {}) {
   const search = jest.fn().mockResolvedValue(results);
   const database = {
-    case: { findUnique: jest.fn().mockResolvedValue(null) },
+    case: { findUnique: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([{ id: 'case-1' }]) },
     filing: { findMany: jest.fn().mockResolvedValue([]) },
     document: {
       findMany: jest.fn().mockResolvedValue([]),

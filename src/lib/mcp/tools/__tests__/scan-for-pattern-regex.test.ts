@@ -141,7 +141,7 @@ function makeHarness(rows: Row[] = makeCorpus(), opts: HarnessOptions = {}): Har
       }),
       findMany: jest.fn().mockResolvedValue([]),
     },
-    case: { findUnique: jest.fn().mockResolvedValue(null) },
+    case: { findUnique: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([{ id: 'case-1' }]) },
     filing: { findMany: jest.fn().mockResolvedValue([]) },
     motion: { findMany: jest.fn().mockResolvedValue(opts.motions ?? []) },
   };
@@ -324,6 +324,19 @@ describe('scan_for_pattern — true regex recall', () => {
     const filter = h.scanTextColumn.mock.calls[0][0].filter;
     expect(filter.caseId).toBe('case-1');
     expect(filter._rawWhere).toEqual(['filing_type = "MOTION"']);
+  });
+
+  it('scopes the full scan to a caseIds subset (docs/tasks/12)', async () => {
+    const h = makeHarness();
+    h.context.database.case.findMany = jest
+      .fn()
+      .mockResolvedValue([{ id: 'case-1' }, { id: 'case-2' }]);
+
+    await run(tool, h, { pattern: '[Uu]nbeknownst', caseIds: ['case-1', 'case-2'], limit: 5 });
+
+    const filter = h.scanTextColumn.mock.calls[0][0].filter;
+    expect(filter.caseIds).toEqual(['case-1', 'case-2']);
+    expect(filter.caseId).toBeUndefined();
   });
 
   // ── Provenance carried by both paths ──────────────────────────────────────

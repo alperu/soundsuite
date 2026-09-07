@@ -15,7 +15,7 @@ import { RESEARCH_TIERS } from '../research-types';
 import { McpError } from '../llm-policy';
 
 export interface ParsedResearchParams {
-  options: Pick<GatherEvidenceOptions, 'mode' | 'caseId' | 'whereClauses' | 'history' | 'retrieval'>;
+  options: Pick<GatherEvidenceOptions, 'mode' | 'caseId' | 'caseIds' | 'whereClauses' | 'history' | 'retrieval'>;
   ignored: string[];
 }
 
@@ -43,7 +43,7 @@ const TOP_LEVEL_RETRIEVAL_KEYS: (keyof RetrievalSettings)[] = ['maxEvidence', 'm
  * callers before parsing but stay allowed so a direct caller is not punished.
  */
 const HONOURED_TOP_LEVEL_KEYS: string[] = [
-  'query', 'profile', 'caseId', 'mode', 'retrieval', 'history', 'preset', 'whereClauses',
+  'query', 'profile', 'caseId', 'caseIds', 'mode', 'retrieval', 'history', 'preset', 'whereClauses',
   ...TOP_LEVEL_RETRIEVAL_KEYS,
 ];
 
@@ -57,6 +57,26 @@ function placementHint(key: string): string {
     if (known.toLowerCase() === lower) return ` — did you mean "${known}"?`;
   }
   return '';
+}
+
+/**
+ * `caseIds` — a subset scope. Type-checked here as well as in
+ * `BaseMCPTool.validateParamTypes` because the HTTP research routes call this
+ * parser directly, without a tool in front of it.
+ */
+function parseCaseIds(v: unknown): string[] | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (!Array.isArray(v)) {
+    throw new McpError('INVALID_PARAMS', `caseIds must be an array of case ids, received ${typeof v}`);
+  }
+  if (v.length === 0) {
+    throw new McpError('INVALID_PARAMS', 'caseIds must contain at least one case id');
+  }
+  const ids = v.map((x) => (typeof x === 'string' ? x.trim() : ''));
+  if (ids.some((x) => !x)) {
+    throw new McpError('INVALID_PARAMS', 'caseIds entries must be non-empty case ids');
+  }
+  return [...new Set(ids)];
 }
 
 function positiveInt(v: unknown): number | undefined {
@@ -127,6 +147,13 @@ export async function parseResearchParams(params: Record<string, unknown> | unde
 
   const mode = parseResearchMode(p.mode);
   const caseId = typeof p.caseId === 'string' && p.caseId.trim() ? p.caseId.trim() : undefined;
+  const caseIds = parseCaseIds(p.caseIds);
+  if (caseId && caseIds) {
+    throw new McpError(
+      'INVALID_PARAMS',
+      'caseId and caseIds are mutually exclusive — send caseId for one case or caseIds for a subset, not both',
+    );
+  }
   const whereClauses = Array.isArray(p.whereClauses)
     ? p.whereClauses.filter((c): c is string => typeof c === 'string' && c.trim().length > 0)
     : undefined;
@@ -161,6 +188,7 @@ export async function parseResearchParams(params: Record<string, unknown> | unde
     options: {
       ...(mode ? { mode } : {}),
       ...(caseId ? { caseId } : {}),
+      ...(caseIds ? { caseIds } : {}),
       ...(whereClauses && whereClauses.length > 0 ? { whereClauses } : {}),
       ...(history ? { history } : {}),
       ...(retrieval ? { retrieval } : {}),

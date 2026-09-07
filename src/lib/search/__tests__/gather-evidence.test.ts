@@ -245,12 +245,27 @@ describe('gatherEvidence', () => {
       profile: 'local', localOnly: true, mode: 'deep',
       retrieval: { limitPerSubQuery: 7, rerankPoolSize: 40, maxEvidence: 1 },
     });
-    expect(executeParallelSearchesMock).toHaveBeenCalledWith(expect.anything(), undefined, registry, expect.any(Function), undefined, 7);
+    // Trailing arg is the `caseIds` subset scope (docs/tasks/12) — unset here.
+    expect(executeParallelSearchesMock).toHaveBeenCalledWith(expect.anything(), undefined, registry, expect.any(Function), undefined, 7, undefined);
     expect(deduplicateAndMergeMock).toHaveBeenCalledWith(expect.anything(), 'q', expect.any(Function), { rerankPoolSize: 40 });
     expect(r.evidence).toHaveLength(1);
     expect(r.stats.rerankPool).toBe(2);
     expect(r.stats.chunksFused).toBe(2);
     expect(typeof r.stats.phases.retrieve).toBe('number');
+  });
+
+  it('threads a caseIds subset scope into every retrieval arm (docs/tasks/12)', async () => {
+    const A = '00000000-0000-4000-8000-0000000000aa';
+    const B = '00000000-0000-4000-8000-0000000000bb';
+    await gatherEvidence('q', registry, {
+      profile: 'local', localOnly: true, mode: 'deep', caseIds: [A, B],
+    });
+    // Position 7 of executeParallelSearches is `caseIds`.
+    expect(executeParallelSearchesMock.mock.calls[0][6]).toEqual([A, B]);
+    // The keyword backstop shares the scope, or it would widen the answer.
+    const patternCall =
+      executePatternSearchMock.mock.calls[0] ?? executePerChipPatternSearchesMock.mock.calls[0];
+    expect(patternCall[5]).toEqual([A, B]);
   });
 
   it('caps evidence count and chunk text by default and reports it in stats.caps', async () => {

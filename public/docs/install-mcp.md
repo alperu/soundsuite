@@ -203,11 +203,59 @@ The bridge sends the result through verbatim. It does not trim, cap or paginate 
 
 No model is involved; these read the index directly.
 
-- `query_case_knowledge` — semantic / hybrid / keyword search. `query` (required), `caseId`, `chatId`, `limit` (default 10), `searchMode` (`vector` | `hybrid` | `keyword`, default `hybrid`). Results carry citation fields plus `documentId`, `blockType`, `headingPath`, `speakers` and `tableMarkdown` when available.
-- `scan_for_pattern` — regex search. `pattern` (required), `caseId`, `limit` (default 10). Same structure metadata as above.
-- `query_case_graph` — structural lookups over the case graph. `operation` (required: `amendment-lineage` | `motions-by-person` | `related-motions`), `motionId`, `personId`, `role` (`judge` | `movant` | `respondent`), `caseScope` (array of case ids), `limit` (default 50).
+- `query_case_knowledge` — semantic / hybrid / keyword search. `query` (required), `caseId`, `caseIds` (array), `chatId`, `limit` (default 10), `searchMode` (`vector` | `hybrid` | `keyword`, default `hybrid`). Results carry citation fields plus `documentId`, `blockType`, `headingPath`, `speakers` and `tableMarkdown` when available.
+- `scan_for_pattern` — regex search. `pattern` (required), `caseId`, `caseIds` (array), `limit` (default 10), `cursor`. Same structure metadata as above.
+- `query_case_graph` — structural lookups over the case graph. `operation` (required: `amendment-lineage` | `motions-by-person` | `related-motions`), `motionId`, `personId`, `role` (`judge` | `movant` | `respondent`), `caseScope` / `caseIds` (array of case ids — two names for the same scope), `limit` (default 50).
 - `retrieve_exhibit` — find exhibit images by description. `description` (required), `caseId`, `limit` (default 5).
 - `search_workflows` — search workflows and templates. `query`, `caseId`, `category`, `tag`, `status`, `limit` (default 20).
+
+### Searching a subset of cases
+
+Every search tool is **unscoped by default** — it spans every indexed case. To narrow it:
+
+| You want | Send |
+|---|---|
+| one case | `caseId: "<case id>"` |
+| a subset | `caseIds: ["<case id>", "<case id>"]` |
+| everything | neither |
+
+`caseId` and `caseIds` are mutually exclusive; sending both is a 400. Case ids come from
+`list_cases` — an id with no case behind it is rejected with `case not found: "<id>"` rather than
+returning an empty result set, so a typo can never be mistaken for an empty case. Unknown
+parameters are rejected too: `caseScope` on a search tool returns
+`unknown parameter "caseScope" — use "caseIds" on this tool`, not a silently unscoped search.
+
+**Scoping selects which cases are searched. It does not raise the cap.** A scoped search
+considers the same number of candidates as an unscoped one — narrowing to one case does not make
+the tool return more of that case's hits. To get *more* results, page or widen the strategy:
+
+- **Page** — `scan_for_pattern` returns `nextCursor` whenever more results exist. Call it again
+  with `cursor: "<nextCursor>"` until `nextCursor` is absent. Raising `limit` bounds the page,
+  not the answer.
+- **Force a full scan** — a pattern with no whole-token literal (a character class or a mid-word
+  fragment, e.g. `[Ss]ettle`) makes `scan_for_pattern` run a true regex pass over the chunk text
+  instead of a keyword pass. The result reports `strategy: "full-scan"`, `scanned` and
+  `truncated`, so you can tell bounded recall from complete recall.
+- **`research_evidence`** — raise `maxEvidence` (and `retrieval.limitPerSubQuery`) for a bigger
+  evidence list. `caseIds` narrows the corpus; the caps stay where you set them.
+
+For an exhaustive answer across several cases, loop one case at a time and merge, exhausting each
+case's pages before moving on:
+
+```
+for id in [caseA, caseB, caseC]:
+    cursor = None
+    while True:
+        page = scan_for_pattern { pattern: "…", caseId: id, limit: 200, cursor: cursor }
+        collect(page.results)
+        cursor = page.nextCursor
+        if not cursor: break
+```
+
+Running one unscoped scan and filtering the results by `caseId` client-side is **not**
+equivalent: the cap applies before your filter does, so a case that ranks low corpus-wide can
+contribute zero rows to a page that was never short.
+
 
 ### Analysis tools (both profiles)
 
@@ -231,7 +279,8 @@ Gathers ranked evidence for a research question: decomposition into sub-queries,
 | Parameter | Type | Meaning |
 |---|---|---|
 | `query` | string, **required** | The research question. |
-| `caseId` | string | Restrict retrieval to one case. |
+| `caseId` | string | Restrict retrieval to one case. Mutually exclusive with `caseIds`. |
+| `caseIds` | string[] | Restrict retrieval to a subset of cases. Selects which cases are searched; it does not raise `maxEvidence`. |
 | `mode` | `auto` \| `fast` \| `deep` \| `deep-report` \| `deep-rlm` | Retrieval tier. `auto` (default) lets the query router choose. `fast` is one retrieval with no outline. `deep` and `deep-report` add decomposition, rerank and outline. `deep-rlm` adds recursive RLM rounds on the sidecar and **always runs as a job**. |
 | `retrieval` | object | `rerankPoolSize` (default 150), `limitPerSubQuery` (default 50), `rlmMaxRounds` (default 2), `maxEvidence` (default 40), `maxCharsPerChunk` (default 1200), `decomposeTimeoutMs` (default 20000), `outlineTimeoutMs` (default 60000). The only settings the local engine honours. |
 | `maxEvidence` | integer | Top-level shorthand for `retrieval.maxEvidence`. |

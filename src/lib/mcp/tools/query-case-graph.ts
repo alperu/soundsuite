@@ -11,6 +11,8 @@ import {
   type MotionNode,
   type MotionRole,
 } from '../../search/graph-expand';
+import { assertCasesExist } from '../case-scope';
+import { McpError } from '../llm-policy';
 
 /**
  * query_case_graph — structural ("graph-aware") lookups over the authoritative
@@ -35,6 +37,8 @@ export interface QueryCaseGraphParams {
   role?: MotionRole;
   /** Optional case-id scope (intersect with the user's `{{ }}` chip filter). */
   caseScope?: string[];
+  /** Alias of `caseScope`, so the whole MCP surface has one name for a subset. */
+  caseIds?: string[];
   /** Max nodes to return (default 50, hard-capped in graph-expand). */
   limit?: number;
 }
@@ -65,12 +69,17 @@ export class QueryCaseGraphTool extends BaseMCPTool<QueryCaseGraphParams, QueryC
           motionId: { type: 'string', description: 'Motion id (amendment-lineage / related-motions).' },
           personId: { type: 'string', description: 'Person id (motions-by-person).' },
           role: { type: 'string', enum: ['judge', 'movant', 'respondent'], description: 'Optional role filter for motions-by-person.' },
-          caseScope: { type: 'array', items: { type: 'string' }, description: 'Optional case-id scope.' },
+          caseScope: { type: 'array', items: { type: 'string' }, description: 'Optional case-id scope. Same thing as caseIds; send one or the other.' },
+          caseIds: { type: 'array', items: { type: 'string' }, description: 'Optional case-id scope — alias of caseScope, matching the search tools.' },
           limit: { type: 'number', description: 'Max nodes (default 50).' },
         },
         required: ['operation'],
       },
     };
+  }
+
+  protected rejectsUnknownParams(): boolean {
+    return true;
   }
 
   validateParams(params: QueryCaseGraphParams): void {
@@ -89,7 +98,25 @@ export class QueryCaseGraphTool extends BaseMCPTool<QueryCaseGraphParams, QueryC
     _context: ToolExecutionContext,
     _config: ToolConfigEntry,
   ): Promise<QueryCaseGraphResult> {
-    const { operation, motionId, personId, role, caseScope, limit } = params;
+    const { operation, motionId, personId, role, limit } = params;
+
+    // `caseIds` is the surface-wide name; `caseScope` is what this tool has
+    // always taken. Both together is a contradiction, not a union.
+    if (params.caseScope && params.caseIds) {
+      throw new McpError(
+        'INVALID_PARAMS',
+        'caseScope and caseIds are the same scope under two names — send one, not both',
+      );
+    }
+    const caseScope = params.caseIds ?? params.caseScope;
+    if (caseScope) {
+      if (caseScope.length === 0) {
+        throw new McpError('INVALID_PARAMS', 'caseScope must contain at least one case id');
+      }
+      // A typo'd id must not read as "this case has no related motions".
+      await assertCasesExist(caseScope, _context.database, 'caseScope');
+    }
+
     const opts = { caseScope, maxNodes: limit };
 
     let nodes: MotionNode[] = [];
