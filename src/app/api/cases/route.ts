@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import path from 'path';
 import { commitEntity } from '../haystack/[op]/route';
+import { requireApiAccess } from '@/lib/api/route-guard';
 
 /**
  * Parse case metadata from a folder name.
@@ -26,9 +27,20 @@ function parseCaseFolder(folderPath: string): { name: string; caseNumber: string
 
 /**
  * GET /api/cases - List all cases, or look up a single case by caseNumber
- * Query params: ?caseNumber=D-1-FM-25-000222
+ * Query params: ?caseNumber=00-0000-XX
+ *
+ * Guarded (v6 item 2): this is the case inventory — names, docket numbers,
+ * jurisdictions, counties, document counts — and it answered 200 from any
+ * origin that could reach the port. Same rule as `POST /api/search/deep`:
+ * loopback permissive (the case-management and case-explorer pages call it
+ * same-origin), a remote caller needs an MCP API key or a live dashboard
+ * session. No sidecar or bridge caller exists; the only cross-process caller
+ * is `scripts/test-draft-vector.ts`, which targets localhost.
  */
 export async function GET(request: NextRequest) {
+  const denied = await requireApiAccess(request, { label: 'cases GET', allowAdminSession: true });
+  if (denied) return denied;
+
   const { searchParams } = new URL(request.url);
   const caseNumberFilter = searchParams.get('caseNumber');
 
@@ -105,6 +117,12 @@ export async function GET(request: NextRequest) {
  * parsing remains here as a convenience for the legacy "add case" UX.
  */
 export async function POST(request: NextRequest) {
+  // Same gate as GET, and for the stronger reason: this creates a Case row and
+  // binds it to a filesystem path. Loopback permissive (the case-explorer
+  // "add case" UX), remote needs an MCP API key or a live dashboard session.
+  const denied = await requireApiAccess(request, { label: 'cases POST', allowAdminSession: true });
+  if (denied) return denied;
+
   try {
     const body = await request.json();
     const { folderPath, name, caseNumber, jurisdiction, county, state, country } = body;

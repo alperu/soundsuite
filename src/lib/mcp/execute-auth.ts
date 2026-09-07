@@ -399,6 +399,81 @@ export async function guardMcpRoute(
   request: McpGuardRequest | null | undefined,
   opts: { profile?: McpProfile; label: string },
 ): Promise<McpRouteGuardResult> {
+  const result = await guardApiRoute(request, { profile: opts.profile, label: `MCP ${opts.label}` });
+  if (result.ok) return { ok: true, origin: result.origin };
+  return {
+    ok: false,
+    status: result.status,
+    body: { error: { code: result.code, message: result.message } },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Route-agnostic guard (v6 item 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The slice of `NextRequest` the general guard reads. Superset of
+ * `McpGuardRequest`: admin routes additionally consult the dashboard session
+ * cookie, so `cookies` is read when `allowAdminSession` is set.
+ */
+export interface ApiGuardRequest extends McpGuardRequest {
+  cookies?: { get(name: string): { value?: string } | undefined } | null;
+}
+
+export interface ApiGuardOptions {
+  /** Label for the refusal log line. */
+  label: string;
+  /** Only meaningful under `MCP_AUTH_STRICT_LOOPBACK=routed`. Default `local`. */
+  profile?: McpProfile;
+  /**
+   * Accept a valid admin dashboard session (`ss_admin_session` cookie) as
+   * sufficient on its own, even from a remote origin. Set on `/api/admin/*`.
+   */
+  allowAdminSession?: boolean;
+  /** With `allowAdminSession`, require role `admin` rather than `viewer`. */
+  requireAdminRole?: boolean;
+}
+
+export type ApiGuardResult =
+  | { ok: true; origin: RequestOrigin; via: 'origin' | 'admin-session'; username?: string }
+  | { ok: false; status: number; code: string; message: string; origin: RequestOrigin };
+
+/**
+ * The one shared entry point for HTTP auth on this server. `/api/mcp/*` calls
+ * it through `guardMcpRoute`; `/api/config`, `/api/search/deep`,
+ * `/api/docs/info` and the gated `/api/admin/*` routes call it directly (via
+ * `requireApiAccess` in `@/lib/api/route-guard`, which wraps the refusal in a
+ * `NextResponse`).
+ *
+ * Two ways to pass, checked in that order:
+ *
+ *  1. **Origin / API key** — exactly `decideExecuteAuth`, unchanged. Loopback
+ *     is permissive (so the dashboard and the stdio bridge keep working with
+ *     no configuration), a remote caller needs a configured `MCP_API_KEYS`
+ *     credential.
+ *  2. **Admin session** (opt-in per route) — a live `ss_admin_session` cookie.
+ *     This is an *access* control rather than the origin *browser* control, so
+ *     it is what lets a remotely-reachable deployment use the admin dashboard
+ *     without handing out an MCP API key.
+ *
+ * Session is deliberately additive rather than mandatory. `/admin` itself does
+ * redirect to `/admin/login`, but several `/api/admin/*` routes are called
+ * from pages that are not behind that redirect — the case-management pages and
+ * the tag-fill panel POST `/api/admin/action-logs`, and `POST /api/config` is
+ * issued by the non-admin toolbar. Making the session mandatory would break
+ * those callers for any operator who never logs in. What this closes is
+ * precisely what v6 measured: remote origin, no session, no key → 401.
+ *
+ * The residual is the one v5.1 §4 proved unclosable inside a route handler —
+ * a single-value forged `X-Forwarded-For: 127.0.0.1` still classifies as
+ * loopback. Admin routes are therefore *not* session-protected; they are
+ * origin-protected with a session escape hatch.
+ */
+export async function guardApiRoute(
+  request: ApiGuardRequest | null | undefined,
+  opts: ApiGuardOptions,
+): Promise<ApiGuardResult> {
   const headers = request?.headers ?? null;
   const origin: RequestOrigin = request
     ? classifyOrigin({
@@ -423,14 +498,37 @@ export async function guardMcpRoute(
     profile: opts.profile ?? 'local',
   });
 
-  if (decision.ok) return { ok: true, origin: decision.origin };
+  if (decision.ok) return { ok: true, origin: decision.origin, via: 'origin' };
+
+  if (opts.allowAdminSession) {
+    const user = await resolveAdminSession(request);
+    if (user && (!opts.requireAdminRole || user.role === 'admin')) {
+      return { ok: true, origin, via: 'admin-session', username: user.username };
+    }
+  }
 
   console.warn(
-    `[MCP ${opts.label}] auth refused: ${decision.code} origin=${decision.origin} mode=${decision.mode}`,
+    `[${opts.label}] auth refused: ${decision.code} origin=${decision.origin} mode=${decision.mode}`,
   );
   return {
     ok: false,
     status: decision.status ?? 401,
-    body: { error: { code: decision.code ?? 'AUTH_REQUIRED', message: decision.message ?? 'Unauthorized' } },
+    code: decision.code ?? 'AUTH_REQUIRED',
+    message: decision.message ?? 'Unauthorized',
+    origin,
   };
+}
+
+/** Best-effort dashboard-session lookup. Never throws; no DB → no session. */
+async function resolveAdminSession(
+  request: ApiGuardRequest | null | undefined,
+): Promise<{ username: string; role: string } | null> {
+  const token = request?.cookies?.get('ss_admin_session')?.value;
+  if (!token) return null;
+  try {
+    const { getSessionUser } = await import('../admin/auth');
+    return await getSessionUser(token);
+  } catch {
+    return null;
+  }
 }

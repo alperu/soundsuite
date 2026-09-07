@@ -25,6 +25,7 @@ import { collectSignals } from '@/lib/ingestion/readiness/collect';
 import { computeReadiness } from '@/lib/ingestion/readiness/score';
 import { READINESS_MODEL_VERSION } from '@/lib/ingestion/readiness/types';
 import type { VerificationResult } from '@/lib/ingestion/indexing-verifier';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 const logger = createLogger('ReadinessBackfill');
 
@@ -56,6 +57,9 @@ function candidateWhere(opts: { caseId?: string; documentIds?: string[]; force?:
 }
 
 export async function GET(req: NextRequest) {
+  const denied = await requireAdminApiAccess(req, 'readiness-backfill');
+  if (denied) return denied;
+
   try {
     const caseId = req.nextUrl.searchParams.get('caseId') || undefined;
     const force = req.nextUrl.searchParams.get('force') === 'true';
@@ -74,6 +78,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const denied = await requireAdminApiAccess(req, 'readiness-backfill');
+  if (denied) return denied;
+
   try {
     const body = (await req.json().catch(() => ({}))) as {
       caseId?: string;

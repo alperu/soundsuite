@@ -1,9 +1,13 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import os from 'os';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'server-info');
+  if (denied) return denied;
+
   try {
     const hostname = os.hostname();
     const port = process.env.PORT || '3000';

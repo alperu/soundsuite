@@ -5,7 +5,29 @@ import {
   ToolExecutionContext,
 } from '../tool-types';
 import { llmProviderDependency } from '../shared-dependencies';
-import { callLLMJson, getDocumentChunks, getCaseChunks, buildContext } from './ai-helper';
+import {
+  callLLMJson,
+  getDocumentChunks,
+  getCaseChunks,
+  buildContext,
+  validateItemList,
+  ItemShape,
+  LlmItemStats,
+} from './ai-helper';
+
+/**
+ * The documented item shape (SS-3 #4). `deadline` is the one field the prompt
+ * itself declares nullable, so an absent deadline is filled with `null` rather
+ * than costing the obligation its place in the result.
+ */
+const OBLIGATION_SHAPE: ItemShape = {
+  description: { type: 'string' },
+  type: { type: 'string' },
+  deadline: { type: 'string', nullable: true },
+  party: { type: 'string' },
+  document: { type: 'string' },
+  page: { type: 'number' },
+};
 
 export interface ExtractObligationsParams {
   documentId: string;
@@ -22,6 +44,8 @@ export interface ExtractObligationsResult {
     document: string;
     page: number;
   }>;
+  /** Present only when items were dropped or flagged (SS-3 #4). */
+  stats?: LlmItemStats;
 }
 
 export class ExtractObligationsTool extends BaseMCPTool<
@@ -124,7 +148,16 @@ Rules:
     if (!Array.isArray(result.obligations)) {
       return { obligations: [] };
     }
-    result.obligations = result.obligations.slice(0, limit);
-    return result;
+
+    const validated = validateItemList<ExtractObligationsResult['obligations'][number]>(
+      result.obligations,
+      OBLIGATION_SHAPE,
+      { tool: 'extract_obligations', key: 'obligations', logger: context.logger },
+    );
+
+    return {
+      obligations: validated.items.slice(0, limit),
+      ...(validated.stats ? { stats: validated.stats } : {}),
+    };
   }
 }

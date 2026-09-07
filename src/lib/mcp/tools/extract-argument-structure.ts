@@ -5,7 +5,23 @@ import {
   ToolExecutionContext,
 } from '../tool-types';
 import { llmProviderDependency } from '../shared-dependencies';
-import { callLLMJson, getDocumentChunks, buildContext } from './ai-helper';
+import {
+  callLLMJson,
+  getDocumentChunks,
+  buildContext,
+  validateItemList,
+  ItemShape,
+  LlmItemStats,
+} from './ai-helper';
+
+/** The documented item shape (SS-3 #4). */
+const ARGUMENT_SHAPE: ItemShape = {
+  claim: { type: 'string' },
+  premises: { type: 'string[]' },
+  evidence: { type: 'string[]' },
+  conclusion: { type: 'string' },
+  strength: { type: 'string' },
+};
 
 export interface ExtractArgumentStructureParams {
   documentId: string;
@@ -20,6 +36,8 @@ export interface ExtractArgumentStructureResult {
     conclusion: string;
     strength: string;
   }>;
+  /** Present only when items were dropped or flagged (SS-3 #4). */
+  stats?: LlmItemStats;
 }
 
 export class ExtractArgumentStructureTool extends BaseMCPTool<
@@ -113,7 +131,16 @@ Rules:
     if (!Array.isArray(result.arguments)) {
       return { arguments: [] };
     }
-    result.arguments = result.arguments.slice(0, limit);
-    return result;
+
+    const validated = validateItemList<ExtractArgumentStructureResult['arguments'][number]>(
+      result.arguments,
+      ARGUMENT_SHAPE,
+      { tool: 'extract_argument_structure', key: 'arguments', logger: context.logger },
+    );
+
+    return {
+      arguments: validated.items.slice(0, limit),
+      ...(validated.stats ? { stats: validated.stats } : {}),
+    };
   }
 }

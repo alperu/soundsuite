@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 const AGENT_PORT = parseInt(process.env.RERANKER_AGENT_PORT || '8098', 10);
 
@@ -11,6 +12,9 @@ const AGENT_PORT = parseInt(process.env.RERANKER_AGENT_PORT || '8098', 10);
  * The agent IP is extracted from this URL, using AGENT_PORT (default 8098).
  */
 export async function POST(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'agent-test');
+  if (denied) return denied;
+
   try {
     const { host } = (await request.json()) as { host: string };
 

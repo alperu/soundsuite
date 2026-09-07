@@ -5,7 +5,25 @@ import {
   ToolExecutionContext,
 } from '../tool-types';
 import { llmProviderDependency } from '../shared-dependencies';
-import { callLLMJson, getDocumentChunks, getCaseChunks, buildContext } from './ai-helper';
+import {
+  callLLMJson,
+  getDocumentChunks,
+  getCaseChunks,
+  buildContext,
+  validateItemList,
+  ItemShape,
+  LlmItemStats,
+} from './ai-helper';
+
+/** The documented item shape (SS-3 #4). */
+const ENTITY_SHAPE: ItemShape = {
+  name: { type: 'string' },
+  type: { type: 'string' },
+  mentions: { type: 'number' },
+  context: { type: 'string' },
+  document: { type: 'string' },
+  page: { type: 'number' },
+};
 
 export interface ExtractEntitiesParams {
   documentId: string;
@@ -23,6 +41,8 @@ export interface ExtractEntitiesResult {
     document: string;
     page: number;
   }>;
+  /** Present only when items were dropped or flagged (SS-3 #4). */
+  stats?: LlmItemStats;
 }
 
 export class ExtractEntitiesTool extends BaseMCPTool<
@@ -139,7 +159,16 @@ Rules:
     if (!Array.isArray(result.entities)) {
       return { entities: [] };
     }
-    result.entities = result.entities.slice(0, limit);
-    return result;
+
+    const validated = validateItemList<ExtractEntitiesResult['entities'][number]>(
+      result.entities,
+      ENTITY_SHAPE,
+      { tool: 'extract_entities', key: 'entities', logger: context.logger },
+    );
+
+    return {
+      entities: validated.items.slice(0, limit),
+      ...(validated.stats ? { stats: validated.stats } : {}),
+    };
   }
 }

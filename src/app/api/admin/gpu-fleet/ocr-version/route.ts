@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getConfig } from '@/lib/db/config';
 import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,6 +30,9 @@ function cmpVersions(a: string, b: string): number {
  *   ok=null   — endpoint unreachable (container stopped is normal here)
  */
 export async function GET(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'gpu-fleet/ocr-version');
+  if (denied) return denied;
+
   const sidecarUrl = request.nextUrl.searchParams.get('sidecarUrl');
   const port = parseInt(request.nextUrl.searchParams.get('port') || '11436', 10);
   if (!sidecarUrl) {

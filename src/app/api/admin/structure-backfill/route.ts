@@ -19,6 +19,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as lancedb from '@lancedb/lancedb';
 import { prisma } from '@/lib/db/prisma';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
 const TABLE_NAME = 'chunks';
@@ -38,6 +39,9 @@ interface RowUpdate {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'structure-backfill');
+  if (denied) return denied;
+
   try {
     const body = await request.json().catch(() => ({}));
     const onlyDocId: string | undefined = body.documentId;

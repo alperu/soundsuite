@@ -2,7 +2,7 @@ import { Suspense } from 'react';
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import AdminDashboard from '@/components/admin-dashboard';
-import { getConfig, getModelDownloadStatus } from '@/lib/db/config';
+import { getPublicConfig, getModelDownloadStatus } from '@/lib/db/config';
 import { getSessionUser, SESSION_COOKIE } from '@/lib/admin/auth';
 
 const VALID_TABS = ['general', 'health', 'embedding', 'reranking', 'gpu', 'roletypes', 'roleassign', 'hostprov', 'ocr', 'localai', 'rlm', 'aikeys', 'aiservices', 'workers', 'redis', 'cache', 'filings', 'jobs', 'actionlog', 'drafts', 'cloudflare', 'users', 'sessions'] as const;
@@ -27,7 +27,9 @@ export default async function AdminPage({ params }: Props) {
     redirect('/admin/general');
   }
 
-  const config = await getConfig();
+  // Masked: this object is serialised into the RSC payload the browser
+  // receives, so the raw provider keys must not be in it (v6 §4).
+  const config = await getPublicConfig();
   const modelDownloads = await getModelDownloadStatus();
 
   return (

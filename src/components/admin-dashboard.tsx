@@ -22,11 +22,11 @@ import AdminUserMenu from '@/components/admin/admin-user-menu';
 import CloudflarePanel from '@/components/admin/cloudflare-panel';
 import WeightSection from '@/components/admin/weight-section';
 import { CopyButton } from '@/components/copy-button';
-import { AppConfig, ModelDownloadInfo } from '@/lib/db/config';
+import { PublicConfig, ModelDownloadInfo } from '@/lib/db/config';
 import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
 
 interface Props {
-  initialConfig: AppConfig;
+  initialConfig: PublicConfig;
   initialModelDownloads: ModelDownloadInfo[];
   initialTab?: TabKey;
 }
@@ -684,7 +684,7 @@ const OLLAMA_OCR_MODELS = [
   { id: 'AuditAid/PaddleOCR-VL-1.6-0.9B', label: 'PaddleOCR-VL 1.6 (~2 GB) — Best document parsing, Apache 2.0', vram: '~2 GB' },
 ];
 
-function OCRProviderPanel({ initialConfig }: { initialConfig: AppConfig }) {
+function OCRProviderPanel({ initialConfig }: { initialConfig: PublicConfig }) {
   const [provider, setProvider] = useState<'local' | 'ollama'>(initialConfig.ocrProvider || 'local');
   const [host, setHost] = useState(initialConfig.ocrOllamaHost || initialConfig.ollamaHost || '');
   const [model, setModel] = useState(initialConfig.ocrOllamaModel || 'richardyoung/olmocr2:7b-q8');

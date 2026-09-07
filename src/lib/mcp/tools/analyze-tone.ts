@@ -6,7 +6,34 @@ import {
 } from '../tool-types';
 import { llmProviderDependency } from '../shared-dependencies';
 import { McpError } from '../llm-policy';
-import { callLLMJson, getDocumentChunks, buildContext } from './ai-helper';
+import {
+  callLLMJson,
+  getDocumentChunks,
+  buildContext,
+  validateItemObject,
+  ItemShape,
+  LlmItemStats,
+} from './ai-helper';
+
+/**
+ * The documented shape of the `analysis` object (SS-3 #4). `confidence` and
+ * `intensity` are scores, so an unscored analysis is kept with `null` rather
+ * than discarded (SS-3 #5).
+ */
+const TONE_SHAPE: ItemShape = {
+  overallTone: { type: 'string' },
+  confidence: { type: 'number', score: true },
+  patterns: { type: 'string[]' },
+  segments: {
+    type: 'object[]',
+    items: {
+      text: { type: 'string' },
+      tone: { type: 'string' },
+      intensity: { type: 'number', score: true },
+      page: { type: 'number' },
+    },
+  },
+};
 
 export interface AnalyzeToneParams {
   documentId: string;
@@ -16,15 +43,18 @@ export interface AnalyzeToneParams {
 export interface AnalyzeToneResult {
   analysis: {
     overallTone: string;
-    confidence: number;
+    /** `null` when the model gave no usable score. */
+    confidence: number | null;
     segments: Array<{
       text: string;
       tone: string;
-      intensity: number;
+      intensity: number | null;
       page: number;
     }>;
     patterns: string[];
   };
+  /** Present only when nested segments were dropped (SS-3 #4). */
+  stats?: LlmItemStats;
 }
 
 export class AnalyzeToneTool extends BaseMCPTool<
@@ -139,6 +169,17 @@ Rules:
       );
     }
 
-    return result;
+    // Item-level shape validation of the object's own fields; malformed
+    // `segments` entries are dropped and counted rather than being fatal.
+    const validated = validateItemObject<AnalyzeToneResult['analysis']>(
+      result.analysis,
+      TONE_SHAPE,
+      { tool: 'analyze_tone', key: 'analysis', logger: context.logger },
+    );
+
+    return {
+      analysis: validated.item,
+      ...(validated.stats ? { stats: validated.stats } : {}),
+    };
   }
 }

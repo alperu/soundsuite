@@ -19,6 +19,7 @@ import {
 } from '@/lib/gpu/fleet-router';
 import { getAggregatedPeakDemand } from '@/lib/gpu/status-cache';
 import { getGpuLogs } from '@/lib/logger';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 function getLatestBuildVersion(): string | null {
   try {
@@ -32,8 +33,23 @@ function getLatestBuildVersion(): string | null {
  * GET /api/admin/gpu-fleet
  * Returns fleet status + idle timeouts from config.
  * Uses cached sidecar status — no outbound push to sidecars.
+ *
+ * **Deliberately NOT gated (v6 item 2).** This is the sidecar's master
+ * discovery probe: `sideCar/src/lib/config.ts:386` calls it as the fallback
+ * signal in `probeIsMaster()`, and the request it builds
+ * (`httpGetWithTimeout`, same file line ~355) carries **no credential at all**
+ * — only `User-Agent: sound-suite-sidecar-discovery/1`. With the shipped
+ * `.env` (`MCP_AUTH_MODE=none`, no `MCP_API_KEYS`) a sidecar on another host
+ * would therefore be refused by the origin guard. Detaching every GPU host is
+ * a worse outcome than leaving the fleet inventory readable, and no credential
+ * scheme exists for this call to reuse. Do not gate this handler until the
+ * sidecar sends a credential here.
+ *
+ * The mutating half of this route (POST — add/remove sidecar, container
+ * control, registry push) IS gated: the sidecar never POSTs to it, only the
+ * dashboard does.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
     const [fleet, config] = await Promise.all([getFleetStatus(), getConfig()]);
 
@@ -77,6 +93,9 @@ export async function GET() {
  * Fleet management actions.
  */
 export async function POST(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'gpu-fleet');
+  if (denied) return denied;
+
   try {
     const body = await request.json();
     const { action } = body;

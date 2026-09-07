@@ -14,6 +14,10 @@ import { AnalyzeCitationsTool } from './analyze-citations';
 import { DetectPrivilegeTool } from './detect-privilege';
 import { AnalyzeToneTool } from './analyze-tone';
 import { SearchWorkflowsTool } from './search-workflows';
+import { ListCasesTool } from './list-cases';
+import { ListMotionsTool } from './list-motions';
+import { ListPeopleTool } from './list-people';
+import { ResolveReferenceTool } from './resolve-reference';
 import { getResearchTools } from './research-tools';
 import { getPresetTools } from './preset-tools';
 import { getRoutedReportTools } from './routed-report-tools';
@@ -41,6 +45,12 @@ export function getAllTools(): BaseMCPTool[] {
     new DetectPrivilegeTool(),
     new AnalyzeToneTool(),
     new SearchWorkflowsTool(),
+    // Discovery tools — hand out the ids every scoped tool requires
+    // (docs/tasks/10-mcp-discovery-tools.md). No LLM; both profiles.
+    new ListCasesTool(),
+    new ListMotionsTool(),
+    new ListPeopleTool(),
+    new ResolveReferenceTool(),
   ];
 }
 
@@ -60,3 +70,7 @@ export { AnalyzeCitationsTool } from './analyze-citations';
 export { DetectPrivilegeTool } from './detect-privilege';
 export { AnalyzeToneTool } from './analyze-tone';
 export { SearchWorkflowsTool } from './search-workflows';
+export { ListCasesTool } from './list-cases';
+export { ListMotionsTool } from './list-motions';
+export { ListPeopleTool } from './list-people';
+export { ResolveReferenceTool } from './resolve-reference';

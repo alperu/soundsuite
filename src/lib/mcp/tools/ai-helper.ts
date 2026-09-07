@@ -226,6 +226,301 @@ export async function callLLMJson<T>(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Item-level shape validation (SS-3 findings #4 and #5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Why this exists: valid JSON under the documented top-level key used to pass
+ * straight through, so `{"citations": ["Vaughn v. Merrowfield, 1 F.3d 1"]}`
+ * reached the client as an array of citation *objects*. A caller destructuring
+ * `citation.case` gets `undefined`, or renders a bare string as if it were a
+ * structured finding. Each tool now declares its documented item shape and
+ * hands it to the one validator below, so the ten checks cannot drift apart.
+ *
+ * The rule, applied identically everywhere:
+ *
+ * - The model returned an **empty** list → a genuine negative. Returned as-is.
+ * - **Every** item in a non-empty list is malformed → this is a shape failure,
+ *   not an answer. Throws `McpError('LLM_SHAPE_ERROR')`, the same family as
+ *   the top-level key guard.
+ * - **Some** items are malformed → the bad ones are dropped, the good ones are
+ *   returned, and `stats.itemsDropped` / `stats.warnings` say so. `stats` is
+ *   present **only** when something was dropped or flagged, so its absence is
+ *   itself the "nothing was lost" signal and a clean result stays byte-identical
+ *   to what the model produced.
+ *
+ * Scores (`confidence`, `intensity`) are never a drop reason — see
+ * `normaliseScore`.
+ *
+ * Privacy: warnings and log lines carry field names and counts only, never the
+ * model's words, which are derived from case text (CLAUDE.md § Privacy).
+ */
+export type ItemFieldType = 'string' | 'number' | 'string[]' | 'object[]' | 'any';
+
+export interface ItemFieldRule {
+  type: ItemFieldType;
+  /** Documented as nullable (e.g. an obligation with no deadline). Absent → `null`. */
+  nullable?: boolean;
+  /**
+   * A model-supplied score. Coerced to a number when possible, `null` when not,
+   * and never a reason to drop the item (SS-3 #5: a missing score is not
+   * evidence of low confidence).
+   */
+  score?: boolean;
+  /** Shape of the members of an `object[]` field. */
+  items?: ItemShape;
+}
+
+/** The documented shape of one item, field by field. */
+export type ItemShape = Record<string, ItemFieldRule>;
+
+/** Surfaced on a tool result only when items were dropped or flagged. */
+export interface LlmItemStats {
+  /** Model-returned items discarded for not matching the documented shape. */
+  itemsDropped: number;
+  /** Shape-only notes: field names and counts, never model text. */
+  warnings: string[];
+}
+
+/**
+ * Coerce a model-supplied score to a number.
+ *
+ * `"0.9"` becomes `0.9`; `"high"`, `null`, `NaN` and absence all become `null`.
+ * A `null` score means "the model did not give a usable score" — it must never
+ * be compared against a threshold, because `undefined >= 0.7` is `false` and
+ * that silently deleted findings the model actually reported.
+ */
+export function normaliseScore(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+interface ItemOutcome {
+  /** Present only when the item matched the shape. */
+  item?: Record<string, unknown>;
+  /** Names of the fields that were missing or the wrong type. */
+  badFields: string[];
+  /** Members dropped from nested `object[]` fields (only meaningful if valid). */
+  nestedDropped: number;
+  /** Shape-only notes about the nested drops. */
+  nestedWarnings: string[];
+}
+
+/**
+ * Check one item against a shape. Presence tests use nullish comparisons, not
+ * truthiness: `page: 0` and `mentions: 0` are documented values.
+ */
+function checkItem(raw: unknown, shape: ItemShape): ItemOutcome {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { badFields: ['<not an object>'], nestedDropped: 0, nestedWarnings: [] };
+  }
+
+  const src = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...src };
+  const badFields: string[] = [];
+  let nestedDropped = 0;
+  const nestedWarnings: string[] = [];
+
+  for (const [field, rule] of Object.entries(shape)) {
+    const value = src[field];
+
+    if (rule.score) {
+      out[field] = normaliseScore(value);
+      continue;
+    }
+
+    if (value === undefined || value === null) {
+      if (rule.nullable) out[field] = null;
+      else badFields.push(field);
+      continue;
+    }
+
+    switch (rule.type) {
+      case 'string':
+        if (typeof value !== 'string' || !value.trim()) badFields.push(field);
+        break;
+      case 'number': {
+        const num = normaliseScore(value);
+        if (num === null) badFields.push(field);
+        else out[field] = num;
+        break;
+      }
+      case 'string[]':
+        if (!Array.isArray(value)) badFields.push(field);
+        break;
+      case 'object[]': {
+        if (!Array.isArray(value)) {
+          badFields.push(field);
+          break;
+        }
+        // A malformed nested member is dropped and counted; it never
+        // invalidates the enclosing item, which is still a real answer.
+        const kept: unknown[] = [];
+        for (const member of value) {
+          const outcome = checkItem(member, rule.items ?? {});
+          if (outcome.item) kept.push(outcome.item);
+          else nestedDropped++;
+        }
+        if (kept.length !== value.length) {
+          nestedWarnings.push(
+            `${field}: dropped ${value.length - kept.length} of ${value.length} malformed entries`,
+          );
+        }
+        out[field] = kept;
+        break;
+      }
+      case 'any':
+        break;
+    }
+  }
+
+  if (badFields.length > 0) return { badFields, nestedDropped: 0, nestedWarnings: [] };
+  return { item: out, badFields: [], nestedDropped, nestedWarnings };
+}
+
+export interface ItemValidationContext {
+  /** Tool name, for the log line. */
+  tool: string;
+  /** Documented top-level key the items live under, for messages. */
+  key: string;
+  logger?: { warn: (message: string, meta?: Record<string, any>) => void };
+}
+
+function reportDrops(
+  ctx: ItemValidationContext,
+  itemsDropped: number,
+  warnings: string[],
+  badFields: string[],
+): void {
+  if (itemsDropped === 0 && warnings.length === 0) return;
+  ctx.logger?.warn(
+    `[${ctx.tool}] dropped ${itemsDropped} malformed "${ctx.key}" item(s) from the model response`,
+    // Field names and counts only — the values are case-derived text.
+    { key: ctx.key, itemsDropped, badFields: [...new Set(badFields)] },
+  );
+}
+
+/**
+ * Validate a list the model returned under a documented key.
+ *
+ * Throws `LLM_SHAPE_ERROR` when a non-empty list contains no usable item;
+ * otherwise returns the survivors plus `stats` when anything was dropped.
+ */
+export function validateItemList<T>(
+  raw: unknown[],
+  shape: ItemShape,
+  ctx: ItemValidationContext,
+): { items: T[]; stats?: LlmItemStats } {
+  if (raw.length === 0) return { items: [] };
+
+  const items: T[] = [];
+  const badFields: string[] = [];
+  const warnings: string[] = [];
+  let nestedDropped = 0;
+
+  for (const candidate of raw) {
+    const outcome = checkItem(candidate, shape);
+    if (outcome.item) {
+      items.push(outcome.item as T);
+      nestedDropped += outcome.nestedDropped;
+      warnings.push(...outcome.nestedWarnings);
+    } else {
+      badFields.push(...outcome.badFields);
+    }
+  }
+
+  const itemsDropped = raw.length - items.length;
+
+  if (items.length === 0) {
+    // Nothing the model returned was usable: report a shape failure rather
+    // than an empty analysis, which reads as "nothing found".
+    throw new McpError(
+      'LLM_SHAPE_ERROR',
+      `The model returned ${raw.length} "${ctx.key}" item(s), none matching the documented shape ` +
+        `(missing or invalid: ${[...new Set(badFields)].join(', ')}), so no analysis could be produced.`,
+    );
+  }
+
+  if (itemsDropped > 0) {
+    warnings.unshift(
+      `dropped ${itemsDropped} of ${raw.length} "${ctx.key}" item(s) missing or with invalid ` +
+        `fields: ${[...new Set(badFields)].join(', ')}`,
+    );
+  }
+
+  reportDrops(ctx, itemsDropped + nestedDropped, warnings, badFields);
+
+  return {
+    items,
+    ...(itemsDropped > 0 || warnings.length > 0
+      ? { stats: { itemsDropped: itemsDropped + nestedDropped, warnings } }
+      : {}),
+  };
+}
+
+/**
+ * Validate a single object the model returned under a documented key
+ * (the two tools whose result is an object rather than a list).
+ *
+ * There is only one "item", so the all-malformed rule collapses to: any
+ * missing documented field is a shape failure. Filling the gaps with empty
+ * arrays would report "no conflicts" when the model said nothing about
+ * conflicts — the same false negative SS-3 #2/#3 removed.
+ */
+export function validateItemObject<T>(
+  raw: unknown,
+  shape: ItemShape,
+  ctx: ItemValidationContext,
+): { item: T; stats?: LlmItemStats } {
+  const outcome = checkItem(raw, shape);
+
+  if (!outcome.item) {
+    throw new McpError(
+      'LLM_SHAPE_ERROR',
+      `The model's "${ctx.key}" object is missing or has invalid fields ` +
+        `(${[...new Set(outcome.badFields)].join(', ')}), so no analysis could be produced.`,
+    );
+  }
+
+  reportDrops(ctx, outcome.nestedDropped, outcome.nestedWarnings, []);
+
+  return {
+    item: outcome.item as T,
+    ...(outcome.nestedDropped > 0
+      ? { stats: { itemsDropped: outcome.nestedDropped, warnings: outcome.nestedWarnings } }
+      : {}),
+  };
+}
+
+/**
+ * Apply a confidence threshold to already-validated items (SS-3 #5).
+ *
+ * `confidence` has been through `normaliseScore`, so it is a number or `null`
+ * — never the string the model may have written. An item with a `null` score
+ * is **kept**, not dropped: the model reported the finding and simply did not
+ * score it, and on litigation material a discarded contradiction or privilege
+ * hit is a substantive loss. The count is returned as a warning so the caller
+ * knows those items were not filtered.
+ */
+export function applyConfidenceThreshold<T extends { confidence: number | null }>(
+  items: T[],
+  threshold: number,
+  key: string,
+): { items: T[]; warnings: string[] } {
+  const unscored = items.filter(i => i.confidence === null).length;
+  const kept = items.filter(i => i.confidence === null || i.confidence >= threshold);
+  const warnings = unscored > 0
+    ? [`${unscored} of ${items.length} "${key}" item(s) carried no usable confidence score; ` +
+       `returned unfiltered with confidence: null`]
+    : [];
+  return { items: kept, warnings };
+}
+
 /**
  * Retrieve all text chunks for a document from the vector store.
  * Returns chunks sorted by page number and chunk index.

@@ -46,6 +46,10 @@ export function sourceToEvidenceItem(
       ? { volumeNumber: source.volumeNumber }
       : {}),
     ...(source.caseNumber ? { caseNumber: source.caseNumber } : {}),
+    // Machine ids the case-scoped tools require — absent, not '', when the
+    // retrieval row did not carry them (REPORT-discovery-tools §5).
+    ...(source.caseId ? { caseId: source.caseId } : {}),
+    ...(source.motionId ? { motionId: source.motionId } : {}),
     ...(source.filingSlug ? { filingSlug: source.filingSlug } : {}),
     ...(blockType ? { blockType } : {}),
     ...(source.headingPath ? { headingPath: source.headingPath } : {}),

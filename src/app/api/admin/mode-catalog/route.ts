@@ -1,5 +1,6 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getModeCatalog } from '@/lib/gpu/mode-catalog-server';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 /**
  * GET /api/admin/mode-catalog
@@ -27,7 +28,10 @@ const RUNTIME_AVAILABILITY: Record<string, string[]> = {
   'docker-vllm': ['ss-reranker'],
 };
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'mode-catalog');
+  if (denied) return denied;
+
   const modes = await getModeCatalog();
   return NextResponse.json({
     modes,

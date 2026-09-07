@@ -96,6 +96,15 @@ export interface EvidenceItem {
   volumeNumber?: number;
   /** Cause / case number of the source document. */
   caseNumber?: string;
+  /** Database id of the owning case. `caseNumber` is the docket number a human
+   *  reads; every case-scoped tool (`detect_contradictions`,
+   *  `reconstruct_timeline`, …) requires this one, so carrying it here removes
+   *  the discovery round trip (REPORT-discovery-tools §5). */
+  caseId?: string;
+  /** Motion whose page range contains this chunk, when one resolves — the
+   *  seed id `query_case_graph` needs. Absent when the chunk's document maps
+   *  to no motion. */
+  motionId?: string;
   /** Slug of the filing the document belongs to — dashboard deep links. */
   filingSlug?: string;
   blockType?: 'paragraph' | 'table' | 'footnote' | 'figure';

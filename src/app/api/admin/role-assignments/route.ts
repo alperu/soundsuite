@@ -10,6 +10,7 @@ import { clearSidecarRole, getSidecarStatus } from '@/lib/gpu/status-cache';
 import { getConfig } from '@/lib/db/config';
 import { resolveModelFromConfig } from '@/lib/gpu/mode-catalog';
 import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 /**
  * Mode names ("ss-ocr") → role keys used in CachedSidecarStatus.containers
@@ -40,6 +41,9 @@ async function syncSidecar(sidecarUrl: string): Promise<void> {
  * Otherwise: returns all assignments across all hosts.
  */
 export async function GET(req: NextRequest) {
+  const denied = await requireAdminApiAccess(req, 'role-assignments');
+  if (denied) return denied;
+
   try {
     const sidecarUrl = req.nextUrl.searchParams.get('sidecarUrl');
     if (sidecarUrl) {
@@ -71,6 +75,9 @@ export async function GET(req: NextRequest) {
  * Legacy compat: accepts `roleTypeName` as an alias for `mode`.
  */
 export async function POST(req: NextRequest) {
+  const denied = await requireAdminApiAccess(req, 'role-assignments');
+  if (denied) return denied;
+
   try {
     const body = (await req.json()) as Partial<AssignmentInput> & { roleTypeName?: string };
     // Back-compat: older callers send roleTypeName as the short role name
@@ -143,6 +150,9 @@ export async function POST(req: NextRequest) {
  * Legacy compat: accepts `roleTypeName` as an alias for `mode`.
  */
 export async function DELETE(req: NextRequest) {
+  const denied = await requireAdminApiAccess(req, 'role-assignments');
+  if (denied) return denied;
+
   try {
     const sidecarUrl = req.nextUrl.searchParams.get('sidecarUrl');
     let mode = req.nextUrl.searchParams.get('mode');

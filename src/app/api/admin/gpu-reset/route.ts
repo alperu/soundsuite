@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getFleetStatus, sendToSidecar } from '@/lib/gpu/fleet-router';
 import { createLogger } from '@/lib/logger';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 const logger = createLogger('admin/gpu-reset');
 
@@ -13,6 +14,9 @@ const logger = createLogger('admin/gpu-reset');
  *   { role?: string }   // restrict reset to a single role (e.g. "reranker")
  */
 export async function POST(req: NextRequest) {
+  const denied = await requireAdminApiAccess(req, 'gpu-reset');
+  if (denied) return denied;
+
   const body = await req.json().catch(() => ({} as { role?: string }));
   const role = typeof body.role === 'string' ? body.role : undefined;
 

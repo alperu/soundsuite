@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { getConfig } from '@/lib/db/config';
+import { requireApiAccess } from '@/lib/api/route-guard';
 
 interface CandidateAddress {
   /** Full URL the user can copy. */
@@ -49,6 +50,12 @@ function listInterfaceAddresses(port: number, protocol: string): CandidateAddres
  * Safe to expose: no secrets, just URLs/versions the user needs to copy-paste.
  */
 export async function GET(request: NextRequest) {
+  // Low value on its own, but it enumerates every non-loopback interface
+  // address of the host — a network map for a caller that only knows one of
+  // them. Same origin/API-key rule as the rest of the surface (v6 item 2).
+  const denied = await requireApiAccess(request, { label: 'docs/info', allowAdminSession: true });
+  if (denied) return denied;
+
   const config = await getConfig().catch(() => null);
 
   // Master URL: configured (admin) > env var > derived from request hostname.

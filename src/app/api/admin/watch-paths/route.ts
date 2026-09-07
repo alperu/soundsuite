@@ -8,6 +8,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,7 +36,10 @@ async function saveWatchPaths(paths: string[]): Promise<void> {
   });
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'watch-paths');
+  if (denied) return denied;
+
   try {
     const paths = await getWatchPaths();
     return NextResponse.json({ paths });
@@ -48,6 +52,9 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'watch-paths');
+  if (denied) return denied;
+
   try {
     const body = await request.json();
     const { path } = body;
@@ -74,6 +81,9 @@ export async function POST(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'watch-paths');
+  if (denied) return denied;
+
   try {
     const body = await request.json();
     const { path } = body;

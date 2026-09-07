@@ -11,6 +11,14 @@
 export interface ChunkProvenance {
   /** Source document id — Meta View deep-links (/vectors/metaview/doc-…). */
   documentId?: string;
+  /** Owning case id. Retrieval already returns `caseNumber` (the docket
+   *  number); every case-scoped MCP tool wants this database id instead, and
+   *  without it a caller holding a passage cannot call one
+   *  (REPORT-discovery-tools §2/§5). */
+  caseId?: string;
+  /** Motion the chunk's page falls inside, when one resolves. Turns any
+   *  retrieval hit into a `query_case_graph` entry point (§5). */
+  motionId?: string;
   /** Dominant block type ('paragraph' | 'table' | 'footnote' | 'figure'). */
   blockType?: string;
   /** Heading context the chunk sits under (also inside chunk text). */
@@ -29,6 +37,8 @@ export interface ChunkProvenance {
 export function pickProvenance<T extends ChunkProvenance>(s: T): ChunkProvenance {
   return {
     ...(s.documentId ? { documentId: s.documentId } : {}),
+    ...(s.caseId ? { caseId: s.caseId } : {}),
+    ...(s.motionId ? { motionId: s.motionId } : {}),
     ...(s.blockType ? { blockType: s.blockType } : {}),
     ...(s.headingPath ? { headingPath: s.headingPath } : {}),
     ...(s.speakers ? { speakers: s.speakers } : {}),

@@ -1,11 +1,11 @@
 'use client';
 
 import { useState } from 'react';
-import { AppConfig } from '@/lib/db/config';
+import { PublicConfig } from '@/lib/db/config';
 import WeightSection from '@/components/admin/weight-section';
 
 interface Props {
-  initialConfig: AppConfig;
+  initialConfig: PublicConfig;
 }
 
 const RERANK_MODELS: Array<{ name: string; label: string }> = [
@@ -62,8 +62,8 @@ export default function AdminRerankingSettings({ initialConfig }: Props) {
           // Pass through existing embedding config so the route doesn't reject
           embeddingProvider: initialConfig.embeddingProvider,
           embeddingModel: initialConfig.embeddingModel,
-          openaiApiKey: initialConfig.openaiApiKey,
-          claudeApiKey: initialConfig.claudeApiKey,
+          // No key fields: they are write-only on POST /api/config, and
+          // omitting them leaves the stored credentials untouched.
           ollamaHost: initialConfig.ollamaHost,
           ollamaModel: initialConfig.ollamaModel,
           // Reranking fields

@@ -139,6 +139,18 @@ interface LanceDBRow {
 }
 
 /**
+ * Every column `rowToSearchResult` dereferences, minus `vector`. Used by
+ * `scanTextColumn` so a full-table regex pass does not drag embeddings
+ * through memory.
+ */
+const TEXT_SCAN_COLUMNS = [
+  'id', 'text', 'document_id', 'case_id', 'page_number', 'chunk_index',
+  'is_exhibit', 'exhibit_path', 'filing_id', 'filing_type', 'volume_number',
+  'case_number', 'document_type', 'start_line', 'end_line', 'annotations',
+  'block_type', 'heading_path', 'speakers', 'table_markdown', 'record_status',
+];
+
+/**
  * VectorStore manages document embeddings in LanceDB.
  *
  * This class provides high-level operations for storing and searching
@@ -410,6 +422,59 @@ export class VectorStore {
     } catch (error) {
       throw new Error(`Search failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  /**
+   * Stream a page of rows straight off the chunk table — no vector, no FTS.
+   *
+   * Exists so `scan_for_pattern` can run a compiled regex over the raw `text`
+   * column when keyword-based FTS recall cannot reach the rows (character
+   * classes, alternations, mid-word fragments). Callers page with
+   * `offset` / `limit` and stop when a short page comes back.
+   *
+   * The `vector` column is deliberately never selected — it dominates row size
+   * and nothing downstream reads it.
+   */
+  async scanTextColumn(options: {
+    filter?: Record<string, any>;
+    limit: number;
+    offset?: number;
+  }): Promise<SearchResult[]> {
+    if (!this.table) {
+      throw new Error('VectorStore not initialized. Call initialize() first.');
+    }
+
+    // Only select columns the table actually has — tables written before a
+    // schema addition (e.g. record_status) would otherwise throw on select.
+    let columns = TEXT_SCAN_COLUMNS;
+    try {
+      const schema = await this.table.schema();
+      const present = new Set((schema.fields ?? []).map((f: any) => f.name));
+      const filtered = TEXT_SCAN_COLUMNS.filter((c) => present.has(c));
+      if (filtered.length > 0) columns = filtered;
+    } catch {
+      // Schema unavailable — fall back to the full list.
+    }
+
+    let queryBuilder = this.table.query().select(columns).limit(options.limit);
+
+    if (options.offset && options.offset > 0) {
+      queryBuilder = queryBuilder.offset(options.offset);
+    }
+
+    if (options.filter) {
+      const whereClause = this.buildWhereClause(options.filter);
+      if (whereClause) {
+        queryBuilder = queryBuilder.where(whereClause);
+      }
+    }
+
+    const rows = await queryBuilder.toArray();
+
+    return rows.map((row: any) => ({
+      ...this.rowToSearchResult(row),
+      score: 0, // Plain table scan — no similarity or relevance score.
+    }));
   }
 
   /**

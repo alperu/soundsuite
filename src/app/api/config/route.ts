@@ -7,24 +7,60 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getConfig, updateConfig } from '@/lib/db/config';
+import {
+  getConfig,
+  updateConfig,
+  toPublicConfig,
+  isSecretConfigKey,
+  API_KEY_FIELDS,
+  type ApiKeyField,
+} from '@/lib/db/config';
 import { prisma } from '@/lib/db/prisma';
 import { invalidateRerankCache } from '@/lib/search/reranker';
 import { logger } from '@/lib/logger';
+import { requireApiAccess } from '@/lib/api/route-guard';
+
+/**
+ * Provider credentials are **write-only** over HTTP (v6 §4 — the plain GET
+ * used to return four live keys in plaintext to any origin that could reach
+ * the port).
+ *
+ * - `GET` returns `apiKeys: { <provider>: { configured, last4? } }` and no
+ *   `*ApiKey` field at all (see `toPublicConfig`).
+ * - `POST` writes a key only when the body carries a **non-empty string** for
+ *   that field. Absent, empty, or a non-string (an admin panel round-tripping
+ *   the masked GET body) all mean "leave the stored key unchanged" — never
+ *   "clear it". Clearing a key is done deliberately via
+ *   `POST /api/admin/ai-keys` with an empty `apiKey`.
+ */
+function pickWritableKey(raw: unknown): string | undefined {
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw : undefined;
+}
 
 /**
  * GET /api/config
- * Get current configuration.
+ * Get current configuration, with provider credentials masked.
  *
  * When called with `?key=<dotted.key>` returns only that single Config-table
  * value as `{ key, value }` — useful for round-trip verification of writes
- * without pulling the full config blob.
+ * without pulling the full config blob. Secret-bearing rows are refused:
+ * unfiltered, this read returned `embedding.openaiApiKey` — and `mcp.apiKeys`,
+ * the credential that satisfies the guard on every other route.
  */
 export async function GET(request: NextRequest) {
   try {
+    const denied = await requireApiAccess(request, { label: 'config GET', allowAdminSession: true });
+    if (denied) return denied;
+
     const url = new URL(request.url);
     const singleKey = url.searchParams.get('key');
     if (singleKey) {
+      if (isSecretConfigKey(singleKey)) {
+        return NextResponse.json(
+          { error: `Config key "${singleKey}" holds a credential and is not readable over HTTP.` },
+          { status: 403 },
+        );
+      }
       const row = await prisma.config.findUnique({ where: { key: singleKey } });
       return NextResponse.json({ key: singleKey, value: row?.value ?? null });
     }
@@ -43,7 +79,7 @@ export async function GET(request: NextRequest) {
     }
 
     const config = await getConfig();
-    return NextResponse.json(config);
+    return NextResponse.json(toPublicConfig(config));
   } catch (error: any) {
     return NextResponse.json(
       { error: error.message || 'Failed to get configuration' },
@@ -58,8 +94,20 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
+    const denied = await requireApiAccess(request, { label: 'config POST', allowAdminSession: true });
+    if (denied) return denied;
+
     const body = await request.json();
-    
+
+    // Write-only credentials. Anything that is not a non-empty string is
+    // dropped here, so a panel that POSTs the masked GET body back verbatim
+    // neither clears the stored key nor writes `[object Object]` into it.
+    const keyWrites: Partial<Record<ApiKeyField, string>> = {};
+    for (const field of API_KEY_FIELDS) {
+      const value = pickWritableKey(body[field]);
+      if (value !== undefined) keyWrites[field] = value;
+    }
+
     // Validate required fields
     if (!body.embeddingProvider) {
       return NextResponse.json(
@@ -83,15 +131,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate API key requirements
-    if (body.embeddingProvider === 'openai' && !body.openaiApiKey) {
+    const currentConfig = await getConfig();
+
+    // Validate API key requirements against the EFFECTIVE key — what will be
+    // stored after this write. Under write-only semantics the body normally
+    // carries no key at all (the toolbar's re-index save and the reranking
+    // panel both round-trip the masked GET), so checking `body.openaiApiKey`
+    // alone would reject every save while the provider is openai/claude.
+    if (body.embeddingProvider === 'openai' && !(keyWrites.openaiApiKey ?? currentConfig.openaiApiKey)) {
       return NextResponse.json(
         { error: 'OpenAI API key is required when using OpenAI provider' },
         { status: 400 }
       );
     }
 
-    if (body.embeddingProvider === 'claude' && !body.claudeApiKey) {
+    if (body.embeddingProvider === 'claude' && !(keyWrites.claudeApiKey ?? currentConfig.claudeApiKey)) {
       return NextResponse.json(
         { error: 'Claude API key is required when using Claude provider' },
         { status: 400 }
@@ -104,9 +158,8 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
-    
+
     // Check what actually changed
-    const currentConfig = await getConfig();
     const modelChanged = body.embeddingModel !== currentConfig.embeddingModel;
     const providerChanged = body.embeddingProvider !== currentConfig.embeddingProvider;
     const hostChanged = body.ollamaHost !== currentConfig.ollamaHost;
@@ -126,8 +179,9 @@ export async function POST(request: NextRequest) {
     await updateConfig({
       embeddingProvider: body.embeddingProvider,
       embeddingModel: body.embeddingModel,
-      openaiApiKey: body.openaiApiKey,
-      claudeApiKey: body.claudeApiKey,
+      // Write-only: only a non-empty string reaches the store (see keyWrites).
+      openaiApiKey: keyWrites.openaiApiKey,
+      claudeApiKey: keyWrites.claudeApiKey,
       ollamaHost: body.ollamaHost,
       ollamaModel,
       // Code embedding model (ss-code-embedding) — independent of text embedding.

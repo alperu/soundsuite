@@ -5,7 +5,23 @@ import {
   ToolExecutionContext,
 } from '../tool-types';
 import { llmProviderDependency, vectorStoreDependency } from '../shared-dependencies';
-import { callLLMJson, getCaseChunks, getTopicCaseChunks, buildContext } from './ai-helper';
+import {
+  callLLMJson,
+  getCaseChunks,
+  getTopicCaseChunks,
+  buildContext,
+  validateItemList,
+  ItemShape,
+  LlmItemStats,
+} from './ai-helper';
+
+/** The documented item shape (SS-3 #4). */
+const EVOLUTION_SHAPE: ItemShape = {
+  document: { type: 'string' },
+  date: { type: 'string' },
+  statement: { type: 'string' },
+  change: { type: 'string' },
+};
 
 export interface TrackClaimEvolutionParams {
   caseId: string;
@@ -20,6 +36,8 @@ export interface TrackClaimEvolutionResult {
     statement: string;
     change: string;
   }>;
+  /** Present only when items were dropped or flagged (SS-3 #4). */
+  stats?: LlmItemStats;
 }
 
 export class TrackClaimEvolutionTool extends BaseMCPTool<
@@ -117,7 +135,16 @@ Rules:
     if (!Array.isArray(result.evolution)) {
       return { evolution: [] };
     }
-    result.evolution = result.evolution.slice(0, limit);
-    return result;
+
+    const validated = validateItemList<TrackClaimEvolutionResult['evolution'][number]>(
+      result.evolution,
+      EVOLUTION_SHAPE,
+      { tool: 'track_claim_evolution', key: 'evolution', logger: context.logger },
+    );
+
+    return {
+      evolution: validated.items.slice(0, limit),
+      ...(validated.stats ? { stats: validated.stats } : {}),
+    };
   }
 }

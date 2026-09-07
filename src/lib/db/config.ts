@@ -335,6 +335,103 @@ export async function getConfig(): Promise<AppConfig> {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Read-side secret masking (v6 §4)
+// ---------------------------------------------------------------------------
+
+/**
+ * The `AppConfig` fields that hold a provider credential. `getConfig()` still
+ * returns them — every server-side consumer (`ai-provider.ts`, the embedding
+ * providers, the rerank client) reads the real value from here. Only the HTTP
+ * read paths mask, via `toPublicConfig()`.
+ */
+export const API_KEY_FIELDS = [
+  'openaiApiKey',
+  'claudeApiKey',
+  'geminiApiKey',
+  'groqApiKey',
+  'grokApiKey',
+] as const satisfies readonly (keyof AppConfig)[];
+
+export type ApiKeyField = (typeof API_KEY_FIELDS)[number];
+
+/** Provider label each key field belongs to — mirrors `/api/admin/ai-keys`. */
+export const API_KEY_FIELD_PROVIDER: Record<ApiKeyField, string> = {
+  openaiApiKey: 'openai',
+  claudeApiKey: 'anthropic',
+  geminiApiKey: 'gemini',
+  groqApiKey: 'groq',
+  grokApiKey: 'grok',
+};
+
+export interface MaskedKey {
+  configured: boolean;
+  /** Last four characters, for "is this the key I think it is?". Absent when unconfigured. */
+  last4?: string;
+}
+
+/** `AppConfig` with every credential field removed and summarised instead. */
+export type PublicConfig = Omit<AppConfig, ApiKeyField> & {
+  /** Keyed by provider (`openai`, `anthropic`, …), like `/api/admin/ai-keys`. */
+  apiKeys: Record<string, MaskedKey>;
+};
+
+function maskKey(value: string | undefined): MaskedKey {
+  if (typeof value !== 'string' || value.length === 0) return { configured: false };
+  return { configured: true, last4: value.slice(-4) };
+}
+
+/**
+ * Strip credentials from a config object for anything that crosses HTTP.
+ *
+ * The key fields are **removed**, not replaced with a placeholder: the admin
+ * panels round-trip the GET body straight back into `POST /api/config`
+ * (`admin-ai-services.tsx` does `{ ...cfg, ...patch }`), so any value left in
+ * `openaiApiKey` would be written back over the real key. Absent fields hit
+ * `updateConfig`'s `!== undefined` guard and leave the stored row alone.
+ */
+export function toPublicConfig(config: AppConfig): PublicConfig {
+  const out = { ...config } as AppConfig & { apiKeys?: Record<string, MaskedKey> };
+  const apiKeys: Record<string, MaskedKey> = {};
+  for (const field of API_KEY_FIELDS) {
+    apiKeys[API_KEY_FIELD_PROVIDER[field]] = maskKey(config[field]);
+    delete (out as Partial<AppConfig>)[field];
+  }
+  out.apiKeys = apiKeys;
+  return out as PublicConfig;
+}
+
+/** Convenience: `getConfig()` + `toPublicConfig()`. */
+export async function getPublicConfig(): Promise<PublicConfig> {
+  return toPublicConfig(await getConfig());
+}
+
+/**
+ * Config-table rows that must never be returned over HTTP by the single-key
+ * read (`GET /api/config?key=…`).
+ *
+ * `mcp.apiKeys` is the important one and the reason this is not a hand-written
+ * list alone: it holds the credential that satisfies the guard above, so
+ * leaking it defeats every gate on the server. The pattern catches it
+ * (`apiKey` matches case-insensitively) along with `cloudflare.apiKey` and the
+ * five provider rows; the explicit set is the belt to the pattern's braces.
+ */
+const SECRET_CONFIG_KEYS = new Set([
+  'embedding.openaiApiKey',
+  'embedding.claudeApiKey',
+  'ai.geminiApiKey',
+  'ai.groqApiKey',
+  'ai.grokApiKey',
+  'cloudflare.apiKey',
+  'mcp.apiKeys',
+]);
+
+const SECRET_CONFIG_KEY_PATTERN = /api[-_]?key|secret|token|password|passphrase|credential/i;
+
+export function isSecretConfigKey(key: string): boolean {
+  return SECRET_CONFIG_KEYS.has(key) || SECRET_CONFIG_KEY_PATTERN.test(key);
+}
+
 // --- Per-sidecar idle timeout overrides ---
 
 export type SidecarIdleTimeouts = { embedding?: number; completion?: number; ocr?: number; reranker?: number };

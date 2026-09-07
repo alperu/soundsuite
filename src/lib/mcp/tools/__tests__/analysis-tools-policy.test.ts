@@ -58,8 +58,17 @@ beforeEach(() => {
   // Parseable and structurally acceptable to every tool: the eight list-shaped
   // tools see no array under their key and return an empty result, while
   // compare_argument_structures / analyze_tone find the object key they now
-  // require (SS-3 fix 3). These cases are about provider policy, not shape.
-  ai.mockResolvedValue(aiResponse('{"comparison": {}, "analysis": {}}'));
+  // require (SS-3 fix 3) with every documented field present (SS-3 fix 4 —
+  // `{}` is now rejected as a shape failure). These cases are about provider
+  // policy, not shape.
+  ai.mockResolvedValue(
+    aiResponse(
+      JSON.stringify({
+        comparison: { shared: [], uniqueToDoc1: [], uniqueToDoc2: [], conflicts: [] },
+        analysis: { overallTone: 'neutral', confidence: 0.5, segments: [], patterns: [] },
+      }),
+    ),
+  );
   config.mockReset();
   config.mockResolvedValue({ ollamaHost: 'http://127.0.0.1:11434' });
 });

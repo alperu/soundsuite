@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 /**
  * POST /api/admin/role-assignments/sync?sidecarUrl=...
@@ -8,6 +9,9 @@ import { NextRequest, NextResponse } from 'next/server';
  * the admin UI immediately after editing role-assignments for a host.
  */
 export async function POST(req: NextRequest) {
+  const denied = await requireAdminApiAccess(req, 'role-assignments/sync');
+  if (denied) return denied;
+
   try {
     const sidecarUrl = req.nextUrl.searchParams.get('sidecarUrl');
     if (!sidecarUrl) {

@@ -5,7 +5,26 @@ import {
   ToolExecutionContext,
 } from '../tool-types';
 import { llmProviderDependency } from '../shared-dependencies';
-import { callLLMJson, getDocumentChunks, getCaseChunks, buildContext } from './ai-helper';
+import {
+  callLLMJson,
+  getDocumentChunks,
+  getCaseChunks,
+  buildContext,
+  validateItemList,
+  applyConfidenceThreshold,
+  ItemShape,
+  LlmItemStats,
+} from './ai-helper';
+
+/** The documented item shape (SS-3 #4). `confidence` is a score: see ai-helper. */
+const PRIVILEGE_SHAPE: ItemShape = {
+  text: { type: 'string' },
+  privilegeType: { type: 'string' },
+  document: { type: 'string' },
+  page: { type: 'number' },
+  reason: { type: 'string' },
+  confidence: { type: 'number', score: true },
+};
 
 export interface DetectPrivilegeParams {
   documentId: string;
@@ -18,11 +37,14 @@ export interface DetectPrivilegeResult {
   privileged: Array<{
     text: string;
     privilegeType: string;
-    confidence: number;
+    /** `null` when the model reported the finding without a usable score. */
+    confidence: number | null;
     document: string;
     page: number;
     reason: string;
   }>;
+  /** Present only when items were dropped or flagged (SS-3 #4/#5). */
+  stats?: LlmItemStats;
 }
 
 export class DetectPrivilegeTool extends BaseMCPTool<
@@ -137,10 +159,22 @@ Rules:
     if (!Array.isArray(result.privileged)) {
       return { privileged: [] };
     }
-    result.privileged = result.privileged
-      .filter(p => p.confidence >= confidence_threshold)
-      .slice(0, limit);
 
-    return result;
+    // Shape validation, then the threshold, then the cap — kept separate so
+    // `stats.itemsDropped` means "malformed" only.
+    const validated = validateItemList<DetectPrivilegeResult['privileged'][number]>(
+      result.privileged,
+      PRIVILEGE_SHAPE,
+      { tool: 'detect_privilege', key: 'privileged', logger: context.logger },
+    );
+    const filtered = applyConfidenceThreshold(validated.items, confidence_threshold, 'privileged');
+
+    const warnings = [...(validated.stats?.warnings ?? []), ...filtered.warnings];
+    const itemsDropped = validated.stats?.itemsDropped ?? 0;
+
+    return {
+      privileged: filtered.items.slice(0, limit),
+      ...(itemsDropped > 0 || warnings.length > 0 ? { stats: { itemsDropped, warnings } } : {}),
+    };
   }
 }

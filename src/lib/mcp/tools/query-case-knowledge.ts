@@ -16,6 +16,7 @@ import { astToLanceQuery, BooleanFtsConversionError, extractFieldFilters, resolv
 import { getConfig } from '../../db/config';
 import { recordStatusFromTags } from '../../ingestion/draft-detector';
 import { DRAFT_CITE_MARKER } from '../../search/context-builder';
+import { attachMotionIds } from '../motion-resolution';
 
 export interface QueryCaseKnowledgeParams {
   query: string;
@@ -60,6 +61,13 @@ export interface QueryCaseKnowledgeResult {
     filingType?: string;
     volumeNumber?: number;
     caseNumber?: string;
+    /** Database id of the owning case — the argument every case-scoped tool
+     *  requires. `caseNumber` is the human docket number, not this
+     *  (REPORT-discovery-tools §5). */
+    caseId?: string;
+    /** Motion whose page range contains this chunk, when one resolves — the
+     *  seed `query_case_graph` needs. Absent when nothing matches. */
+    motionId?: string;
     annotations?: string;
     source?: 'docket' | 'chat';
     chatAttachmentId?: string;
@@ -545,6 +553,10 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       country: caseData?.country || undefined,
     });
 
+    // documentId -> filingId for the returned hits, filled during enrichment
+    // below and consumed by the single batched motion lookup that follows.
+    const docFilingIds = new Map<string, string>();
+
     // Enrich results with document names and citations
     const enrichedResults = await Promise.all(
       searchResults.map(async (result) => {
@@ -565,6 +577,9 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
             filingType: undefined,
             volumeNumber: undefined,
             caseNumber: undefined,
+            // A chat attachment belongs to no case and no motion.
+            caseId: undefined as string | undefined,
+            motionId: undefined as string | undefined,
             annotations: result.metadata.annotations || undefined,
             // Structural fields — same projection as document hits below.
             // This hand-built branch previously dropped all four (the exact
@@ -596,6 +611,14 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
           if (volMatch) volumeNumber = parseInt(volMatch[1], 10);
         }
         const caseNumber = result.metadata.caseNumber || (document as any)?.case?.caseNumber || caseData?.caseNumber;
+        // The chunk row already carries case_id; fall back to the Document's
+        // case relation for rows indexed before the column was stamped.
+        const rowCaseId: string | undefined =
+          result.metadata.caseId || (document as any)?.case?.id || caseId || undefined;
+        const filingId: string | undefined = (document as any)?.filing?.id;
+        if (filingId && result.metadata.documentId) {
+          docFilingIds.set(result.metadata.documentId, filingId);
+        }
 
         // Build citation input
         const totalVolumes = filingType ? (volumeCountMap.get(filingType) ?? 1) : 1;
@@ -647,6 +670,10 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
           filingType,
           volumeNumber,
           caseNumber: caseNumber || undefined,
+          caseId: rowCaseId,
+          // Filled by the batched motion lookup below — one query for the
+          // whole result set, never one per item.
+          motionId: undefined as string | undefined,
           filingSlug: (document as any)?.filing?.slug || undefined,
           annotations: result.metadata.annotations || undefined,
           // Structure metadata (task #13 phases 1-2) — optional, absent on
@@ -660,6 +687,8 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       }),
     );
 
+    await attachMotionIds(context, enrichedResults, docFilingIds);
+
     markPhase('hydrate');
     context.logger.info('[qck-timing] phase breakdown', {
       searchMode,
@@ -671,3 +700,4 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
     return { results: enrichedResults };
   }
 }
+

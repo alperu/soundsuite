@@ -5,14 +5,18 @@
  * for the admin dashboard: DB stats, service status, uptime, etc.
  */
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { getServicesManager } from '@/lib/services-manager';
 import { isRedisAvailable, getRedis } from '@/lib/redis';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'system-info');
+  if (denied) return denied;
+
   try {
     // Database stats
     const [caseCount, documentCount, jobLogCount, configCount, actionLogCount] =

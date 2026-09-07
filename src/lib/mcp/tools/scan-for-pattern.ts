@@ -4,14 +4,20 @@ import {
   ToolExecutionContext,
   ToolConfigEntry,
 } from '../tool-types';
-import { SearchQuery, MatchQuery, Operator } from '../../vector/vector-store';
+import { SearchQuery, SearchResult, MatchQuery, Operator } from '../../vector/vector-store';
 import { getCitationFormatter, CitationInput } from '../../citations/citation-formatter';
 import { detectLineNumbers } from '../../citations/line-number-detector';
+import { attachMotionIds } from '../motion-resolution';
+
+/** How a page of results was produced. Always present on the result. */
+export type ScanStrategy = 'fts+regex' | 'full-scan';
 
 export interface ScanForPatternParams {
   pattern: string;
   caseId?: string;
   limit?: number;
+  /** Opaque page token returned as `nextCursor` by a previous call. */
+  cursor?: string;
   /**
    * Pre-extracted Lance/SQL where-clauses to merge into the retrieval
    * filter as hard constraints. Each string is already SQL-escaped at the
@@ -34,8 +40,25 @@ export interface ScanForPatternResult {
     filingType?: string;
     volumeNumber?: number;
     caseNumber?: string;
+    /** Owning case id — ChunkProvenance parity with query_case_knowledge, and
+     *  the argument every case-scoped tool requires (REPORT-discovery-tools §5). */
+    caseId?: string;
+    /** Motion whose page range contains this hit, when one resolves. */
+    motionId?: string;
     filingSlug?: string;
   }>;
+  /** How this page was produced. `full-scan` = regex run over the raw text column. */
+  strategy: ScanStrategy;
+  /** FTS candidates retrieved before the regex post-filter (`fts+regex` only). */
+  candidatePool?: number;
+  /** Rows read off the chunk table during this call (`full-scan` only). */
+  scanned?: number;
+  /** True when the scan stopped early (time box / row cap) — recall is bounded. */
+  truncated?: boolean;
+  /** Page token for the next call. Absent = this page is the end of the answer. */
+  nextCursor?: string;
+  /** Non-fatal recall caveats. Empty array = the answer is believed complete. */
+  warnings: string[];
 }
 
 /**
@@ -56,6 +79,256 @@ function extractKeywordsFromPattern(pattern: string): string[] {
     .filter(w => w.length >= 2); // Only meaningful words (2+ chars)
 }
 
+/** A literal word-character run inside a regex, with its flanking context. */
+interface LiteralRun {
+  text: string;
+  /** True when nothing to the left can extend this run into a bigger index token. */
+  leftClean: boolean;
+  /** Same, to the right. */
+  rightClean: boolean;
+}
+
+/** Escapes that can only match a token separator (so a run beside one is whole). */
+const SEPARATOR_ESCAPES = new Set(['b', 's', 'n', 'r', 't', 'f', 'v', 'W', 'A', 'Z', 'z']);
+
+/**
+ * Walk a regex and pull out its literal `[A-Za-z0-9_]` runs, recording whether
+ * each run is flanked by something that guarantees a token boundary.
+ *
+ * This is what tells `[Uu]nbeknownst` apart from `unbeknownst`: the run
+ * `nbeknownst` sits immediately after a character class, so it is a *fragment*
+ * of an index token, not a token — feeding it to BM25 FTS returns nothing.
+ */
+function literalRuns(pattern: string): LiteralRun[] {
+  const runs: LiteralRun[] = [];
+  let current = '';
+  let leftClean = true; // start of pattern is a boundary
+  let i = 0;
+
+  const flush = (rightClean: boolean, nextLeftClean: boolean) => {
+    if (current.length > 0) runs.push({ text: current, leftClean, rightClean });
+    current = '';
+    leftClean = nextLeftClean;
+  };
+
+  while (i < pattern.length) {
+    const c = pattern[i];
+
+    if (c === '\\') {
+      const next = pattern[i + 1];
+      // Escaped punctuation (\. \- \/) is a separator; \d \w \S are not.
+      const clean = next === undefined
+        ? true
+        : /[A-Za-z0-9]/.test(next) ? SEPARATOR_ESCAPES.has(next) : true;
+      flush(clean, clean);
+      i += 2;
+      continue;
+    }
+
+    if (c === '[') {
+      const close = pattern.indexOf(']', i + 1);
+      flush(false, false);
+      i = close === -1 ? pattern.length : close + 1;
+      continue;
+    }
+
+    if (c === '{') {
+      // Quantifier: the atom it repeats is the previous char, so that char is
+      // not reliably part of the literal run.
+      if (current.length > 0) current = current.slice(0, -1);
+      const close = pattern.indexOf('}', i + 1);
+      flush(false, false);
+      i = close === -1 ? pattern.length : close + 1;
+      continue;
+    }
+
+    if (c === '*' || c === '+' || c === '?') {
+      if (current.length > 0) current = current.slice(0, -1);
+      flush(false, false);
+      i += 1;
+      continue;
+    }
+
+    if (c === '|' || c === '^' || c === '$') {
+      flush(true, true);
+      i += 1;
+      continue;
+    }
+
+    if (c === '(' || c === ')') {
+      // A group edge may abut word material on the other side, so treat it as
+      // possibly token-extending. `(foo|bar)baz` really does mean `foobaz`.
+      flush(false, false);
+      i += 1;
+      continue;
+    }
+
+    if (c === '.') {
+      flush(false, false);
+      i += 1;
+      continue;
+    }
+
+    if (/[A-Za-z0-9_]/.test(c)) {
+      current += c;
+      i += 1;
+      continue;
+    }
+
+    // Any other literal (space, comma, hyphen, apostrophe): a token separator
+    // for the FTS tokenizer.
+    flush(true, true);
+    i += 1;
+  }
+
+  flush(true, true);
+  return runs;
+}
+
+/**
+ * Literal runs usable as FTS keywords: whole index tokens of ≥3 chars.
+ *
+ * A run flanked on both sides by boundaries is trivially whole. A run that is
+ * not gets one rescue: if the compiled regex still matches the run standing
+ * alone between separators, it is whole after all (this is what keeps
+ * `\bfoo\b|\bbar\b` — the shape `/api/search/ai` builds — on the FTS path).
+ */
+function safeKeywords(pattern: string, regex: RegExp | null): string[] {
+  const out: string[] = [];
+  for (const run of literalRuns(pattern)) {
+    if (run.text.length < 3) continue;
+    if (run.leftClean && run.rightClean) {
+      out.push(run.text);
+      continue;
+    }
+    if (regex && regex.test(`aa ${run.text} zz`)) out.push(run.text);
+  }
+  return out;
+}
+
+/**
+ * Reject patterns that can blow up the regex engine before we point them at
+ * tens of thousands of chunks: nested quantifiers (`(a+)+`) and quantified
+ * lookbehind. Cheap textual check — it only has to catch the shapes that make
+ * a linear scan hang.
+ */
+function catastrophicReason(pattern: string): string | null {
+  if (/\(\?<[=!][^)]*[*+]/.test(pattern)) {
+    return 'unbounded lookbehind';
+  }
+  for (let i = 0; i < pattern.length; i++) {
+    if (pattern[i] !== ')') continue;
+    const after = pattern[i + 1];
+    if (after !== '*' && after !== '+' && after !== '{') continue;
+    // Walk back to the matching '(' and inspect the group body.
+    let depth = 0;
+    let start = -1;
+    for (let j = i; j >= 0; j--) {
+      if (pattern[j] === ')' && pattern[j - 1] !== '\\') depth++;
+      else if (pattern[j] === '(' && pattern[j - 1] !== '\\') {
+        depth--;
+        if (depth === 0) { start = j; break; }
+      }
+    }
+    if (start === -1) continue;
+    if (bodyIsAmbiguouslyRepeatable(pattern.slice(start + 1, i))) {
+      return 'nested quantifier';
+    }
+  }
+  return null;
+}
+
+/**
+ * True when a quantified group's body can match the same text many ways —
+ * i.e. it holds an unbounded quantifier and *nothing mandatory* to anchor an
+ * iteration. `(a+)+`, `(\d+)+`, `(\s*\w*)*` blow up; `(ab+c)+` and
+ * `(No\.\s*\d+)+` do not, because each iteration must start on a fixed atom.
+ */
+function bodyIsAmbiguouslyRepeatable(body: string): boolean {
+  let hasUnboundedQuantifier = false;
+  let hasMandatoryAtom = false;
+  let i = 0;
+
+  while (i < body.length) {
+    const c = body[i];
+
+    // Structural chars carry no obligation of their own.
+    if (c === '|' || c === '(' || c === ')' || c === '^' || c === '$') { i += 1; continue; }
+
+    // Consume one atom.
+    let atomIsBoundary = false;
+    if (c === '\\') {
+      atomIsBoundary = SEPARATOR_ESCAPES.has(body[i + 1] ?? '') && /[A-Za-z]/.test(body[i + 1] ?? '');
+      i += 2;
+    } else if (c === '[') {
+      const close = body.indexOf(']', i + 1);
+      i = close === -1 ? body.length : close + 1;
+    } else {
+      i += 1;
+    }
+
+    // …then the quantifier applied to it, if any.
+    let quantified = false;
+    const q = body[i];
+    if (q === '*' || q === '+' || q === '?') {
+      quantified = true;
+      if (q !== '?') hasUnboundedQuantifier = true;
+      i += 1;
+    } else if (q === '{') {
+      const close = body.indexOf('}', i + 1);
+      const spec = body.slice(i + 1, close === -1 ? body.length : close);
+      quantified = true;
+      if (/^\d+,\s*$/.test(spec)) hasUnboundedQuantifier = true;
+      i = close === -1 ? body.length : close + 1;
+    }
+
+    if (!quantified && !atomIsBoundary) hasMandatoryAtom = true;
+  }
+
+  return hasUnboundedQuantifier && !hasMandatoryAtom;
+}
+
+/** Cursor payload. Opaque to callers; validated against the pattern on reuse. */
+interface ScanCursor {
+  s: ScanStrategy;
+  /** `fts+regex`: index into the matched list. `full-scan`: row offset. */
+  o: number;
+  /** Pattern fingerprint — a cursor from another query must not silently page. */
+  p: string;
+}
+
+function cursorKey(pattern: string, caseId?: string): string {
+  return `${pattern}|${caseId ?? ''}`.slice(0, 200);
+}
+
+function encodeCursor(c: ScanCursor): string {
+  return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url');
+}
+
+function decodeCursor(raw: string): ScanCursor | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    if (typeof parsed?.o !== 'number' || (parsed.s !== 'fts+regex' && parsed.s !== 'full-scan')) {
+      return null;
+    }
+    return parsed as ScanCursor;
+  } catch {
+    return null;
+  }
+}
+
+/** Row shape both retrieval paths produce. */
+type SearchResultRow = SearchResult;
+
+/** Rows read per LanceDB page during a full scan. */
+const SCAN_BATCH = 1000;
+/** Wall-clock budget for one full-scan call before it reports partial results. */
+const SCAN_TIME_BUDGET_MS = 10_000;
+/** Hard ceiling on rows read in one call, regardless of the time box. */
+const SCAN_MAX_ROWS = 250_000;
+/** Largest page a caller may request. Beyond this, page with `cursor`. */
+const MAX_PAGE_LIMIT = 200;
+
 export class ScanForPatternTool extends BaseMCPTool<
   ScanForPatternParams,
   ScanForPatternResult
@@ -65,10 +338,14 @@ export class ScanForPatternTool extends BaseMCPTool<
       name: 'scan_for_pattern',
       displayName: 'Scan for Pattern',
       description:
-        'Search for exact patterns in legal documents using regex. Results carry the ' +
+        'Search for exact patterns in legal documents using regex. Character classes, ' +
+        'alternations and mid-word fragments fall back to a true regex scan of the ' +
+        'chunk text, so a pattern FTS cannot tokenize still returns its hits. Every ' +
+        'result reports `strategy`, recall counts and `warnings[]`; page with ' +
+        '`cursor` / `nextCursor` rather than raising `limit`. Results carry the ' +
         'same structure metadata as query_case_knowledge when available (documentId, ' +
         'blockType, headingPath, speakers, tableMarkdown).',
-      version: '1.2.0',
+      version: '1.3.0',
       category: 'search',
       inputSchema: {
         type: 'object',
@@ -83,7 +360,13 @@ export class ScanForPatternTool extends BaseMCPTool<
           },
           limit: {
             type: 'number',
-            description: 'Maximum number of results to return (default: 10)',
+            description:
+              'Results per page (default: 10, max: 200). This bounds the page, not ' +
+              'the answer — follow `nextCursor` for the rest.',
+          },
+          cursor: {
+            type: 'string',
+            description: 'Page token from a previous call\'s `nextCursor`.',
           },
         },
         required: ['pattern'],
@@ -106,6 +389,82 @@ export class ScanForPatternTool extends BaseMCPTool<
       err.code = 'INVALID_REGEX';
       throw err;
     }
+    // A pattern that compiles can still take exponential time on a long chunk.
+    // Reject it here rather than hanging a scan over the whole corpus.
+    const reason = catastrophicReason(params.pattern);
+    if (reason) {
+      const err: any = new Error(
+        `Invalid regex pattern: ${reason} can backtrack catastrophically over document text`,
+      );
+      err.code = 'INVALID_REGEX';
+      throw err;
+    }
+  }
+
+  /**
+   * Run the compiled regex over the raw chunk text, paging the table directly.
+   *
+   * Unlike the FTS path this applies the regex unconditionally — a plain
+   * literal like a mid-word fragment has no metacharacters, so the
+   * "looks like a regex" heuristic must not gate the filter here.
+   *
+   * Stops at `limit + 1` matches (the extra one only fixes the cursor), at the
+   * end of the table, or at the time box — reporting `truncated` in the last
+   * case so the caller can tell "no more" from "not finished".
+   */
+  private async runFullScan(
+    context: ToolExecutionContext,
+    regex: RegExp,
+    filter: Record<string, any> | undefined,
+    startOffset: number,
+    limit: number,
+  ): Promise<{
+    matches: SearchResultRow[];
+    scanned: number;
+    truncated: boolean;
+    nextOffset: number | null;
+  }> {
+    const matches: SearchResultRow[] = [];
+    const need = limit + 1;
+    const deadline = Date.now() + SCAN_TIME_BUDGET_MS;
+    let rowOffset = startOffset;
+    let scanned = 0;
+    let truncated = false;
+    let nextOffset: number | null = null;
+
+    while (matches.length < need) {
+      if (Date.now() > deadline || scanned >= SCAN_MAX_ROWS) {
+        truncated = true;
+        nextOffset = rowOffset;
+        break;
+      }
+
+      const rows = await context.vectorStore.scanTextColumn({
+        filter,
+        limit: SCAN_BATCH,
+        offset: rowOffset,
+      });
+      if (rows.length === 0) break;
+
+      let stopped = false;
+      for (let i = 0; i < rows.length; i++) {
+        scanned++;
+        if (!regex.test(rows[i].text)) continue;
+        if (matches.length === limit) {
+          // One past the page: resume *at* this row so it is not skipped.
+          nextOffset = rowOffset + i;
+          stopped = true;
+          break;
+        }
+        matches.push(rows[i]);
+      }
+      if (stopped) break;
+
+      rowOffset += rows.length;
+      if (rows.length < SCAN_BATCH) break; // end of table
+    }
+
+    return { matches, scanned, truncated, nextOffset };
   }
 
   async executeImpl(
@@ -113,9 +472,23 @@ export class ScanForPatternTool extends BaseMCPTool<
     context: ToolExecutionContext,
     _config: ToolConfigEntry,
   ): Promise<ScanForPatternResult> {
-    const { pattern, caseId, limit = 10, whereClauses } = params;
+    const { pattern, caseId, whereClauses } = params;
+    const limit = Math.max(1, Math.min(params.limit ?? 10, MAX_PAGE_LIMIT));
+    const warnings: string[] = [];
 
     context.logger.info('Handling scan_for_pattern', { pattern, caseId, limit });
+
+    // Resume a previous page. A cursor minted for a different pattern/case
+    // would silently page through the wrong answer, so reject it outright.
+    let cursor: ScanCursor | null = null;
+    if (params.cursor) {
+      cursor = decodeCursor(params.cursor);
+      if (!cursor || cursor.p !== cursorKey(pattern, caseId)) {
+        const err: any = new Error('Invalid or mismatched cursor for this pattern');
+        err.code = 'INVALID_PARAMS';
+        throw err;
+      }
+    }
 
     // Detect whether the input is an actual regex (has metacharacters) or a
     // plain natural-language phrase. When users / callers pass natural text
@@ -147,61 +520,166 @@ export class ScanForPatternTool extends BaseMCPTool<
     // Extract literal keywords from the pattern for FTS recall
     const keywords = extractKeywordsFromPattern(pattern);
 
-    // Fetch more candidates than needed so we can post-filter with regex.
-    // For natural-language input we fetch exactly `limit` since there's no
-    // post-filter that would shrink the set.
-    const fetchLimit = looksLikeRegex && regex ? limit * 5 : limit;
+    // Of those, the ones that are whole index tokens. A pattern whose literals
+    // are only *fragments* of tokens (`[Uu]nbeknownst` → `nbeknownst`) can
+    // never be reached by BM25 — that is the recall hole this tool used to
+    // report as an empty result set.
+    const safe = regex ? safeKeywords(pattern, regex) : keywords;
+    const ftsKeywords = safe.length > 0 ? safe : keywords;
 
-    // Build search query — use FTS keywords for initial recall
-    const searchQuery: SearchQuery = {
-      limit: fetchLimit,
-    };
+    // ── Full-scan trigger rule ────────────────────────────────────────────
+    // (a) the pattern is regex-like and no literal survives as a whole token;
+    // (b) FTS returned zero candidates for a single-expression pattern
+    //     (no whitespace, no alternation) — a lone mid-word fragment;
+    // (c) the caller is paging a full scan.
+    // Multi-word / alternation input never full-scans on (b): those are the
+    // natural-language and `\bfoo\b|\bbar\b` shapes the dashboard sends, and a
+    // linear pass would neither find more nor finish quickly.
+    const noWholeTokenKeyword = looksLikeRegex && !!regex && safe.length === 0;
+    const zeroCandidateEligible = !!regex && !/\s/.test(pattern) && !pattern.includes('|');
+    const scanSupported = typeof (context.vectorStore as any)?.scanTextColumn === 'function';
 
-    if (keywords.length > 0) {
-      // Use FTS with extracted keywords (OR logic for broad recall)
-      searchQuery.ftsQuery = new MatchQuery(keywords.join(' '), 'text', {
-        operator: Operator.Or,
-      });
-    } else {
-      // No useful keywords extracted — fall back to legacy LIKE with the raw pattern
-      searchQuery.hybridQuery = pattern;
-    }
-
-    // Apply case filter if provided
-    if (caseId) {
-      searchQuery.filter = { caseId };
-    }
-
-    // Caller-supplied hard where-clauses (e.g. deep-search's per-chip
-    // pattern dispatch shipping the chip's extracted filters so the regex
-    // backstop stays inside the user's named scope).
+    // Retrieval scope, shared by both paths so the full scan never widens it.
+    let filter: Record<string, any> | undefined;
+    if (caseId) filter = { caseId };
     if (whereClauses && whereClauses.length > 0) {
-      if (!searchQuery.filter) searchQuery.filter = {};
-      const existing = Array.isArray((searchQuery.filter as any)._rawWhere) ? (searchQuery.filter as any)._rawWhere : [];
-      (searchQuery.filter as any)._rawWhere = [...existing, ...whereClauses];
+      filter = { ...(filter ?? {}), _rawWhere: [...whereClauses] };
     }
 
-    // Perform initial recall search
-    const searchResults = await context.vectorStore.search(searchQuery);
+    let strategy: ScanStrategy = 'fts+regex';
+    let matchedResults: SearchResultRow[] = [];
+    let candidatePool: number | undefined;
+    let scanned: number | undefined;
+    let truncated = false;
+    let nextCursor: string | undefined;
 
-    // Post-filter: only apply the regex if the input is actually regex-like
-    // AND the regex compiled. For natural-language queries, trust FTS recall.
-    const matchedResults = looksLikeRegex && regex
-      ? searchResults.filter((result) => regex!.test(result.text))
-      : searchResults;
+    const wantFullScanUpFront = cursor?.s === 'full-scan' || noWholeTokenKeyword;
 
-    if (looksLikeRegex && regex && matchedResults.length === 0 && searchResults.length > 0) {
-      // Useful diagnostic: regex post-filter dropped everything despite FTS
-      // returning candidates. Almost always means the caller passed a
-      // natural-language string with one stray metacharacter (parens,
-      // apostrophe etc.) and our heuristic mis-classified it.
-      context.logger.warn?.('scan_for_pattern: regex post-filter dropped all FTS candidates', {
-        pattern: pattern.slice(0, 120),
-        ftsCandidates: searchResults.length,
-      });
+    if (wantFullScanUpFront && !scanSupported) {
+      warnings.push(
+        'This pattern needs a full text scan, but the vector store does not support one. ' +
+        'Results may be incomplete.',
+      );
     }
 
-    // Take only the requested limit
+    if (wantFullScanUpFront && scanSupported && regex) {
+      if (noWholeTokenKeyword) {
+        warnings.push(
+          'No literal in this pattern is a whole index token, so keyword recall cannot ' +
+          'reach its matches — ran a full regex scan instead.',
+        );
+      }
+      strategy = 'full-scan';
+      const scan = await this.runFullScan(context, regex, filter, cursor?.o ?? 0, limit);
+      matchedResults = scan.matches;
+      scanned = scan.scanned;
+      truncated = scan.truncated;
+      if (scan.nextOffset !== null) {
+        nextCursor = encodeCursor({ s: 'full-scan', o: scan.nextOffset, p: cursorKey(pattern, caseId) });
+      }
+    } else {
+      // ── FTS recall + regex post-filter (unchanged path) ─────────────────
+      const pageOffset = cursor?.o ?? 0;
+
+      // Fetch more candidates than needed so we can post-filter with regex.
+      // For natural-language input we fetch exactly what the page needs since
+      // there's no post-filter that would shrink the set.
+      const wanted = pageOffset + limit;
+      // One row past the page on the natural-language path so a next page is
+      // detectable; ×5 on the regex path because the post-filter shrinks the set.
+      const fetchLimit = looksLikeRegex && regex ? wanted * 5 : wanted + 1;
+
+      // Build search query — use FTS keywords for initial recall
+      const searchQuery: SearchQuery = {
+        limit: fetchLimit,
+      };
+
+      if (ftsKeywords.length > 0) {
+        // Use FTS with extracted keywords (OR logic for broad recall)
+        searchQuery.ftsQuery = new MatchQuery(ftsKeywords.join(' '), 'text', {
+          operator: Operator.Or,
+        });
+      } else {
+        // No useful keywords extracted — fall back to legacy LIKE with the raw pattern
+        searchQuery.hybridQuery = pattern;
+      }
+
+      // Apply case filter and caller-supplied hard where-clauses (e.g.
+      // deep-search's per-chip pattern dispatch shipping the chip's extracted
+      // filters so the regex backstop stays inside the user's named scope).
+      if (filter) searchQuery.filter = { ...filter };
+
+      // Perform initial recall search
+      const searchResults = await context.vectorStore.search(searchQuery);
+      candidatePool = searchResults.length;
+
+      // Post-filter: only apply the regex if the input is actually regex-like
+      // AND the regex compiled. For natural-language queries, trust FTS recall.
+      const allMatches = looksLikeRegex && regex
+        ? searchResults.filter((result) => regex!.test(result.text))
+        : searchResults;
+
+      if (looksLikeRegex && regex && allMatches.length === 0 && searchResults.length > 0) {
+        // Useful diagnostic: regex post-filter dropped everything despite FTS
+        // returning candidates. Almost always means the caller passed a
+        // natural-language string with one stray metacharacter (parens,
+        // apostrophe etc.) and our heuristic mis-classified it.
+        context.logger.warn?.('scan_for_pattern: regex post-filter dropped all FTS candidates', {
+          pattern: pattern.slice(0, 120),
+          ftsCandidates: searchResults.length,
+        });
+        warnings.push(
+          `Keyword recall returned ${searchResults.length} candidates but none matched the ` +
+          'regex. Matches elsewhere in the corpus would not be reached by this strategy.',
+        );
+      }
+
+      if (searchResults.length === 0 && regex && zeroCandidateEligible && scanSupported) {
+        // The measured mid-word-fragment case: FTS has no token for it, so the
+        // regex never ran. Scan instead of reporting an empty record.
+        warnings.push(
+          'Keyword recall returned no candidates — ran a full regex scan instead.',
+        );
+        strategy = 'full-scan';
+        const scan = await this.runFullScan(context, regex, filter, 0, limit);
+        matchedResults = scan.matches;
+        scanned = scan.scanned;
+        truncated = scan.truncated;
+        candidatePool = 0;
+        if (scan.nextOffset !== null) {
+          nextCursor = encodeCursor({ s: 'full-scan', o: scan.nextOffset, p: cursorKey(pattern, caseId) });
+        }
+      } else {
+        if (searchResults.length === 0) {
+          warnings.push(
+            `Keyword recall returned no candidates for [${ftsKeywords.join(', ')}]. ` +
+            'This is keyword recall, not an exhaustive scan — absence here is not proof of absence.',
+          );
+        } else if (searchResults.length >= fetchLimit) {
+          warnings.push(
+            `Keyword recall was capped at ${fetchLimit} candidates; more matches likely exist ` +
+            'beyond this page.',
+          );
+        }
+        matchedResults = allMatches.slice(pageOffset);
+        if (matchedResults.length > limit) {
+          nextCursor = encodeCursor({
+            s: 'fts+regex',
+            o: pageOffset + limit,
+            p: cursorKey(pattern, caseId),
+          });
+        }
+      }
+    }
+
+    if (truncated && scanned !== undefined) {
+      warnings.push(
+        `Scan stopped after ${scanned} rows (time box). Results are partial — follow ` +
+        '`nextCursor` to continue.',
+      );
+    }
+
+    // Take only the requested page
     const limitedResults = matchedResults.slice(0, limit);
 
     // Count distinct volumes per filing type for citation formatting
@@ -254,6 +732,10 @@ export class ScanForPatternTool extends BaseMCPTool<
       country: caseData?.country || undefined,
     });
 
+    // documentId -> filingId for the returned hits, consumed by the single
+    // batched motion lookup after enrichment.
+    const docFilingIds = new Map<string, string>();
+
     // Enrich results with document names, matches, and citations
     const enrichedResults = await Promise.all(
       limitedResults.map(async (result) => {
@@ -290,6 +772,14 @@ export class ScanForPatternTool extends BaseMCPTool<
           if (volMatch) volumeNumber = parseInt(volMatch[1], 10);
         }
         const caseNumber = result.metadata.caseNumber || (document as any)?.case?.caseNumber || caseData?.caseNumber;
+        // The chunk row already carries case_id; fall back to the Document's
+        // case relation for rows indexed before the column was stamped.
+        const rowCaseId: string | undefined =
+          result.metadata.caseId || (document as any)?.case?.id || caseId || undefined;
+        const filingId: string | undefined = (document as any)?.filing?.id;
+        if (filingId && result.metadata.documentId) {
+          docFilingIds.set(result.metadata.documentId, filingId);
+        }
         const totalVolumes = filingType ? (volumeCountMap.get(filingType) ?? 1) : 1;
 
         const citationInput: CitationInput = {
@@ -328,6 +818,10 @@ export class ScanForPatternTool extends BaseMCPTool<
           filingType,
           volumeNumber,
           caseNumber: caseNumber || undefined,
+          caseId: rowCaseId,
+          // Filled by the batched motion lookup below — one query for the
+          // whole result set, never one per item.
+          motionId: undefined as string | undefined,
           filingSlug: (document as any)?.filing?.slug || undefined,
           // ChunkProvenance parity with query_case_knowledge (task #13
           // phase 3c) — optional until backfilled
@@ -340,12 +834,26 @@ export class ScanForPatternTool extends BaseMCPTool<
       }),
     );
 
+    await attachMotionIds(context, enrichedResults, docFilingIds);
+
     context.logger.info('Pattern scan completed', {
       resultCount: enrichedResults.length,
-      ftsKeywords: keywords,
-      candidatesBeforeFilter: searchResults.length,
+      strategy,
+      ftsKeywords,
+      candidatePool,
+      scanned,
+      truncated,
+      warnings: warnings.length,
     });
 
-    return { results: enrichedResults };
+    return {
+      results: enrichedResults,
+      strategy,
+      ...(candidatePool !== undefined ? { candidatePool } : {}),
+      ...(scanned !== undefined ? { scanned } : {}),
+      ...(truncated ? { truncated } : {}),
+      ...(nextCursor ? { nextCursor } : {}),
+      warnings,
+    };
   }
 }

@@ -6,7 +6,33 @@ import {
 } from '../tool-types';
 import { llmProviderDependency } from '../shared-dependencies';
 import { McpError } from '../llm-policy';
-import { callLLMJson, getDocumentChunks, buildContext } from './ai-helper';
+import {
+  callLLMJson,
+  getDocumentChunks,
+  buildContext,
+  validateItemObject,
+  ItemShape,
+  LlmItemStats,
+} from './ai-helper';
+
+/**
+ * The documented shape of the `comparison` object (SS-3 #4). There is only one
+ * "item", so any missing field is a shape failure: defaulting `conflicts` to
+ * `[]` would report "no conflicts" when the model said nothing about them.
+ */
+const COMPARISON_SHAPE: ItemShape = {
+  shared: { type: 'string[]' },
+  uniqueToDoc1: { type: 'string[]' },
+  uniqueToDoc2: { type: 'string[]' },
+  conflicts: {
+    type: 'object[]',
+    items: {
+      topic: { type: 'string' },
+      doc1Position: { type: 'string' },
+      doc2Position: { type: 'string' },
+    },
+  },
+};
 
 export interface CompareArgumentStructuresParams {
   documentId1: string;
@@ -24,6 +50,8 @@ export interface CompareArgumentStructuresResult {
       doc2Position: string;
     }>;
   };
+  /** Present only when nested entries were dropped (SS-3 #4). */
+  stats?: LlmItemStats;
 }
 
 export class CompareArgumentStructuresTool extends BaseMCPTool<
@@ -134,6 +162,17 @@ Rules:
       );
     }
 
-    return result;
+    // Item-level shape validation of the object's own fields; malformed
+    // `conflicts` entries are dropped and counted rather than being fatal.
+    const validated = validateItemObject<CompareArgumentStructuresResult['comparison']>(
+      result.comparison,
+      COMPARISON_SHAPE,
+      { tool: 'compare_argument_structures', key: 'comparison', logger: context.logger },
+    );
+
+    return {
+      comparison: validated.item,
+      ...(validated.stats ? { stats: validated.stats } : {}),
+    };
   }
 }

@@ -389,27 +389,31 @@ describe.each(SPECS.map((s) => [s.name, s] as const))('%s', (_name, spec) => {
   describe('valid JSON, wrong item shape', () => {
     // The nastiest case: the model returns syntactically valid JSON under the
     // right top-level key, but the items do not match the documented item
-    // schema. Every tool checks only `Array.isArray(result[key])` (or, for the
-    // two unguarded ones, nothing at all), so these reach the MCP client typed
-    // as real findings.
-    it('CURRENT BEHAVIOUR: the top-level key is checked but item shape is not', async () => {
+    // schema. Every tool used to check only `Array.isArray(result[key])` (or,
+    // for the two unguarded ones, nothing at all), so these reached the MCP
+    // client typed as real findings. Each tool now declares its documented
+    // item shape and runs it through the shared validator in ai-helper.
+    //
+    // Inverted sibling of the tripwire below (SS-3 #4): the tripwire alone is
+    // satisfied by any failure, including a crash in the validator, so this
+    // pins the specific outcome — a shape error, not a thrown TypeError and
+    // not an empty answer.
+    it('REQUIRED: an all-malformed list is a shape failure, not an empty answer', async () => {
       ai.mockResolvedValue(aiResponse(JSON.stringify(spec.junk)));
       const { context } = makeHarness();
 
       const out = await spec.tool.execute(spec.params, context, CONFIG);
 
-      expect(out.success).toBe(true);
-      expect(ai).toHaveBeenCalledTimes(1); // parsed fine — no retry
-      const value = (out.data as any)[spec.key];
-      const items = Array.isArray(value) ? value : [value];
-      expect(items.length).toBeGreaterThan(0);
-      // At least one documented field is missing on a returned item.
-      expect(
-        items.some((item: any) => spec.itemFields.some((f) => item?.[f] === undefined)),
-      ).toBe(true);
+      expect(ai).toHaveBeenCalledTimes(1); // parsed fine — the failure is shape, not JSON
+      expect(out.success).toBe(false);
+      expect(out.errorCode).toBe('LLM_SHAPE_ERROR');
+      expect(out.data).toBeUndefined();
+      // The message names the fields that were missing, so the failure is
+      // diagnosable without quoting what the model wrote.
+      expect(out.error).toMatch(/missing or (has )?invalid/i);
     });
 
-    it.failing('REQUIRED: items missing documented fields are rejected or dropped', async () => {
+    it('REQUIRED: items missing documented fields are rejected or dropped', async () => {
       ai.mockResolvedValue(aiResponse(JSON.stringify(spec.junk)));
       const { context } = makeHarness();
 
@@ -427,6 +431,42 @@ describe.each(SPECS.map((s) => [s.name, s] as const))('%s', (_name, spec) => {
         }
       }
     });
+
+    // The other half of the drop-vs-reject rule: a list that is only partly
+    // malformed is still an answer, so the good items are returned — but "3
+    // citations" with 2 dropped must not read as a complete answer, hence
+    // `stats.itemsDropped`. Only the list-shaped tools can be partly bad; the
+    // two object-shaped ones have a single item, covered above.
+    if (Array.isArray((spec.good as any)[spec.key])) {
+      it('REQUIRED: a partly malformed list keeps the good items and reports the drops', async () => {
+        const goodItems = (spec.good as any)[spec.key] as any[];
+        const junkItems = (spec.junk as any)[spec.key] as any[];
+        ai.mockResolvedValue(
+          aiResponse(JSON.stringify({ [spec.key]: [...goodItems, ...junkItems] })),
+        );
+        const { context } = makeHarness();
+
+        const out = await spec.tool.execute(spec.params, context, CONFIG);
+
+        expect(out.success).toBe(true);
+        const items = (out.data as any)[spec.key];
+        expect(items).toHaveLength(goodItems.length);
+        for (const item of items) {
+          for (const field of spec.itemFields) expect(item?.[field]).toBeDefined();
+        }
+
+        const stats = (out.data as any).stats;
+        expect(stats.itemsDropped).toBe(junkItems.length);
+        expect(stats.warnings.length).toBeGreaterThan(0);
+
+        // Privacy: the warning names fields and counts, never the model's
+        // words — those are derived from case text (CLAUDE.md § Privacy).
+        const flat = JSON.stringify(stats);
+        for (const value of Object.values(goodItems[0])) {
+          if (typeof value === 'string' && value.length > 12) expect(flat).not.toContain(value);
+        }
+      });
+    }
   });
 });
 
@@ -488,41 +528,89 @@ describe('confidence filtering (detect_contradictions, detect_privilege)', () =>
     },
   );
 
+  // Inverted sibling (SS-3 #5). Was: "an item with no confidence is silently
+  // dropped", because `undefined >= 0.7` is false. A missing score is not
+  // evidence of low confidence, and on litigation material a dropped
+  // contradiction / privilege hit is a substantive loss — so the item is kept,
+  // scored `null`, and the caller is told it was not filtered.
   it.each(cases.map((c) => [c.name, c] as const))(
-    '%s: CURRENT BEHAVIOUR — an item with no confidence is silently dropped',
+    '%s: REQUIRED — an unscored item is kept with confidence: null, not dropped',
     async (_n, c) => {
-      // `undefined >= 0.7` is false, so a finding the model reported but did
-      // not score disappears with no signal to the caller. On litigation
-      // material a dropped contradiction/privilege hit is a substantive loss.
       ai.mockResolvedValue(aiResponse(JSON.stringify({ [c.key]: [c.item(undefined)] })));
       const { context } = makeHarness();
 
       const out = await c.tool.execute(c.params as any, context, CONFIG);
 
       expect(out.success).toBe(true);
-      expect((out.data as any)[c.key]).toEqual([]);
+      const items = (out.data as any)[c.key];
+      expect(items).toHaveLength(1);
+      expect(items[0].confidence).toBeNull();
+      // Not silent: the caller can see the item bypassed the threshold.
+      expect((out.data as any).stats.warnings.join(' ')).toMatch(/confidence/i);
     },
   );
 
+  // Inverted sibling (SS-3 #5). Was: "a string confidence passes the numeric
+  // filter uncoerced", because `"0.9" >= 0.7` coerces to true and the string
+  // then reached the client where the declared type says number.
   it.each(cases.map((c) => [c.name, c] as const))(
-    '%s: CURRENT BEHAVIOUR — a string confidence passes the numeric filter uncoerced',
+    '%s: REQUIRED — a numeric string confidence is coerced to a number',
     async (_n, c) => {
-      // `"0.9" >= 0.7` coerces and passes, so the client receives a string
-      // where the declared result type says number.
       ai.mockResolvedValue(aiResponse(JSON.stringify({ [c.key]: [c.item('0.9')] })));
       const { context } = makeHarness();
 
       const out = await c.tool.execute(c.params as any, context, CONFIG);
 
       expect(out.success).toBe(true);
+      const items = (out.data as any)[c.key];
+      expect(items).toHaveLength(1);
+      expect(items[0].confidence).toBe(0.9);
+      expect(typeof items[0].confidence).toBe('number');
+    },
+  );
+
+  it.each(cases.map((c) => [c.name, c] as const))(
+    '%s: REQUIRED — a non-numeric confidence becomes null and the item survives',
+    async (_n, c) => {
+      // "high" is not a score. Coercing it to 0 would bury the finding below
+      // the threshold; letting it through as a string breaks the declared
+      // type. It becomes `null` — unscored, and therefore unfiltered.
+      ai.mockResolvedValue(aiResponse(JSON.stringify({ [c.key]: [c.item('high')] })));
+      const { context } = makeHarness();
+
+      const out = await c.tool.execute(c.params as any, context, CONFIG);
+
+      expect(out.success).toBe(true);
+      const items = (out.data as any)[c.key];
+      expect(items).toHaveLength(1);
+      expect(items[0].confidence).toBeNull();
+    },
+  );
+
+  it.each(cases.map((c) => [c.name, c] as const))(
+    '%s: a scored item below the threshold is still filtered out',
+    async (_n, c) => {
+      // The unscored-is-kept rule must not disable the filter itself.
+      ai.mockResolvedValue(
+        aiResponse(JSON.stringify({ [c.key]: [c.item(0.9), c.item('0.2')] })),
+      );
+      const { context } = makeHarness();
+
+      const out = await c.tool.execute(
+        { ...c.params, confidence_threshold: 0.7 } as any,
+        context,
+        CONFIG,
+      );
+
+      expect(out.success).toBe(true);
       expect((out.data as any)[c.key]).toHaveLength(1);
-      expect(typeof (out.data as any)[c.key][0].confidence).toBe('string');
+      expect((out.data as any)[c.key][0].confidence).toBe(0.9);
     },
   );
 
   // Encodes the fix: coerce/validate confidence rather than letting JS
-  // comparison semantics decide. Flip away from `failing` when fixed.
-  it.failing('detect_contradictions: REQUIRED — confidence reaches the client as a number', async () => {
+  // comparison semantics decide.
+  it('detect_contradictions: REQUIRED — confidence reaches the client as a number', async () => {
     const c = cases[0];
     ai.mockResolvedValue(aiResponse(JSON.stringify({ [c.key]: [c.item('0.9')] })));
     const { context } = makeHarness();
@@ -532,7 +620,7 @@ describe('confidence filtering (detect_contradictions, detect_privilege)', () =>
     expect(item === undefined || typeof item.confidence === 'number').toBe(true);
   });
 
-  it.failing('detect_privilege: REQUIRED — confidence reaches the client as a number', async () => {
+  it('detect_privilege: REQUIRED — confidence reaches the client as a number', async () => {
     const c = cases[1];
     ai.mockResolvedValue(aiResponse(JSON.stringify({ [c.key]: [c.item('0.9')] })));
     const { context } = makeHarness();

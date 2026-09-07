@@ -25,6 +25,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 import {
   quickExtractHeader,
   classifyFilingHybrid,
@@ -44,6 +45,9 @@ interface FilingDiff {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'filings/reclassify');
+  if (denied) return denied;
+
   let body: {
     dryRun?: boolean;
     caseId?: string;

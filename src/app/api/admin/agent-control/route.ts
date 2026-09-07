@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 const AGENT_PORT = parseInt(process.env.RERANKER_AGENT_PORT || '8098', 10);
 
@@ -8,6 +9,9 @@ const AGENT_PORT = parseInt(process.env.RERANKER_AGENT_PORT || '8098', 10);
  * Body: { host: string, action: 'start' | 'stop' | 'status' }
  */
 export async function POST(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'agent-control');
+  if (denied) return denied;
+
   try {
     const { host, action } = (await request.json()) as {
       host: string;

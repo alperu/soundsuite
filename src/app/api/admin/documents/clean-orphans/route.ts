@@ -13,6 +13,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,7 +22,10 @@ const ORPHAN_WHERE = {
   errorMessage: { not: null },
 } as const;
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'documents/clean-orphans');
+  if (denied) return denied;
+
   try {
     const [count, sample] = await Promise.all([
       prisma.document.count({ where: ORPHAN_WHERE }),
@@ -53,6 +57,9 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'documents/clean-orphans');
+  if (denied) return denied;
+
   try {
     const apply = request.nextUrl.searchParams.get('apply') === 'true';
     const count = await prisma.document.count({ where: ORPHAN_WHERE });

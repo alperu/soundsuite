@@ -5,7 +5,24 @@ import {
   ToolExecutionContext,
 } from '../tool-types';
 import { llmProviderDependency } from '../shared-dependencies';
-import { callLLMJson, getDocumentChunks, getCaseChunks, buildContext } from './ai-helper';
+import {
+  callLLMJson,
+  getDocumentChunks,
+  getCaseChunks,
+  buildContext,
+  validateItemList,
+  ItemShape,
+  LlmItemStats,
+} from './ai-helper';
+
+/** The documented item shape (SS-3 #4). */
+const CITATION_SHAPE: ItemShape = {
+  citation: { type: 'string' },
+  type: { type: 'string' },
+  frequency: { type: 'number' },
+  documents: { type: 'string[]' },
+  context: { type: 'string' },
+};
 
 export interface AnalyzeCitationsParams {
   caseId: string;
@@ -21,6 +38,8 @@ export interface AnalyzeCitationsResult {
     documents: string[];
     context: string;
   }>;
+  /** Present only when items were dropped or flagged (SS-3 #4). */
+  stats?: LlmItemStats;
 }
 
 export class AnalyzeCitationsTool extends BaseMCPTool<
@@ -129,7 +148,16 @@ Rules:
     if (!Array.isArray(result.citations)) {
       return { citations: [] };
     }
-    result.citations = result.citations.slice(0, limit);
-    return result;
+
+    const validated = validateItemList<AnalyzeCitationsResult['citations'][number]>(
+      result.citations,
+      CITATION_SHAPE,
+      { tool: 'analyze_citations', key: 'citations', logger: context.logger },
+    );
+
+    return {
+      citations: validated.items.slice(0, limit),
+      ...(validated.stats ? { stats: validated.stats } : {}),
+    };
   }
 }

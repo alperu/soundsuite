@@ -17,6 +17,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 import {
   HostProvisioningRecord,
   deleteProvisioning,
@@ -28,7 +29,10 @@ import {
   upsertProvisioning,
 } from '@/lib/db/host-provisioning';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'host-provisioning');
+  if (denied) return denied;
+
   try {
     const provisioning = await listProvisioning();
     const defaultWsPort = parseInt(process.env.GPU_WS_PORT || '3002', 10);
@@ -42,6 +46,9 @@ export async function GET() {
 }
 
 export async function PUT(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'host-provisioning');
+  if (denied) return denied;
+
   try {
     const body = await request.json();
     const sidecarUrl = normalizeSidecarUrl(String(body?.sidecarUrl ?? ''));
@@ -108,6 +115,9 @@ export async function PUT(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'host-provisioning');
+  if (denied) return denied;
+
   try {
     const sidecarUrl = normalizeSidecarUrl(
       request.nextUrl.searchParams.get('sidecarUrl') ?? '',

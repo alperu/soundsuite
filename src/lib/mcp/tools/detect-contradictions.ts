@@ -5,7 +5,26 @@ import {
   ToolExecutionContext,
 } from '../tool-types';
 import { llmProviderDependency, vectorStoreDependency } from '../shared-dependencies';
-import { callLLMJson, getCaseChunks, getTopicCaseChunks, buildContext } from './ai-helper';
+import {
+  callLLMJson,
+  getCaseChunks,
+  getTopicCaseChunks,
+  buildContext,
+  validateItemList,
+  applyConfidenceThreshold,
+  ItemShape,
+  LlmItemStats,
+} from './ai-helper';
+
+/** The documented item shape (SS-3 #4). `confidence` is a score: see ai-helper. */
+const CONTRADICTION_SHAPE: ItemShape = {
+  statement1: { type: 'string' },
+  statement2: { type: 'string' },
+  document1: { type: 'string' },
+  document2: { type: 'string' },
+  explanation: { type: 'string' },
+  confidence: { type: 'number', score: true },
+};
 
 export interface DetectContradictionsParams {
   caseId: string;
@@ -20,9 +39,12 @@ export interface DetectContradictionsResult {
     statement2: string;
     document1: string;
     document2: string;
-    confidence: number;
+    /** `null` when the model reported the finding without a usable score. */
+    confidence: number | null;
     explanation: string;
   }>;
+  /** Present only when items were dropped or flagged (SS-3 #4/#5). */
+  stats?: LlmItemStats;
 }
 
 export class DetectContradictionsTool extends BaseMCPTool<
@@ -132,11 +154,25 @@ Rules:
       return { contradictions: [] };
     }
 
-    // Filter by confidence threshold
-    result.contradictions = result.contradictions
-      .filter(c => c.confidence >= confidence_threshold)
-      .slice(0, limit);
+    // Item-level shape validation, then the threshold, then the cap. The three
+    // are kept separate so `stats.itemsDropped` means "malformed" only.
+    const validated = validateItemList<DetectContradictionsResult['contradictions'][number]>(
+      result.contradictions,
+      CONTRADICTION_SHAPE,
+      { tool: 'detect_contradictions', key: 'contradictions', logger: context.logger },
+    );
+    const filtered = applyConfidenceThreshold(
+      validated.items,
+      confidence_threshold,
+      'contradictions',
+    );
 
-    return result;
+    const warnings = [...(validated.stats?.warnings ?? []), ...filtered.warnings];
+    const itemsDropped = validated.stats?.itemsDropped ?? 0;
+
+    return {
+      contradictions: filtered.items.slice(0, limit),
+      ...(itemsDropped > 0 || warnings.length > 0 ? { stats: { itemsDropped, warnings } } : {}),
+    };
   }
 }

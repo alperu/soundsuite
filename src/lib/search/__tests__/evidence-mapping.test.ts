@@ -59,6 +59,26 @@ describe('sourceToEvidenceItem', () => {
     expect(item.volumeNumber).toBe(0);
   });
 
+  // The machine ids the case-scoped tools require (REPORT-discovery-tools §5).
+  // `caseNumber` is the docket number a human reads; `caseId` is what
+  // detect_contradictions / reconstruct_timeline actually take.
+  it('carries caseId and motionId through when the source has them', () => {
+    const item = sourceToEvidenceItem(
+      source({ caseId: 'case-aaa', motionId: 'motion-1' }),
+      'retrieval',
+    );
+    expect(item.caseId).toBe('case-aaa');
+    expect(item.motionId).toBe('motion-1');
+  });
+
+  it('omits caseId / motionId entirely when the source lacks them', () => {
+    const item = sourceToEvidenceItem(source(), 'retrieval');
+    // Absent, not '' — an empty string would be passed on as a real id and
+    // reintroduce the silent-wrong-scope failure SS-3 #1 removed.
+    expect(item).not.toHaveProperty('caseId');
+    expect(item).not.toHaveProperty('motionId');
+  });
+
   it('sourcesToEvidence maps the family for every source', () => {
     const items = sourcesToEvidence([source(), source({ page: 13, citationShort: 'Mot. Compel 13' })], 'retrieval');
     expect(items.map((i) => i.citationShort)).toEqual(['Mot. Compel 12', 'Mot. Compel 13']);

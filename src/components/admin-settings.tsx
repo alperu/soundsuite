@@ -10,10 +10,10 @@
  */
 
 import { useState, useEffect } from 'react';
-import { AppConfig, ModelDownloadInfo } from '@/lib/db/config';
+import { PublicConfig, ModelDownloadInfo } from '@/lib/db/config';
 
 interface AdminSettingsProps {
-  initialConfig: AppConfig;
+  initialConfig: PublicConfig;
   initialModelDownloads: ModelDownloadInfo[];
 }
 
@@ -53,7 +53,7 @@ const CODE_EMBEDDING_MODELS: Array<{ name: string; label: string; size: number }
 ];
 
 export default function AdminSettings({ initialConfig, initialModelDownloads }: AdminSettingsProps) {
-  const [config, setConfig] = useState<AppConfig>(initialConfig);
+  const [config, setConfig] = useState<PublicConfig & { openaiApiKey?: string; claudeApiKey?: string }>(initialConfig);
   const [modelDownloads, setModelDownloads] = useState<ModelDownloadInfo[]>(initialModelDownloads);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -65,6 +65,12 @@ export default function AdminSettings({ initialConfig, initialModelDownloads }: 
 
   // Check if API key is required
   const requiresApiKey = config.embeddingProvider === 'openai' || config.embeddingProvider === 'claude';
+  // Masked summary of the stored credential — `{ configured, last4? }`, keyed
+  // by provider exactly like /api/admin/ai-keys. The value itself never
+  // reaches the client.
+  const storedKey =
+    config.apiKeys?.[config.embeddingProvider === 'openai' ? 'openai' : 'anthropic'] ??
+    { configured: false };
   const requiresOllamaHost = config.embeddingProvider === 'ollama';
 
   // Handle provider change
@@ -536,12 +542,15 @@ export default function AdminSettings({ initialConfig, initialModelDownloads }: 
             Enter your {config.embeddingProvider === 'openai' ? 'OpenAI' : 'Anthropic'} API key.
           </p>
 
+          {/* Write-only. The server never sends the stored key back (v6 §4), so
+              the field starts empty and shows a masked hint when one is set.
+              Leaving it empty on save keeps the stored key. */}
           <input
             type="password"
             value={
               config.embeddingProvider === 'openai'
-                ? config.openaiApiKey || ''
-                : config.claudeApiKey || ''
+                ? config.openaiApiKey ?? ''
+                : config.claudeApiKey ?? ''
             }
             onChange={(e) => {
               if (config.embeddingProvider === 'openai') {
@@ -550,12 +559,18 @@ export default function AdminSettings({ initialConfig, initialModelDownloads }: 
                 setConfig({ ...config, claudeApiKey: e.target.value });
               }
             }}
-            placeholder={`Enter ${config.embeddingProvider === 'openai' ? 'OpenAI' : 'Anthropic'} API key`}
+            placeholder={
+              storedKey.configured
+                ? `Saved key ending ••••${storedKey.last4 ?? ''} — leave blank to keep it`
+                : `Enter ${config.embeddingProvider === 'openai' ? 'OpenAI' : 'Anthropic'} API key`
+            }
             className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
-          
+
           <p className="mt-2 text-xs text-gray-500">
-            Your API key is stored securely and never shared.
+            {storedKey.configured
+              ? 'A key is stored. It is never sent back to the browser — type a new one to replace it, or leave this blank to keep it.'
+              : 'Your API key is stored securely and never shared.'}
           </p>
         </div>
       )}

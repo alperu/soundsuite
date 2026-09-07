@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getConfig, setConfigValue } from '@/lib/db/config';
 import { AI_PROVIDERS, AIProviderKey, AI_PROVIDER_KEYS } from '@/lib/ai/models';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 /**
  * GET /api/admin/ai-keys
  * Returns which providers have keys configured (never returns actual keys).
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'ai-keys');
+  if (denied) return denied;
+
   try {
     const config = await getConfig();
     const result: Record<string, { configured: boolean; name: string }> = {};
@@ -45,6 +49,9 @@ const PROVIDER_CONFIG_KEYS: Record<AIProviderKey, string> = {
  * Body: { provider: AIProviderKey, apiKey: string }
  */
 export async function POST(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'ai-keys');
+  if (denied) return denied;
+
   try {
     const body = await request.json();
     const { provider, apiKey } = body as { provider: string; apiKey: string };

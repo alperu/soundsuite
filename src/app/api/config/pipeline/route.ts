@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { setConfigValue, getConfig } from '@/lib/db/config';
+import { setConfigValue, getConfig, toPublicConfig } from '@/lib/db/config';
+import { requireApiAccess } from '@/lib/api/route-guard';
 
 export const dynamic = 'force-dynamic';
 
@@ -25,10 +26,14 @@ interface PipelineConfigBody {
   docparseEnabled?: boolean;
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireApiAccess(request, { label: 'config/pipeline GET', allowAdminSession: true });
+  if (denied) return denied;
   try {
     const config = await getConfig();
-    return NextResponse.json(config);
+    // Returns the whole AppConfig, not just the pipeline slice — so it goes
+    // through the same credential mask as GET /api/config (v6 §4).
+    return NextResponse.json(toPublicConfig(config));
   } catch (error) {
     console.error('Error reading pipeline config:', error);
     return NextResponse.json({ error: 'Failed to read pipeline config' }, { status: 500 });
@@ -36,6 +41,8 @@ export async function GET() {
 }
 
 export async function PATCH(request: NextRequest) {
+  const denied = await requireApiAccess(request, { label: 'config/pipeline PATCH', allowAdminSession: true });
+  if (denied) return denied;
   try {
     const body: PipelineConfigBody = await request.json();
     const updates: Promise<void>[] = [];

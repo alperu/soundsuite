@@ -277,38 +277,16 @@ export default function AdminAIServices() {
     setTesting(prev => ({ ...prev, cloud: true }));
     setTestResult(prev => ({ ...prev, cloud: null }));
     try {
-      // Read the configured API key for this provider from the AI-Keys admin.
-      // We don't have direct access to the key on the client, so we use the
-      // server-side /api/admin/ai-keys/test endpoint with the stored key.
-      // That endpoint expects the key in the request body, so we first GET
-      // /api/config which exposes API keys to the admin UI.
-      const cfgRes = await fetch('/api/config');
-      const cfg = (await cfgRes.json()) as Record<string, unknown>;
-      const keyByProvider: Record<string, string | undefined> = {
-        openai: typeof cfg.openaiApiKey === 'string' ? cfg.openaiApiKey : undefined,
-        anthropic: typeof cfg.claudeApiKey === 'string' ? cfg.claudeApiKey : undefined,
-        gemini: typeof cfg.geminiApiKey === 'string' ? cfg.geminiApiKey : undefined,
-        groq: typeof cfg.groqApiKey === 'string' ? cfg.groqApiKey : undefined,
-        grok: typeof cfg.grokApiKey === 'string' ? cfg.grokApiKey : undefined,
-      };
-      const apiKey = keyByProvider[fallbackProvider];
-      if (!apiKey) {
-        setTestResult(prev => ({
-          ...prev,
-          cloud: {
-            valid: false,
-            error: 'No API key configured — set it under AI Keys $.',
-          },
-        }));
-      } else {
-        const res = await fetch('/api/admin/ai-keys/test', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ provider: fallbackProvider, apiKey }),
-        });
-        const result = (await res.json()) as TestResult;
-        setTestResult(prev => ({ ...prev, cloud: result }));
-      }
+      // The key never leaves the server: /api/config masks credentials
+      // (v6 §4), so we ask /api/admin/ai-keys/test to exercise the key it
+      // already holds for this provider rather than posting one back.
+      const res = await fetch('/api/admin/ai-keys/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: fallbackProvider }),
+      });
+      const result = (await res.json()) as TestResult;
+      setTestResult(prev => ({ ...prev, cloud: result }));
     } catch (e) {
       setTestResult(prev => ({
         ...prev,

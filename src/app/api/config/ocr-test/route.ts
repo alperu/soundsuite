@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { requireApiAccess } from '@/lib/api/route-guard';
 
 /**
  * POST /api/config/ocr-test
@@ -6,6 +7,10 @@ import { NextRequest, NextResponse } from 'next/server';
  * Body: { host: string, model: string }
  */
 export async function POST(request: NextRequest) {
+  // Outbound fetch to an arbitrary host from the body — gated like the rest of
+  // /api/config (v6 item 2).
+  const denied = await requireApiAccess(request, { label: 'config/ocr-test', allowAdminSession: true });
+  if (denied) return denied;
   try {
     const body = await request.json();
     const { host, model } = body;

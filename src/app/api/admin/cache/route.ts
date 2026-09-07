@@ -3,11 +3,15 @@ export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { getRedis, isRedisAvailable } from '@/lib/redis';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 /**
  * GET /api/admin/cache — Returns cache & document index status.
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'cache');
+  if (denied) return denied;
+
   try {
     // Redis stats
     let redis: Record<string, any> = { available: false };
@@ -96,6 +100,9 @@ export async function GET() {
  * POST /api/admin/cache — Cache operations (clear redis, reindex, etc.).
  */
 export async function POST(req: NextRequest) {
+  const denied = await requireAdminApiAccess(req, 'cache');
+  if (denied) return denied;
+
   try {
     const body = await req.json();
     const { action, documentIds } = body;

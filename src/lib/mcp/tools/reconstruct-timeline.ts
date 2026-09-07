@@ -5,7 +5,23 @@ import {
   ToolExecutionContext,
 } from '../tool-types';
 import { llmProviderDependency } from '../shared-dependencies';
-import { callLLMJson, getCaseChunks, buildContext } from './ai-helper';
+import {
+  callLLMJson,
+  getCaseChunks,
+  buildContext,
+  validateItemList,
+  ItemShape,
+  LlmItemStats,
+} from './ai-helper';
+
+/** The documented item shape (SS-3 #4). `confidence` is a score: see ai-helper. */
+const EVENT_SHAPE: ItemShape = {
+  date: { type: 'string' },
+  description: { type: 'string' },
+  document: { type: 'string' },
+  page: { type: 'number' },
+  confidence: { type: 'number', score: true },
+};
 
 export interface ReconstructTimelineParams {
   caseId: string;
@@ -20,8 +36,11 @@ export interface ReconstructTimelineResult {
     description: string;
     document: string;
     page: number;
-    confidence: number;
+    /** `null` when the model reported the event without a usable score. */
+    confidence: number | null;
   }>;
+  /** Present only when items were dropped or flagged (SS-3 #4). */
+  stats?: LlmItemStats;
 }
 
 export class ReconstructTimelineTool extends BaseMCPTool<
@@ -125,7 +144,16 @@ Rules:
     if (!Array.isArray(result.events)) {
       return { events: [] };
     }
-    result.events = result.events.slice(0, limit);
-    return result;
+
+    const validated = validateItemList<ReconstructTimelineResult['events'][number]>(
+      result.events,
+      EVENT_SHAPE,
+      { tool: 'reconstruct_timeline', key: 'events', logger: context.logger },
+    );
+
+    return {
+      events: validated.items.slice(0, limit),
+      ...(validated.stats ? { stats: validated.stats } : {}),
+    };
   }
 }

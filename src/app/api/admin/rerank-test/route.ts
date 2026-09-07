@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 /**
  * POST /api/admin/rerank-test
@@ -6,6 +7,9 @@ import { NextRequest, NextResponse } from 'next/server';
  * Body: { host: string, model: string }
  */
 export async function POST(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'rerank-test');
+  if (denied) return denied;
+
   try {
     const { host, model } = (await request.json()) as { host: string; model: string };
 

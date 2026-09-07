@@ -7,10 +7,14 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
+import { requireAdminApiAccess } from '@/lib/api/route-guard';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'action-logs');
+  if (denied) return denied;
+
   try {
     const sp = request.nextUrl.searchParams;
     const caseId = sp.get('caseId');
@@ -67,6 +71,9 @@ export async function GET(request: NextRequest) {
  * be present. Returns `{ deleted: number }`.
  */
 export async function DELETE(request: NextRequest) {
+  const denied = await requireAdminApiAccess(request, 'action-logs');
+  if (denied) return denied;
+
   try {
     const sp = request.nextUrl.searchParams;
     const caseId = sp.get('caseId');
@@ -107,6 +114,17 @@ export async function DELETE(request: NextRequest) {
   }
 }
 
+/**
+ * POST is deliberately **not** gated, unlike GET and DELETE on this route.
+ *
+ * It is an append-only audit sink, and its callers are the case-management
+ * pages and the tag-fill panel (`case-management/[caseNumber]/page.tsx`,
+ * `.../[filingSlug]/page.tsx`, `components/case/tag-fill-review-panel.tsx`) —
+ * ordinary, non-admin pages. A user working through the Cloudflare tunnel
+ * classifies as `remote` and may hold no dashboard session, so gating the
+ * write would silently stop those pages logging their own activity. The read
+ * side is what discloses user activity, and that is gated.
+ */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();

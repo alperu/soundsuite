@@ -4,6 +4,7 @@ import { getToolRegistry } from '@/lib/mcp/get-tool-registry';
 import { deepSearch, DeepSearchProgress, ConversationTurn } from '@/lib/search/deep-search';
 import { pickProvenance } from '@/lib/search/chunk-provenance';
 import { prisma } from '@/lib/db/prisma';
+import { requireApiAccess } from '@/lib/api/route-guard';
 
 /**
  * POST /api/search/deep
@@ -13,9 +14,23 @@ import { prisma } from '@/lib/db/prisma';
  *   {"type":"progress","step":"decomposing","message":"...","subQueries":[],...}
  *   {"type":"result","data":{...}}
  *   {"type":"error","error":"..."}
+ *
+ * Guarded (v6 item 2): this route reads case documents and calls an LLM, so an
+ * unauthenticated caller could both spend API credit and exfiltrate case text.
+ * It takes the same origin/API-key rule as `/api/mcp/execute` — the dashboard
+ * calls it same-origin over loopback and is unaffected; neither the bridge nor
+ * the sidecar calls it. A live admin session also passes, so a deployment
+ * served through the Cloudflare tunnel keeps working for a signed-in operator.
+ * Under `MCP_AUTH_STRICT_LOOPBACK=routed` even loopback needs a credential —
+ * this is a `routed` call, and that knob exists for the calls that spend money.
+ * The refusal is a plain JSON 401 emitted *before* the NDJSON stream is
+ * opened, so a refused client never has to parse a stream.
  */
 export async function POST(request: NextRequest) {
   try {
+    const denied = await requireApiAccess(request, { label: 'search/deep', profile: 'routed', allowAdminSession: true });
+    if (denied) return denied;
+
     const body = await request.json();
     const { query, provider, model, caseId, chatId, history, workflowIds, thinking, maxTokens, effort, multiPass, useRlm, rlmMaxRounds, whereClauses } = body as {
       query: string;
