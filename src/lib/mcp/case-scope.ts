@@ -107,8 +107,13 @@ export async function resolveCaseScope(
 }
 
 /**
- * One query for the whole list. Skipped when the injected client has no
- * `case.findMany` (older test doubles) — production Prisma always does.
+ * One query for the whole list.
+ *
+ * Throws rather than skipping when the injected client cannot answer: a
+ * validation that quietly no-ops is the failure class this whole change
+ * exists to remove, and it would let a test double without the mock pass a
+ * test that proves nothing. Production Prisma always has `case.findMany`, so
+ * this can only fire on a misconfigured context.
  */
 export async function assertCasesExist(
   ids: string[],
@@ -117,7 +122,11 @@ export async function assertCasesExist(
 ): Promise<void> {
   if (ids.length === 0) return;
   const findMany = (database as any)?.case?.findMany;
-  if (typeof findMany !== 'function') return;
+  if (typeof findMany !== 'function') {
+    throw new Error(
+      'assertCasesExist: database client has no case.findMany — cannot validate case scope',
+    );
+  }
 
   const rows: Array<{ id: string }> = await (database as any).case.findMany({
     where: { id: { in: ids } },
