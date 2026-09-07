@@ -68,6 +68,18 @@ capped at `fetchLimit`; post-filter dropping every candidate; time box hit; stor
 Results also carry `caseId` and, where resolvable, `motionId` (shared `attachMotionIds` helper from
 the discovery-tools stream, applied to the returned page only).
 
+### 4a. Motion integration
+
+`attachMotionIds` (shared `src/lib/mcp/motion-resolution.ts`) is awaited **once**, on the enriched
+final page only — after the regex post-filter and after pagination — so it never sees the candidate
+pool: one batched `motion.findMany` per call regardless of page size, and paging never re-resolves
+rows the caller already has. Best-effort by contract: a missing `Motion` table ships results without
+`motionId` rather than failing the query. `scanTextColumn` selects `case_id` and `filing_id`, so
+provenance resolves identically on the full-scan path — live, all three pattern forms returned
+37/37 with `caseId` and 12/37 with `motionId`, across both strategies. Three tripwires pin this
+(one query on full-scan; page-only resolution at `limit: 2`; no covering motion leaves `motionId`
+undefined while `caseId` is still stamped).
+
 ## 5. Pagination
 
 `limit` bounds a page (default 10, max 200); `cursor`/`nextCursor` bound the answer. The cursor is
@@ -114,6 +126,10 @@ full-scan and FTS pagination with no overlap; cursor/pattern mismatch; page cap;
 + warning + cursor.
 
 ## 9. Left undone
+
+- A stray NUL byte was found in this file's `cursorKey` template separator during reconciliation and
+  replaced with `|`. Worth knowing: a NUL silently turns `grep` into binary mode and would have hidden
+  the file from any text search of the repo.
 
 - `strategy` / `warnings` / `nextCursor` are not surfaced in `mcp-result-renderer.tsx` or
   `/api/search/pattern`'s response. Dashboard Pattern-mode operators get corrected results but not
