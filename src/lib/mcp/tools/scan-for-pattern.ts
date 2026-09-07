@@ -5,10 +5,11 @@ import {
   ToolConfigEntry,
 } from '../tool-types';
 import { SearchQuery, SearchResult, MatchQuery, Operator } from '../../vector/vector-store';
-import { getCitationFormatter, CitationInput } from '../../citations/citation-formatter';
+import type { CitationInput } from '../../citations/citation-formatter';
 import { detectLineNumbers } from '../../citations/line-number-detector';
 import { attachMotionIds } from '../motion-resolution';
 import { resolveCaseScope, caseScopeFilter, caseScopeIds, type CaseScope } from '../case-scope';
+import { buildCaseCitationContexts, defaultCitationContext, type CaseCitationContext } from '../case-citation-context';
 
 /** How a page of results was produced. Always present on the result. */
 export type ScanStrategy = 'fts+regex' | 'full-scan';
@@ -715,55 +716,13 @@ export class ScanForPatternTool extends BaseMCPTool<
     // Take only the requested page
     const limitedResults = matchedResults.slice(0, limit);
 
-    // Count distinct volumes per filing type for citation formatting
-    const volumeCountMap = new Map<string, number>();
-    if (caseId) {
-      try {
-        const filings = await (context.database as any).filing.findMany({
-          where: { caseId },
-          select: { filingType: true, volumeNumber: true },
-        });
-        const typeVolumes = new Map<string, Set<number>>();
-        for (const f of filings) {
-          if (!f.filingType) continue;
-          if (!typeVolumes.has(f.filingType)) typeVolumes.set(f.filingType, new Set());
-          typeVolumes.get(f.filingType)!.add(f.volumeNumber ?? 1);
-        }
-        for (const [type, vols] of typeVolumes) {
-          volumeCountMap.set(type, vols.size);
-        }
-        // Supplement from document filenames
-        const caseDocs = await context.database.document.findMany({
-          where: { caseId },
-          select: { fileName: true, documentType: true },
-        });
-        const docTypeVolumes = new Map<string, Set<number>>();
-        for (const doc of caseDocs) {
-          if (!doc.documentType) continue;
-          const volMatch = doc.fileName?.match(/-VOL(\d+)/i);
-          const vol = volMatch ? parseInt(volMatch[1], 10) : 1;
-          if (!docTypeVolumes.has(doc.documentType)) docTypeVolumes.set(doc.documentType, new Set());
-          docTypeVolumes.get(doc.documentType)!.add(vol);
-        }
-        for (const [type, vols] of docTypeVolumes) {
-          if (vols.size > (volumeCountMap.get(type) ?? 0)) volumeCountMap.set(type, vols.size);
-        }
-      } catch { /* ignore */ }
-    }
-
-    // Select citation formatter based on case metadata
-    let caseData: { jurisdiction?: string | null; state?: string | null; country?: string | null; caseNumber?: string | null } | null = null;
-    if (caseId) {
-      caseData = await context.database.case.findUnique({
-        where: { id: caseId },
-        select: { jurisdiction: true, state: true, country: true, caseNumber: true },
-      });
-    }
-    const formatter = getCitationFormatter({
-      jurisdiction: caseData?.jurisdiction || undefined,
-      state: caseData?.state || undefined,
-      country: caseData?.country || undefined,
-    });
+    // Per-case citation context (formatter + volume counts + docket number)
+    // for every case in scope. `caseIds` gets the same quality `caseId` does;
+    // a multi-case page formats each row with its own case's context.
+    const citationContexts = await buildCaseCitationContexts(scopeIds, context.database);
+    const fallbackContext = defaultCitationContext();
+    const contextFor = (rowCaseId?: string): CaseCitationContext =>
+      (rowCaseId ? citationContexts.get(rowCaseId) : undefined) ?? fallbackContext;
 
     // documentId -> filingId for the returned hits, consumed by the single
     // batched motion lookup after enrichment.
@@ -804,16 +763,17 @@ export class ScanForPatternTool extends BaseMCPTool<
           const volMatch = document.fileName.match(/-VOL(\d+)/i);
           if (volMatch) volumeNumber = parseInt(volMatch[1], 10);
         }
-        const caseNumber = result.metadata.caseNumber || (document as any)?.case?.caseNumber || caseData?.caseNumber;
         // The chunk row already carries case_id; fall back to the Document's
         // case relation for rows indexed before the column was stamped.
         const rowCaseId: string | undefined =
           result.metadata.caseId || (document as any)?.case?.id || caseId || undefined;
+        const caseCtx = contextFor(rowCaseId);
+        const caseNumber = result.metadata.caseNumber || (document as any)?.case?.caseNumber || caseCtx.caseNumber;
         const filingId: string | undefined = (document as any)?.filing?.id;
         if (filingId && result.metadata.documentId) {
           docFilingIds.set(result.metadata.documentId, filingId);
         }
-        const totalVolumes = filingType ? (volumeCountMap.get(filingType) ?? 1) : 1;
+        const totalVolumes = filingType ? (caseCtx.volumeCountMap.get(filingType) ?? 1) : 1;
 
         const citationInput: CitationInput = {
           filingType,
@@ -839,7 +799,7 @@ export class ScanForPatternTool extends BaseMCPTool<
           }
         }
 
-        const formatted = formatter.format(citationInput);
+        const formatted = caseCtx.formatter.format(citationInput);
 
         return {
           text: result.text,

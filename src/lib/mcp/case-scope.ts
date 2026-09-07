@@ -99,7 +99,11 @@ export async function resolveCaseScope(
 
   await assertCasesExist(ids, database, single);
 
-  return hasMulti ? { caseIds: ids } : { caseId: ids[0] };
+  // A one-element `caseIds` IS the single-case scope. Normalising here (rather
+  // than leaving a parallel one-element list) guarantees `caseIds: [A]` and
+  // `caseId: A` take literally the same path — same filter, same citation
+  // metadata, byte-identical citations.
+  return ids.length > 1 ? { caseIds: ids } : { caseId: ids[0] };
 }
 
 /**

@@ -69,11 +69,34 @@ The exhaustive multi-case pattern is now documented in the three tools' descript
 "Searching a subset of cases" section of `public/docs/install-mcp.md`: `list_cases` → `caseIds`
 → page to exhaustion per case → merge.
 
+## Citation parity under `caseIds` — a regression caught in review
+
+The first cut left `caseId` undefined under `caseIds`, so the single-case metadata lookups
+(citation-formatter jurisdiction, `volumeCountMap`) were skipped and `caseIds: [A]` formatted
+citations with corpus-wide defaults where `caseId: A` used the case's jurisdiction. Citations are
+the product; a new parameter that silently degrades them is a regression, not a gap. Fixed:
+
+- A one-element `caseIds` normalises to `{ caseId }` in `case-scope.ts`, so both spellings take
+  literally the same path.
+- For a multi-case scope, a new `case-citation-context.ts` builds `Map<caseId, { formatter,
+  volumeCountMap, caseNumber }>` with **three batched queries for the whole scope regardless of
+  case count** (`case`, `filing`, `document` each `where caseId in […]`) — never per row — and each
+  result formats with `contextFor(rowCaseId)`. The duplicated single-case blocks in
+  `scan_for_pattern` and `query_case_knowledge` were replaced by that shared builder;
+  `research_evidence` inherits it through qck.
+
+Verified live by the lead: `caseId: A` vs `caseIds: [A]` → byte-identical `citation` and
+`citationShort` on both tools; `caseIds: [A, B]` → every row carries a citation formatted for its
+own case. Tests assert the parity and exactly one `filing.findMany` / `document.findMany` per call
+with `where.caseId.in === [A, B]`.
+
+In passing, the replaced block carried a comment with a real-format filename; it is gone.
+
 ## Verification
 
 - **Typecheck:** 59 errors in 15 files — byte-identical to the baseline.
-- **Tests:** mcp + search + vector + api-mcp + api-search → **1,048 passed, 0 failed** (54 suites);
-  29 new in `case-scoping.test.ts` plus tripwires added to the scan-regex, qck, and
+- **Tests:** mcp + search + vector + api-mcp + api-search → **1,052 passed, 0 failed** (54 suites);
+  33 new in `case-scoping.test.ts` plus tripwires added to the scan-regex, qck, and
   gather-evidence suites (full-scan honours `caseIds`; `caseIds` threads through all three
   retrieval arms and the RLM rounds).
 - **Lint:** clean on every changed source file. **Privacy scan:** clean.

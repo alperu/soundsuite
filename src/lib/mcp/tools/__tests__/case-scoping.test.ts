@@ -277,3 +277,98 @@ describe('buildWhereClause — caseIds', () => {
     expect(clauseFor({ caseId: CASE_A })).toBe(`case_id = "${CASE_A}"`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Citation quality must not depend on which param selected the case.
+// ---------------------------------------------------------------------------
+
+/**
+ * Two synthetic cases with different jurisdictions, so the formatter choice is
+ * observable: CASE_A is Texas (texas-appellate, "…-CV RR 4"), CASE_B has no
+ * jurisdiction (generic, "…-CV — record.pdf, p. 4").
+ */
+function makeCitationContext(hits: Array<{ chunkId: string; caseId: string }>) {
+  const CASE_ROWS: Record<string, any> = {
+    [CASE_A]: { id: CASE_A, jurisdiction: 'Travis', state: 'Texas', country: 'US', caseNumber: '00-0000-AA' },
+    [CASE_B]: { id: CASE_B, jurisdiction: null, state: null, country: null, caseNumber: '00-0000-BB' },
+  };
+  const caseFindMany = jest.fn(async ({ where }: any) =>
+    (where.id.in as string[]).map((id) => CASE_ROWS[id]).filter(Boolean),
+  );
+  const filingFindMany = jest.fn().mockResolvedValue([]);
+  const documentFindMany = jest.fn().mockResolvedValue([]);
+  const search = jest.fn().mockResolvedValue(
+    hits.map((h) => ({
+      chunkId: h.chunkId,
+      text: 'synthetic passage about a scheduling order',
+      score: 0.9,
+      metadata: {
+        documentId: `doc-${h.chunkId}`,
+        caseId: h.caseId,
+        pageNumber: 4,
+        chunkIndex: 0,
+        isExhibit: false,
+        filingType: "Reporter's Record",
+        caseNumber: CASE_ROWS[h.caseId].caseNumber,
+      },
+    })),
+  );
+  const database = {
+    case: { findUnique: jest.fn().mockResolvedValue(null), findMany: caseFindMany },
+    filing: { findMany: filingFindMany },
+    document: {
+      findMany: documentFindMany,
+      findUnique: jest.fn().mockResolvedValue({ fileName: 'record.pdf', filing: null, case: null, documentType: "Reporter's Record" }),
+    },
+  };
+  const context = {
+    logger: makeLogger(),
+    sessionId: 'sess-cite',
+    vectorStore: { search },
+    database,
+    embeddingProvider: { embed: jest.fn().mockResolvedValue([[0.1, 0.2]]) },
+  } as unknown as ToolExecutionContext;
+  return { context, search, caseFindMany, filingFindMany, documentFindMany };
+}
+
+describe.each(CASES)('$name — citation quality under caseIds', ({ tool, base }) => {
+  it('formats caseIds:[A] byte-identically to caseId:A', async () => {
+    const single = makeCitationContext([{ chunkId: 'c1', caseId: CASE_A }]);
+    const viaCaseId = await tool().execute({ ...base, caseId: CASE_A } as any, single.context, config);
+
+    const listed = makeCitationContext([{ chunkId: 'c1', caseId: CASE_A }]);
+    const viaCaseIds = await tool().execute({ ...base, caseIds: [CASE_A] } as any, listed.context, config);
+
+    expect(viaCaseId.success && viaCaseIds.success).toBe(true);
+    const a = (viaCaseId.data as any).results[0];
+    const b = (viaCaseIds.data as any).results[0];
+    expect(b.citation).toBe(a.citation);
+    expect(b.citationShort).toBe(a.citationShort);
+    // Not the corpus-wide fallback: a Texas case gets the appellate form.
+    expect(a.citation).toBe('00-0000-AA RR 4');
+  });
+
+  it('formats a multi-case page with each row\'s own case context, one batched lookup', async () => {
+    const { context, caseFindMany, filingFindMany, documentFindMany } = makeCitationContext([
+      { chunkId: 'c1', caseId: CASE_A },
+      { chunkId: 'c2', caseId: CASE_B },
+    ]);
+    const res = await tool().execute({ ...base, caseIds: [CASE_A, CASE_B], limit: 10 } as any, context, config);
+
+    expect(res.success).toBe(true);
+    const byCase = Object.fromEntries(
+      (res.data as any).results.map((r: any) => [r.caseId, r.citation]),
+    );
+    // Texas case → appellate form; the other → generic form. Neither is the
+    // corpus-wide default, and they are not the same formatter.
+    expect(byCase[CASE_A]).toBe('00-0000-AA RR 4');
+    expect(byCase[CASE_B]).toBe('00-0000-BB — record.pdf, p. 4');
+
+    // One batched lookup per table for the whole scope: the existence check
+    // and the citation-context build, and one filing/document sweep.
+    expect(caseFindMany).toHaveBeenCalledTimes(2);
+    expect(filingFindMany).toHaveBeenCalledTimes(1);
+    expect(documentFindMany).toHaveBeenCalledTimes(1);
+    expect((filingFindMany.mock.calls[0][0] as any).where.caseId.in).toEqual([CASE_A, CASE_B]);
+  });
+});

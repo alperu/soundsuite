@@ -6,7 +6,7 @@ import {
 } from '../tool-types';
 import { SearchQuery, MatchQuery, BooleanQuery, Occur, Operator } from '../../vector/vector-store';
 import type { FullTextQuery } from '../../vector/vector-store';
-import { getCitationFormatter, CitationInput } from '../../citations/citation-formatter';
+import type { CitationInput } from '../../citations/citation-formatter';
 import { detectLineNumbers } from '../../citations/line-number-detector';
 import { QueryPreprocessor } from '../../search/query-preprocessor';
 import { rerank } from '../../search/reranker';
@@ -17,7 +17,8 @@ import { getConfig } from '../../db/config';
 import { recordStatusFromTags } from '../../ingestion/draft-detector';
 import { DRAFT_CITE_MARKER } from '../../search/context-builder';
 import { attachMotionIds } from '../motion-resolution';
-import { resolveCaseScope, caseScopeFilter } from '../case-scope';
+import { resolveCaseScope, caseScopeFilter, caseScopeIds } from '../case-scope';
+import { buildCaseCitationContexts, defaultCitationContext, type CaseCitationContext } from '../case-citation-context';
 
 export interface QueryCaseKnowledgeParams {
   query: string;
@@ -547,65 +548,13 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       searchResults = capped;
     }
 
-    // Look up case metadata for citation formatter selection
-    let caseData: { jurisdiction?: string | null; state?: string | null; country?: string | null; caseNumber?: string | null } | null = null;
-    if (caseId) {
-      caseData = await context.database.case.findUnique({
-        where: { id: caseId },
-        select: { jurisdiction: true, state: true, country: true, caseNumber: true },
-      });
-    }
-
-    // Count distinct volumes per filing type for this case (to decide whether to show vol number)
-    const volumeCountMap = new Map<string, number>(); // filingType -> distinct volume count
-    if (caseId) {
-      try {
-        const filings = await (context.database as any).filing.findMany({
-          where: { caseId },
-          select: { filingType: true, volumeNumber: true },
-        });
-        const typeVolumes = new Map<string, Set<number>>();
-        for (const f of filings) {
-          if (!f.filingType) continue;
-          const key = f.filingType;
-          if (!typeVolumes.has(key)) typeVolumes.set(key, new Set());
-          typeVolumes.get(key)!.add(f.volumeNumber ?? 1);
-        }
-        for (const [type, vols] of typeVolumes) {
-          volumeCountMap.set(type, vols.size);
-        }
-      } catch { /* filings may not exist for all cases */ }
-
-      // Supplement volume counts from document filenames (for docs without Filing records)
-      // e.g. TRAVIS-D-1-FM-25-000222-RR-VOL002.pdf → "Reporter's Record" vol 2
-      try {
-        const caseDocs = await context.database.document.findMany({
-          where: { caseId },
-          select: { fileName: true, documentType: true },
-        });
-        const docTypeVolumes = new Map<string, Set<number>>();
-        for (const doc of caseDocs) {
-          const dt = doc.documentType;
-          if (!dt) continue;
-          const volMatch = doc.fileName?.match(/-VOL(\d+)/i);
-          const vol = volMatch ? parseInt(volMatch[1], 10) : 1;
-          if (!docTypeVolumes.has(dt)) docTypeVolumes.set(dt, new Set());
-          docTypeVolumes.get(dt)!.add(vol);
-        }
-        for (const [type, vols] of docTypeVolumes) {
-          // Only update if we have more volumes than currently known
-          const current = volumeCountMap.get(type) ?? 0;
-          if (vols.size > current) volumeCountMap.set(type, vols.size);
-        }
-      } catch { /* ignore */ }
-    }
-
-    // Select citation formatter based on case metadata
-    const formatter = getCitationFormatter({
-      jurisdiction: caseData?.jurisdiction || undefined,
-      state: caseData?.state || undefined,
-      country: caseData?.country || undefined,
-    });
+    // Per-case citation context (formatter + volume counts + docket number)
+    // for every case in scope. `caseIds` gets the same quality `caseId` does;
+    // a multi-case page formats each row with its own case's context.
+    const citationContexts = await buildCaseCitationContexts(caseScopeIds(scope), context.database);
+    const fallbackContext = defaultCitationContext();
+    const contextFor = (rowCaseId?: string): CaseCitationContext =>
+      (rowCaseId ? citationContexts.get(rowCaseId) : undefined) ?? fallbackContext;
 
     // documentId -> filingId for the returned hits, filled during enrichment
     // below and consumed by the single batched motion lookup that follows.
@@ -664,18 +613,19 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
           const volMatch = document.fileName.match(/-VOL(\d+)/i);
           if (volMatch) volumeNumber = parseInt(volMatch[1], 10);
         }
-        const caseNumber = result.metadata.caseNumber || (document as any)?.case?.caseNumber || caseData?.caseNumber;
         // The chunk row already carries case_id; fall back to the Document's
         // case relation for rows indexed before the column was stamped.
         const rowCaseId: string | undefined =
           result.metadata.caseId || (document as any)?.case?.id || caseId || undefined;
+        const caseCtx = contextFor(rowCaseId);
+        const caseNumber = result.metadata.caseNumber || (document as any)?.case?.caseNumber || caseCtx.caseNumber;
         const filingId: string | undefined = (document as any)?.filing?.id;
         if (filingId && result.metadata.documentId) {
           docFilingIds.set(result.metadata.documentId, filingId);
         }
 
         // Build citation input
-        const totalVolumes = filingType ? (volumeCountMap.get(filingType) ?? 1) : 1;
+        const totalVolumes = filingType ? (caseCtx.volumeCountMap.get(filingType) ?? 1) : 1;
         const filing = (document as any)?.filing;
         const citationInput: CitationInput = {
           filingType,
@@ -703,7 +653,7 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
           }
         }
 
-        const formatted = formatter.format(citationInput);
+        const formatted = caseCtx.formatter.format(citationInput);
 
         // Draft guard: prefer the chunk stamp, fall back to the Document tag
         // (chunks indexed before the column existed and not yet backfilled).
@@ -749,7 +699,11 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       totalMs: Date.now() - phaseStart,
       ...phaseTimings,
     });
-    context.logger.info('Query completed', { resultCount: enrichedResults.length, formatter: formatter.id });
+    context.logger.info('Query completed', {
+      resultCount: enrichedResults.length,
+      // One formatter per case in scope now, so log the set rather than one id.
+      formatters: [...new Set([...citationContexts.values()].map((c) => c.formatter.id))],
+    });
 
     return { results: enrichedResults };
   }
