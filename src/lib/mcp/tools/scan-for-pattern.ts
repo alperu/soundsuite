@@ -197,6 +197,82 @@ function literalRuns(pattern: string): LiteralRun[] {
  * alone between separators, it is whole after all (this is what keeps
  * `\bfoo\b|\bbar\b` — the shape `/api/search/ai` builds — on the FTS path).
  */
+/**
+ * The FTS index is built with `removeStopWords: true`
+ * (`src/lib/vector/vector-store.ts`), so a keyword that is a stopword is
+ * dropped by the tokenizer and contributes nothing to recall. This is
+ * tantivy's English set. A *superset* is the safe direction here: an extra
+ * word costs a full scan, a missing one costs evidence.
+ */
+const FTS_STOPWORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'for', 'if', 'in',
+  'into', 'is', 'it', 'no', 'not', 'of', 'on', 'or', 's', 'such', 't', 'that',
+  'the', 'their', 'then', 'there', 'these', 'they', 'this', 'to', 'was',
+  'will', 'with',
+]);
+
+/** A keyword FTS can actually match: a whole token that survives the tokenizer. */
+function isReachableKeyword(word: string): boolean {
+  return !FTS_STOPWORDS.has(word.toLowerCase());
+}
+
+/**
+ * Drop the group delimiters a naive `|` split leaves stranded on a segment.
+ *
+ * `(unbeknownst|safeguarding)` splits into `(unbeknownst` and `safeguarding)`,
+ * and both parens make `literalRuns` mark the run as possibly token-extending —
+ * so a perfectly reachable alternation looked uncovered and scanned linearly.
+ *
+ * Only a *leading* `(` / `(?:` and a *trailing* `)` come off. An interior `)`
+ * stays: `(foo|bar)baz` really does mean `barbaz`, so that segment must remain
+ * uncovered. An escaped `\)` is a literal paren, not a delimiter, and stays too.
+ */
+function stripGroupDelimiters(segment: string): string {
+  let s = segment;
+  if (s.startsWith('(?:')) s = s.slice(3);
+  else if (s.startsWith('(')) s = s.slice(1);
+  if (s.endsWith(')') && !s.endsWith('\\)')) s = s.slice(0, -1);
+  return s;
+}
+
+/**
+ * Split a pattern into alternation segments at *every* `|`, whatever its depth.
+ *
+ * Deliberately naive. Proper top-level parsing would keep `(MR\.|MS\.)` as one
+ * unit, but the conservative split is what we want: a segment like `MR\.` that
+ * yields no usable keyword marks the whole pattern as unreachable by FTS, which
+ * is the correct conclusion. Over-splitting can only send us to a full scan —
+ * it can never make us miss evidence.
+ *
+ * A pattern with no `|` is a single segment: **one branch**, decided by exactly
+ * the same rule.
+ */
+function alternationSegments(pattern: string): string[] {
+  return pattern.split('|').map(stripGroupDelimiters);
+}
+
+/**
+ * True when some branch contributes no keyword FTS can reach, so BM25 recall
+ * for that branch is zero and nothing downstream would say so.
+ *
+ * This is the discriminator that replaces "does the pattern contain `|`" — and
+ * it is not a fact about alternations. A pattern with no `|` is a single
+ * branch: `[Cc]ould not do` reduces to `not`, a stopword the tokenizer removes,
+ * so keyword recall for it is zero however many spaces it contains.
+ *
+ * Conversely, a pattern whose every branch contributes a real, non-stopword
+ * whole token is *trustworthy* when FTS returns nothing — the terms genuinely
+ * are not in the corpus, and a linear pass would only be slower. That is the
+ * `/api/search/ai` shape, and it must stay on the FTS path.
+ */
+function hasUncoveredBranch(pattern: string): boolean {
+  // `null` regex = no rescue test: a segment is not a valid regex on its own,
+  // and the whole-pattern rescue is exactly the bug this replaces.
+  return alternationSegments(pattern).some(
+    (seg) => !safeKeywords(seg, null).some(isReachableKeyword),
+  );
+}
+
 function safeKeywords(pattern: string, regex: RegExp | null): string[] {
   const out: string[] = [];
   for (const run of literalRuns(pattern)) {
@@ -352,8 +428,15 @@ export class ScanForPatternTool extends BaseMCPTool<
         'blockType, headingPath, speakers, tableMarkdown). Scope with `caseId` (one ' +
         'case) or `caseIds` (a subset); unscoped spans every case. Scoping selects ' +
         'WHICH cases are searched — it does not raise the candidate pool, so exhaust ' +
-        'a scoped search with `nextCursor` exactly as you would an unscoped one.',
-      version: '1.4.0',
+        'a scoped search with `nextCursor` exactly as you would an unscoped one. ' +
+        'Absence of `nextCursor` means the answer is complete, and it is complete for ' +
+        'a reason: a pattern with any branch the index cannot match (a fragment, a ' +
+        'word under three characters, or a stopword) escalates to a full regex scan ' +
+        'BEFORE the keyword query runs, and a candidate pool that came back capped ' +
+        'escalates after it. A zero over a fully covered, uncapped keyword pass is a ' +
+        'proven absence, and `warnings[]` says so in those words — it reads ' +
+        'differently from a bounded answer, which always says what bounded it.',
+      version: '1.6.0',
       category: 'search',
       inputSchema: {
         type: 'object',
@@ -568,7 +651,30 @@ export class ScanForPatternTool extends BaseMCPTool<
     // Multi-word / alternation input never full-scans on (b): those are the
     // natural-language and `\bfoo\b|\bbar\b` shapes the dashboard sends, and a
     // linear pass would neither find more nor finish quickly.
-    const noWholeTokenKeyword = looksLikeRegex && !!regex && safe.length === 0;
+    // A branch that contributes no FTS-reachable keyword makes BM25 recall for
+    // that branch silently zero. Measured: `(MR\.|MS\.|THE COURT)` kept only
+    // `THE` (a stopword) and returned nothing for a phrase on nearly every
+    // transcript page; `[Cc]ould not do` kept only `not` and did the same with
+    // no `|` in sight. A pattern with no alternation is one branch, judged by
+    // the same rule. Scan instead.
+    //
+    // The `looksLikeRegex` gate is load-bearing: natural-language input runs no
+    // post-filter, so scanning it linearly for a contiguous string would return
+    // a confident zero for a phrase whose words are all present.
+    const uncoveredBranch = looksLikeRegex && !!regex && hasUncoveredBranch(pattern);
+    // `safe.length === 0` stays as a second disjunct: `stripGroupDelimiters`
+    // can make a segment look whole when the full-pattern walk found nothing,
+    // and over-escalating costs time while under-escalating costs evidence.
+    const noWholeTokenKeyword =
+      looksLikeRegex && !!regex && (safe.length === 0 || uncoveredBranch);
+    /**
+     * Every branch contributes a keyword the index can actually match, so an OR
+     * keyword query is a genuine superset of this pattern's matches. When such
+     * a pool is also uncapped, a zero is a *proven* absence, not an unreached
+     * one — the distinction the warnings must carry.
+     */
+    const coveredKeywordSet =
+      looksLikeRegex && !!regex && !uncoveredBranch && safe.length > 0;
     const zeroCandidateEligible = !!regex && !/\s/.test(pattern) && !pattern.includes('|');
     const scanSupported = typeof (context.vectorStore as any)?.scanTextColumn === 'function';
 
@@ -597,7 +703,19 @@ export class ScanForPatternTool extends BaseMCPTool<
     }
 
     if (wantFullScanUpFront && scanSupported && regex) {
-      if (noWholeTokenKeyword) {
+      if (uncoveredBranch && pattern.includes('|')) {
+        warnings.push(
+          'At least one alternation branch contributes no keyword the index can match ' +
+          '(too short, a fragment, or a stopword), so keyword recall would miss that ' +
+          'branch entirely — ran a full regex scan instead.',
+        );
+      } else if (uncoveredBranch) {
+        warnings.push(
+          'Every literal in this pattern is unreachable by the index (too short, a ' +
+          'fragment, or a stopword the tokenizer removes), so keyword recall would ' +
+          'miss its matches entirely — ran a full regex scan instead.',
+        );
+      } else if (noWholeTokenKeyword) {
         warnings.push(
           'No literal in this pattern is a whole index token, so keyword recall cannot ' +
           'reach its matches — ran a full regex scan instead.',
@@ -653,20 +771,9 @@ export class ScanForPatternTool extends BaseMCPTool<
         ? searchResults.filter((result) => regex!.test(result.text))
         : searchResults;
 
-      if (looksLikeRegex && regex && allMatches.length === 0 && searchResults.length > 0) {
-        // Useful diagnostic: regex post-filter dropped everything despite FTS
-        // returning candidates. Almost always means the caller passed a
-        // natural-language string with one stray metacharacter (parens,
-        // apostrophe etc.) and our heuristic mis-classified it.
-        context.logger.warn?.('scan_for_pattern: regex post-filter dropped all FTS candidates', {
-          pattern: pattern.slice(0, 120),
-          ftsCandidates: searchResults.length,
-        });
-        warnings.push(
-          `Keyword recall returned ${searchResults.length} candidates but none matched the ` +
-          'regex. Matches elsewhere in the corpus would not be reached by this strategy.',
-        );
-      }
+      // Whether the pool was truncated decides which kind of zero this is, so
+      // it has to be known before any warning is written.
+      const poolCapped = searchResults.length >= fetchLimit;
 
       if (searchResults.length === 0 && regex && zeroCandidateEligible && scanSupported) {
         // The measured mid-word-fragment case: FTS has no token for it, so the
@@ -684,24 +791,84 @@ export class ScanForPatternTool extends BaseMCPTool<
           nextCursor = encodeCursor({ s: 'full-scan', o: scan.nextOffset, p: cursorKey(pattern, scope) });
         }
       } else {
+        matchedResults = allMatches.slice(pageOffset);
+
+        const pageFills = matchedResults.length > limit;
+        // When the page escalates below, the pool's limits are moot — saying
+        // anything about unreached matches there would contradict the scan.
+        const willEscalate = poolCapped && !pageFills && looksLikeRegex && !!regex && scanSupported;
+        // A superset pool that was never truncated: whatever the regex rejected,
+        // nothing outside the pool could have satisfied it either.
+        const provenAbsence = coveredKeywordSet && !poolCapped && !willEscalate;
+
         if (searchResults.length === 0) {
           warnings.push(
-            `Keyword recall returned no candidates for [${ftsKeywords.join(', ')}]. ` +
-            'This is keyword recall, not an exhaustive scan — absence here is not proof of absence.',
+            provenAbsence
+              ? `Keyword recall returned no candidates for [${ftsKeywords.join(', ')}]. ` +
+                'Every branch of this pattern contributes a keyword the index can match and ' +
+                'the candidate pool was not capped, so this answer is exhaustive: the ' +
+                'absence is proven, not merely unreached.'
+              : `Keyword recall returned no candidates for [${ftsKeywords.join(', ')}]. ` +
+                'This is keyword recall, not an exhaustive scan — absence here is not proof of absence.',
           );
-        } else if (searchResults.length >= fetchLimit) {
+        } else if (looksLikeRegex && regex && allMatches.length === 0 && !willEscalate) {
+          // Useful diagnostic: regex post-filter dropped everything despite FTS
+          // returning candidates. Without full branch coverage this almost
+          // always means the caller passed a natural-language string with one
+          // stray metacharacter and our heuristic mis-classified it.
+          context.logger.warn?.('scan_for_pattern: regex post-filter dropped all FTS candidates', {
+            pattern: pattern.slice(0, 120),
+            ftsCandidates: searchResults.length,
+          });
           warnings.push(
-            `Keyword recall was capped at ${fetchLimit} candidates; more matches likely exist ` +
-            'beyond this page.',
+            provenAbsence
+              ? `Keyword recall returned ${searchResults.length} candidates over a keyword set ` +
+                'the index fully covers, and none matched the regex. The pool was not capped, ' +
+                'so this answer is exhaustive: the absence is proven, not merely unreached.'
+              : `Keyword recall returned ${searchResults.length} candidates but none matched the ` +
+                'regex. Matches elsewhere in the corpus would not be reached by this strategy.',
           );
         }
-        matchedResults = allMatches.slice(pageOffset);
-        if (matchedResults.length > limit) {
-          nextCursor = encodeCursor({
-            s: 'fts+regex',
-            o: pageOffset + limit,
-            p: cursorKey(pattern, scope),
-          });
+
+        if (willEscalate && regex) {
+          // The unsound terminal state: the candidate pool was truncated, yet
+          // this page would end the answer with no cursor to follow. A caller
+          // obeying the "page to exhaustion" contract would read that as
+          // complete. Finish the job with a strategy that can actually finish.
+          warnings.push(
+            `Keyword recall was capped at ${fetchLimit} candidates and this page would ` +
+            'have ended the answer — escalated to a full regex scan so the result is ' +
+            'exhaustive.',
+          );
+          if (cursor) {
+            warnings.push(
+              'Strategy changed mid-answer: rows already returned on earlier pages may ' +
+              'repeat here. De-duplicate before counting.',
+            );
+          }
+          strategy = 'full-scan';
+          const scan = await this.runFullScan(context, regex, filter, 0, limit);
+          matchedResults = scan.matches;
+          scanned = scan.scanned;
+          truncated = scan.truncated;
+          candidatePool = searchResults.length;
+          if (scan.nextOffset !== null) {
+            nextCursor = encodeCursor({ s: 'full-scan', o: scan.nextOffset, p: cursorKey(pattern, scope) });
+          }
+        } else {
+          if (poolCapped) {
+            warnings.push(
+              `Keyword recall was capped at ${fetchLimit} candidates; more matches likely exist ` +
+              'beyond this page.',
+            );
+          }
+          if (pageFills) {
+            nextCursor = encodeCursor({
+              s: 'fts+regex',
+              o: pageOffset + limit,
+              p: cursorKey(pattern, scope),
+            });
+          }
         }
       }
     }

@@ -255,6 +255,11 @@ export class VectorStore {
           baseTokenizer: 'simple',
           language: 'English',
           stem: true,
+          // ⚠️ `scan_for_pattern` depends on this being true: `FTS_STOPWORDS` in
+          // `src/lib/mcp/tools/scan-for-pattern.ts` mirrors this set to decide
+          // whether an alternation branch is reachable by keyword recall. If you
+          // flip this to false, that branch-coverage check starts forcing full
+          // scans for no reason — update FTS_STOPWORDS in the same change.
           removeStopWords: true,
           asciiFolding: true,
         }),
