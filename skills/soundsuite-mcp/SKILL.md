@@ -1,6 +1,6 @@
 ---
 name: soundsuite-mcp
-description: "Query the Sound Suite / court-lens-mcp case-document engine from a Cowork session — regex phrase search, evidence retrieval, case/motion/person discovery, and deep research jobs. Use when asked to search, cite, or analyse case documents."
+description: "Query the Sound Suite / court-lens-mcp case-document engine from a Cowork session — regex phrase search across one or many cases, evidence retrieval, case/motion/person discovery, and deep research jobs. Use when asked to search, cite, or analyse case documents."
 ---
 
 # Querying Sound Suite
@@ -44,46 +44,79 @@ await fetch('/mcp-client/soundsuite-client.js').then(r => r.text()).then(eval);
 
 ## 3. Find a phrase — the common task, in one call
 
-`ss.scan` (`scan_for_pattern`) is a **true regex scan** as of v6.1. Character classes,
-alternation, and mid-word fragments all work — verified `[Uu]nbeknownst` → 37, `nbeknownst` → 37,
-`unbeknownst` → 37 on the same corpus. (Before v6.1 the first two returned 0 silently; if you meet
-a session or doc that says regex does not work, it is stale.)
+`ss.scan` (`scan_for_pattern`) is a **true regex scan**. Character classes, alternation and mid-word
+fragments all work — verified `[Uu]nbeknownst` → 37, `nbeknownst` → 37, `unbeknownst` → 37 on the
+same corpus. (If you meet a session or doc saying regex does not work, or that alternation silently
+returns zero, it is stale.)
 
 Recall is **self-reporting**. Every scan result carries:
 
 ```jsonc
 { "results": [...], "strategy": "fts+regex" | "full-scan",
-  "candidatePool": 21,        // fts+regex only — how many candidates the keyword pass found
+  "candidatePool": 21,        // fts+regex only — candidates the keyword pass found
   "scanned": 25560,           // full-scan only — chunks examined before the page filled
+  "truncated": false,         // full-scan only — true if the time box cut the scan short
   "nextCursor": "…",          // present when more may exist; absent when exhausted
   "warnings": [] }
 ```
 
-**Two strategies, and the counter-intuitive part: the regex form is often the *more* complete one.**
+### The coverage rule — why the regex form is often the *more* complete one
 
-| Pattern | strategy | warning |
+The tool checks whether every literal in your pattern is a keyword the index can actually reach. A
+literal is **unreachable** if it is under three characters, a mid-token fragment, or a stopword the
+tokenizer strips. If any literal — or, in an alternation, any *branch* — is unreachable, keyword
+recall would silently miss those matches, so the tool **escalates to a full scan by itself** and says
+which condition fired in `warnings[]`.
+
+| Pattern | strategy | why |
 |---|---|---|
-| `unbeknownst` | `fts+regex` | *"Keyword recall was capped at 21 candidates; more matches likely exist beyond this page."* |
-| `[Uu]nbeknownst` | `full-scan` | *"No literal in this pattern is a whole index token… ran a full regex scan instead."* |
-| `nbeknownst` | `full-scan` | *"Keyword recall returned no candidates — ran a full regex scan instead."* |
-| `\d{3},\d{3}` | `full-scan` | same as row 2 |
+| `unbeknownst` | `fts+regex` | one reachable whole token; pool capped at 21 |
+| `[Uu]nbeknownst` | `full-scan` | the literal is a fragment |
+| `[Cc]ould not do` | `full-scan` | survivor is `not`, a stopword; the rest are sub-3-char |
+| `[Tt]he was not` | `full-scan` | every literal is a stopword |
+| `(MR\.|MS\.|THE COURT)` | `full-scan` | branches too short or stopword-only |
+| `(unbeknownst|safeguarding)` | `fts+regex` | every branch has a real token — fast path kept |
 
-A plain literal takes the keyword path, which **caps its candidate pool** — so the literal search can
-be *less* complete than the same word wrapped in a character class, which forces a full scan of all
-~36k chunks. Do not assume "simplest pattern = most hits".
+A plain literal takes the keyword path, which **caps its candidate pool**, while the same word in a
+character class scans all ~36k chunks. Do not assume "simplest pattern = most hits". You no longer
+need to hand-de-tokenise a phrase to force a scan — the coverage rule does it — but doing so is still
+a valid way to force one deliberately, and is the control check below.
 
-**How to read the three warnings:**
+### Proving a phrase is absent
 
-- *"Keyword recall was capped at N…"* → **incomplete.** Page with `nextCursor`, or force a full scan
-  by making the pattern non-tokenisable (e.g. `[Uu]nbeknownst`).
-- *"No literal … is a whole index token"* / *"Keyword recall returned no candidates"* → it already
-  fell back to a full scan. Not a problem, just slower.
-- `warnings: []` → the keyword pass covered its pool.
+The result litigation actually needs. **Two shapes count as proof**, and the warning tells you which:
 
-**Proving a phrase is absent** — the one result litigation actually needs — requires all three:
-`strategy: "full-scan"`, no `nextCursor`, and `scanned` equal to the corpus (~35,890 here). A zero
-result from a capped `fts+regex` pass proves nothing. Measured: an absent token scanned 35,890 in
-1.8 s and returned no cursor.
+1. **Exhaustive scan.** `strategy: "full-scan"`, `truncated` falsy, no `nextCursor`, `scanned` equal
+   to the corpus (~35,890). Measured: an absent token scanned 35,890 in ~1.8 s.
+2. **Uncapped pass over a fully-covered keyword set.** `strategy: "fts+regex"`, no cap warning, and a
+   warning ending *"the absence is proven, not merely unreached."* Every branch was reachable and the
+   pool was never truncated, so the keyword pass saw everything the regex could match.
+
+**Never read "proven" together with `truncated: true`.** A full scan is bounded by a time box; cut
+short, it sets `truncated` and emits a cursor. Loud rather than silent — but a proven absence is only
+proven for a scan that reached the end of the table.
+
+**Three things that still defeat a proof:**
+
+- **A capped pool.** *"Keyword recall was capped at N candidates"* → incomplete. At small `limit` the
+  tool escalates rather than ending on a capped page; at larger `limit` the cap threshold rises
+  (`fetchLimit = (offset + limit) * 5`), so the *same query* can answer on either path. The strategy
+  shifts with `limit`; the verdict does not — but read `strategy` each time rather than assuming.
+- **Natural-language input is exempt from the coverage rule**, which is gated on the pattern looking
+  like a regex. A plain phrase with no metacharacters whose words are all stopwords is neither proven
+  nor escalated — only hedged. **Put one metacharacter in it** (`[Tt]he was not`) to buy coverage.
+- **"Reachable" is judged against a hand-maintained stopword list** mirroring the index's own, plus
+  the three-character floor. A stopword missing from that list would read as reachable and a zero
+  would be called *proven* when recall never ran. Trustworthy for ordinary English; where a negative
+  finding actually turns on it, run the control below too.
+
+**The control check, worth doing anyway.** If a scan returns zero, re-run it de-tokenised
+(`[Cc]ould not do` → `[Cc]ould [Nn]ot d[o]`). If the two disagree, the zero was never about the
+corpus. That trick caught every recall defect found so far.
+
+**Always report `strategy` and `warnings` alongside a count** — an unqualified "N hits" from a capped
+pass overstates certainty. **If a page escalates mid-answer** while you hold a cursor, the tool warns
+that earlier rows may repeat: escalation restarts at offset zero, so de-duplicate before counting.
 
 ### The digest pattern — one call, ~1s
 
@@ -108,6 +141,13 @@ count** — an unqualified "N hits" from a capped pass overstates certainty.
 
 Catastrophic patterns are rejected up front with **`INVALID_REGEX`** (400) before any scan.
 
+Two things that still cost round trips if you do not know them:
+
+- **`ss.cites()` anchors its snippet at the start of the chunk, not at the match.** Do not call
+  `ss.item(n)` per hit to find the phrase — centre it yourself (above). Rows also carry `match`.
+- **The corpus duplicates itself.** Clerk's records contain transcribed copies of the reporter's
+  record, so one statement can appear 4×. Dedupe before you count.
+
 `limit` is client-supplied, not a server cap. Results paginate via **`nextCursor`** — pass it back to
 continue.
 
@@ -123,7 +163,7 @@ Unscoped is the default and spans **every** case — cross-case search needs no 
 normalises to `caseId`, so citations are byte-identical either way (verified on both tools). Under a
 multi-case scope every row is formatted for **its own** case.
 
-Bad input now fails loudly instead of lying:
+Bad input fails loudly instead of lying:
 
 ```
 caseId: ["A","B"]        → 400  caseId must be a string, received array
@@ -161,23 +201,58 @@ The `full-scan` path honours `caseIds` too — verified: a non-tokenisable patte
 scanned 8,306 chunks and returned rows from exactly those two. Paginating that scope to exhaustion
 took 2 pages / 64 results, ending with no cursor.
 
-**No cursor now means complete, for two reasons that both had to be fixed.** A keyword set the index
-cannot reach escalates to a full scan *before* the query runs, and a capped candidate pool escalates
-*after* it. So a cursor-free page is exhaustive rather than merely finished.
+## 3a. Who said it — transcript speaker attribution
 
-**Read the warning, not just the count.** A zero over a reachable keyword set with an uncapped pool
-now says the absence is **proven, not merely unreached** — that is the wording to quote when you
-assert a phrase is absent. Anything else means recall was bounded.
+The `speakers` column is null, but transcripts **print** their labels, so attribution is in the text.
+Two label forms, both searchable:
 
-**⚠️ That guarantee has a precondition.** "Reachable" is judged against `FTS_STOPWORDS`, a
-hand-maintained mirror of the index's stopword set, plus a three-character floor on keywords. A
-stopword missing from that list would be treated as reachable, and the tool would then call a zero
-*proven* when recall never ran. The word is trustworthy for ordinary English; for a filing on which
-a negative finding actually turns, run the de-tokenised control below as well.
+- **Colloquy** — `MR. SURNAME:`, `MS. SURNAME:`, `THE COURT:`, `THE WITNESS:`
+- **Q&A** — numbered lines `N  Q ` (examining counsel) and `N  A ` (the witness on the stand)
 
-**The check worth doing anyway.** If a scan returns zero, re-run it de-tokenised
-(`[Cc]ould not do` → `[Cc]ould [Nn]ot d[o]`). If the two disagree, the zero was never about the
-corpus. That trick caught both defects fixed here.
+**(a) Find a named speaker's turns.** Scan for the label, then split each chunk on label boundaries
+and keep the parts that *begin* with your label:
+
+```js
+await ss.exec('scan_for_pattern', { pattern: 'MR\\. SURNAME', limit: 100 });
+const turns = [];
+for (const r of ss.last?.results || []) {
+  const parts = String(r.text||'').split(/(?=(?:MR\.|MS\.|MRS\.|THE COURT|THE WITNESS)\s*[A-Z'-]*\s*:)/);
+  for (const q of parts) if (/^MR\. SURNAME:/i.test(q.trim()))
+    turns.push({ cite: r.citationShort, page: r.page, text: q.replace(/\s+/g,' ').slice(0,400) });
+}
+```
+
+**(b) Attribute a phrase you already found.** Slice backwards from the match; take the **last** label
+or Q/A marker before it:
+
+```js
+const before = t.slice(Math.max(0, i-900), i);
+const labs = [...before.matchAll(/(MR\.|MS\.|MRS\.|THE COURT|THE WITNESS)\s*[A-Z'-]*\s*:/g)];
+const speaker = labs.length ? labs[labs.length-1][0] : null;
+const qa = [...before.matchAll(/\n?\s*\d{1,2}\s+([QA])\s/g)];
+const qaMark = qa.length ? qa[qa.length-1][1] : null;   // 'A' = the witness, 'Q' = counsel
+```
+
+**(c) Turn an `A` into a name — the witness index.** A `Q`/`A` block tells you *witness vs counsel*,
+not *which witness*. Every reporter's record opens with an index listing each witness against the
+page its examination starts on. Scan the volume for `CROSS-EXAMINATION` or `duly sworn`: the index
+hits (pages 1–6) give a page-range map, and `NAME, having been first duly sworn` marks each
+swearing-in.
+
+```
+RESPONDENT WITNESSES        DIRECT  CROSS  VOL.
+<WITNESS A>   By Ms. X ....... 42      3
+              By Ms. Y ....... 90      3
+<WITNESS B>   By Ms. X ...... 117      3
+```
+
+→ an `A` line on p. 110 belongs to Witness A. Confirm against the nearest `duly sworn` line, or a
+counsel line addressing the witness by name.
+
+**Limits to state when you report.** A chunk that opens mid-turn loses its *first* partial turn
+(every later label in it is intact), and these are labels printed in the text, not `speakers`-column
+facts. **Give the basis** — "witness index p. 3 puts <Name> on the stand pp. 42–116; this is an `A`
+line on p. 110" — never a bare "X said Y".
 
 ## 4. Discovery — ids without prior knowledge
 
@@ -200,7 +275,7 @@ an exact `caseNumber` scores 0.95 `matchedOn: "caseNumber"`; a name fragment sco
 `matchedOn: "name"`. **A vague phrase can return zero candidates** — it matches fields, not meaning.
 If it comes back empty, fall back to `list_cases` and pick, or `ss.scan` a distinctive phrase.
 
-**Evidence now carries ids directly**, so discovery is often unnecessary: `caseId` on every item
+**Evidence carries ids directly**, so discovery is often unnecessary: `caseId` on every item
 (20/20 measured) and `motionId` where resolvable (13/20). Prefer reading them off a result over
 making a discovery call.
 
@@ -221,15 +296,16 @@ Anything not wrapped: `ss.exec('tool_name', { …params }, { profile: 'local' })
 | **Where was this phrase said** | **`ss.scan` + digest (§3), ~1s. Never a research tier.** |
 | Passages on a topic | `ss.ask` (`query_case_knowledge`) |
 | Which case / motion / person is this | `resolve_reference`, `list_*` (§4) |
-| Amendment lineage, motions by person | `query_case_graph` — now callable, seed from an evidence `motionId` |
+| Amendment lineage, motions by person | `query_case_graph` — callable; seed from an evidence `motionId` |
 | Multi-part / comparative | `ss.research` |
+| Saved workflows and templates | `search_workflows` |
 | Contradictions, timeline, entities, citations, privilege, tone, obligations, argument structure | the matching tool |
 
 ### Error codes
 
 | Code | Means |
 |---|---|
-| `INVALID_PARAMS` | Required field missing; the message names it. All ten LLM tools enforce this. ~15ms. |
+| `INVALID_PARAMS` | Missing, mistyped, unknown, or mutually-exclusive parameter; the message names it. ~15ms. |
 | `INVALID_REGEX` | Pattern rejected as catastrophic before scanning. |
 | `TOOL_NOT_IN_PROFILE` | Routed-only tool called on `local`. |
 | `POLICY_VIOLATION` | Cloud provider requested on `local`. |
@@ -243,12 +319,12 @@ Anything not wrapped: `ss.exec('tool_name', { …params }, { profile: 'local' })
 
 ### Reading LLM-tool results correctly
 
-Item-level validation now runs on all ten. The contract:
+Item-level validation runs on all ten. The contract:
 
 - **empty list = a genuine negative.** Trust it.
 - **`LLM_SHAPE_ERROR` = every item was malformed.** Not a negative.
 - **`stats: { itemsDropped, warnings[] }` appears only when something was lost.** Its *absence* is
-  the "nothing dropped" signal — so check for the key before trusting a count.
+  the "nothing dropped" signal — check for the key before trusting a count.
 - **`confidence` is `number | null`** on four tools. `null` means unscored; such items are **kept
   and flagged**, never silently dropped. Scored items below `confidence_threshold` are still filtered.
 
@@ -279,6 +355,9 @@ To start and leave: `ss.fire('k', 'research_evidence', {…})` then `ss.peek('k'
 { "maxEvidence": 12, "maxCharsPerChunk": 800, "evidenceTruncated": true,
   "evidenceTotalBeforeCap": 79, "chunksTruncated": 7, "tablesTruncated": 0 }
 ```
+
+`chunksTruncated` counts items whose **text** was shortened; `tablesTruncated` counts `tableMarkdown`
+cut on a row boundary — deliberately separate counters.
 
 **`deep-report` still returns `outline: null`** (`modelsUsed.outline: "none"`), burning its 25s
 budget: the host has no small instruct model. Check `GET /api/config?resolve=localModels`. Until one
@@ -312,16 +391,12 @@ MR. <SURNAME>: … testimony …  THE COURT: … ruling …
 
 Scan for the label, split each chunk on the label boundary, keep the turns that **begin** with the
 label you want. That is attribution from the transcript itself, not from a filing quoting it.
-Measured: 268 label-bearing chunks → 104 distinct turns for one speaker.
+Measured: 268 label-bearing chunks → 104 distinct turns for one speaker. **Full method in §3a**,
+including how to name the witness behind an unlabelled `Q`/`A` block.
 
 Two real limits. A chunk that opens mid-turn loses its **first** partial turn (every later label in
 that chunk is intact), and speaker labels are not `speakers`-column facts, so state that you derived
 them from the printed text.
-
-Alternation works — scan for every label in one call. `(MR\.|MS\.|THE COURT)` used to return zero
-silently; it now full-scans and returns its hits. If any branch of your pattern reduces to a
-stopword, a fragment, or a literal under three characters, the whole pattern takes the linear path
-automatically and `warnings[]` says so.
 
 **Graph data is thin.** `query_case_graph` is callable, but corpus-wide no motion has a child,
 `amendsId` or `supersedesId`, and no Person is linked to any Motion (`motionCount: 0` across all).

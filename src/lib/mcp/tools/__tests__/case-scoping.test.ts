@@ -300,7 +300,10 @@ function makeCitationContext(hits: Array<{ chunkId: string; caseId: string }>) {
   const search = jest.fn().mockResolvedValue(
     hits.map((h) => ({
       chunkId: h.chunkId,
-      text: 'synthetic passage about a scheduling order',
+      // Must contain the scan pattern verbatim: `scan_for_pattern` verifies
+      // every row it returns (docs/tasks/16), so a row that does not carry the
+      // phrase is dropped before there is a citation to compare.
+      text: 'synthetic passage about a scheduling order for the trust fund',
       score: 0.9,
       metadata: {
         documentId: `doc-${h.chunkId}`,

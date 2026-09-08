@@ -31,11 +31,31 @@ export interface ScanForPatternParams {
    * the main vector+FTS retrieval.
    */
   whereClauses?: string[];
+  /**
+   * `'phrase'` (default) verifies every returned row against the pattern.
+   * `'keyword'` restores the legacy bag-of-words behaviour for a non-regex
+   * pattern and always says, in `warnings[]`, that the rows are unverified.
+   */
+  mode?: 'phrase' | 'keyword';
+  /**
+   * Match across a printed transcript line number (default `true`). A literal
+   * space in the pattern also matches "whitespace, a one-to-three digit line
+   * number, whitespace". Set false to match the caller's spacing exactly.
+   */
+  linePermissive?: boolean;
+  /**
+   * Compare with curly quotes, dash variants and diacritics folded to ASCII on
+   * both sides (default `true`). Returned text is always the raw document text.
+   */
+  fold?: boolean;
 }
 
 export interface ScanForPatternResult {
   results: Array<{
     text: string;
+    /** Id of the matched chunk. Feed it to `get_chunk_context` to read the
+     *  passage that runs past this chunk's edge. */
+    chunkId?: string;
     document: string;
     page: number;
     match: string;
@@ -368,6 +388,203 @@ function bodyIsAmbiguouslyRepeatable(body: string): boolean {
   return hasUnboundedQuantifier && !hasMandatoryAtom;
 }
 
+// ── Text folding (docs/tasks/18) ────────────────────────────────────────────
+//
+// The FTS index already folds at index time (`asciiFolding: true`,
+// src/lib/vector/vector-store.ts), so keyword *recall* is not the gap. The gap
+// is the regex comparison, which tests a raw pattern against raw text: a
+// quotation pasted out of Word carries a curly apostrophe the corpus does not
+// use, and a name transliterated with diacritics in one filing and without in
+// another matches only one of the two. Fold both sides; return the raw text.
+
+/** Punctuation that folds to its ASCII form. Case is NOT folded here — the
+ *  regex already runs case-insensitive, and case-folding would widen it. */
+const FOLD_CHARS: Record<string, string> = {
+  '‘': "'", '’': "'", '‚': "'", '‛': "'", '′': "'", '‵': "'",
+  '“': '"', '”': '"', '„': '"', '‟': '"', '″': '"', '‶': '"',
+  '‐': '-', '‑': '-', '‒': '-', '–': '-', '—': '-',
+  '―': '-', '−': '-',
+  ' ': ' ', ' ': ' ', ' ': ' ', ' ': ' ', ' ': ' ',
+  ' ': ' ', ' ': ' ', '　': ' ',
+};
+
+const COMBINING_MARKS = /[̀-ͯ᪰-᫿᷀-᷿⃐-⃰︠-︯]/g;
+/** Nothing outside ASCII means nothing to fold — the fast path a 250k-row scan needs. */
+const NEEDS_FOLD = /[^\x00-\x7f]/;
+
+function foldChar(ch: string): string {
+  const mapped = FOLD_CHARS[ch];
+  if (mapped !== undefined) return mapped;
+  return ch.normalize('NFKD').replace(COMBINING_MARKS, '');
+}
+
+/** Folded form only. Identity for pure-ASCII input. */
+function foldText(raw: string): string {
+  if (!NEEDS_FOLD.test(raw)) return raw;
+  let out = '';
+  for (let i = 0; i < raw.length; i++) out += foldChar(raw[i]);
+  return out;
+}
+
+/**
+ * Folded form plus an index map back to the raw string, so a match found in
+ * folded space can be sliced out of the raw text. `map[i]` is the raw offset of
+ * folded character `i`; `map[folded.length]` is `raw.length`. `map === null`
+ * means the fold was the identity and offsets need no translation.
+ *
+ * Without this, folding would silently cite the wrong span: NFKD decomposition
+ * and a wide-dash-to-hyphen map both change string length.
+ */
+function foldWithMap(raw: string): { text: string; map: number[] | null } {
+  if (!NEEDS_FOLD.test(raw)) return { text: raw, map: null };
+  let out = '';
+  const map: number[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const folded = foldChar(raw[i]);
+    for (let k = 0; k < folded.length; k++) {
+      out += folded[k];
+      map.push(i);
+    }
+  }
+  map.push(raw.length);
+  return { text: out, map };
+}
+
+// ── Line-number tolerance (docs/tasks/17) ───────────────────────────────────
+
+/**
+ * What a literal space becomes: at least one whitespace character, optionally a
+ * printed line number and more whitespace.
+ *
+ * The `\s+` is load-bearing. The v10 report proposed `\s*(?:\d{1,3}\s+)?\s*`,
+ * in which every quantifier is zero-or-more — that makes whitespace optional,
+ * so `the court` would match `thecourt`, manufacturing exactly the
+ * false-positive class task #16 exists to remove.
+ */
+const LINE_BREAK_GAP = '\\s+(?:\\d{1,3}\\s+)?';
+
+/** Index of the `]` closing the class opened at `start`, or -1 if unterminated. */
+function characterClassEnd(source: string, start: number): number {
+  let j = start + 1;
+  while (j < source.length) {
+    if (source[j] === '\\') { j += 2; continue; }
+    if (source[j] === ']') return j;
+    j += 1;
+  }
+  return -1;
+}
+
+/**
+ * Rewrite every *literal* space run in a regex source as `LINE_BREAK_GAP`.
+ *
+ * Deliberately narrow: a space inside a character class is left alone (it is
+ * one alternative of a set, not a gap between words), whitespace the caller
+ * wrote as `\s` is left alone (it is already their choice), and a space a
+ * quantifier applies to is left alone (`ledger ?closed` means "optional
+ * space"; rewriting it would make the space mandatory and change the answer).
+ */
+function insertLineTolerance(source: string): { source: string; changed: boolean } {
+  let out = '';
+  let changed = false;
+  let i = 0;
+
+  while (i < source.length) {
+    const c = source[i];
+
+    if (c === '\\') {
+      out += source.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+
+    if (c === '[') {
+      const close = characterClassEnd(source, i);
+      if (close === -1) { out += source.slice(i); break; }
+      out += source.slice(i, close + 1);
+      i = close + 1;
+      continue;
+    }
+
+    if (c === ' ') {
+      let j = i;
+      while (j < source.length && source[j] === ' ') j += 1;
+      const next = source[j];
+      if (next === '*' || next === '+' || next === '?' || next === '{') {
+        out += source.slice(i, j); // quantified — the caller's spacing stands
+      } else {
+        out += LINE_BREAK_GAP;
+        changed = true;
+      }
+      i = j;
+      continue;
+    }
+
+    out += c;
+    i += 1;
+  }
+
+  return { source: out, changed };
+}
+
+function escapeLiteral(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The single pattern-preparation step. Tasks 17 and 18 both rewrite the source
+ * before compiling, so they compose here rather than as two passes that could
+ * fight (folding must run first: a non-breaking space becomes a plain space,
+ * which line tolerance then treats as a gap).
+ */
+interface PreparedPattern {
+  /** What every match — post-filter, full scan, snippet — is tested against. */
+  regex: RegExp | null;
+  /** The same pattern without line tolerance, for the crossed-a-line warning. */
+  strictRegex: RegExp | null;
+  /** True when a literal space was actually rewritten. */
+  lineTolerant: boolean;
+  /** True when a rewritten source failed to compile and we fell back. */
+  degraded: boolean;
+}
+
+function preparePattern(
+  pattern: string,
+  opts: { literal: boolean; linePermissive: boolean; fold: boolean },
+): PreparedPattern {
+  const compile = (s: string): RegExp | null => {
+    try { return new RegExp(s, 'i'); } catch { return null; }
+  };
+
+  const base = opts.literal ? escapeLiteral(pattern) : pattern;
+  const strictSource = opts.fold ? foldText(base) : base;
+  const tolerant = opts.linePermissive
+    ? insertLineTolerance(strictSource)
+    : { source: strictSource, changed: false };
+
+  let lineTolerant = tolerant.changed;
+  let degraded = false;
+  let regex = compile(tolerant.source);
+
+  // A rewrite that will not compile must not silently disable matching.
+  if (!regex && tolerant.source !== strictSource) {
+    regex = compile(strictSource);
+    lineTolerant = false;
+    degraded = regex !== null;
+  }
+  if (!regex && strictSource !== base) {
+    regex = compile(base);
+    lineTolerant = false;
+    degraded = regex !== null;
+  }
+
+  return {
+    regex,
+    strictRegex: lineTolerant ? compile(strictSource) : regex,
+    lineTolerant: lineTolerant && regex !== null,
+    degraded,
+  };
+}
+
 /** Cursor payload. Opaque to callers; validated against the pattern on reuse. */
 interface ScanCursor {
   s: ScanStrategy;
@@ -435,8 +652,13 @@ export class ScanForPatternTool extends BaseMCPTool<
         'BEFORE the keyword query runs, and a candidate pool that came back capped ' +
         'escalates after it. A zero over a fully covered, uncapped keyword pass is a ' +
         'proven absence, and `warnings[]` says so in those words — it reads ' +
-        'differently from a bounded answer, which always says what bounded it.',
-      version: '1.6.0',
+        'differently from a bounded answer, which always says what bounded it. ' +
+        'Every returned row is VERIFIED to contain the pattern (mode: "phrase", the ' +
+        'default) — a bag-of-words hit is never presented as a match. A literal space ' +
+        'matches across a printed transcript line number, and curly quotes, dashes and ' +
+        'diacritics are folded on both sides of the comparison, so a phrase pasted out ' +
+        'of a brief still finds the corpus form.',
+      version: '1.7.0',
       category: 'search',
       inputSchema: {
         type: 'object',
@@ -472,6 +694,30 @@ export class ScanForPatternTool extends BaseMCPTool<
           cursor: {
             type: 'string',
             description: 'Page token from a previous call\'s `nextCursor`.',
+          },
+          mode: {
+            type: 'string',
+            enum: ['phrase', 'keyword'],
+            description:
+              'phrase (default): every returned row is verified to contain the pattern. ' +
+              'keyword: legacy bag-of-words recall for a non-regex pattern — rows are ' +
+              'NOT verified and warnings[] says so. Use query_case_knowledge for ' +
+              'semantic search instead of this.',
+          },
+          linePermissive: {
+            type: 'boolean',
+            description:
+              'Default true. A literal space in the pattern also matches across a ' +
+              'printed transcript line number, so a quoted phrase that straddles a line ' +
+              'break is still found. Set false to match your spacing exactly.',
+          },
+          fold: {
+            type: 'boolean',
+            description:
+              'Default true. Compares with curly quotes, dash variants and diacritics ' +
+              'folded to ASCII on both sides, so a quotation pasted from a brief finds ' +
+              'the corpus spelling. Returned text is always raw. Set false to hunt an ' +
+              'exact glyph.',
           },
         },
         required: ['pattern'],
@@ -513,9 +759,9 @@ export class ScanForPatternTool extends BaseMCPTool<
   /**
    * Run the compiled regex over the raw chunk text, paging the table directly.
    *
-   * Unlike the FTS path this applies the regex unconditionally — a plain
-   * literal like a mid-word fragment has no metacharacters, so the
-   * "looks like a regex" heuristic must not gate the filter here.
+   * `matches_` is the same predicate the FTS post-filter uses — one prepared
+   * pattern and one folding decision for both paths, so the two can never
+   * disagree about what matched (docs/tasks/17 item 3).
    *
    * Stops at `limit + 1` matches (the extra one only fixes the cursor), at the
    * end of the table, or at the time box — reporting `truncated` in the last
@@ -523,7 +769,7 @@ export class ScanForPatternTool extends BaseMCPTool<
    */
   private async runFullScan(
     context: ToolExecutionContext,
-    regex: RegExp,
+    matches_: (text: string) => boolean,
     filter: Record<string, any> | undefined,
     startOffset: number,
     limit: number,
@@ -558,7 +804,7 @@ export class ScanForPatternTool extends BaseMCPTool<
       let stopped = false;
       for (let i = 0; i < rows.length; i++) {
         scanned++;
-        if (!regex.test(rows[i].text)) continue;
+        if (!matches_(rows[i].text)) continue;
         if (matches.length === limit) {
           // One past the page: resume *at* this row so it is not skipped.
           nextOffset = rowOffset + i;
@@ -584,6 +830,9 @@ export class ScanForPatternTool extends BaseMCPTool<
     const { pattern, whereClauses } = params;
     const limit = Math.max(1, Math.min(params.limit ?? 10, MAX_PAGE_LIMIT));
     const warnings: string[] = [];
+    const mode: 'phrase' | 'keyword' = params.mode === 'keyword' ? 'keyword' : 'phrase';
+    const linePermissive = params.linePermissive !== false;
+    const foldEnabled = params.fold !== false;
 
     // Mutual exclusion + existence in one place; a bad id fails here with
     // INVALID_PARAMS rather than returning an empty page (docs/tasks/12 §4).
@@ -633,6 +882,51 @@ export class ScanForPatternTool extends BaseMCPTool<
       regex = null;
     }
 
+    // ── One pattern-preparation step (docs/tasks/17 + /18) ────────────────
+    // `regex` above stays the *raw* compiled pattern: every strategy decision
+    // below (`safeKeywords`, `hasUncoveredBranch`, branch coverage) reasons
+    // about literals in the pattern the caller wrote, and must never see the
+    // `\s+(?:\d{1,3}\s+)?` this step injects.
+    //
+    // A pattern with no metacharacters is compiled as an escaped literal so it
+    // can be verified at all — that is task #16's whole point.
+    const prepared = preparePattern(pattern, {
+      literal: !looksLikeRegex,
+      linePermissive,
+      fold: foldEnabled,
+    });
+    const matchRegex = prepared.regex;
+    const foldFor = (text: string): string => (foldEnabled ? foldText(text) : text);
+    const matchesPattern = (text: string): boolean =>
+      matchRegex !== null && matchRegex.test(foldFor(text));
+
+    if (prepared.degraded) {
+      warnings.push(
+        'Line-number tolerance and/or text folding could not be applied to this pattern ' +
+        '(the rewritten form did not compile) — matched the pattern exactly as written.',
+      );
+    }
+
+    /**
+     * Whether the rows returned were checked against the pattern.
+     *
+     * `looksLikeRegex` keeps deciding STRATEGY — the dashboard path must not
+     * start linear-scanning — but it no longer decides VERIFICATION. Those are
+     * different questions, and collapsing them is what let a six-word phrase
+     * return twenty citations to passages that did not contain it, under
+     * `warnings: []` (docs/tasks/16).
+     */
+    const verify =
+      matchRegex !== null && (mode === 'phrase' || (looksLikeRegex && !!regex));
+
+    if (mode === 'keyword' && !verify) {
+      warnings.push(
+        'mode: "keyword" — these rows are keyword (BM25) matches and were NOT verified ' +
+        'against the pattern. A row may not contain it. Use the default mode: "phrase" ' +
+        'to have every row checked.',
+      );
+    }
+
     // Extract literal keywords from the pattern for FTS recall
     const keywords = extractKeywordsFromPattern(pattern);
 
@@ -641,7 +935,12 @@ export class ScanForPatternTool extends BaseMCPTool<
     // never be reached by BM25 — that is the recall hole this tool used to
     // report as an empty result set.
     const safe = regex ? safeKeywords(pattern, regex) : keywords;
-    const ftsKeywords = safe.length > 0 ? safe : keywords;
+    // Fold the keywords too, so recall and verification agree on spelling: the
+    // index folds at write time (`asciiFolding: true`), so an unfolded keyword
+    // with a diacritic or a curly apostrophe asks for a token it never wrote.
+    const ftsKeywords = (safe.length > 0 ? safe : keywords).map((k) =>
+      foldEnabled ? foldText(k) : k,
+    );
 
     // ── Full-scan trigger rule ────────────────────────────────────────────
     // (a) the pattern is regex-like and no literal survives as a whole token;
@@ -702,7 +1001,7 @@ export class ScanForPatternTool extends BaseMCPTool<
       );
     }
 
-    if (wantFullScanUpFront && scanSupported && regex) {
+    if (wantFullScanUpFront && scanSupported && matchRegex) {
       if (uncoveredBranch && pattern.includes('|')) {
         warnings.push(
           'At least one alternation branch contributes no keyword the index can match ' +
@@ -722,7 +1021,7 @@ export class ScanForPatternTool extends BaseMCPTool<
         );
       }
       strategy = 'full-scan';
-      const scan = await this.runFullScan(context, regex, filter, cursor?.o ?? 0, limit);
+      const scan = await this.runFullScan(context, matchesPattern, filter, cursor?.o ?? 0, limit);
       matchedResults = scan.matches;
       scanned = scan.scanned;
       truncated = scan.truncated;
@@ -739,7 +1038,7 @@ export class ScanForPatternTool extends BaseMCPTool<
       const wanted = pageOffset + limit;
       // One row past the page on the natural-language path so a next page is
       // detectable; ×5 on the regex path because the post-filter shrinks the set.
-      const fetchLimit = looksLikeRegex && regex ? wanted * 5 : wanted + 1;
+      const fetchLimit = verify ? wanted * 5 : wanted + 1;
 
       // Build search query — use FTS keywords for initial recall
       const searchQuery: SearchQuery = {
@@ -767,22 +1066,22 @@ export class ScanForPatternTool extends BaseMCPTool<
 
       // Post-filter: only apply the regex if the input is actually regex-like
       // AND the regex compiled. For natural-language queries, trust FTS recall.
-      const allMatches = looksLikeRegex && regex
-        ? searchResults.filter((result) => regex!.test(result.text))
+      const allMatches = verify
+        ? searchResults.filter((result) => matchesPattern(result.text))
         : searchResults;
 
       // Whether the pool was truncated decides which kind of zero this is, so
       // it has to be known before any warning is written.
       const poolCapped = searchResults.length >= fetchLimit;
 
-      if (searchResults.length === 0 && regex && zeroCandidateEligible && scanSupported) {
+      if (searchResults.length === 0 && matchRegex && zeroCandidateEligible && scanSupported) {
         // The measured mid-word-fragment case: FTS has no token for it, so the
         // regex never ran. Scan instead of reporting an empty record.
         warnings.push(
           'Keyword recall returned no candidates — ran a full regex scan instead.',
         );
         strategy = 'full-scan';
-        const scan = await this.runFullScan(context, regex, filter, 0, limit);
+        const scan = await this.runFullScan(context, matchesPattern, filter, 0, limit);
         matchedResults = scan.matches;
         scanned = scan.scanned;
         truncated = scan.truncated;
@@ -796,7 +1095,7 @@ export class ScanForPatternTool extends BaseMCPTool<
         const pageFills = matchedResults.length > limit;
         // When the page escalates below, the pool's limits are moot — saying
         // anything about unreached matches there would contradict the scan.
-        const willEscalate = poolCapped && !pageFills && looksLikeRegex && !!regex && scanSupported;
+        const willEscalate = poolCapped && !pageFills && verify && scanSupported;
         // A superset pool that was never truncated: whatever the regex rejected,
         // nothing outside the pool could have satisfied it either.
         const provenAbsence = coveredKeywordSet && !poolCapped && !willEscalate;
@@ -811,7 +1110,7 @@ export class ScanForPatternTool extends BaseMCPTool<
               : `Keyword recall returned no candidates for [${ftsKeywords.join(', ')}]. ` +
                 'This is keyword recall, not an exhaustive scan — absence here is not proof of absence.',
           );
-        } else if (looksLikeRegex && regex && allMatches.length === 0 && !willEscalate) {
+        } else if (verify && allMatches.length === 0 && !willEscalate) {
           // Useful diagnostic: regex post-filter dropped everything despite FTS
           // returning candidates. Without full branch coverage this almost
           // always means the caller passed a natural-language string with one
@@ -830,7 +1129,7 @@ export class ScanForPatternTool extends BaseMCPTool<
           );
         }
 
-        if (willEscalate && regex) {
+        if (willEscalate && matchRegex) {
           // The unsound terminal state: the candidate pool was truncated, yet
           // this page would end the answer with no cursor to follow. A caller
           // obeying the "page to exhaustion" contract would read that as
@@ -847,7 +1146,7 @@ export class ScanForPatternTool extends BaseMCPTool<
             );
           }
           strategy = 'full-scan';
-          const scan = await this.runFullScan(context, regex, filter, 0, limit);
+          const scan = await this.runFullScan(context, matchesPattern, filter, 0, limit);
           matchedResults = scan.matches;
           scanned = scan.scanned;
           truncated = scan.truncated;
@@ -883,6 +1182,21 @@ export class ScanForPatternTool extends BaseMCPTool<
     // Take only the requested page
     const limitedResults = matchedResults.slice(0, limit);
 
+    // An operator asserting a quotation should know the match crossed a printed
+    // line number rather than appearing as contiguous text. Checked on the rows
+    // actually returned — those are the only ones anyone will cite.
+    if (prepared.lineTolerant && prepared.strictRegex && limitedResults.length > 0) {
+      const strict = prepared.strictRegex;
+      const crossed = limitedResults.some((r) => !strict.test(foldFor(r.text)));
+      if (crossed) {
+        warnings.push(
+          'At least one match on this page spans a printed transcript line number: it ' +
+          'matched with line-number tolerance, not as contiguous text. Check the line ' +
+          'break before quoting it. Pass `linePermissive: false` for strict spacing.',
+        );
+      }
+    }
+
     // Per-case citation context (formatter + volume counts + docket number)
     // for every case in scope. `caseIds` gets the same quality `caseId` does;
     // a multi-case page formats each row with its own case's context.
@@ -907,16 +1221,32 @@ export class ScanForPatternTool extends BaseMCPTool<
         // `regex` may be null (natural-language input). In that case we surface
         // the first matching keyword instead so the UI's snippet field still
         // shows something useful.
+        // Folding can change string length, so the match is located in folded
+        // space and then sliced out of the RAW text via the offset map. The
+        // operator must see and cite what the document actually says.
         let matchedText = '';
-        if (regex) {
-          const m = result.text.match(regex);
-          matchedText = m ? m[0] : '';
+        const { text: haystack, map } = foldEnabled
+          ? foldWithMap(result.text)
+          : { text: result.text, map: null as number[] | null };
+        const sliceRaw = (m: RegExpExecArray): string => {
+          const start = map ? map[m.index] : m.index;
+          const end = map ? map[m.index + m[0].length] : m.index + m[0].length;
+          return result.text.slice(start, end);
+        };
+
+        if (matchRegex) {
+          const m = matchRegex.exec(haystack);
+          if (m) matchedText = sliceRaw(m);
         }
+        // Snippet fallback for a row the regex did not match (`mode: 'keyword'`).
+        // It searches the same folded haystack the primary path does, so it
+        // agrees with recall about spelling instead of missing a diacritic.
         if (!matchedText && keywords.length > 0) {
           for (const kw of keywords) {
-            const kwRe = new RegExp(`\\b${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-            const m = result.text.match(kwRe);
-            if (m) { matchedText = m[0]; break; }
+            const folded = foldEnabled ? foldText(kw) : kw;
+            const kwRe = new RegExp(`\\b${folded.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+            const m = kwRe.exec(haystack);
+            if (m) { matchedText = sliceRaw(m); break; }
           }
         }
 
@@ -970,6 +1300,11 @@ export class ScanForPatternTool extends BaseMCPTool<
 
         return {
           text: result.text,
+          // `get_chunk_context` takes a chunkId and its description names this
+          // tool as a source for one. Without this field that entry path does
+          // not exist — found by calling the two tools in sequence, which no
+          // unit test does.
+          chunkId: result.chunkId,
           document: document?.fileName || 'Unknown',
           page: result.metadata.pageNumber,
           match: matchedText,

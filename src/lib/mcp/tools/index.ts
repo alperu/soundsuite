@@ -18,6 +18,7 @@ import { ListCasesTool } from './list-cases';
 import { ListMotionsTool } from './list-motions';
 import { ListPeopleTool } from './list-people';
 import { ResolveReferenceTool } from './resolve-reference';
+import { GetChunkContextTool } from './get-chunk-context';
 import { getResearchTools } from './research-tools';
 import { getPresetTools } from './preset-tools';
 import { getRoutedReportTools } from './routed-report-tools';
@@ -51,6 +52,9 @@ export function getAllTools(): BaseMCPTool[] {
     new ListMotionsTool(),
     new ListPeopleTool(),
     new ResolveReferenceTool(),
+    // Read-only neighbour lookup around a chunk id (docs/tasks/19). No LLM;
+    // both profiles. Never crosses a document boundary.
+    new GetChunkContextTool(),
   ];
 }
 
@@ -74,3 +78,4 @@ export { ListCasesTool } from './list-cases';
 export { ListMotionsTool } from './list-motions';
 export { ListPeopleTool } from './list-people';
 export { ResolveReferenceTool } from './resolve-reference';
+export { GetChunkContextTool } from './get-chunk-context';
