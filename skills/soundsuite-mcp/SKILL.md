@@ -108,6 +108,77 @@ count** — an unqualified "N hits" from a capped pass overstates certainty.
 
 Catastrophic patterns are rejected up front with **`INVALID_REGEX`** (400) before any scan.
 
+`limit` is client-supplied, not a server cap. Results paginate via **`nextCursor`** — pass it back to
+continue.
+
+### Scoping to one case, or a subset
+
+| Parameter | Accepts | Tools |
+|---|---|---|
+| `caseId` | a **string** (one case) | `scan_for_pattern`, `query_case_knowledge`, `research_evidence` |
+| `caseIds` | a **string array** (a subset) | the same three, plus `query_case_graph` (where `caseScope` is an alias) |
+
+Unscoped is the default and spans **every** case — cross-case search needs no parameter at all.
+`caseId` and `caseIds` are mutually exclusive; both together is a 400. A one-element `caseIds`
+normalises to `caseId`, so citations are byte-identical either way (verified on both tools). Under a
+multi-case scope every row is formatted for **its own** case.
+
+Bad input now fails loudly instead of lying:
+
+```
+caseId: ["A","B"]        → 400  caseId must be a string, received array
+caseScope: [...] on scan → 400  unknown parameter: "caseScope" — use "caseIds" on this tool
+caseId: "<typo>"         → 400  case not found: "<id>" — call list_cases for valid caseId values
+patern: "…"              → 400  unknown parameter: "patern". Accepted parameters: …
+```
+
+Unknown-key rejection is on for `scan_for_pattern`, `query_case_knowledge`, `query_case_graph` and
+`research_evidence` — **not** for the ten LLM analysis tools or the discovery tools, where a typo'd
+key is still silently ignored.
+
+**⚠️ Scoping does NOT lift the recall cap.** Measured: unscoped and `caseId: A` returned the same
+capped pool; `caseIds: [A,B]` at `limit: 60` still reported `candidatePool: 61` with a cap warning.
+Scope narrows *which* cases, not *how many candidates the keyword pass considers*.
+
+**Filtering an unscoped scan client-side is not equivalent** — the cap bites before your filter runs,
+so matches from the cases you care about are silently lost. Scope at the source.
+
+### Exhaustive multi-case search
+
+```js
+await ss.exec('list_cases', {});
+const ids = ss.last.cases.map(c => c.caseId);            // or just the subset you want
+let cursor = null; const all = [];
+do {
+  await ss.exec('scan_for_pattern',
+    { pattern: '[Ss]afeguard', limit: 50, caseIds: ids, ...(cursor && { cursor }) });
+  all.push(...(ss.last.results || []));
+  cursor = ss.last.nextCursor;
+} while (cursor);
+```
+
+The `full-scan` path honours `caseIds` too — verified: a non-tokenisable pattern scoped to two cases
+scanned 8,306 chunks and returned rows from exactly those two. Paginating that scope to exhaustion
+took 2 pages / 64 results, ending with no cursor.
+
+**No cursor now means complete, for two reasons that both had to be fixed.** A keyword set the index
+cannot reach escalates to a full scan *before* the query runs, and a capped candidate pool escalates
+*after* it. So a cursor-free page is exhaustive rather than merely finished.
+
+**Read the warning, not just the count.** A zero over a reachable keyword set with an uncapped pool
+now says the absence is **proven, not merely unreached** — that is the wording to quote when you
+assert a phrase is absent. Anything else means recall was bounded.
+
+**⚠️ That guarantee has a precondition.** "Reachable" is judged against `FTS_STOPWORDS`, a
+hand-maintained mirror of the index's stopword set, plus a three-character floor on keywords. A
+stopword missing from that list would be treated as reachable, and the tool would then call a zero
+*proven* when recall never ran. The word is trustworthy for ordinary English; for a filing on which
+a negative finding actually turns, run the de-tokenised control below as well.
+
+**The check worth doing anyway.** If a scan returns zero, re-run it de-tokenised
+(`[Cc]ould not do` → `[Cc]ould [Nn]ot d[o]`). If the two disagree, the zero was never about the
+corpus. That trick caught both defects fixed here.
+
 ## 4. Discovery — ids without prior knowledge
 
 Four tools, all `local`, no LLM, one query each:
@@ -165,6 +236,9 @@ Anything not wrapped: `ss.exec('tool_name', { …params }, { profile: 'local' })
 | `TOOL_NOT_READY` | Local model host down or busy — check `ss.tools('local').notReady`. |
 | `LLM_PARSE_ERROR` | Model returned unparseable prose. **An honest failure — not "nothing found".** |
 | `LLM_SHAPE_ERROR` | Parsed, but every item was malformed. Also a failure, not a negative. |
+| `EMBEDDING_UNAVAILABLE` | The local embedder did not answer — a retrieval failure, not an empty corpus. |
+| `EMBEDDING_DIMENSION_MISMATCH` | Index built with a different embedding model than the one configured. |
+| `EXECUTION_ERROR` | Unexpected server fault. The caller message is generic by design; details stay server-side. |
 | `AUTH_REQUIRED` | Request classified as non-loopback. |
 
 ### Reading LLM-tool results correctly
@@ -218,7 +292,10 @@ caseNumber, caseId, motionId, filingSlug, hits, source` (+ `recordStatus` where 
 **Cite with `citationShort` + `page`, never the bare `documentId`.** `citationShort` falls back to
 the source filename when no formal citation is indexed. Snippets carry a `[Case: … | Filing: …]` prefix.
 
-## 7. What the index cannot tell you
+## 7. Sparse metadata — what it does and does not rule out
+
+A null column means *this field was never stamped*. It does **not** mean the underlying fact is
+unavailable — sometimes, as with speaker attribution below, the fact is in the chunk text.
 
 The draft backfill has run: `recordStatus` is populated — **29 filed / 0 draft / 67 unknown**. So
 `"filed"` is meaningful, but `null`/unknown is the majority and does **not** mean draft.
@@ -226,15 +303,49 @@ The draft backfill has run: `recordStatus` is populated — **29 filed / 0 draft
 `headingPath`, `blockType` and **`speakers` are still sparse or null** — the structure backfill is
 pending.
 
-**Consequence for filings: transcript speaker attribution is not retrievable.** `speakers` is null
-on reporter's-record chunks, chunks can start mid-sentence with no label, and a scoped scan for a
-surname returns nothing from the transcript. The index shows *that a line appears in a reporter's
-record*, not *who said it*. Attribution must come from the page image or an existing citation —
-**say so explicitly rather than implying the index confirmed it.**
+**Speaker attribution IS retrievable — from the chunk text, not from `speakers`.** The column is
+null, but a reporter's record *prints* its speaker labels, so they are in the text:
+
+```
+MR. <SURNAME>: … testimony …  THE COURT: … ruling …
+```
+
+Scan for the label, split each chunk on the label boundary, keep the turns that **begin** with the
+label you want. That is attribution from the transcript itself, not from a filing quoting it.
+Measured: 268 label-bearing chunks → 104 distinct turns for one speaker.
+
+Two real limits. A chunk that opens mid-turn loses its **first** partial turn (every later label in
+that chunk is intact), and speaker labels are not `speakers`-column facts, so state that you derived
+them from the printed text.
+
+Alternation works — scan for every label in one call. `(MR\.|MS\.|THE COURT)` used to return zero
+silently; it now full-scans and returns its hits. If any branch of your pattern reduces to a
+stopword, a fragment, or a literal under three characters, the whole pattern takes the linear path
+automatically and `warnings[]` says so.
 
 **Graph data is thin.** `query_case_graph` is callable, but corpus-wide no motion has a child,
 `amendsId` or `supersedesId`, and no Person is linked to any Motion (`motionCount: 0` across all).
 Callable ≠ productive; expect empty lineage until that data is populated.
+
+## 7a. Which models a call actually uses
+
+The `local` profile is local end to end, and it is enforced rather than merely configured — a call
+carrying `provider: anthropic` returns **403 `POLICY_VIOLATION`**.
+
+| Stage | Engine | Cloud? |
+|---|---|---|
+| `scan_for_pattern` | none — regex / FTS over the index | no model at all |
+| embedding (`query_case_knowledge`, `research_evidence`) | `ollama` / `qwen3-embedding:0.6b` | no |
+| rerank | `vllm` / `Qwen/Qwen3-Reranker-8B` | no |
+| decompose, outline | `ollama` / `qwen3.5:9b` | no |
+
+Check any result's `modelsUsed`; check host config with `GET /api/config?resolve=localModels`.
+
+**Two caveats.** `embeddingProvider` is a config knob — `ollama` today, but an `openai` value would
+route query text to a cloud embedder, and the profile guard covers *completion* provider selection,
+not the embedding path. And `aiFallbackEnabled: true` / `aiFallbackProvider: anthropic` exists for
+the dashboard; on `local` the policy should refuse it first, but that is untested against a mid-call
+Ollama outage.
 
 ## 8. Profiles
 
