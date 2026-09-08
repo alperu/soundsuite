@@ -113,7 +113,8 @@ which condition fired in `warnings[]`.
 | `(unbeknownst|safeguarding)` | `fts+regex` | every branch has a real token — fast path kept |
 
 A plain literal takes the keyword path, which **caps its candidate pool**, while the same word in a
-character class scans all ~36k chunks. Do not assume "simplest pattern = most hits". You no longer
+character class scans every indexed chunk in scope (`corpus_status` says how many that is today).
+Do not assume "simplest pattern = most hits". You no longer
 need to hand-de-tokenise a phrase to force a scan — the coverage rule does it — but doing so is still
 a valid way to force one deliberately, and is the control check below.
 
@@ -121,8 +122,11 @@ a valid way to force one deliberately, and is the control check below.
 
 The result litigation actually needs. **Two shapes count as proof**, and the warning tells you which:
 
-1. **Exhaustive scan.** `strategy: "full-scan"`, `truncated` falsy, no `nextCursor`, `scanned` equal
-   to the corpus (~35,890). Measured: an absent token scanned 35,890 in ~1.8 s.
+1. **Exhaustive scan.** `strategy: "full-scan"`, `truncated` falsy, no `nextCursor`. **Do not check
+   `scanned` against a number memorised from a doc** — the corpus grows, and a frozen constant
+   silently stops matching. The scan now reports its own denominator in `warnings[]`, and
+   `corpus_status` is the live figure. (At the 2026-09-08 measurement an absent token scanned 35,890
+   in ~1.8 s; treat that as a dated observation, not a threshold.)
 2. **Uncapped pass over a fully-covered keyword set.** `strategy: "fts+regex"`, no cap warning, and a
    warning saying the answer is *exhaustive over the index* followed by the denominator it was proven
    from. Every branch was reachable and the pool was never truncated, so the keyword pass saw
@@ -439,7 +443,11 @@ Anything not wrapped: `ss.exec('tool_name', { …params }, { profile: 'local' })
 
 Item-level validation runs on all ten. The contract:
 
-- **empty list = a genuine negative.** Trust it.
+- **empty list = a genuine negative, over the text the tool was given.** It means the model found
+  nothing in the chunks passed to it — *not* that nothing exists in the case. That denominator is the
+  evidence window, which is narrower than the index, which is in turn narrower than the corpus (11.1%
+  of documents at the 2026-09-08 measurement). Trust it as "not in what was read"; do not promote it
+  to "not in the record" without widening the retrieval and checking `corpus_status`.
 - **`LLM_SHAPE_ERROR` = every item was malformed.** Not a negative.
 - **`stats: { itemsDropped, warnings[] }` appears only when something was lost.** Its *absence* is
   the "nothing dropped" signal — check for the key before trusting a count.

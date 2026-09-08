@@ -647,7 +647,9 @@ export class ScanForPatternTool extends BaseMCPTool<
         'case) or `caseIds` (a subset); unscoped spans every case. Scoping selects ' +
         'WHICH cases are searched — it does not raise the candidate pool, so exhaust ' +
         'a scoped search with `nextCursor` exactly as you would an unscoped one. ' +
-        'Absence of `nextCursor` means the answer is complete, and it is complete for ' +
+        'Absence of `nextCursor` means the answer is complete OVER THE INDEX — every ' +
+        'indexed chunk in scope was considered, which is not the same as every document ' +
+        'in the case (call corpus_status for that gap). It is complete for ' +
         'a reason: a pattern with any branch the index cannot match (a fragment, a ' +
         'word under three characters, or a stopword) escalates to a full regex scan ' +
         'BEFORE the keyword query runs, and a candidate pool that came back capped ' +

@@ -164,7 +164,29 @@ is honest, guessing is not.
 | 5 | **Emit `caveats`** carrying the chunk-boundary limitation while [task 21](./21-chunk-overlap-defect.md) is open. This is the machine-readable form of a known-unsound negative, and it should disappear from the payload the day task 21 lands — not linger as stale prose. | ☐ |
 | 6 | **Add a `completenessVersion` integer** (start at `1`). The whole point is that callers stop guessing; a version lets the shape change later without silently breaking them, which is the exact failure being fixed. | ☐ |
 | 7 | **`query_case_knowledge`: decide scope explicitly.** It has no warnings, cursor or truncation signal to project. Either (a) derive a minimal honest object (`method`, `verified: false`, `rerankApplied` from [task 22](./22-rerank-observability.md), `limit`/`returned`), or (b) emit nothing and document that this tool makes no completeness claim. **Do not emit `exhaustive` from a top-k semantic search** — it is never exhaustive, and a field saying so would be the same over-claim in a new place. | ☐ |
+| 7a | **The bare silent zero.** Audit finding 2026-09-08: `query_case_knowledge` returns a zero with **no warning, no cursor and no denominator** — it makes no claim, so it violates no rule, but it is the one place a caller gets nothing attached to an empty result. Decide whether a minimal `completeness` is the fix, or an explicit "this tool makes no completeness claim" marker. | ☐ |
 | 8 | **Update the skill.** `skills/soundsuite-mcp/SKILL.md` documents the string-matching method; replace it with the field, and keep one line explaining the warnings remain for humans. | ☐ |
+
+## A blind spot a structured field does not close
+
+Audit finding, 2026-09-08, recorded because it is invisible to every method used so far.
+
+A sweep of string literals found no other tool making an undenominated corpus-wide absence claim. But
+two surfaces emit absence prose that **no literal sweep can see, because a model writes it at
+runtime**:
+
+- `research_evidence` emits **`gaps`**
+- `routed/run-report.ts` emits **report prose**
+
+A model writing *"no evidence found for section X"* is an undenominated corpus-absence claim by
+construction — and it is the claim most likely to be pasted into something that matters. The static
+surface for both is clean; the generated surface is unaudited and, as things stand, unauditable by
+the technique that found everything else.
+
+This is not solved by `completeness` on a tool response: the field would sit beside prose that
+already over-claims. It needs either a denominator injected into the generation context, or a
+post-generation check. **It deserves its own task**; noted here so it is not lost, and because it is
+the reason a structured field is necessary but not sufficient.
 
 ## Risks
 
