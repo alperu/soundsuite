@@ -70,14 +70,20 @@ cp -r skills/soundsuite-mcp ~/.claude/skills/
 ```
 
 Keep it in step with the live skill — if it is edited in the app, re-copy its `SKILL.md` here; if
-this copy is edited, re-propose it in a session so the saved skill matches. They are byte-identical
-as of this commit.
+this copy is edited, re-propose it in a session so the saved skill matches. **Do not trust a
+"byte-identical as of this commit" note** (one used to live here): such a claim keeps reading as true
+after it stops being so. Compare them: `sha256sum skills/soundsuite-mcp/SKILL.md
+~/.claude/skills/soundsuite-mcp/SKILL.md`.
 
 ## Privacy
 
 Evidence text is real case material. Quote it in conversation; never write it to
-a file, report, or commit message. Never fetch `/api/config` — it returns live
-provider API keys in plaintext.
+a file, report, or commit message.
+
+`/api/config` no longer returns key values — it returns `apiKeys: { <provider>:
+{ configured, last4 } }` and refuses `?key=<row>` with 403. (It did leak plaintext
+keys; that was fixed 2026-09-07.) There is still no reason to fetch it; the one
+useful read is `?resolve=localModels`.
 
 ## History
 

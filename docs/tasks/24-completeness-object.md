@@ -164,8 +164,27 @@ is honest, guessing is not.
 | 5 | **Emit `caveats`** carrying the chunk-boundary limitation while [task 21](./21-chunk-overlap-defect.md) is open. This is the machine-readable form of a known-unsound negative, and it should disappear from the payload the day task 21 lands — not linger as stale prose. | ☐ |
 | 6 | **Add a `completenessVersion` integer** (start at `1`). The whole point is that callers stop guessing; a version lets the shape change later without silently breaking them, which is the exact failure being fixed. | ☐ |
 | 7 | **`query_case_knowledge`: decide scope explicitly.** It has no warnings, cursor or truncation signal to project. Either (a) derive a minimal honest object (`method`, `verified: false`, `rerankApplied` from [task 22](./22-rerank-observability.md), `limit`/`returned`), or (b) emit nothing and document that this tool makes no completeness claim. **Do not emit `exhaustive` from a top-k semantic search** — it is never exhaustive, and a field saying so would be the same over-claim in a new place. | ☐ |
-| 7a | **The bare silent zero.** Audit finding 2026-09-08: `query_case_knowledge` returns a zero with **no warning, no cursor and no denominator** — it makes no claim, so it violates no rule, but it is the one place a caller gets nothing attached to an empty result. Decide whether a minimal `completeness` is the fix, or an explicit "this tool makes no completeness claim" marker. | ☐ |
+| 7a | **The bare silent zero — and the thing that actually happens instead.** Audit finding 2026-09-08: `query_case_knowledge` returns a zero with no warning, cursor or denominator. But a follow-up could **not reproduce an empty result at all** — a deliberately absurd query still returned three passages scoring 0.73. Semantic search essentially never returns empty, so the empty case is rarer than it looks and **the real failure mode is worse**: a confident, irrelevant, non-empty result with nothing attached either. Design for that case, not the empty one. A relevance floor, or a `completeness` that reports what the scores actually were, beats a marker for a branch that rarely fires. | ☐ |
 | 8 | **Update the skill.** `skills/soundsuite-mcp/SKILL.md` documents the string-matching method; replace it with the field, and keep one line explaining the warnings remain for humans. | ☐ |
+
+## The asymmetry that argues for this task most directly
+
+Verified live 2026-09-08, after [task 33](./33-full-scan-denominator-gap.md) landed:
+
+| Full-scan answer | Where the completeness statement lives |
+|---|---|
+| **Zero results** | a **per-call** warning naming the scoped denominator |
+| **Non-zero results** (e.g. 29 rows, no cursor, `scanned: 35890`) | only the **tool description**, read once per session |
+
+`noteFullScanAbsence` deliberately skips the non-zero case, and that is correct — a non-zero result is
+not an absence claim, so it should not carry an absence sentence. The description was amended to say
+"complete OVER THE INDEX" so the contract covers both.
+
+**But a caller that inspects `warnings[]` — which is what the skill teaches, and what callers actually
+do — sees a denominator on one branch and silence on the other.** The honesty of an answer should not
+depend on which branch produced it, and a caller should not have to remember a sentence from a
+description to interpret a payload. A `completeness` object is emitted on every answer regardless of
+branch, which is the whole point: it makes the guarantee structural rather than editorial.
 
 ## A blind spot a structured field does not close
 
