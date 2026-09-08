@@ -21,6 +21,27 @@ success · References. Nothing here is implemented — these are proposals for r
 | [06](./06-mcp-two-profiles.md) | MCP two profiles: `local` evidence engine + `routed` LLM router | L | High | Split the MCP surface into a fail-closed local-only evidence engine and a preset-driven cloud router, with async research/report jobs, PresetV2, provenance logging, and a profile-aware bridge. **Implemented 2026-09-03.** |
 | [14](./14-alternation-recall-and-speaker-attribution.md) | `scan_for_pattern` alternation recall, honest exhaustion, speaker attribution | M | High | An alternation of transcript boilerplate returns zero (short branches dropped → lone stopword survivor → `\|` barred from full-scan rescue); a cursor-free final page can still carry a cap warning, so no negative finding is defensible; and speaker attribution is retrievable from chunk text despite a null `speakers` column. |
 | [15](./15-branch-coverage-generalisation.md) | Generalise branch coverage beyond alternations | S | Critical | Task 14 applied its own rule only where a `\|` was present, so `[Cc]ould not do` (keywords reduce to the stopword `not`) still returns a cursor-free zero while the same phrase de-tokenised finds a real hit. Also corrects task 14's overstated completeness guarantee: escalation was gated on a *capped* pool, and an empty pool is never capped. |
+| [22](./22-rerank-observability.md) | Rerank is unobservable, unverifiable, and skipped for RLM evidence | S+M | P0 | The cross-encoder *does* run, but `rerankScore` equals `score` by construction (the first-stage score is overwritten in place, then boosted), the flag gating it is a pool size read *before* the call, there is no `rerank` phase, and RLM-round evidence bypasses rerank entirely. |
+| [23](./23-corpus-status-and-denominators.md) | `corpus_status()` and naming the denominator | S | P0 | **Implemented 2026-09-08 (items 1–4, 7).** Measured: 864 documents, 96 indexed (11.1%), 768 never ingested; per-case coverage 2.3%–44.4%. Items 5–6 (wiring the denominator into scan prose) remain open. |
+| [24](./24-completeness-object.md) | Machine-readable `completeness`, instead of warning prose | S+M | P0 | Callers regex-match English to decide exhaustiveness. `scan_for_pattern` already computes every fact (5 vars need hoisting); `query_case_knowledge` computes none. `exhaustiveOverIndex` + `corpusCoverage` — two claims, two fields, no threshold. |
+| [25](./25-rlm-notes-live-trace.md) | `rlmNotes` is empty during the run, not on the result | XS+S | P1 | v12 had it backwards: the result carries the notes; `research_status` is empty for the whole run because they are replayed after the await. Report jobs never call `rlmNote` at all. |
+| [26](./26-batched-chunk-context.md) | Batched `get_chunk_context({ chunkIds })` | M | P1 | 4–6 store probes per call, not 3; no liftable function exists, so batching needs an extraction refactor first. Build the batched form first, single-target as a thin caller. |
+| [27](./27-subquery-grounding-gate.md) | Ground sub-queries before deep retrieval | S | P1 | ~50 s of a 140 s job spent retrieving invented subjects. A gate at `gather-evidence.ts:427` reuses fuse+rerank signals already paid for — no extra retrieval. |
+| [28](./28-server-side-speaker-attribution.md) | Server-side `speaker` + `speakerBasis` | M | P1 | Turns task 14's five-call caller-side ritual into a field. `speakerBasis` distinguishes a text-derived guess from a structurally-backfilled fact. |
+| [29](./29-progress-notifications.md) | Progress notifications — extend the bridge that exists | S–M | P2 | v12's premise was wrong: `notifications/progress` is already implemented in `scripts/mcp-bridge/bridge.mjs` with `seq` resumption. What is missing is the cursor on events and three silent mutations. |
+| [30](./30-mcp-parity-and-fleet-visibility.md) | Parameter parity + read-only fleet tools | S | P2 | `searchMode`/`recordStatus` exist only on `query_case_knowledge`. `multiPass` is a *synthesis* switch, not retrieval — v12's inference corrected. No MCP surface for the fleet. |
+| [31](./31-result-size-economy.md) | `fields` projection and count-only summary | S | P2 | The 60 KB cap is a **client** display limit, not a server ceiling — the docs say otherwise and should be corrected first. Pagination cost is the real justification. |
+| [32](./32-draft-semantics-reconciliation.md) | Two meanings of "draft" in one payload | XS–S | P2 | `Draft: Motion` beside `containsDraft: false`. Trace both derivations before renaming — a clearer name on a wrong value is worse than a confusing name on a right one. |
+
+## Tasks 22–32 — provenance
+
+Tasks 22–32 derive from [`../MCP-Improvements/REPORT-v12-mcp-surface-for-fast-correct-answers.md`](../MCP-Improvements/REPORT-v12-mcp-surface-for-fast-correct-answers.md),
+which was written from the caller's side without reading the source. Four of its premises were then
+found wrong (`rlmNotes` inverted, `notifications/progress` already implemented, the 60 KB cap on the
+client side, `rerankPoolSize` never reaching a response). **Task 23 was built and verified end to end;
+22, 24 and 25 are written against source read during the same session; 26–32 are marked
+*diagnosed, not verified* in their own headers** — treat their designs as proposals whose premises
+still need reproducing, not as settled specifications.
 
 ## On "are we already doing GraphRAG?"
 

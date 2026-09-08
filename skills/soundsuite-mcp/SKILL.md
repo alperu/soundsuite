@@ -5,7 +5,7 @@ description: "Query the Sound Suite / court-lens-mcp case-document engine from a
 
 # Querying Sound Suite
 
-Sound Suite (`court-lens-mcp`) indexes court PDFs and exposes 24 tools in the `local` profile.
+Sound Suite (`court-lens-mcp`) indexes court PDFs and exposes 25 tools in the `local` profile.
 This skill is how to reach it from a cloud session.
 
 ## 1. Transport — read first, it is not obvious
@@ -60,6 +60,41 @@ Recall is **self-reporting**. Every scan result carries:
   "warnings": [] }
 ```
 
+### Four parameters that changed the defaults (2026-09-08)
+
+```jsonc
+{ pattern: "…",
+  mode: "phrase" | "keyword",   // default "phrase" — rows are VERIFIED against the pattern
+  linePermissive: true,          // default true  — a phrase may match across a printed line number
+  fold: true,                    // default true  — quotes, dashes and diacritics folded before comparing
+  limit, caseId, caseIds, cursor, whereClauses }
+```
+
+**Rows are now verified by default.** A plain multi-word phrase used to return unverified BM25 rows —
+20 rows, none containing the phrase, `warnings: []`. It now post-filters on every path. Measured: the
+same query returns **1 verified row**. Set `mode: "keyword"` to get the old behaviour back, and it
+then says so loudly (*"these rows are keyword (BM25) matches and were NOT verified"*).
+
+**A phrase may match across a transcript line number.** Reporter's records store line numbers inline,
+so a phrase spanning a line break has a digit inside it. That used to be unfindable. Now a plain
+pattern matches and the `match` field shows what it crossed:
+
+```
+match: "agree with how you\n10  structured"
+warning: "At least one match on this page spans a printed transcript line number…"
+```
+
+Set `linePermissive: false` for a strict, contiguous-text match (verified: same query → 0).
+
+**Glyphs are folded.** A curly apostrophe now finds the straight-apostrophe corpus form, and a name
+spelled without diacritics finds the spelling with them. **`text` and `match` come back raw**, never
+folded, so you cite what the document says. Set `fold: false` to hunt an exact glyph (verified:
+curly-apostrophe form → 1 with folding, 0 with `fold: false`).
+
+**Consequence for the digest pattern below and for §3a:** you no longer need to de-tokenise a phrase
+by hand to make it work. That trick is still valid as a deliberate control (see *Proving a phrase is
+absent*), but it is no longer the price of entry.
+
 ### The coverage rule — why the regex form is often the *more* complete one
 
 The tool checks whether every literal in your pattern is a keyword the index can actually reach. A
@@ -89,8 +124,20 @@ The result litigation actually needs. **Two shapes count as proof**, and the war
 1. **Exhaustive scan.** `strategy: "full-scan"`, `truncated` falsy, no `nextCursor`, `scanned` equal
    to the corpus (~35,890). Measured: an absent token scanned 35,890 in ~1.8 s.
 2. **Uncapped pass over a fully-covered keyword set.** `strategy: "fts+regex"`, no cap warning, and a
-   warning ending *"the absence is proven, not merely unreached."* Every branch was reachable and the
-   pool was never truncated, so the keyword pass saw everything the regex could match.
+   warning saying the answer is *exhaustive over the index* followed by the denominator it was proven
+   from. Every branch was reachable and the pool was never truncated, so the keyword pass saw
+   everything the regex could match.
+
+**Both shapes prove absence from the INDEX, and the warning now says so with numbers.** Since
+2026-09-08 the sentence always carries its subject — e.g. *"proven absent from the 380 indexed chunks
+of this case, spanning 6 of 258 documents (2.3% indexed)"*. The bare form *"the absence is proven"* is
+gone; if you see it, you are reading a stale transcript.
+
+**Read the denominator before relying on a negative.** Coverage is currently partial and varies
+sharply per case — measured 2026-09-08: 96 of 864 documents corpus-wide (11.1%), ranging from 44.4%
+down to 2.3% per case. An absence is proven *of the corpus* only at complete coverage. The clause is
+scoped to what you searched, so a `caseId` scan quotes that case's numbers, not the corpus average.
+Call **`corpus_status`** for the full picture (per-case coverage, chunk counts, last ingest run).
 
 **Never read "proven" together with `truncated: true`.** A full scan is bounded by a time box; cut
 short, it sets `truncated` and emits a cursor. Loud rather than silent — but a proven absence is only
@@ -147,6 +194,9 @@ Two things that still cost round trips if you do not know them:
   `ss.item(n)` per hit to find the phrase — centre it yourself (above). Rows also carry `match`.
 - **The corpus duplicates itself.** Clerk's records contain transcribed copies of the reporter's
   record, so one statement can appear 4×. Dedupe before you count.
+
+Scan rows carry `chunkId`, `match`, `blockType` and `headingPath` alongside the citation fields.
+`chunkId` is what you feed to `get_chunk_context` (§3b).
 
 `limit` is client-supplied, not a server cap. Results paginate via **`nextCursor`** — pass it back to
 continue.
@@ -250,9 +300,52 @@ RESPONDENT WITNESSES        DIRECT  CROSS  VOL.
 counsel line addressing the witness by name.
 
 **Limits to state when you report.** A chunk that opens mid-turn loses its *first* partial turn
-(every later label in it is intact), and these are labels printed in the text, not `speakers`-column
-facts. **Give the basis** — "witness index p. 3 puts <Name> on the stand pp. 42–116; this is an `A`
+(every later label in it is intact) — **recover it with `get_chunk_context` (§3b)** on that chunk's
+`chunkId`, which is what the preceding chunk's trailing label is for. These are labels printed in the
+text, not `speakers`-column facts. **Give the basis** — "witness index p. 3 puts <Name> on the stand pp. 42–116; this is an `A`
 line on p. 110" — never a bare "X said Y".
+
+## 3b. Widen a hit — `get_chunk_context`
+
+Chunks are small (median ~130 chars) and **98.7% of consecutive pairs share no overlap**, so a
+quotation routinely runs off the edge of the chunk you found. This tool is how you see across that
+edge without a page image.
+
+```js
+await ss.exec('scan_for_pattern', { pattern: '…', limit: 5 });
+const id = ss.last.results[0].chunkId;             // scan rows carry chunkId
+await ss.exec('get_chunk_context', { chunkId: id, before: 2, after: 2 });
+```
+
+Returns `chunks[]` in document order — each with `chunkId`, `text`, `page`, `chunkIndex`,
+`isTarget`, `position`, `isExhibit` and full citation fields — plus a response-level envelope worth
+reading rather than ignoring:
+
+| Field | Meaning |
+|---|---|
+| `atDocumentStart` / `atDocumentEnd` | the target really is the first/last chunk — from its own probe |
+| `returnedBefore` / `returnedAfter` vs `requested*` | how many you actually got |
+| `contiguous` | the returned indices run without a gap |
+| `orderingAmbiguous` | two rows share a `chunkIndex`; order was tiebroken, not resolved |
+| `containsDraft` | some chunk in the window is draft — **do not merge the window into one quotation** |
+| `notes[]` | clamping, bounded search, and edge explanations in words |
+
+**Getting fewer chunks than you asked for does not mean you hit the document edge.** Index gaps
+exist, so the tool probes for the edge separately. Measured: a window returned 1 of 2 preceding
+chunks with `atDocumentStart: false` and the note *"the search for neighbours was bounded and did not
+reach as far as requested"*. Trust the flags, not the array length.
+
+`before`/`after` are clamped to 3 each and the clamp is stated in `notes` (`before was clamped from
+99 to 3`). Neighbours never cross a document boundary, and each carries its own draft marker rather
+than inheriting the target's.
+
+**Two limits to state when you rely on it.** Rows sharing the target's exact `chunkIndex` are never
+returned — the tool reports the collision instead of choosing — and stale-generation detection is
+local to the target's own index, so a damaged document with a unique-index target is not flagged.
+Both matter only on the handful of partially-reindexed documents.
+
+`scan_for_pattern` has **no** `context` parameter — padding hits is a separate, unbuilt item. Call
+this tool per hit, and remember that N hits means N calls.
 
 ## 4. Discovery — ids without prior knowledge
 
@@ -296,6 +389,7 @@ Anything not wrapped: `ss.exec('tool_name', { …params }, { profile: 'local' })
 | **Where was this phrase said** | **`ss.scan` + digest (§3), ~1s. Never a research tier.** |
 | Passages on a topic | `ss.ask` (`query_case_knowledge`) |
 | Which case / motion / person is this | `resolve_reference`, `list_*` (§4) |
+| What comes before/after this hit | `get_chunk_context` (§3b) |
 | Amendment lineage, motions by person | `query_case_graph` — callable; seed from an evidence `motionId` |
 | Multi-part / comparative | `ss.research` |
 | Saved workflows and templates | `search_workflows` |
@@ -395,8 +489,8 @@ Measured: 268 label-bearing chunks → 104 distinct turns for one speaker. **Ful
 including how to name the witness behind an unlabelled `Q`/`A` block.
 
 Two real limits. A chunk that opens mid-turn loses its **first** partial turn (every later label in
-that chunk is intact), and speaker labels are not `speakers`-column facts, so state that you derived
-them from the printed text.
+that chunk is intact) — `get_chunk_context` (§3b) recovers it — and speaker labels are not
+`speakers`-column facts, so state that you derived them from the printed text.
 
 **Graph data is thin.** `query_case_graph` is callable, but corpus-wide no motion has a child,
 `amendsId` or `supersedesId`, and no Person is linked to any Motion (`motionCount: 0` across all).
@@ -426,7 +520,7 @@ Ollama outage.
 
 | Profile | Tools | LLM |
 |---|---|---|
-| **`local`** (default) | 24 | Sidecar/Ollama only; cloud refused with `POLICY_VIOLATION` |
+| **`local`** (default) | 25 | Sidecar/Ollama only; cloud refused with `POLICY_VIOLATION` |
 | **`routed`** | 36 | Whatever the active preset picks, including cloud |
 | `all` | — | Listing only; not a policy |
 

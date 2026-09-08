@@ -9,6 +9,7 @@ import type { CitationInput } from '../../citations/citation-formatter';
 import { detectLineNumbers } from '../../citations/line-number-detector';
 import { attachMotionIds } from '../motion-resolution';
 import { resolveCaseScope, caseScopeFilter, caseScopeIds, type CaseScope } from '../case-scope';
+import { getCorpusDenominator, provenAbsenceClause } from '../corpus-denominator';
 import { buildCaseCitationContexts, defaultCitationContext, type CaseCitationContext } from '../case-citation-context';
 
 /** How a page of results was produced. Always present on the result. */
@@ -650,9 +651,13 @@ export class ScanForPatternTool extends BaseMCPTool<
         'a reason: a pattern with any branch the index cannot match (a fragment, a ' +
         'word under three characters, or a stopword) escalates to a full regex scan ' +
         'BEFORE the keyword query runs, and a candidate pool that came back capped ' +
-        'escalates after it. A zero over a fully covered, uncapped keyword pass is a ' +
-        'proven absence, and `warnings[]` says so in those words — it reads ' +
-        'differently from a bounded answer, which always says what bounded it. ' +
+        'escalates after it. A zero over a fully covered, uncapped keyword pass is an ' +
+        'absence proven OVER THE INDEX, and `warnings[]` names the denominator it was ' +
+        'proven from — the indexed chunks, and how many of the scope\'s documents are ' +
+        'indexed at all. Read that denominator before relying on a negative: an absence ' +
+        'is proven of the corpus only at complete coverage, and coverage is currently ' +
+        'partial and varies sharply per case (call corpus_status). A bounded answer ' +
+        'always says what bounded it instead. ' +
         'Every returned row is VERIFIED to contain the pattern (mode: "phrase", the ' +
         'default) — a bag-of-words hit is never presented as a match. A literal space ' +
         'matches across a printed transcript line number, and curly quotes, dashes and ' +
@@ -1101,12 +1106,18 @@ export class ScanForPatternTool extends BaseMCPTool<
         const provenAbsence = coveredKeywordSet && !poolCapped && !willEscalate;
 
         if (searchResults.length === 0) {
+          // The denominator is read only when a proven claim is about to be
+          // made, and only then — it costs a grouped count plus one vector
+          // count, cached for the paging window.
+          const clause = provenAbsence
+            ? provenAbsenceClause(await getCorpusDenominator(context, scopeIds))
+            : '';
           warnings.push(
             provenAbsence
               ? `Keyword recall returned no candidates for [${ftsKeywords.join(', ')}]. ` +
                 'Every branch of this pattern contributes a keyword the index can match and ' +
-                'the candidate pool was not capped, so this answer is exhaustive: the ' +
-                'absence is proven, not merely unreached.'
+                'the candidate pool was not capped, so this answer is exhaustive over the ' +
+                `index: ${clause}.`
               : `Keyword recall returned no candidates for [${ftsKeywords.join(', ')}]. ` +
                 'This is keyword recall, not an exhaustive scan — absence here is not proof of absence.',
           );
@@ -1119,11 +1130,14 @@ export class ScanForPatternTool extends BaseMCPTool<
             pattern: pattern.slice(0, 120),
             ftsCandidates: searchResults.length,
           });
+          const clause = provenAbsence
+            ? provenAbsenceClause(await getCorpusDenominator(context, scopeIds))
+            : '';
           warnings.push(
             provenAbsence
               ? `Keyword recall returned ${searchResults.length} candidates over a keyword set ` +
                 'the index fully covers, and none matched the regex. The pool was not capped, ' +
-                'so this answer is exhaustive: the absence is proven, not merely unreached.'
+                `so this answer is exhaustive over the index: ${clause}.`
               : `Keyword recall returned ${searchResults.length} candidates but none matched the ` +
                 'regex. Matches elsewhere in the corpus would not be reached by this strategy.',
           );
@@ -1137,7 +1151,7 @@ export class ScanForPatternTool extends BaseMCPTool<
           warnings.push(
             `Keyword recall was capped at ${fetchLimit} candidates and this page would ` +
             'have ended the answer — escalated to a full regex scan so the result is ' +
-            'exhaustive.',
+            'exhaustive over the index.',
           );
           if (cursor) {
             warnings.push(

@@ -15,6 +15,7 @@ import { DetectPrivilegeTool } from './detect-privilege';
 import { AnalyzeToneTool } from './analyze-tone';
 import { SearchWorkflowsTool } from './search-workflows';
 import { ListCasesTool } from './list-cases';
+import { CorpusStatusTool } from './corpus-status';
 import { ListMotionsTool } from './list-motions';
 import { ListPeopleTool } from './list-people';
 import { ResolveReferenceTool } from './resolve-reference';
@@ -49,6 +50,9 @@ export function getAllTools(): BaseMCPTool[] {
     // Discovery tools — hand out the ids every scoped tool requires
     // (docs/tasks/10-mcp-discovery-tools.md). No LLM; both profiles.
     new ListCasesTool(),
+    // corpus_status — the denominator under every proven-absence claim
+    // (docs/tasks/23-corpus-status-and-denominators.md). No LLM; both profiles.
+    new CorpusStatusTool(),
     new ListMotionsTool(),
     new ListPeopleTool(),
     new ResolveReferenceTool(),
@@ -75,6 +79,7 @@ export { DetectPrivilegeTool } from './detect-privilege';
 export { AnalyzeToneTool } from './analyze-tone';
 export { SearchWorkflowsTool } from './search-workflows';
 export { ListCasesTool } from './list-cases';
+export { CorpusStatusTool } from './corpus-status';
 export { ListMotionsTool } from './list-motions';
 export { ListPeopleTool } from './list-people';
 export { ResolveReferenceTool } from './resolve-reference';
