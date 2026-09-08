@@ -246,7 +246,11 @@ describe('scan_for_pattern — a capped pool never ends an answer', () => {
     const res: any = await run(tool, h, { pattern: PATTERN, limit: 2 });
 
     expect(res.strategy).toBe('full-scan');
-    expect(res.warnings.join(' ')).toMatch(/escalated to a full regex scan/i);
+    // Tense-tolerant: the warning is pushed BEFORE the scan runs, so it reads
+    // "escalating" rather than "escalated" (task 33 — it must not pre-declare
+    // an outcome it cannot yet know). The claim under test is that it escalated
+    // at all, which `strategy` and `scanTextColumn` below also witness.
+    expect(res.warnings.join(' ')).toMatch(/escalat(ed|ing) to a full regex scan/i);
     expect(h.scanTextColumn).toHaveBeenCalled();
   });
 

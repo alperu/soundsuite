@@ -128,10 +128,34 @@ The result litigation actually needs. **Two shapes count as proof**, and the war
    from. Every branch was reachable and the pool was never truncated, so the keyword pass saw
    everything the regex could match.
 
-**Both shapes prove absence from the INDEX, and the warning now says so with numbers.** Since
-2026-09-08 the sentence always carries its subject — e.g. *"proven absent from the 380 indexed chunks
-of this case, spanning 6 of 258 documents (2.3% indexed)"*. The bare form *"the absence is proven"* is
-gone; if you see it, you are reading a stale transcript.
+**Both shapes prove absence from the INDEX, not the corpus.** Since 2026-09-08 the claim carries its
+subject — e.g. *"proven absent from the 380 indexed chunks of this case, spanning 6 of 258 documents
+(2.3% indexed)"*. The bare form *"the absence is proven"* is gone; if you see it, you are reading a
+stale transcript.
+
+**Both shapes carry the denominator as of 2026-09-08.** An earlier note here said only shape 2 did —
+that gap is closed. All three `full-scan` paths (coverage rule, capped-page escalation,
+zero-candidate fallback) now add a second warning naming what was read and what that covers:
+
+```
+The scan read all 380 chunks in scope to the end of the table and matched nothing:
+proven absent from the 380 indexed chunks of this case, spanning 6 of 258 documents (2.3% indexed).
+```
+
+The `scanned` count is quoted **alongside** the denominator, not instead of it — if the two disagree,
+the scan and the vector store disagree about the corpus, and you want to see that. Measured
+2026-09-08 they agree exactly, at both corpus (35,890) and case (380) scope.
+
+**A full-scan zero stays silent in three cases, deliberately** — no claim is better than a wrong one:
+
+| Situation | Why no claim |
+|---|---|
+| `truncated: true` | the time box cut the scan short |
+| `nextCursor` present | rows remain unscanned |
+| you passed a `cursor` | this is one page of a longer answer; earlier pages may have matched |
+
+So the presence of the claim is itself the signal. If you get a `full-scan` zero **without** it, check
+`truncated` and `nextCursor` before treating the answer as complete.
 
 **Read the denominator before relying on a negative.** Coverage is currently partial and varies
 sharply per case — measured 2026-09-08: 96 of 864 documents corpus-wide (11.1%), ranging from 44.4%

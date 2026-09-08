@@ -212,6 +212,65 @@ at 44.4% coverage. They now cannot.
 shape omitted the phrase "indexed chunks of"; the correct requirement is that no chunk *number* is
 invented. Fixed the assertion.
 
+### The gap this left, found on re-verification, and closed
+
+Items 5–6 were verified live and passed — **on one of the two proof shapes.** `scan_for_pattern`
+teaches two shapes that count as proof, and the denominator attached only to the second:
+
+| Zero-result path | Warning, before | Denominator |
+|---|---|---|
+| Coverage rule → full scan | *"…ran a full regex scan instead."* | none |
+| Capped-page escalation → full scan | *"…so the result is exhaustive over the index."* | none |
+| Zero-candidate fallback → full scan | *"Keyword recall returned no candidates — ran a full regex scan instead."* | none |
+| Uncapped `fts+regex` | *"…proven absent from the N indexed chunks…"* | ✅ |
+
+**The inversion was the defect.** Shape 1 is the one the skill teaches first, the one that reads every
+chunk in scope, and the one that sounds strongest — and it was the one carrying no numbers. The
+escalation path was the sharpest case: *"exhaustive over the index"* is accurate, and is exactly the
+phrasing that invites a corpus-wide reading when no denominator sits beside it. The same pattern this
+series keeps finding, one layer along: **the more confident statement was the less qualified one.**
+
+Closed as [task 33](../tasks/33-full-scan-denominator-gap.md) — a helper calling the existing
+`provenAbsenceClause()` at all three `runFullScan` sites. All four paths now agree:
+
+```
+The scan read all 380 chunks in scope to the end of the table and matched nothing:
+proven absent from the 380 indexed chunks of this case, spanning 6 of 258 documents (2.3% indexed).
+```
+
+**`scanned` is quoted alongside the denominator, not instead of it** — a divergence between chunks
+actually read and the vector store's count would mean the two stores disagree about the corpus, and
+that is only visible if both numbers appear. Measured 2026-09-08 they agree exactly: **35,890 =
+35,890** corpus-wide and **380 = 380** scoped, which is an independent cross-check of both figures.
+
+The claim stays silent on a truncated scan, a scan with rows remaining, a paged call, and a scan that
+found matches. **Its presence is therefore itself a signal**: a `full-scan` zero *without* it means
+`truncated` or `nextCursor` needs checking.
+
+**A fourth site turned up on audit, after the three-site fix, and it was the worst of them.** The
+capped-page escalation warning asserted *"so the result is exhaustive over the index"* — and it is
+pushed **before** `runFullScan` is called. It declared its own outcome before the outcome existed,
+and `noteFullScanAbsence` could not rescue it, because that helper deliberately bails on exactly the
+conditions under which the pre-declaration is false. Two contradictions were reachable from code
+already in the file: a **truncated escalation** put *"exhaustive over the index"* and *"Results are
+partial — follow `nextCursor`"* in the same `warnings[]`, and an **escalation on a later page** left
+the bare claim standing alone.
+
+The rule that fixes it generalises beyond this one string: **a warning issued before an outcome must
+describe the action, not the result.** It now reads *"escalating to a full regex scan, which is not
+bounded by that cap. What it covered is reported below."* Two sentences, two jobs, neither claiming
+the other's ground. Guarded by a source-level test (with `' +` continuations collapsed, so a claim
+cannot hide across a line break) and a behavioural one.
+
+That the gap survived a live four-path verification and was caught only by a separate audit is worth
+recording: **testing the paths I had just fixed could not find the path I had not thought to fix.**
+
+One finding from writing the tests: `runFullScan` sets `nextOffset` only on meeting a
+(limit+1)-th match, so a resumed page always opens *on* a matching row and cannot normally be empty.
+The `!cursor` guard is therefore **defensive rather than load-bearing** on today's paths — reachable
+only if the corpus changes between pages. It is kept and tested by simulating exactly that, because
+partial reindex is a known live behaviour ([task 21](../tasks/21-chunk-overlap-defect.md) item 5).
+
 ### What is still not built
 
 Nothing yet emits a **machine-readable** denominator. A caller who wants to branch on coverage must
@@ -401,7 +460,10 @@ v12 §6, re-ordered against what is now known.
 
 1. **Task 24** — the machine-readable `completeness` object, consuming `corpus-denominator.ts`. The
    prose is now honest; callers still have to read English to learn it. Five variables need hoisting
-   first (§6).
+   first (§6). **The task 33 gap is the argument for it:** a caller should not have to know *which of
+   four warning strings it got* to learn whether an answer was exhaustive and over what denominator.
+   A machine gating on a structured field would have been indifferent to which prose branch fired,
+   and the gap could not have been introduced in the first place.
 2. **Task 22 item 1** — preserve the first-stage score. One line, and every other rerank
    question is unanswerable without it.
 3. **Task 22 item 7** — reproduce the 5-candidate pool. If the cross-encoder is routinely handed 5

@@ -997,6 +997,40 @@ export class ScanForPatternTool extends BaseMCPTool<
     let truncated = false;
     let nextCursor: string | undefined;
 
+    /**
+     * A full scan that reached the end of the table with no match is the
+     * strongest proof this tool can produce — and it was the one carrying no
+     * numbers. The uncapped `fts+regex` branch named its denominator while all
+     * three full-scan paths said only "ran a full regex scan instead" or
+     * "exhaustive over the index", so the more confident statement was the less
+     * qualified one. See task 33.
+     *
+     * All four conditions are load-bearing. `!cursor` in particular: on a later
+     * page, earlier pages may have returned matches, so a zero here is not an
+     * absence for the query. Dropping it would emit a confident absence claim
+     * for a phrase the tool had already found.
+     */
+    const noteFullScanAbsence = async (scan: {
+      matches: unknown[];
+      scanned: number;
+      truncated: boolean;
+      nextOffset: number | null;
+    }): Promise<void> => {
+      if (cursor) return; //             a page, not the whole answer
+      if (scan.matches.length !== 0) return; // not an absence
+      if (scan.truncated) return; //     time box / SCAN_MAX_ROWS cut it short
+      if (scan.nextOffset !== null) return; // rows remain unscanned
+
+      const clause = provenAbsenceClause(await getCorpusDenominator(context, scopeIds));
+      // `scanned` is quoted alongside the denominator rather than instead of
+      // it: a divergence between chunks actually read and the vector store's
+      // count is itself a finding, and only visible if both numbers are shown.
+      warnings.push(
+        `The scan read all ${scan.scanned.toLocaleString('en-US')} chunks in scope to the ` +
+        `end of the table and matched nothing: ${clause}.`,
+      );
+    };
+
     const wantFullScanUpFront = cursor?.s === 'full-scan' || noWholeTokenKeyword;
 
     if (wantFullScanUpFront && !scanSupported) {
@@ -1033,6 +1067,7 @@ export class ScanForPatternTool extends BaseMCPTool<
       if (scan.nextOffset !== null) {
         nextCursor = encodeCursor({ s: 'full-scan', o: scan.nextOffset, p: cursorKey(pattern, scope) });
       }
+      await noteFullScanAbsence(scan);
     } else {
       // ── FTS recall + regex post-filter (unchanged path) ─────────────────
       const pageOffset = cursor?.o ?? 0;
@@ -1094,6 +1129,7 @@ export class ScanForPatternTool extends BaseMCPTool<
         if (scan.nextOffset !== null) {
           nextCursor = encodeCursor({ s: 'full-scan', o: scan.nextOffset, p: cursorKey(pattern, scope) });
         }
+        await noteFullScanAbsence(scan);
       } else {
         matchedResults = allMatches.slice(pageOffset);
 
@@ -1149,9 +1185,17 @@ export class ScanForPatternTool extends BaseMCPTool<
           // obeying the "page to exhaustion" contract would read that as
           // complete. Finish the job with a strategy that can actually finish.
           warnings.push(
+            // States the ACTION, not the outcome. This warning is pushed before
+            // `runFullScan` below, so it cannot know what the scan covered. It
+            // previously read "so the result is exhaustive over the index" —
+            // a completeness claim asserted before the fact, and reachably
+            // false: a truncated escalation put that sentence in the same
+            // `warnings[]` as "Results are partial — follow `nextCursor`".
+            // What the scan actually proved is stated afterwards, by
+            // `noteFullScanAbsence` or by the truncation/cap warnings.
             `Keyword recall was capped at ${fetchLimit} candidates and this page would ` +
-            'have ended the answer — escalated to a full regex scan so the result is ' +
-            'exhaustive over the index.',
+            'have ended the answer — escalating to a full regex scan, which is not ' +
+            'bounded by that cap. What it covered is reported below.',
           );
           if (cursor) {
             warnings.push(
@@ -1165,6 +1209,7 @@ export class ScanForPatternTool extends BaseMCPTool<
           scanned = scan.scanned;
           truncated = scan.truncated;
           candidatePool = searchResults.length;
+          await noteFullScanAbsence(scan);
           if (scan.nextOffset !== null) {
             nextCursor = encodeCursor({ s: 'full-scan', o: scan.nextOffset, p: cursorKey(pattern, scope) });
           }
