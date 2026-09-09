@@ -127,8 +127,26 @@ The swallow is pre-existing and unconditional; threading `searchMode` widened it
 creating it.
 
 **And the two mechanisms cannot meet.** `retrieval` / `warnings` live on a *returned* result; when the
-tool throws there is no result object. Not a disagreement — an unreachable gap, now closed separately
-on `EvidenceResult.stats`.
+tool throws there is no result object. Not a disagreement — an unreachable gap.
+
+**Closed on `EvidenceResult` instead — and it turned out to be three holes, not one.** All three
+previously silent exits in `executeParallelSearches` now report: the `!success` branch, a malformed
+response (`MALFORMED_RESULT`), and the `catch`. The signal carries
+`stats.subQueriesDispatched` (**the denominator**), `stats.subQueriesFailed`, and
+`stats.subQueryFailures[]` with a per-sub-query code and message, plus `warnings[]` reusing the same
+vocabulary as `scan_for_pattern` and `query_case_knowledge` — one contract across three tools.
+
+The swallow was **not** narrowed: a test asserts healthy sub-queries still return evidence alongside a
+failed one. The defect was **silence, not tolerance**. `EMBEDDING_UNAVAILABLE` is not special-cased —
+a bare `EXECUTION_ERROR` and a thrown `ECONNRESET` report identically, so the visible failure set is
+not quietly narrowed to the one that prompted the work.
+
+A degraded empty result and an honest empty result are now distinguishable at the `research_evidence`
+boundary; both were previously just `evidence: []`.
+
+**A testing lesson worth generalising:** when a parser's output type is a `Pick` or any explicit
+projection, widening the source interface is never sufficient. A runtime assertion passes either way,
+because the value really *is* there — only the type says nobody downstream can see it.
 
 Both `query_case_knowledge` call sites were threaded — the phase-1 dispatch and the independently
 built RLM payload. A parameter honoured in phase 1 and dropped in the RLM rounds would have been this
