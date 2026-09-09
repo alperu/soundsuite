@@ -28,9 +28,26 @@ matters — a **timed retrieval probe**. Read `verdict`:
 | `degraded — …` | retrieval works; a sidecar declares a container it does not report |
 | `BLOCKED — retrieval path hangs` | `ss.ask` and research will hang. `ss.scan` still works — it uses no model. |
 
-**`notReady` alone is not evidence.** It has been observed empty while the retrieval path
-hung *and* empty while it was healthy, so on its own it carries no information. That is why
-`preflight` probes with a timeout instead of asking.
+**`notReady` alone is not evidence**, and the reason is structural rather than a bug to wait
+out. Readiness under `local` gates on one cached boolean — a *completion* probe
+(`reachable && generates`) applied to every tool outside `category: 'search'`. It says nothing
+about the embedding, rerank or RLM roles, and nothing about vLLM at all. So it reads empty
+while the retrieval path hangs and empty while it is healthy: verified in both states.
+
+Per-role dependency checks now exist (`fleetRole:<role>`, with three outcomes —
+`available` / `unavailable` / `unknown`, where `unknown` never refuses, because a role the
+fleet does not mention is not thereby down). But they ship **advisory**, and as of this
+writing **no tool declares one** — verified live: 26 local tools, zero role dependencies,
+`notReady` empty. Read the tool payload's `dependencies[]` if you want role state, but do not
+expect it to be populated, and do not treat an empty `notReady` as health either way.
+
+**The deeper limit will not be fixed by declaring more dependencies.** A dependency check
+takes no call parameters, so readiness describes the *tool*, never the *call*.
+`query_case_knowledge` needs the embedding role on `vector` and `hybrid` and nothing at all on
+`keyword` — one static declaration would over-refuse `keyword` and still not describe `hybrid`,
+whose real failure mode is not "not ready" but **ready, then silently degraded**. That is why
+`preflight` probes with a timeout instead of asking, and why the `searchMode` split below is
+the diagnostic that actually works.
 
 Retrieval flaps: serving in seconds, then hanging minutes later, within one session. If a
 retrieval call stalls, re-run `preflight` rather than assuming your query is at fault.
@@ -460,7 +477,7 @@ evolution, plus exhibit retrieval and saved workflows. Get the exact callable na
 | `TOOL_NOT_READY` | Local model host down or busy. **Its absence is not health** — see §0 |
 | `LLM_PARSE_ERROR` | Model returned unparseable prose. **An honest failure — not "nothing found"** |
 | `LLM_SHAPE_ERROR` | Parsed, but every item was malformed. Also a failure, not a negative |
-| `EMBEDDING_UNAVAILABLE` | The local embedder did not answer — a retrieval failure, not an empty corpus |
+| `EMBEDDING_UNAVAILABLE` | The local embedder did not answer — a retrieval failure, not an empty corpus. On `vector` mode this coded error is a **better** signal than readiness, which cannot see it |
 | `EMBEDDING_DIMENSION_MISMATCH` | Index built with a different embedding model than the one configured |
 | `EXECUTION_ERROR` | Unexpected server fault; details stay server-side by design |
 | `AUTH_REQUIRED` | Request classified as non-loopback |
