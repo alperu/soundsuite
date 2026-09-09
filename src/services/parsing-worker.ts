@@ -45,12 +45,44 @@ function noteOcrPause(reason: string, logger: Logger): void {
   }
 }
 
+/**
+ * OCR requeue attempt counter, keyed by document id (docs/tasks/34 item 4).
+ *
+ * The OCR-not-ready branch in `processClaimedDocument` requeues the document
+ * *and* pauses claims for every worker in this process for OCR_PAUSE_MS.
+ * Uncapped, a document that can never OCR requeues forever — and because
+ * claims are ordered `createdAt asc`, that same document returns to the head
+ * of the queue each cycle, so it stalls the whole pipeline rather than merely
+ * failing itself.
+ *
+ * Scope is deliberately in-process, matching the lifetime of the loop it
+ * bounds. It does NOT bound the cross-restart loop in `worker-init.ts`, where
+ * a filed document at any non-terminal status is re-queued on every init;
+ * that loop outlives any in-memory counter and needs a durable column.
+ */
+const ocrAttempts = new Map<string, number>();
+
+/** OCR requeue attempts recorded for `documentId` in this process. */
+export function getOcrAttempts(documentId: string): number {
+  return ocrAttempts.get(documentId) ?? 0;
+}
+
+/** Clear the in-process OCR attempt counters. Test use. */
+export function resetOcrAttempts(): void {
+  ocrAttempts.clear();
+}
+
 export interface ParsingWorkerConfig {
   /** Unique worker ID (e.g. "worker-1") */
   workerId: string;
   /** Milliseconds between poll cycles when queue is empty */
   pollInterval: number;
-  /** Maximum retries per document */
+  /**
+   * Maximum OCR-not-ready requeues per document within this process before the
+   * document is failed to ERROR with a named cause. Bounds the pipeline-wide
+   * stall described on `ocrAttempts`; it is not a general parse-retry budget —
+   * a non-OCR parse failure still goes straight to ERROR on the first attempt.
+   */
   maxRetries: number;
 }
 
@@ -235,6 +267,9 @@ export class ParsingWorker {
       await this.processDocument(documentId, filePath);
 
       const duration = Date.now() - startTime;
+      // A document that got through has spent its OCR trouble; don't carry the
+      // count forward into a later requeue of the same id.
+      ocrAttempts.delete(documentId);
       this.logger.info('Document processed successfully', { documentId, durationMs: duration });
 
       // Publish INDEXED status to Redis
@@ -247,15 +282,49 @@ export class ParsingWorker {
       // requeue the document and back off so the sidecar's gpuOnly watchdog
       // has time to evict competing models and reload OCR fully on GPU.
       if (isOcrNotReady(err)) {
-        noteOcrPause(err instanceof Error ? err.message : String(err), this.logger);
+        const reason = err instanceof Error ? err.message : String(err);
+        noteOcrPause(reason, this.logger);
+
+        const attempts = (ocrAttempts.get(documentId) ?? 0) + 1;
+        ocrAttempts.set(documentId, attempts);
+
+        if (attempts <= this.config.maxRetries) {
+          try {
+            await this.prisma.document.update({
+              where: { id: documentId },
+              data: { status: 'QUEUED' },
+            });
+            await this.publishStatusChange(documentId, filePath, 'QUEUED');
+          } catch (dbErr) {
+            this.logger.error('Failed to requeue document after OCR pause', dbErr, { documentId });
+          }
+          return;
+        }
+
+        // Cap reached. Requeuing again would put this document back at the head
+        // of the claim order and pause every worker for another OCR_PAUSE_MS,
+        // indefinitely. Fail it with a named cause so the pipeline drains and
+        // the document is visible as a failure rather than as a stall.
+        ocrAttempts.delete(documentId);
+        this.logger.error(
+          `OCR not ready after ${this.config.maxRetries} requeues — failing document`,
+          err,
+          { documentId, attempts: this.config.maxRetries }
+        );
         try {
           await this.prisma.document.update({
             where: { id: documentId },
-            data: { status: 'QUEUED' },
+            data: {
+              status: 'ERROR',
+              errorMessage:
+                `OCR not ready after ${this.config.maxRetries} requeues in this process ` +
+                `(last cause: ${reason})`,
+            },
           });
-          await this.publishStatusChange(documentId, filePath, 'QUEUED');
+          await this.publishStatusChange(documentId, filePath, 'ERROR');
+          await this.invalidateCacheForDocument(documentId);
         } catch (dbErr) {
-          this.logger.error('Failed to requeue document after OCR pause', dbErr, { documentId });
+          this.logger.error('Failed to fail document after OCR retry cap', dbErr, { documentId });
         }
         return;
       }

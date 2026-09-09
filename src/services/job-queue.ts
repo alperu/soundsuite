@@ -1,7 +1,21 @@
 /**
- * JobQueue - Manages asynchronous document processing with concurrency control and retry logic
- * 
- * Features:
+ * JobQueue — asynchronous document processing with concurrency control and
+ * retry with exponential backoff.
+ *
+ * ⚠️ NOT ON THE INGESTION PATH. Nothing feeds this queue in production.
+ * `worker-init.ts` constructs a JobQueue and registers it with the services
+ * manager, but never calls `.start()` and never enqueues: `enqueue()` has zero
+ * non-test callers, and `loadJobsFromDatabase()` fills an in-memory map that
+ * nothing drains. Documents are processed by `ParsingWorker`, which polls the
+ * database directly.
+ *
+ * That matters for anyone reading the retry behaviour below and taking it for
+ * the system's retry behaviour — it is not. `ParsingWorker` has a bounded
+ * in-process cap on OCR-not-ready requeues and no other retry; the
+ * cross-restart requeue lives in `worker-init.ts`. See
+ * docs/tasks/34-ingestion-dry-run-and-retry.md.
+ *
+ * Features (of this class, reachable only through its tests):
  * - Configurable concurrency (default: 1 — one document at a time)
  * - Retry logic with exponential backoff (3 attempts: 1s, 2s, 4s)
  * - Job state persistence to SQLite for crash recovery

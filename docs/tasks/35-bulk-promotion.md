@@ -66,12 +66,27 @@ Two facts that bear directly on running this safely:
 
 | # | Item | Status |
 |---|---|---|
-| 1 | **Promote in waves by case, smallest `DISCOVERED` count first — read from `corpus_status` at run time, never from this file.** A systemic failure then surfaces on tens of documents, not hundreds. Re-read between waves; promoting changes the ordering input. | ☐ |
-| 2 | **Re-run `corpus_status` after each wave** and record per-case coverage. This is the progress metric, and it is now a one-call measurement. | ☐ |
-| 3 | **Re-run the [task 20](./20-measure-chunk-overlap.md) overlap measurement on newly-ingested documents only** — document-then-index ordering, never page order. This is what proves [task 21](./21-chunk-overlap-defect.md)'s fix holds on the real path rather than in a unit test. Do it after wave A, before wave D. | ☐ |
-| 4 | **Keep the generations distinguishable.** Task 21 item 5 records that partial reindex produces duplicate `chunk_index` values and gaps within one document. Newly-ingested documents must be identifiable — `parserVersion` is the natural marker, and today it has exactly one value (`hybrid-docparse-1`, 22 documents), so a new value cleanly separates the generations. | ☐ |
-| 5 | **Stop between waves and look.** The point of waves is the pause, not the batching. Coverage rising is necessary but not sufficient — check overlap, chunk sizes, and `ERROR` causes each time. | ☐ |
-| 6 | **Record wall-clock and throughput per wave**, so the D and E waves (654 documents) can be scheduled rather than guessed at. | ☐ |
+| 0 | **Build the bulk path — it did not exist.** Promotion lived only inline in two API routes, as a side effect of filing through the UI. There was no bulk promotion and no bulk requeue. | ☑ `src/lib/ingestion/promotion.ts`, CLI `scripts/promote-discovered.ts` |
+| 1 | **Promote in waves by case, smallest `DISCOVERED` count first — read at run time, never from this file.** A systemic failure then surfaces on tens of documents, not hundreds. Re-read between waves; promoting changes the ordering input. | ☐ **operator** — tooling ready; `planPromotion` measures and orders on every call and stores nothing |
+| 2 | **Re-run `corpus_status` after each wave** and record per-case coverage. This is the progress metric, and it is now a one-call measurement. | ☐ **operator** |
+| 3 | **Re-run the [task 20](./20-measure-chunk-overlap.md) overlap measurement on newly-ingested documents only** — document-then-index ordering, never page order. This is what proves [task 21](./21-chunk-overlap-defect.md)'s fix holds on the real path rather than in a unit test. Do it after wave A, before wave D. | ☐ **operator** |
+| 4 | **Keep the generations distinguishable.** ⚠️ **Refuted as written.** `ingestion-pipeline.ts:1039` writes the literal `'hybrid-docparse-1'` — the current parser stamps the *same* value the existing 22 carry, so promotion will **not** produce "a new value that cleanly separates the generations". Newly-ingested documents will be indistinguishable from the existing 22 by `parserVersion` alone. Either bump the constant before the first wave, or separate the generations by `createdAt`/`updatedAt` and say so. | ☐ **blocked on a decision** |
+| 5 | **Stop between waves and look.** The point of waves is the pause, not the batching. Coverage rising is necessary but not sufficient — check overlap, chunk sizes, and `ERROR` causes each time. | ☐ **operator** |
+| 6 | **Record wall-clock and throughput per wave**, so the two largest waves can be scheduled rather than guessed at. | ☐ **operator** |
+
+### What the tooling guarantees, and what it does not
+
+`planPromotion` / `applyPromotion` are deliberately two calls: the dry run and the run it describes
+go through the same selection code, so the preview cannot drift from the mutation. `limit` is
+required in both promotion and requeue — there is no call shape that promotes the backlog by
+omission — and the wave order is recomputed from live counts on every call, never read from a file.
+The CLI writes nothing without `--apply`.
+
+It does **not** make a wave safe on its own. `ingestCheckpoint` is still NULL corpus-wide, so a lost
+run is still a lost run; the cross-restart requeue loops in `worker-init.ts` are still uncapped (task
+34 item 4 is half done); and the promotion mode is unfiled, which trades away retry for boundedness.
+The reasoning for that trade is in `PROMOTION_MODE_RATIONALE` in `promotion.ts`, next to the code it
+governs, rather than here.
 
 ## Risks
 
