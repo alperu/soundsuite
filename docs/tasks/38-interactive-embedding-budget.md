@@ -67,6 +67,27 @@ Retries re-resolve the host (`this.lastPreflight = null`, line 155) and exclude 
 in a multi-host fleet the attempts usually land elsewhere and this ceiling is rarely reached. But
 nothing bounds it, and a live query is entitled to none of that patience.
 
+> **≈ 370 s is a LOWER BOUND, not the total** — cross-reference from
+> [task 40](./40-fleet-admission-control.md) item 7, added 2026-09-09.
+>
+> The table above is computed from Ollama/provider constants alone and silently prices
+> `resolveEndpoint()` at zero. It is not zero:
+>
+> - `resolveEndpoint()` runs **per request**, and its Phase 2 (`src/lib/gpu/fleet-router.ts`, the
+>   `// Phase 2: No running container` loop) **starts a container** via `/acquire`. A request
+>   arriving at a cold role pays that cold start *inside* the caller's budget, on top of every row
+>   above.
+> - Because each retry re-resolves with `excludeHosts`, one caller can pay the acquire cost **up to
+>   three times** in a single call.
+> - **×N under concurrency.** Task 40's item-2 measurement
+>   (`src/lib/gpu/__tests__/fleet-router-herd.test.ts`) found a five-caller burst at a **cold** role
+>   sends all five to the *same* host — Phase 2 has no load criterion at all, it returns
+>   `reachable[0]`. So the "attempts usually land elsewhere" mitigation in the paragraph above is
+>   weakest exactly when the fleet is cold: five callers serialise behind one host's cold start
+>   instead of spreading across the fleet.
+> - Nothing refuses the fifth caller, so the only backpressure remains this timeout expiring. Task 40
+>   added admission control, but it is opt-in and **off by default** (task 40 item 4).
+
 **Compare:** rerank costs a live search at most 30 s and then returns labelled, degraded results.
 Embedding can cost it six minutes and then throw — and unlike rerank there is no first-stage order
 to fall back to, because without an embedding there is no vector leg at all.

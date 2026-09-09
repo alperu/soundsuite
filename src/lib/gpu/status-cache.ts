@@ -217,6 +217,41 @@ export function updateSidecarStatus(agentUrl: string, status: Partial<CachedSide
 }
 
 /**
+ * Record the sidecar-reported `activeRequests` for ONE role, without touching
+ * anything else — in particular without refreshing `lastSeen`.
+ *
+ * Task #40 item 6: `resolveEndpoint` feeds the count returned by `/acquire`
+ * back into the cache so concurrent resolutions do not all select on the same
+ * stale snapshot. That write must NOT go through `updateSidecarStatus`, which
+ * unconditionally stamps `lastSeen: Date.now()`. Doing so would make liveness
+ * self-certifying by the router's own writes:
+ *
+ *   - `isSidecarConnected` treats any entry newer than STALE_THRESHOLD_MS as
+ *     connected, so a sidecar whose heartbeats had stopped but which still
+ *     answered /acquire would read as connected indefinitely.
+ *   - `sendToSidecar` serves a cached /status younger than 15s, so a stale
+ *     snapshot would be handed back as fresh.
+ *
+ * Liveness keeps coming from heartbeats only. No-ops when the sidecar has no
+ * cache entry yet — an acquire is not a substitute for a first heartbeat.
+ */
+export function updateRoleLoad(agentUrl: string, role: string, activeRequests: number): void {
+  const normalized = agentUrl.replace(/\/+$/, '');
+  const entry = cache.get(normalized);
+  if (!entry) return;
+  const existing = entry.roles?.[role];
+  entry.roles = {
+    ...entry.roles,
+    [role]: {
+      idleTimerActive: existing?.idleTimerActive ?? false,
+      lastRelease: existing?.lastRelease ?? null,
+      activeRequests,
+      lastAcquire: new Date().toISOString(),
+    },
+  };
+}
+
+/**
  * Get cached status for a specific sidecar.
  */
 export function getSidecarStatus(agentUrl: string): CachedSidecarStatus | null {

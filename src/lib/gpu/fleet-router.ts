@@ -99,6 +99,135 @@ function maybeLogAcquireSkip(sidecarUrl: string, role: string): void {
   );
 }
 
+// ─── Stale-acquire discount (Task #40 item 3) ────────────────────────────────
+//
+// `releaseEndpoint()` is fire-and-forget. A lost /release — network blip, or
+// the master dying mid-request — leaves that role's `activeRequests` elevated
+// on the sidecar with no automatic reconciliation, and the router then biases
+// AWAY from a host that is actually free. The failure is quiet and cumulative.
+//
+// This has happened: see src/lib/search/reranker.ts:264-268, where a failover
+// path sent an extra /acquire per failed candidate while only one /release was
+// ever sent — "+1 activeRequests per failed call, which kept idle timers from
+// ever starting and pinned VRAM at 99%". Recovery required an operator to hit
+// /api/admin/gpu-reset, which fans out the sidecar's /reset-counters.
+//
+// Why a routing-time DISCOUNT rather than auto-firing /reset-counters:
+// zeroing the sidecar's counter on a heuristic can clobber a request that is
+// legitimately still in flight (a long OCR job), which would let the idle timer
+// stop a container out from under it. A discount mutates no sidecar state, so
+// it cannot fight an in-flight request — the worst case is that we route to a
+// busy host, which is exactly what happens today anyway.
+//
+// The signal: the sidecar reports `lastAcquire` / `lastRelease` per role
+// (sideCar/src/lib/handlers.ts:904-905), and both heartbeat paths forward them
+// into the status cache (ws-relay.ts:232, heartbeat/route.ts:56). A positive
+// counter whose LAST ACQUIRE is older than the longest plausible request is not
+// credible: no new work has been admitted in that long, so the outstanding
+// count is almost certainly leaked.
+//
+// The threshold is deliberately generous. It is not tuned to interactive
+// latency (EMBED_TIMEOUT_MS = 120s); it is tuned so that a legitimately
+// long-running job is never discounted. Override with FLEET_STALE_ACQUIRE_MS.
+const DEFAULT_STALE_ACQUIRE_MS = 15 * 60_000;
+
+function staleAcquireMs(): number {
+  const raw = Number(process.env.FLEET_STALE_ACQUIRE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_STALE_ACQUIRE_MS;
+}
+
+/** Minimal shape of the cached status this module reads for load decisions. */
+interface LoadReadableStatus {
+  activeRequests?: number;
+  roles?: Record<string, { activeRequests?: number; lastAcquire?: string | null; lastRelease?: string | null }>;
+}
+
+/**
+ * The load the router should ROUTE ON for `role` on this host.
+ *
+ * Returns the sidecar-reported `activeRequests`, except when the counter looks
+ * leaked (positive, but no acquire within `staleAcquireMs()`), in which case it
+ * returns 0 and flags the discount.
+ *
+ * Exported for tests and for the fleet UI, which should show both numbers so an
+ * operator can see that a discount happened rather than wonder why routing
+ * changed.
+ */
+export function effectiveRoleLoad(
+  cached: LoadReadableStatus | undefined,
+  role: string,
+  now: number = Date.now(),
+): { load: number; reported: number; discounted: boolean } {
+  const perRole = cached?.roles?.[role];
+  const reported = perRole?.activeRequests ?? cached?.activeRequests ?? 0;
+  if (reported <= 0) return { load: reported, reported, discounted: false };
+
+  // No lastAcquire at all: either an older sidecar that doesn't report it, or a
+  // counter that predates any recorded acquire. Do NOT discount — absence of
+  // the signal is not evidence of a leak (UNREPORTED is not down).
+  const lastAcquire = perRole?.lastAcquire;
+  if (!lastAcquire) return { load: reported, reported, discounted: false };
+
+  const acquiredAt = Date.parse(lastAcquire);
+  if (!Number.isFinite(acquiredAt)) return { load: reported, reported, discounted: false };
+
+  if (now - acquiredAt < staleAcquireMs()) return { load: reported, reported, discounted: false };
+
+  return { load: 0, reported, discounted: true };
+}
+
+// ─── Admission control (Task #40 items 4 & 5) — OPT-IN, OFF BY DEFAULT ───────
+//
+// The DECISION (task 40 item 4) is: cap and refuse fast, naming the saturated
+// role. Not a queue. Reasoning is written up in docs/tasks/40-*.md — in short,
+// a queue converts "the fleet cannot serve you" into "you are waiting", which
+// reads as progress and is the harder failure to diagnose.
+//
+// It is off unless FLEET_MAX_ACTIVE_PER_ROLE is set, because a cap tuned for
+// steady state will refuse a legitimate five-user burst, and this measurement
+// (task 40 item 2) showed a burst already lands entirely on ONE host — so a
+// naive per-host cap would refuse the 2nd of five users on an idle fleet.
+//
+// Per-host capacity: FLEET_MAX_ACTIVE_PER_HOST accepts a JSON object keyed by
+// hostname, e.g. {"host-a":8,"host-b":2}, because a 24 GB host and an 8 GB host
+// do not share a ceiling. Hosts absent from the map fall back to the fleet-wide
+// default. NOTE: no per-host concurrency capacity is DERIVED from `vram` — that
+// field is a memory footprint in MB, not a request ceiling, and inventing a
+// conversion would be exactly the kind of unearned confidence this task series
+// exists to remove. An operator who knows their hosts states the numbers.
+interface AdmissionCaps {
+  enabled: boolean;
+  defaultCap: number;
+  perHost: Record<string, number>;
+}
+
+export function readAdmissionCaps(): AdmissionCaps {
+  const raw = Number(process.env.FLEET_MAX_ACTIVE_PER_ROLE);
+  const enabled = Number.isFinite(raw) && raw > 0;
+  let perHost: Record<string, number> = {};
+  if (enabled && process.env.FLEET_MAX_ACTIVE_PER_HOST) {
+    try {
+      const parsed = JSON.parse(process.env.FLEET_MAX_ACTIVE_PER_HOST);
+      if (parsed && typeof parsed === 'object') {
+        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+          if (typeof v === 'number' && Number.isFinite(v) && v > 0) perHost[k] = v;
+        }
+      }
+    } catch {
+      logger.warn('FLEET_MAX_ACTIVE_PER_HOST is not valid JSON — ignoring, using fleet-wide cap only');
+      perHost = {};
+    }
+  }
+  return { enabled, defaultCap: enabled ? raw : 0, perHost };
+}
+
+function capForHost(caps: AdmissionCaps, hostname: string): number {
+  return caps.perHost[hostname] ?? caps.defaultCap;
+}
+
+/** Advisory retry hint: the sidecar heartbeat cadence bounds how fast our view can change. */
+const SATURATION_RETRY_HINT_MS = 15_000;
+
 // ─── dockerMode=none skip log throttling ─────────────────────────────────────
 // Throttle to once per (sidecar, role) per hour. Operator only needs the
 // "fix this sidecar" hint once, not every 30s tick.
@@ -969,6 +1098,23 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
   let cpuOffloadedFallback: FleetSidecar | null = null;
   let cpuOffloadedLoad = Infinity;
   let cpuOffloadedGpuPct = 0;
+  // Task #40 items 4 & 5 — admission control. OFF unless the operator opts in.
+  //
+  // The cap is applied as a CANDIDATE FILTER inside the loop below, not as a
+  // check on the winner afterwards. That distinction is load-bearing once caps
+  // differ per host: the winner is the minimum LOAD, not the minimum load
+  // RELATIVE TO ITS OWN CAP. With caps {host-a:2, host-c:12} and loads
+  // [5,5,5], a post-selection check would refuse — even though host-c has
+  // seven free slots. Filtering first lands selection on host-c instead.
+  //
+  // Filtering here also preserves the gpuOnly invariant for free: the filter
+  // sits ahead of the gpuPct branching, so a CPU-offloaded host that survives
+  // it can still only ever become `cpuOffloadedFallback`.
+  const caps = readAdmissionCaps();
+  const saturatedCandidates: Array<{ hostname: string; load: number; cap: number }> = [];
+  // Every candidate's post-discount load, so a saturation refusal can name the
+  // numbers it refused on rather than emitting a bare 503.
+  const observedLoads: Array<{ hostname: string; load: number }> = [];
 
   for (const sidecar of reachable) {
     const cached = statusCache.getSidecarStatus(sidecar.url);
@@ -996,11 +1142,38 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
       }
     }
 
-    const load = cached.roles?.[role]?.activeRequests ?? cached.activeRequests ?? 0;
+    // Task #40 item 3: route on the DISCOUNTED load, not the raw counter. A
+    // counter left elevated by a lost /release would otherwise bias us away
+    // from a host that is actually free — permanently.
+    const { load, reported, discounted } = effectiveRoleLoad(cached, role);
+    if (discounted) {
+      logger.warn(
+        `Route: discounting stale activeRequests for ${role} on ${sidecar.hostname} — ` +
+        `reported=${reported}, last acquire older than ${Math.round(staleAcquireMs() / 60_000)}min, routing as 0`,
+        { role, sidecar: sidecar.hostname, reported, lastAcquire: cached.roles?.[role]?.lastAcquire },
+      );
+    }
+    observedLoads.push({ hostname: sidecar.hostname, load });
 
     // Check GPU offload status from loaded models
     const loadedModels = container.loadedModels;
     const gpuPct = loadedModels?.[0]?.gpuPercent ?? (loadedModels?.[0]?.processor === 'GPU' ? 100 : loadedModels?.length ? 0 : -1);
+
+    // Admission filter (task #40 item 4). Off unless the operator opted in.
+    //
+    // Only a host this role could OTHERWISE have used counts as "saturated".
+    // For a gpuOnly role, a CPU-offloaded host was never a candidate to begin
+    // with, so recording it as saturated would tell the caller that raising the
+    // cap would help — which is false. Its real problem is GPU residency, and
+    // the gpuOnly branch below is the one that should speak.
+    if (caps.enabled) {
+      const viableForRole = !roleIsGpuOnly || gpuPct >= 99 || gpuPct < 0;
+      const cap = capForHost(caps, sidecar.hostname);
+      if (viableForRole && load >= cap) {
+        saturatedCandidates.push({ hostname: sidecar.hostname, load, cap });
+        continue;
+      }
+    }
 
     if (gpuPct >= 99) {
       // Fully GPU-loaded — prefer this, pick by lowest load
@@ -1039,6 +1212,26 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
     });
   }
 
+  // Task #40 items 4 & 5 — saturation refusal.
+  //
+  // Every running candidate was filtered out by the cap, and none survived as a
+  // CPU-offloaded fallback either. Refuse fast, naming the role and the numbers.
+  //
+  // This MUST come before the gpuOnly branch below. If it did not, a gpuOnly
+  // role whose hosts are all GPU-ready but all at cap would fall into that
+  // branch and be told "no GPU-ready sidecar" — which is false, and is exactly
+  // the `notReady` defect: a signal that misdescribes why it failed. The two
+  // refusals answer different questions and neither replaces the other.
+  if (!bestSidecar && !cpuOffloadedFallback && saturatedCandidates.length > 0) {
+    const cap = Math.min(...saturatedCandidates.map(h => h.cap));
+    logger.warn(
+      `Route: ${role} — refusing, fleet saturated (${saturatedCandidates.length} candidate(s) at or over cap)`,
+      { role, hosts: saturatedCandidates },
+    );
+    const { FleetSaturatedError } = await import('@/lib/gpu/errors');
+    throw new FleetSaturatedError(role, saturatedCandidates, cap, SATURATION_RETRY_HINT_MS);
+  }
+
   // gpuOnly + no fully-GPU candidate AND no fallback we can take. Do not
   // attempt phase 2/3 acquire either — those would just spin up the container
   // somewhere with no guarantee of full GPU. Throw so the caller (worker or
@@ -1062,9 +1255,35 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
   if (bestSidecar) {
     const hostname = new URL(bestSidecar.url).hostname;
     const resolvedPort = portFor(bestSidecar);
-    // Send acquire to register the request + reset idle timer
+    // Send acquire to register the request + reset idle timer.
+    //
+    // Task #40 item 6 (minimal step): the sidecar's /acquire response carries
+    // its OWN post-increment activeRequests — the authoritative number, which
+    // this call used to discard. Feeding it back means a LATER resolution sees
+    // the incremented count instead of the same snapshot.
+    //
+    // Scope of the benefit, MEASURED (fleet-router-herd.test.ts): a warm
+    // five-caller burst goes from {host-a:5} to {host-a:2, host-b:2, host-c:1},
+    // and concurrent (Promise.all) matches sequential — resolveEndpoint awaits
+    // getFleetStatus before its selection loop, so the calls interleave and
+    // feedback lands. A real network makes that interleaving MORE likely, not
+    // less, since the /acquire round trip is longer than a mocked one.
+    //
+    // It does NOT help a COLD role: Phase 2 has no load criterion to feed, so a
+    // cold burst still lands entirely on reachable[0]. See task 40 "Not built".
+    //
+    // Writes via updateRoleLoad, NOT updateSidecarStatus: the latter refreshes
+    // `lastSeen`, which would let the router's own writes certify a sidecar as
+    // alive. Liveness comes from heartbeats only.
+    //
+    // Best-effort — a failed acquire must not fail the route, because the
+    // container is already running.
     try {
-      await sendToSidecar(bestSidecar.url, '/acquire', { role });
+      const acq = await sendToSidecar(bestSidecar.url, '/acquire', { role });
+      const reportedActive = (acq as { activeRequests?: number } | undefined)?.activeRequests;
+      if (typeof reportedActive === 'number' && Number.isFinite(reportedActive)) {
+        statusCache.updateRoleLoad(bestSidecar.url, role, reportedActive);
+      }
     } catch {
       // Non-critical — container already running
     }
