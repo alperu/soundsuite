@@ -137,11 +137,82 @@ field name, two meanings, no way for a caller to tell which it is holding.
 |---|---|---|
 | 1 | **Preserve the first-stage score before it is overwritten.** In `reranker.ts:587-591`, carry the incoming `score` onto the returned item as `retrievalScore` before assigning `score = rr.relevance_score`. This is the single change that makes every other comparison possible. | ☐ |
 | 2 | **Preserve the raw cross-encoder score too.** Because §2 boosts mutate `score` after rerank, three values are needed, not two: `retrievalScore` (first stage), `rerankScore` (raw `relevance_score`, set once and never boosted), and `score` (final, post-boost). Set `rerankScore` at the reranker, not at the mapping site. | ☐ |
-| 3 | **Replace the `reranked` flag with a real outcome.** Have `rerank()` return an applied/degraded outcome alongside its items — it already classifies every failure via `RerankWarning.reason` (`'preflight' \| 'lifecycle' \| 'fetch' \| 'score-validation' \| 'fallback-model' \| 'degraded'`, `reranker.ts:148-153`). Surface `rerankApplied: boolean` and, when false, the reason. Delete `const reranked = stats.rerankPool > 0` (`gather-evidence.ts:424`). | ☐ |
+| 3 | **Replace the `reranked` flag with a real outcome.** Have `rerank()` return an applied/degraded outcome alongside its items — it already classifies every failure via `RerankWarning.reason` (`'preflight' \| 'lifecycle' \| 'fetch' \| 'score-validation' \| 'fallback-model' \| 'degraded'`, `reranker.ts:148-153`). Surface `rerankApplied: boolean` and, when false, the reason. Delete `const reranked = stats.rerankPool > 0` (`gather-evidence.ts:424`). | ☑ **done 2026-09-09.** See §"Item 3 as built" below. |
 | 4 | **Add a `rerank` key to `stats.phases`** (`gather-evidence.ts:220-226`), timed around the rerank await specifically so `fuse` stops absorbing it. Keep `fuse` reporting the rest of the merge. | ☐ |
 | 5 | **Reconcile `rerankPool` across profiles.** Either rename one side, or emit both `rerankPoolIn` and `rerankPoolOut` in both paths. Fix `run-report.ts:312`'s hardcoded `'n/a'` to report the routed profile's actual reranker or an explicit "not applicable in this profile". | ☐ |
 | 6 | **Decide whether RLM-round evidence should be reranked.** This is a retrieval-quality decision, not plumbing — do not just wire it up. Measure a fixed query set with RLM evidence reranked and unreranked before choosing. Whatever is decided, state it in the response so a caller knows which items passed a cross-encoder. | ☐ |
 | 7 | **Investigate the 5-candidate pool.** If `stats.rerankPool` is routinely single-digit where 150 was configured, dedup or first-stage recall is collapsing the pool and the reranker is being starved. Reproduce, then measure the pool distribution over a fixed query set. | ☐ |
+
+## Item 3 as built (2026-09-09)
+
+**Premises re-verified before building.** §1 (`rerank()` overwrites `score` in place), §3 (the six
+degraded returns; `stats.rerankPool` assigned before the call and never reassigned) and §4
+(`deep-search.ts` has exactly one `rerank(` call, and `runRlmEvidenceRounds` makes none) all still
+read as written. The "two corrections to the report" section also still holds. Nothing in this task
+was refuted.
+
+**One correction to this file's own §3 table.** The row *"thrown / fetch error (`warn('fetch', …)`)"*
+is reachable far less often than the table implies. A refused connection or a timeout is absorbed
+**per host** inside the candidate loop and exits through the *all-hosts-failed* path, reporting
+`'degraded'` — not `'fetch'`. The outer catch only fires for a throw outside that loop. This matters
+because the acceptance row "a response with an unreachable rerank host → reason `'degraded'`" is
+therefore the *correct* expectation, and a test asserting `'fetch'` for an unreachable host fails.
+Pinned as such in `reranker-outcome.test.ts`.
+
+**Shape.** `rerank()`'s signature is unchanged; the outcome is reported through a new optional
+`onOutcome` callback in the existing options object:
+
+```ts
+opts?: { interactive?: boolean; onOutcome?: (o: RerankOutcome) => void }
+
+interface RerankOutcome {
+  applied: boolean;
+  reason?: RerankSkipReason;   // 'empty-results' | 'disabled' | 'provider-none'
+                               // | 'no-host' | 'degraded' | 'score-validation' | 'fetch'
+  message?: string; host?: string; model?: string;
+  poolIn: number; poolOut: number;
+}
+```
+
+A callback rather than a changed return type **specifically to satisfy this task's own first Risk**:
+the three call sites are untouched, and `ai-helper.ts:674` never had to be opened. Every degraded
+return now goes through a single `skipped()` helper, so a seventh degraded return cannot be added
+without declaring itself.
+
+**One hole in the "every exit declares itself" invariant, by design.** `await getRerankConfig()` sits
+*before* the try block, so if `getConfig()` itself throws, `rerank()` throws and `onOutcome` never
+fires. The caller gets an exception rather than a silent degrade — which is the right outcome, since
+a config read failing is not a fleet problem — but `skipped()`'s guarantee does not cover it. Left as
+is; noted so no one reads `onOutcome` as "fires exactly once, always".
+
+`empty-results` is deliberately distinguished from the six real failures: nothing was retrieved to
+rank, the empty `results` array already says so, and warning there would cry wolf on every zero-hit
+query and devalue the real warnings.
+
+**Both profiles consume it.** `gather-evidence.ts:423`'s `const reranked = stats.rerankPool > 0` is
+deleted — it was attaching a `rerankScore` to rows the cross-encoder had never seen — and
+`EvidenceResult.stats` now carries `rerankApplied` / `rerankSkipReason`
+(`research-types.ts:139-165`). `query_case_knowledge` carries the same two fields inside its new
+`retrieval` block (see [task 39](./39-role-aware-readiness.md) §"Item 10 settled").
+
+**The one consumer of the removed labelling is safe.** Dropping `rerankScore` from rows on a degraded
+run is the behaviour acceptance asks for, and `evidence-outline.ts:144` — the only reader — is
+`e.rerankScore ?? e.score ?? 0`, so it falls back to the first-stage score. `evidence-mapping.ts:38`
+only writes the field when it is a number.
+
+**Tests.** `reranker-outcome.test.ts` pins every exit of `rerank()` itself;
+`merge-rerank-applied.test.ts` pins `deduplicateAndMerge`'s stats, including the assertion that
+`stats.rerankPool > 0` and `stats.rerankApplied` now genuinely disagree on a degraded run — the
+inequality that the old proxy could not express.
+
+**Still open, deliberately.** Items 1, 2, 4, 5, 6, 7. Item 1/2 (`retrievalScore` + an unboosted
+`rerankScore`) are additive and enable *comparison*; they are not needed for *degradation detection*
+and were scoped out rather than half-done. Item 5 touches `src/lib/mcp/routed/run-report.ts`, which
+was outside this change's file territory — note that `rerankApplied` was declared **optional** on
+`EvidenceResult.stats` precisely so the routed profile still typechecks while it goes unset there.
+
+**Cross-reference fix.** [Task 39](./39-role-aware-readiness.md) item 10 cites "task 22 item 9";
+this table has seven items and no item 9. The intended referent is item 3.
 
 ## Risks
 

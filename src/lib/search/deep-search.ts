@@ -10,7 +10,7 @@
 import { callLLM, callLLMJson, buildContext, getAvailableProvider } from '../mcp/tools/ai-helper';
 import { streamAI } from '../ai/ai-provider';
 import { supportsAdaptiveEffort, type AIProviderKey } from '../ai/models';
-import { rerank, RerankableResult } from './reranker';
+import { rerank, RerankableResult, type RerankOutcome, type RerankSkipReason } from './reranker';
 import { getConfig } from '../db/config';
 import type { ToolRegistry } from '../mcp/tool-registry';
 import { parseBooleanQuery, astSerialize } from './boolean-query';
@@ -742,7 +742,27 @@ export async function deduplicateAndMerge(
   onWarning?: (w: { source: string; host?: string; reason?: string; message: string }) => void,
   /** Optional overrides — `rerankPoolSize` replaces the configured pool cap (MCP presets). */
   mergeOptions?: { rerankPoolSize?: number },
-): Promise<{ sources: DeepSearchSource[]; stats: { totalRetrieved: number; uniqueAfterDedup: number; finalAfterRerank: number; rerankPool: number } }> {
+): Promise<{
+  sources: DeepSearchSource[];
+  stats: {
+    totalRetrieved: number;
+    uniqueAfterDedup: number;
+    finalAfterRerank: number;
+    /** Candidates handed to the cross-encoder. NOT a success signal — see `rerankApplied`. */
+    rerankPool: number;
+    /**
+     * Whether the cross-encoder actually scored these sources.
+     *
+     * `rerankPool > 0` was previously read as this, but it only means "at
+     * least one source was retrieved": `rerank()` returns its input array on
+     * all six of its failure paths, so first-stage order is indistinguishable
+     * from a real ranking (docs/tasks/22 §3).
+     */
+    rerankApplied: boolean;
+    /** Set whenever `rerankApplied` is false. */
+    rerankSkipReason?: RerankSkipReason;
+  };
+}> {
   const seen = new Map<string, DeepSearchSource>();
   let totalRetrieved = 0;
 
@@ -785,6 +805,7 @@ export async function deduplicateAndMerge(
   // Trimming by first-stage score keeps only the most promising candidates —
   // the dominant lever on interactive rerank latency. Master-side: no restart.
   let rerankPool = 0;
+  let rerankOutcome: RerankOutcome | undefined;
   if (merged.length > 0) {
     const poolSize = mergeOptions?.rerankPoolSize && mergeOptions.rerankPoolSize > 0
       ? mergeOptions.rerankPoolSize
@@ -800,7 +821,7 @@ export async function deduplicateAndMerge(
       host: w.host,
       reason: w.reason,
       message: w.message,
-    }) : undefined, { interactive: true });
+    }) : undefined, { interactive: true, onOutcome: (o) => { rerankOutcome = o; } });
   }
 
   // Filing-type-aware boost when the user's question is clearly about
@@ -904,6 +925,10 @@ export async function deduplicateAndMerge(
       uniqueAfterDedup,
       finalAfterRerank: merged.length,
       rerankPool,
+      rerankApplied: rerankOutcome?.applied ?? false,
+      ...(rerankOutcome && !rerankOutcome.applied
+        ? { rerankSkipReason: rerankOutcome.reason }
+        : {}),
     },
   };
 }

@@ -9,7 +9,7 @@ import type { FullTextQuery } from '../../vector/vector-store';
 import type { CitationInput } from '../../citations/citation-formatter';
 import { detectLineNumbers } from '../../citations/line-number-detector';
 import { QueryPreprocessor } from '../../search/query-preprocessor';
-import { rerank } from '../../search/reranker';
+import { rerank, type RerankOutcome, type RerankSkipReason } from '../../search/reranker';
 import { getChatVectorStore } from '../../chat/chat-vector-store';
 import { parseBooleanQuery } from '../../search/boolean-query';
 import { astToLanceQuery, BooleanFtsConversionError, extractFieldFilters, resolvePrismaFilters } from '../../search/boolean-to-fts';
@@ -78,6 +78,51 @@ export interface QueryCaseKnowledgeResult {
     /** 'draft' = unfiled working copy — citation carries a DRAFT marker. */
     recordStatus?: 'filed' | 'draft' | 'unknown';
   }>;
+  /**
+   * What the retrieval pipeline actually did, as opposed to what was asked
+   * for. Always present.
+   *
+   * This exists because two legs of this tool degrade into a *successful*
+   * response (docs/tasks/39 item 10, docs/tasks/22):
+   *
+   * - `searchMode: 'hybrid'` (the default) catches an embedding failure and
+   *   falls through to keyword/FTS. The caller gets lexically-matched rows
+   *   and no indication the vector leg is missing.
+   * - `rerank()` returns its input unchanged on all six of its failure paths,
+   *   so first-stage hybrid order is indistinguishable from a cross-encoder
+   *   ranking by inspecting the rows.
+   *
+   * Neither was observable from the response. The `pushWarning` channel these
+   * two sites already write to (`tool-types.ts:122`) is never supplied on an
+   * MCP-facing `ToolExecutionContext` — `get-tool-registry.ts:107-112` builds
+   * the context with four fields and no warning sink — and
+   * `ToolExecutionResult` has no field to carry a warning even if it were.
+   * So the signal has to travel in-band, here.
+   */
+  retrieval: {
+    /** The `searchMode` param as requested. */
+    searchModeRequested: 'vector' | 'hybrid' | 'keyword';
+    /**
+     * What ran. Differs from `searchModeRequested` only when `'hybrid'`
+     * degraded to `'keyword'` because the embedding provider failed.
+     */
+    searchModeEffective: 'vector' | 'hybrid' | 'keyword';
+    /** False when the query was never embedded — by request or by failure. */
+    vectorSearchApplied: boolean;
+    /** True only when cross-encoder scores were applied to these rows. */
+    rerankApplied: boolean;
+    /** Set whenever `rerankApplied` is false. */
+    rerankSkipReason?: RerankSkipReason;
+    /** Candidates handed to the cross-encoder. */
+    rerankPoolIn?: number;
+  };
+  /**
+   * Human-readable degradation notices; `[]` when nothing degraded — the same
+   * field name and contract as `scan_for_pattern.warnings`. A non-empty array
+   * means these results are thinner than a healthy run's, NOT that the corpus
+   * lacks the answer.
+   */
+  warnings: string[];
 }
 
 export class QueryCaseKnowledgeTool extends BaseMCPTool<
@@ -98,8 +143,16 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
         'their citation is suffixed "DRAFT, filing not confirmed" and they must never be ' +
         'described as filed, ruled on, or part of the record. Scope with `caseId` (one ' +
         'case) or `caseIds` (a subset); unscoped searches every case. Scoping selects ' +
-        'WHICH cases are searched — it does not raise the candidate pool or the `limit`.',
-      version: '1.4.0',
+        'WHICH cases are searched — it does not raise the candidate pool or the `limit`. ' +
+        'ALWAYS check `retrieval` and `warnings` before concluding anything from thin or ' +
+        'empty results: this tool returns success on a degraded run. ' +
+        '`retrieval.searchModeEffective` is "keyword" when the embedding provider failed ' +
+        'and the search silently became lexical-only, and `retrieval.rerankApplied` is ' +
+        'false when rows are in first-stage retrieval order rather than cross-encoder ' +
+        'relevance order. Non-empty `warnings` means the results are thinner or worse ' +
+        'ranked than a healthy run — it does NOT mean the corpus lacks the answer, so ' +
+        'report the degradation rather than asserting absence.',
+      version: '1.5.0',
       category: 'search',
       inputSchema: {
         type: 'object',
@@ -236,6 +289,14 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
 
     markPhase('preprocess');
 
+    // In-band degradation ledger. `pushWarning` below reaches only the
+    // in-process deep-search collector (`deep-search.ts:509`, the sole caller
+    // that supplies it); everything the MCP surface returns has to be on the
+    // result object itself. See `QueryCaseKnowledgeResult.retrieval`.
+    const warnings: string[] = [];
+    /** Flips to 'keyword' if the hybrid embed leg fails below. */
+    let searchModeEffective: 'vector' | 'hybrid' | 'keyword' = searchMode;
+
     // Generate embedding for query (needed for vector and hybrid modes)
     let queryEmbedding: number[] | undefined;
     if (searchMode !== 'keyword') {
@@ -254,6 +315,17 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
           reason: 'embed-failed',
           message: msg,
         });
+        // The same fact, in-band. A hybrid search that silently became
+        // keyword-only must say so where the caller will actually see it.
+        if (searchMode === 'hybrid') {
+          searchModeEffective = 'keyword';
+          warnings.push(
+            `Semantic (vector) search was unavailable${host ? ` at ${host}` : ''} — the embedding ` +
+              'provider failed, so these results are KEYWORD-ONLY and rank by lexical match, not ' +
+              'meaning. Paraphrases and synonyms of the query will be missing. This is a degraded ' +
+              `run, not an empty corpus. Provider error: ${msg}`,
+          );
+        }
         // Re-throw if no fallback path possible (pure vector search would have
         // nothing to do). Coded so `BaseMCPTool` forwards the provider's own
         // message — the dashboard turns it into "configure an embedding
@@ -472,10 +544,26 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       searchResults = searchResults.slice(0, rerankPool);
     }
 
+    // `rerank()` returns its input array on every failure path, so the only
+    // way to know whether a cross-encoder touched these rows is to ask it.
+    let rerankOutcome: RerankOutcome | undefined;
     searchResults = await rerank(query, searchResults, rerankPool, context.pushWarning ? (w) => {
       context.pushWarning!({ source: w.source, host: w.host, reason: w.reason, message: w.message });
-    } : undefined, { interactive: true });
+    } : undefined, { interactive: true, onOutcome: (o) => { rerankOutcome = o; } });
     markPhase('rerank');
+
+    // `empty-results` is benign — nothing was retrieved to rank, and the empty
+    // `results` array already tells the caller that. Every other skip reason
+    // means these rows are in first-stage retrieval order while looking
+    // exactly like a reranked set.
+    if (rerankOutcome && !rerankOutcome.applied && rerankOutcome.reason !== 'empty-results') {
+      warnings.push(
+        `Results were NOT reranked (${rerankOutcome.reason}) — they are in first-stage hybrid ` +
+          'retrieval order, not cross-encoder relevance order. Ordering is less reliable than a ' +
+          'healthy run; treat the top result as a candidate, not a best match.' +
+          (rerankOutcome.message ? ` Detail: ${rerankOutcome.message}` : ''),
+      );
+    }
 
     // Transcript-intent boost — mirrors the same heuristic in
     // src/lib/search/deep-search.ts so /api/search/semantic doesn't punish
@@ -705,7 +793,20 @@ export class QueryCaseKnowledgeTool extends BaseMCPTool<
       formatters: [...new Set([...citationContexts.values()].map((c) => c.formatter.id))],
     });
 
-    return { results: enrichedResults };
+    return {
+      results: enrichedResults,
+      retrieval: {
+        searchModeRequested: searchMode,
+        searchModeEffective,
+        vectorSearchApplied: queryEmbedding !== undefined,
+        rerankApplied: rerankOutcome?.applied ?? false,
+        ...(rerankOutcome && !rerankOutcome.applied
+          ? { rerankSkipReason: rerankOutcome.reason }
+          : {}),
+        ...(rerankOutcome ? { rerankPoolIn: rerankOutcome.poolIn } : {}),
+      },
+      warnings,
+    };
   }
 }
 

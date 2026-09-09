@@ -124,7 +124,7 @@ reported as drift.
 | 7 | **Do not let a role probe hang a readiness call.** Bounded per-host timeout; a host that does not answer is `unknown`, not `down`. | ☐ |
 | 8 | Fix the doc drift found in passing: `tool-registry.ts:220` commented *"cached 30 s"*; the constant is **60 s**. | ☑ done 2026-09-09 — comment now names `OLLAMA_PROBE_CACHE_MS` so the two cannot drift again. |
 | 9 | Tests: a tool with an unsatisfied role dep is `notReady` **with that role named**; a tool needing only embedding is **ready** while completion is down; the previous behaviour (everything ready while a vLLM role is exited) is asserted **gone**. | ☐ |
-| 10 | **Decide what a silent degrade owes the caller**, and verify the existing signal reaches them. `query_case_knowledge` already calls `pushWarning({ source: 'embedding', reason: 'embed-failed' })` (`:251-256`) before falling through to keyword-only — but whether that warning survives to the MCP response is **unsettled**. Trace it. If it does not surface, a caller cannot distinguish a thin result from a degraded one. Same question as [task 22](./22-rerank-observability.md) item 9. | ☐ |
+| 10 | **Decide what a silent degrade owes the caller**, and verify the existing signal reaches them. `query_case_knowledge` already calls `pushWarning({ source: 'embedding', reason: 'embed-failed' })` (`:251-256`) before falling through to keyword-only — but whether that warning survives to the MCP response is **unsettled**. Trace it. If it does not surface, a caller cannot distinguish a thin result from a degraded one. Same question as [task 22](./22-rerank-observability.md) item 9. | ☑ **done 2026-09-09 — traced: it does NOT reach an MCP caller. `pushWarning` is a dead channel there, for two independent reasons. Replaced with an in-band `retrieval` + `warnings` block on the result. See §"Item 10 settled" below.** |
 | 11 | **`GpuRole` omits `rlm` *and* `code-embedding`** (`fleet-router.ts:153`) — the original wording under-counted by one. **Correction: this is no longer a prerequisite.** `findSidecarsWithRole(role: string, …)` takes a bare `string`, so role dependencies are expressible today without widening the union; consolidating `GpuRole` / `ROLE_PORTS` / `stream-rlm.ts` is its own change with its own blast radius, and is **deferred out of this task**. The original reasoning follows, still accurate: it is why `stream-rlm.ts:195-246` cannot use `resolveEndpoint` and walks `fleet.sidecars` by hand instead, matching `containers.rlm.status === 'running'` and skipping synthetic images. Adding `rlm` to the type is a prerequisite for expressing an RLM role dependency at all — and is the same omission as the missing `rlm` entry in `ROLE_PORTS` ([task 30](./30-mcp-parity-and-fleet-visibility.md) amendment (b)). | ☐ |
 
 ## Staging — why this ships in two commits
@@ -186,6 +186,56 @@ refusal — a *new* wrong answer, not a fix for the old one.
 **The one mode that is actually broken — `hybrid` — is broken in a way readiness cannot express.**
 The tool is genuinely ready; the *call* degraded. That belongs at the degrade site (item 10), not in
 `isToolReady`.
+
+## Item 10 settled — `pushWarning` is a dead channel on the MCP path
+
+Traced 2026-09-09. **The warning does not reach a caller of `query_case_knowledge`,** for two
+independent reasons — either alone is sufficient, so wiring one without the other would fix nothing:
+
+1. **Nothing ever supplies `pushWarning` on an MCP-facing context.** It is optional on
+   `ToolExecutionContext` (`tool-types.ts:122`). The production context is built at
+   `get-tool-registry.ts:107-112` with exactly four fields — `vectorStore`, `embeddingProvider`,
+   `database`, `logger` — and no warning sink. The only overlay,
+   `api/mcp/execute/route.ts:139-145`, adds `aiProvider` / `aiModel` / `sessionId` only.
+   `mcp-server.ts:205` calls `registry.execute(tool, params)` with no context argument at all.
+   So `context.pushWarning?.(…)` in the embed-failure catch is an **optional call on `undefined`** —
+   a no-op that compiles, runs, and discards the fact.
+2. **There is no field to carry it even if it were supplied.** `ToolExecutionResult`
+   (`tool-types.ts:129-135`) is `{success, data, error, errorCode, executionTimeMs}`.
+   `BaseMCPTool.execute` (`base-tool.ts:228-274`) never reads warnings off the context, and
+   `mcp-server.ts:222` / `execute/route.ts:167` send `result.data` alone.
+
+**Denominator.** The channel is not dead everywhere. `deep-search.ts:509` — via
+`executeParallelSearches` — is the **sole** supplier of `pushWarning`, for in-process sub-query
+dispatch. So the correct claim is *"the warning reaches deep-search's collector and no MCP caller."*
+Even there it is transient: `gather-evidence.ts:274-276` converts each warning into an
+`emit('warning', …)` progress event and stores it on **nothing**, so it is absent from
+`EvidenceResult` too. No response object in the repo carried it.
+
+### What was built instead
+
+The signal now travels **in-band on the result**, which `mcp-server.ts:222` serialises verbatim:
+
+```ts
+retrieval: {
+  searchModeRequested, searchModeEffective,   // 'hybrid' → 'keyword' on embed failure
+  vectorSearchApplied,                        // false when the query was never embedded
+  rerankApplied, rerankSkipReason, rerankPoolIn,
+}
+warnings: string[]                            // [] when healthy
+```
+
+`warnings[]` matches the field name and contract `scan_for_pattern` already uses, rather than
+inventing a third vocabulary for the same idea. The `pushWarning` call at `:251` is **kept** — it
+still feeds the deep-search collector — and is now paired with the in-band write.
+
+`searchMode: 'vector'` still throws coded `EMBEDDING_UNAVAILABLE` and `'keyword'` is not treated as a
+degradation, since it was what the caller asked for. The tool description was updated (version
+`1.5.0`) so a model calling it is told to read both fields before concluding absence.
+
+Pinned by `src/lib/mcp/tools/__tests__/query-case-knowledge-degraded.test.ts` — including the case
+that motivates the whole task: a degraded empty result and a healthy empty result are now
+distinguishable, where before both were `{results: []}`.
 
 **`research_evidence`** has the same shape on `tier`: `fast` is one retrieval with no outline,
 `deep`/`deep-report` add rerank, and only `deep-rlm` uses the RLM role. Its declared dependency today

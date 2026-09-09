@@ -139,7 +139,28 @@ export interface EvidenceResult {
   stats: {
     retrievals: number;
     chunksFused: number;
+    /** Candidates handed to the cross-encoder. NOT a success signal. */
     rerankPool: number;
+    /**
+     * Whether the cross-encoder actually scored this evidence.
+     *
+     * `rerankPool > 0` was previously read as this, but it only means "at
+     * least one source was retrieved" — `rerank()` returns its input array
+     * unchanged on all six of its failure paths, so first-stage hybrid order
+     * is indistinguishable from a real ranking by inspecting the items
+     * (docs/tasks/22 §3). When false, `evidence[].rerankScore` is absent and
+     * the ordering is first-stage retrieval order.
+     */
+    rerankApplied?: boolean;
+    /** Why the cross-encoder did not run. Set whenever `rerankApplied` is false. */
+    rerankSkipReason?:
+      | 'empty-results'
+      | 'disabled'
+      | 'provider-none'
+      | 'no-host'
+      | 'degraded'
+      | 'score-validation'
+      | 'fetch';
     ms: number;
     phases: Record<string, number>;
     /** Caps applied to this payload, so truncation is visible to the caller. */

@@ -80,6 +80,31 @@ and it is the broken one.
 That reframes the decision: this is not "populate an array", it is "decide which of two surfaces is
 the trace, and make the other one honest."
 
+## Re-verification, 2026-09-09 — premises hold, nothing built
+
+Checked against current source before touching anything (standing rule: verify before building).
+**Every premise in this file still reads as written. Nothing was refuted.** Specifically:
+
+- **The inversion is real.** `start-research-job.ts:57` is still
+  `for (const note of result.rlm?.notes ?? []) job.rlmNote(note);`, sitting **after**
+  `await gatherEvidence(...)` — so `research_status.rlmNotes` is `[]` for the whole run and fills
+  microseconds before the job flips to `done`. v12's claim remains backwards in both halves, and its
+  prescribed "carry it onto the final result" remains a no-op.
+- **Defect 1 confirmed.** `start-report-job.ts` wires `signal`, `onToken`, `onProgress`,
+  `onThoughts`, `onEvidence`, `setCost` and `setOutline` — and **no `rlmNote`**.
+  `report_status.rlmNotes` is permanently empty.
+
+**Deliberately not built.** All five items land in `src/lib/mcp/research/start-research-job.ts`,
+`src/lib/mcp/routed/start-report-job.ts`, `src/lib/mcp/routed/run-report.ts`,
+`src/lib/mcp/research-jobs.ts` and `research-jobs-tools.ts` — every one outside the file territory of
+the change that verified them, and item 4's `research-evidence.ts` is explicitly owned elsewhere. The
+verification above is the deliverable; the work is unblocked for whoever owns those files.
+
+Item 5's decision now has a precedent to follow: the same "a flag that looks like an outcome but
+isn't" defect was closed in [task 22](./22-rerank-observability.md) item 3 by making the *producer*
+report its own outcome rather than having a consumer infer it from a proxy. `rlmNotes` reconstructed
+from a post-hoc replay loop is the same shape of mistake.
+
 ## Work
 
 | # | Item | Status |

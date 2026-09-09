@@ -152,34 +152,96 @@ export interface RerankWarning {
   message: string;
 }
 
+/**
+ * Why the cross-encoder did not score this pool.
+ *
+ * `empty-results` is the benign one — there was nothing to rank. The other
+ * five are the degraded returns: every one of them hands the caller the
+ * *first-stage retrieval order*, which is indistinguishable from a real rerank
+ * by inspecting the items alone (docs/tasks/22 §3).
+ */
+export type RerankSkipReason =
+  | 'empty-results'
+  | 'disabled'
+  | 'provider-none'
+  | 'no-host'
+  | 'degraded'
+  | 'score-validation'
+  | 'fetch';
+
+/**
+ * Did the cross-encoder actually run?
+ *
+ * This exists because it cannot be inferred downstream. `rerank()` returns the
+ * input array on all six failure paths, so a caller holding the result cannot
+ * tell a cross-encoder ranking from first-stage hybrid order — and
+ * `stats.rerankPool > 0`, the flag previously used as a proxy, only means "at
+ * least one source was retrieved" (docs/tasks/22 §3).
+ */
+export interface RerankOutcome {
+  /** True only when cross-encoder scores were applied to the returned items. */
+  applied: boolean;
+  /** Set whenever `applied` is false. */
+  reason?: RerankSkipReason;
+  /** Operator-facing detail for the degraded reasons; absent when benign. */
+  message?: string;
+  host?: string;
+  /** The model that produced the scores. Only set when `applied`. */
+  model?: string;
+  /** Candidates handed to `rerank()`. */
+  poolIn: number;
+  /** Items returned (post-`topN` trim). */
+  poolOut: number;
+}
+
 export async function rerank<T extends RerankableResult>(
   query: string,
   results: T[],
   topN?: number,
   onWarning?: (w: RerankWarning) => void,
-  opts?: { interactive?: boolean },
+  opts?: { interactive?: boolean; onOutcome?: (o: RerankOutcome) => void },
 ): Promise<T[]> {
   const warn = (reason: RerankWarning['reason'], host: string | undefined, message: string) => {
     if (onWarning) onWarning({ source: 'reranker', host, reason, message });
   };
+  /**
+   * Report a non-rerank and return the first-stage items in one statement, so
+   * a future degraded return cannot be added without declaring itself.
+   */
+  const skipped = (
+    reason: RerankSkipReason,
+    items: T[],
+    detail?: { message?: string; host?: string },
+  ): T[] => {
+    opts?.onOutcome?.({
+      applied: false,
+      reason,
+      message: detail?.message,
+      host: detail?.host,
+      poolIn: results.length,
+      poolOut: items.length,
+    });
+    return items;
+  };
+
   if (results.length === 0) {
     logger.info('Reranking skipped', { reason: 'empty results' });
-    return results;
+    return skipped('empty-results', results);
   }
 
   const config = await getRerankConfig();
 
   if (!config.rerankEnabled) {
     logger.info('Reranking skipped', { reason: 'disabled' });
-    return results;
+    return skipped('disabled', results, { message: 'Reranking is disabled in configuration.' });
   }
   if (config.rerankProvider === 'none') {
     logger.info('Reranking skipped', { reason: 'provider set to none' });
-    return results;
+    return skipped('provider-none', results, { message: 'Rerank provider is set to "none".' });
   }
   if (!config.rerankHost) {
     logger.info('Reranking skipped', { reason: 'no host configured' });
-    return results;
+    return skipped('no-host', results, { message: 'No rerank host is configured.' });
   }
 
   const effectiveTopN = topN ?? config.rerankTopN ?? 10;
@@ -366,14 +428,14 @@ export async function rerank<T extends RerankableResult>(
       // All hosts failed — return original order (graceful degrade). Emit one
       // clear, user-facing signal so the UI can show a "results not reranked"
       // badge instead of silently serving first-stage order.
-      warn(
-        'degraded',
-        config.rerankHost,
-        opts?.interactive
-          ? 'Results not reranked — reranker unavailable within the interactive timeout; showing first-stage (hybrid) order.'
-          : 'Results not reranked — reranker unavailable; showing first-stage (hybrid) order.',
-      );
-      return results.slice(0, effectiveTopN);
+      const degradedMessage = opts?.interactive
+        ? 'Results not reranked — reranker unavailable within the interactive timeout; showing first-stage (hybrid) order.'
+        : 'Results not reranked — reranker unavailable; showing first-stage (hybrid) order.';
+      warn('degraded', config.rerankHost, degradedMessage);
+      return skipped('degraded', results.slice(0, effectiveTopN), {
+        message: degradedMessage,
+        host: config.rerankHost,
+      });
     }
 
     // Score validation: detect degenerate scores from misbehaving models
@@ -385,8 +447,12 @@ export async function rerank<T extends RerankableResult>(
           model: usedModel,
           scores: reranked.slice(0, 5).map(r => r.score),
         });
-        warn('score-validation', config.rerankHost, `score validation failed: ${validation.reason}`);
-        return results.slice(0, effectiveTopN);
+        const validationMessage = `score validation failed: ${validation.reason}`;
+        warn('score-validation', config.rerankHost, validationMessage);
+        return skipped('score-validation', results.slice(0, effectiveTopN), {
+          message: validationMessage,
+          host: config.rerankHost,
+        });
       }
     }
 
@@ -396,6 +462,13 @@ export async function rerank<T extends RerankableResult>(
       topScore: reranked[0]?.score,
       totalTokens,
       model: usedModel,
+    });
+    opts?.onOutcome?.({
+      applied: true,
+      host: config.rerankHost,
+      model: usedModel,
+      poolIn: results.length,
+      poolOut: reranked.length,
     });
     return reranked;
   } catch (err) {
@@ -413,7 +486,7 @@ export async function rerank<T extends RerankableResult>(
       causeSyscall: cause?.syscall,
     });
     warn('fetch', config.rerankHost, errMessage);
-    return results;
+    return skipped('fetch', results, { message: errMessage, host: config.rerankHost });
   } finally {
     // Pair with the single ensureRunning() above. Only release if the
     // initial acquire actually succeeded — otherwise we'd decrement a

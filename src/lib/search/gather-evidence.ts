@@ -420,7 +420,11 @@ export async function gatherEvidence(
     }
     return fresh;
   };
-  const reranked = stats.rerankPool > 0;
+  // Was `stats.rerankPool > 0`, which only meant "at least one source was
+  // retrieved" — it attached a `rerankScore` to rows the cross-encoder had
+  // never seen, because `rerank()` returns its input on every failure path
+  // (docs/tasks/22 item 3). `rerankApplied` is the real signal.
+  const reranked = stats.rerankApplied;
   const initial = addItems(sources.map((s) => toItem(s, evidenceOrigin(s), reranked ? s.score : undefined)));
   if (initial.length > 0) options.onEvidence?.(initial);
 
@@ -579,6 +583,11 @@ export async function gatherEvidence(
       retrievals,
       chunksFused: stats.uniqueAfterDedup,
       rerankPool: stats.rerankPool,
+      // `rerankPool` is the pool size, not an outcome. Without this a caller
+      // cannot tell a cross-encoder ranking from first-stage hybrid order,
+      // and `rerankScore` is absent on every row either way (docs/tasks/22).
+      rerankApplied: stats.rerankApplied,
+      ...(stats.rerankApplied ? {} : { rerankSkipReason: stats.rerankSkipReason }),
       ms: Date.now() - t0,
       phases,
       caps: { maxEvidence, maxCharsPerChunk, evidenceTruncated, evidenceTotalBeforeCap, chunksTruncated, tablesTruncated },
