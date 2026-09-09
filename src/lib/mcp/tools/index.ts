@@ -20,6 +20,8 @@ import { ListMotionsTool } from './list-motions';
 import { ListPeopleTool } from './list-people';
 import { ResolveReferenceTool } from './resolve-reference';
 import { GetChunkContextTool } from './get-chunk-context';
+import { FleetStatusTool } from './fleet-status';
+import { RoleAssignmentsListTool } from './role-assignments-list';
 import { getResearchTools } from './research-tools';
 import { getPresetTools } from './preset-tools';
 import { getRoutedReportTools } from './routed-report-tools';
@@ -59,6 +61,13 @@ export function getAllTools(): BaseMCPTool[] {
     // Read-only neighbour lookup around a chunk id (docs/tasks/19). No LLM;
     // both profiles. Never crosses a document boundary.
     new GetChunkContextTool(),
+    // Fleet visibility (docs/tasks/30 Part 3). Read-only and `local`-only: the
+    // payload is infrastructure detail (hostnames, ports, VRAM) and an absent
+    // `profiles` would expose it to `routed` too. `category: 'search'` so they
+    // answer on a degraded fleet — a status tool that fails closed when the
+    // fleet is sick is useless exactly when it is wanted.
+    new FleetStatusTool(),
+    new RoleAssignmentsListTool(),
   ];
 }
 
@@ -84,3 +93,5 @@ export { ListMotionsTool } from './list-motions';
 export { ListPeopleTool } from './list-people';
 export { ResolveReferenceTool } from './resolve-reference';
 export { GetChunkContextTool } from './get-chunk-context';
+export { FleetStatusTool } from './fleet-status';
+export { RoleAssignmentsListTool } from './role-assignments-list';
