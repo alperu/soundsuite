@@ -38,7 +38,7 @@
 
 (function () {
   const ss = {
-    version: '1.1.0',
+    version: '1.2.0',
     origin: location.origin,
     last: null,     // full payload of the most recent exec — extract from here
     runs: {},       // background runs keyed by name
@@ -455,6 +455,7 @@
         speakers: ['label, {caseId}', 'transcript turns for MR./MS./THE COURT labels'],
         provenance: ['result, corpus', 'citable footer; quotes the server clause verbatim'],
         preflight: ['{timeoutMs, probe}', 'fleet gaps + corpus + a TIMED retrieval probe'],
+        fleet: ['', 'per-role: expected port, who runs it, runtime, and whether it is actually up'],
         research: ['query, {mode, maxEvidence}', 'fast returns evidence; deep tiers return a jobId'],
         status: ['jobId, {kind}', 'poll a job'], result: ['jobId, {kind}', 'fetch a finished job'],
         cancel: ['jobId, {kind}', 'cancel a job'], explain: ['query', 'dry run (routed only)'],
@@ -474,6 +475,62 @@
         drift: (undocumented.length || orphanedDocs.length)
           ? 'DRIFT: code and docs disagree — fix before relying on this list' : 'none',
       };
+    },
+  });
+
+
+  // Role → port is fixed by role, not by host. Two things vary: which host runs
+  // the role, and what backs it. A role backed by a SHARED Ollama answers on
+  // 11434 regardless of its per-role port — that is not a misconfiguration.
+  const ROLE_PORTS = { embedding: 11434, completion: 11435, ocr: 11436,
+                       'code-embedding': 11437, reranker: 8099, rlm: 8100 };
+  const SHARED_OLLAMA_PORT = 11434;
+  const LIVE = { running: 1 };   // every other status means it is not serving
+
+  Object.assign(ss, {
+    ROLE_PORTS,
+
+    /** Per-role fleet truth: who runs it, on what, and is it actually up. */
+    async fleet() {
+      const g = await fetch('/api/admin/gpu-fleet').then((r) => r.json());
+      const roles = {};
+      for (const s of g.sidecars || []) {
+        const declared = (s.containers || []).map((c) => c.replace(/^ss-/, ''));
+        const reported = (s.sidecarStatus || {}).containers || {};
+        for (const d of declared) {
+          (roles[d] = roles[d] || []).push(Object.assign(
+            { host: s.hostname, sidecar: s.status },
+            reported[d]
+              ? { status: reported[d].status, port: (reported[d].config || {}).port,
+                  runtime: (reported[d].config || {}).type,
+                  model: (reported[d].config || {}).model,
+                  loaded: (reported[d].loadedModels || []).map((m) => m.name) }
+              : { status: 'UNREPORTED' }));
+        }
+      }
+      const out = {};
+      for (const [role, rows] of Object.entries(roles)) {
+        const want = ROLE_PORTS[role];
+        const live = rows.filter((r) => LIVE[r.status]);
+        const portOdd = rows.filter((r) =>
+          r.port != null && want != null && r.port !== want &&
+          !(r.runtime === 'ollama' && r.port === SHARED_OLLAMA_PORT));
+        out[role] = {
+          expectedPort: want == null ? '(utility)' : want,
+          up: live.length,
+          hosts: rows.map((r) => `${r.host}:${r.status}` +
+            (r.port != null ? `@${r.port}` : '') + (r.runtime ? `/${r.runtime}` : '')),
+          models: [...new Set(rows.map((r) => r.model).filter(Boolean))],
+          sharedOllama: rows.some((r) => r.runtime === 'ollama' && r.port === SHARED_OLLAMA_PORT
+                                          && want !== SHARED_OLLAMA_PORT),
+          portAnomalies: portOdd.map((r) => `${r.host} on ${r.port}, expected ${want}`),
+          minOnline: (g.minOnline || {})[role],
+        };
+      }
+      const unmet = Object.entries(out)
+        .filter(([r, v]) => (v.minOnline || 0) > 0 && v.up === 0)
+        .map(([r, v]) => `${r}: minOnline ${v.minOnline} but 0 running (${v.hosts.join(', ')})`);
+      return { roles: out, unmet, gpuMode: g.gpuMode, gpuAutoManage: g.gpuAutoManage };
     },
   });
 

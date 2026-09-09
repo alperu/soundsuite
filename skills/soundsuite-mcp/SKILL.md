@@ -35,6 +35,15 @@ hung *and* empty while it was healthy, so on its own it carries no information. 
 Retrieval flaps: serving in seconds, then hanging minutes later, within one session. If a
 retrieval call stalls, re-run `preflight` rather than assuming your query is at fault.
 
+**Isolate a stall with `searchMode`.** `query_case_knowledge` takes
+`searchMode: 'keyword' | 'vector' | 'hybrid'` (default `hybrid`), and the three exercise
+different legs: `keyword` needs neither embedding nor rerank, `vector` needs embedding,
+`hybrid` needs both. If `keyword` returns and `vector` hangs, the fault is the embedding
+leg, not your query — and `keyword` is the reliable fallback while it is being fixed.
+Measured behaviour when the embedding leg is sick is **intermittent, not dead**: the same
+query can hang past 20 s and then return in 3 s, so one timeout proves nothing. Run it three
+or four times before concluding.
+
 ## 1. Transport — read first, it is not obvious
 
 Sound Suite listens on the Mac's **loopback**. Only one of the three places you can run
@@ -547,18 +556,44 @@ duplicated here. Two documents describing one thing is how they come to disagree
 The `local` profile is local end to end, and enforced rather than merely configured — a call
 carrying `provider: anthropic` returns **403 `POLICY_VIOLATION`**.
 
-| Stage | Engine |
-|---|---|
-| `scan_for_pattern` | none — regex / FTS over the index. **No model at all**, which is why scan survives a model outage |
-| embedding | sidecar-managed |
-| rerank | sidecar-managed |
-| decompose, outline | sidecar-managed |
-| RLM (`deep-rlm`) | sidecar-managed |
+`scan_for_pattern` uses **no model at all** — regex/FTS over the index — which is why it
+keeps working through any model outage. Everything else depends on the sidecar fleet.
 
-**Do not memorise model names or ports here** — the fleet is reconfigured live, containers
-move between hosts, and a host can declare a container it does not report. `ss.preflight()`
-shows what is actually up; `GET /api/config?resolve=localModels` shows what is selected; any
-result's `modelsUsed` shows what a given call used.
+**Port is fixed by role.** This map is hard-coded and safe to rely on:
+
+| Role | Port | Typical runtime |
+|---|---|---|
+| `ss-embedding` | 11434 | Ollama |
+| `ss-completion` | 11435 | Ollama |
+| `ss-ocr` | 11436 | Ollama |
+| `ss-code-embedding` | 11437 | Ollama |
+| `ss-reranker` | 8099 | Docker vLLM |
+| `ss-rlm` | 8100 | Docker vLLM |
+
+**One caveat that looks like a bug and is not.** A role backed by a *shared* Ollama answers
+on **11434** rather than its own per-role port — so `completion` on 11434 or `ocr` on 11434
+is correct configuration, not drift. `ss.fleet()` reports that as `sharedOllama: true` and
+keeps `portAnomalies` empty. A port outside both the role's own port and 11434 is a real
+anomaly.
+
+**What actually varies is the host, the runtime, and whether it is up** — the fleet
+auto-manages (`gpuAutoManage: true`) and moves roles between hosts by mode, so a role can be
+`running`, `exited`, `unloaded`, `not_pulled`, `created`, or declared by a host that reports
+no status at all. Read it live:
+
+```js
+await ss.fleet();
+// → { roles: { <role>: { expectedPort, up, minOnline, hosts, models,
+//                        sharedOllama, portAnomalies } }, unmet, gpuMode, gpuAutoManage }
+```
+
+`unmet` is the line that matters: a role with `minOnline >= 1` and `up: 0` is a capability
+the fleet believes it has and does not. **`UNREPORTED` is not `down`** — it means the host
+declared the container and sent no status; do not conclude the thing does not exist from a
+host that is not talking. That mistake has been made in this repo more than once.
+
+`GET /api/config?resolve=localModels` shows what is *selected*; any result's `modelsUsed`
+shows what a given call actually used.
 
 **Two caveats.** `embeddingProvider` is a config knob — an `openai` value would route query
 text to a cloud embedder, and the profile guard covers *completion* provider selection, not
