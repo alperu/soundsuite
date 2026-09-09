@@ -15,6 +15,30 @@ here is a bug in this file — re-derive it.
 
 ## 0. Preflight — run this before you trust anything
 
+**First: the response now tells you what it actually did.** `query_case_knowledge` returns a
+`retrieval` block and `warnings[]` alongside its passages:
+
+```jsonc
+retrieval: {
+  searchModeRequested: "hybrid",   // what you asked for
+  searchModeEffective: "hybrid",   // what ran — a difference IS the degrade
+  vectorSearchApplied: true,
+  rerankApplied: true,
+  rerankSkipReason: undefined,     // present only when rerank did not run
+  rerankPoolIn: 40
+}
+```
+
+Read it on every call that matters. `searchModeRequested !== searchModeEffective` means the
+default `hybrid` fell back to keyword and **still returned success** — previously a degraded
+empty result and an honest empty result were both `{results: []}` with nothing to tell them
+apart. `rerankApplied: false` with a `rerankSkipReason` means first-stage order, not
+cross-encoder order. `research_evidence` carries the same vocabulary plus its own denominator:
+`stats.subQueriesDispatched`, `stats.subQueriesFailed`, and `stats.subQueryFailures[]` with a
+per-sub-query code — the array is **absent when nothing failed**, so its presence is the signal.
+
+This is the diagnostic. Everything below is for the case where the call does not return at all.
+
 ```js
 await ss.preflight();
 ```
@@ -28,31 +52,20 @@ matters — a **timed retrieval probe**. Read `verdict`:
 | `degraded — …` | retrieval works; a sidecar declares a container it does not report |
 | `BLOCKED — retrieval path hangs` | `ss.ask` and research will hang. `ss.scan` still works — it uses no model. |
 
-**`notReady` alone is not evidence**, and the reason is structural rather than a bug to wait
-out. Readiness under `local` gates on one cached boolean — a *completion* probe
-(`reachable && generates`) applied to every tool outside `category: 'search'`. It says nothing
-about the embedding, rerank or RLM roles, and nothing about vLLM at all. So it reads empty
-while the retrieval path hangs and empty while it is healthy: verified in both states.
-
-Per-role dependency checks now exist (`fleetRole:<role>`, with three outcomes —
-`available` / `unavailable` / `unknown`, where `unknown` never refuses, because a role the
-fleet does not mention is not thereby down). But they ship **advisory**, and as of this
-writing **no tool declares one** — verified live: 26 local tools, zero role dependencies,
-`notReady` empty. Read the tool payload's `dependencies[]` if you want role state, but do not
-expect it to be populated, and do not treat an empty `notReady` as health either way.
-
-**The deeper limit will not be fixed by declaring more dependencies.** A dependency check
-takes no call parameters, so readiness describes the *tool*, never the *call*.
-`query_case_knowledge` needs the embedding role on `vector` and `hybrid` and nothing at all on
-`keyword` — one static declaration would over-refuse `keyword` and still not describe `hybrid`,
-whose real failure mode is not "not ready" but **ready, then silently degraded**. That is why
-`preflight` probes with a timeout instead of asking, and why the `searchMode` split below is
-the diagnostic that actually works.
+**`notReady` is still not evidence.** Readiness under `local` gates on one cached *completion*
+probe applied to every non-`search` tool; it says nothing about the embedding, rerank or RLM
+roles, and nothing about vLLM. Per-role checks exist (`fleetRole:<role>`, three outcomes, where
+`unknown` never refuses because a role the fleet does not mention is not thereby down) but ship
+**advisory**, and few or no tools declare one — read `dependencies[]` if you want role state,
+but never treat an empty `notReady` as health. Readiness describes the *tool*; a dependency
+check takes no call parameters, so it can never describe the *call*. That is what the
+`retrieval` block above is for.
 
 Retrieval flaps: serving in seconds, then hanging minutes later, within one session. If a
 retrieval call stalls, re-run `preflight` rather than assuming your query is at fault.
 
-**Isolate a stall with `searchMode`.** `query_case_knowledge` takes
+**When a call does not return at all**, isolate with `searchMode` — no response means no
+`retrieval` block to read. `query_case_knowledge` takes
 `searchMode: 'keyword' | 'vector' | 'hybrid'` (default `hybrid`), and the three exercise
 different legs: `keyword` needs neither embedding nor rerank, `vector` needs embedding,
 `hybrid` needs both. If `keyword` returns and `vector` hangs, the fault is the embedding
@@ -515,7 +528,11 @@ await ss.cancel(jobId)
 ```
 
 Retrieval knobs are **nested** under `retrieval` — a top-level `maxEvidence` is silently
-ignored. `ss.research()` nests them for you.
+ignored. `ss.research()` nests them for you. `research_evidence` now also accepts `searchMode`
+and `recordStatus` with `query_case_knowledge`'s semantics, and reports
+`stats.subQueriesDispatched` / `subQueriesFailed` / `subQueryFailures[]`. `multiPass` is
+accepted and **deliberately ignored** — it selects a synthesis path and these tools do not
+synthesise prose; it is named in `routing.ignored[]` rather than silently dropped.
 
 Poll with a **`Bash` `sleep 45`** between calls — never loop inside the JS; the tool aborts
 at 45 s. To start and leave: `ss.fire('k', 'research_evidence', {…})` then `ss.peek('k')`.
@@ -576,7 +593,9 @@ carrying `provider: anthropic` returns **403 `POLICY_VIOLATION`**.
 `scan_for_pattern` uses **no model at all** — regex/FTS over the index — which is why it
 keeps working through any model outage. Everything else depends on the sidecar fleet.
 
-**Port is fixed by role.** This map is hard-coded and safe to rely on:
+**Port is fixed by role.** This map is stable, but `fleet_status`'s `port` + `portSource` is
+the authority — it reports what a host actually serves and says `unreported` rather than
+guessing. Use the table to read a result, not to construct one:
 
 | Role | Port | Typical runtime |
 |---|---|---|
@@ -594,20 +613,30 @@ keeps `portAnomalies` empty. A port outside both the role's own port and 11434 i
 anomaly.
 
 **What actually varies is the host, the runtime, and whether it is up** — the fleet
-auto-manages (`gpuAutoManage: true`) and moves roles between hosts by mode, so a role can be
-`running`, `exited`, `unloaded`, `not_pulled`, `created`, or declared by a host that reports
-no status at all. Read it live:
+auto-manages (`gpuAutoManage: true`) and moves roles between hosts by mode. Read it from the
+tool, not from a table:
 
 ```js
-await ss.fleet();
-// → { roles: { <role>: { expectedPort, up, minOnline, hosts, models,
-//                        sharedOllama, portAnomalies } }, unmet, gpuMode, gpuAutoManage }
+await ss.exec('fleet_status', {});
+await ss.exec('role_assignments_list', {});
 ```
 
-`unmet` is the line that matters: a role with `minOnline >= 1` and `up: 0` is a capability
-the fleet believes it has and does not. **`UNREPORTED` is not `down`** — it means the host
-declared the container and sent no status; do not conclude the thing does not exist from a
-host that is not talking. That mistake has been made in this repo more than once.
+`fleet_status` **probes rather than relays**, and is careful about the difference:
+
+| Field | Why it exists |
+|---|---|
+| `reported` | the sidecar's own string, verbatim — not mapped onto an invented enum |
+| `reportedSynthetic` + `syntheticBasis` | a host-runtime role gets a `running` the sidecar *assumes*; this labels it rather than laundering it |
+| `stale` / `staleMs` vs `stalenessThresholdMs` | *stale* is not *reported*, and neither is *down* |
+| `probe` / `probeDetail` | says whether it actually asked. Ollama roles read `not_attempted` **because the sidecar already observes them live** via `/api/tags` and `/api/ps` — relaying those is an observation, not an inference. vLLM roles get a bounded `GET /v1/models` |
+| `port` + `portSource` | `sidecar-config` when reported, `null` + `unreported` otherwise — it never fabricates a default |
+| `probing.attempted` / `timeoutMs` / `wallClockMs` | the probe's own denominator and bound |
+
+The client's `ss.fleet()` predates this tool and derives less carefully — prefer `fleet_status`.
+
+**`UNREPORTED` is not `down`, and `stale` is not `reported`.** A host that declared a container
+and sent no status is telling you nothing about it. That mistake has been made in this repo more
+than once, in both directions.
 
 `GET /api/config?resolve=localModels` shows what is *selected*; any result's `modelsUsed`
 shows what a given call actually used.
