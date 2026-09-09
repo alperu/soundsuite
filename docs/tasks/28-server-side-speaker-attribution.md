@@ -10,6 +10,55 @@
 
 Patterns in this file are transcript boilerplate (`MR\.`, `THE COURT`). No party names, no case data.
 
+## ✅ Verification 2026-09-09 — premises hold, but **items 5 and 6 are blocked by an unstated dependency**
+
+**CONFIRMED**
+
+| Claim | Evidence |
+|---|---|
+| Task 14 made attribution possible and left the backfill unrun | task 14 is Implemented with **exactly one** open item — item 6, the structure backfill, marked *"Not run — operational, needs a backup and your go-ahead"* |
+| Task 14 item 6 is the structure backfill via `POST /api/admin/structure-backfill` | the route exists; it chunks with `new StructuredChunker(new LangChainTextChunker())` (`src/app/api/admin/structure-backfill/route.ts:151`) |
+| A `speakers` column exists in the vector schema | `src/lib/vector/vector-store.ts:90-91` (`Delimited '\|SPEAKER\|…\|'`), `:129`, `:150`, written `:316`, read back `:1039` (empty string → `undefined`) |
+| The projection sites item 4 targets already exist | `speakers` is already projected onto rows at `query-case-knowledge.ts:592` and `:688`, and `scan-for-pattern.ts:1387`. Item 4 is additive alongside an existing field, not new plumbing. |
+| Chunk boundaries cut turns in half | measured: the median body-non-block chunk is ≈130 characters (see task 21's verification box). The risk is real and it is the largest one in this task. |
+
+**REFUTED**
+
+1. **"`skills/soundsuite-mcp/SKILL.md` §7 documents the caller-side ritual."** It is **§3a — "Who
+   said it — transcript speaker attribution"**, at `SKILL.md:334-380`. There is no §7 covering this.
+   Item 7 must target §3a, and also `SKILL.md:557` and `:561`, which repeat "the column is null" as a
+   standing example.
+
+**NEW BLOCKER — measured, and it changes the plan.** Measured **2026-09-09**, the `speakers` column
+was populated on **91 of 35,890 rows**.
+
+> **Q3 — `speakers` coverage.** Open `data/lancedb` → table `chunks`; select `speakers` for
+> `countRows()` rows and count those whose value is neither null nor the empty string (the store
+> writes `''` for absent — `src/lib/vector/vector-store.ts:316` — and maps it back to `undefined` at
+> `:1039`, so test for empty, not for null). Report the count **and** `countRows()` as the
+> denominator.
+
+That figure is the whole basis for this section, so **re-run Q3 before acting on it** — it moves the
+moment task 14 item 6 runs, and this blocker dissolves when it does. As measured it is effectively
+unpopulated, with two consequences the task does not state:
+
+- **Item 5** ("prefer the `speakers` column when non-null") is correct but will almost never fire.
+  It is cheap to write and should stay — as forward compatibility, not as a coverage contributor.
+- **Item 6** ("measure agreement between derived and backfilled attribution on chunks where both
+  exist") **is not computable at a useful denominator today.** The population where both exist is
+  bounded above by Q3's count, and an agreement rate over that many rows is not the honest quality
+  figure the item asks for. Item 6 is **blocked on task 14 item 6 actually being run** — a hard
+  dependency between two tasks that neither file currently records. Either run the backfill first,
+  or restate item 6 to report the denominator alongside the rate so a reader can see how thin it is.
+
+**Revised disposition — keep P1; split the task.** Items 1-4 and 7 are unblocked, are the bulk of the
+value, and can ship against printed labels alone. Items 5-6 depend on task 14 item 6 and should be
+tracked behind it rather than sitting in the same list. State the dependency in both files.
+
+**UNVERIFIABLE from source** — that server-side derivation reproduces task 14's caller-side figures
+at corpus scale. That is what item 6 exists to measure, and the provenance note above already says so
+correctly.
+
 ## Problem
 
 Attribution is a caller-side ritual today: scan for a printed label, split chunks on label boundaries,

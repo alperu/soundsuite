@@ -8,6 +8,45 @@
 
 Field names and code citations only. No case data.
 
+## ✅ Verification 2026-09-09 — the correction is right, but **it over-corrected: item 1 fixes docs that are already correct**
+
+**CONFIRMED — the core correction stands.**
+
+| Claim | Evidence |
+|---|---|
+| Nothing in this repo enforces a 60 KB ceiling | `mcp-server.ts` `sendSuccess` is `res.writeHead(200, …); res.end(JSON.stringify(data));` — serialise and return, no size branch anywhere |
+| The cap is a host-side client limit | `public/mcp-client/soundsuite-client.js:25` records it as a learned constraint of the calling tool |
+| A `fields` projection would not lift a server limit | follows from the above |
+| The surviving justification — pagination costs a call per page — is sound | the cursor/`nextCursor` paging path in `scan-for-pattern.ts` is per-call |
+
+**REFUTED — item 1's premise.** The task says `SKILL.md:522` and `public/mcp-client/README.md:57`
+"present the cap as a server property" and calls correcting them "the honest part of the task."
+**Both documents already attribute it to the client:**
+
+- `public/mcp-client/README.md:57` — *"helpers return summaries so a result never exceeds **the
+  tool's** ~60 KB output cap"*. "The tool" is the calling `javascript_tool`, not this server.
+- `skills/soundsuite-mcp/SKILL.md:636` — *"A result over ~60 KB **aborts the call** and dumps to a
+  file you then have to parse."* Aborting the call is client behaviour, and the sentence says so.
+
+Neither sentence claims the server truncates. **Item 1 has nothing to fix** and should be deleted, or
+reduced to a one-line check that no *new* doc introduces the misreading. This is a correction that
+introduced a second error while fixing the first — worth noting, because the v12 sentence it corrects
+really was wrong.
+
+**STALE CITATIONS**
+
+- `SKILL.md:522` → the 60 KB sentence is at **`:636`**; `:522` is unrelated.
+- `soundsuite-client.js:25 (constant)` → `:25` is a **comment line** in the file's header block. There
+  is **no 60 KB constant** in that file; the other `60`s (`:251`, `:292`, `:325`) are an excerpt
+  radius and two default `limit`s, unrelated to the cap. The reference list's "`:25` (constant),
+  `:71` (summariser, used `:66`, `:224`)" is wrong on the first item.
+
+**Revised disposition — keep P2, drop item 1, keep items 2-6.** The task's *own* stated reason for
+existing (pagination costs round trips; the server already knows the total on the exhaustive path)
+survives untouched, and items 3 and 4 carry the real discipline — a projection must never trim the
+honesty fields, and `totalMatches` must not appear on a capped path. Item 6 (measure the byte
+reduction) stays: it is still unmeasured.
+
 ## The correction: the 60 KB ceiling is not ours
 
 v12 §3c attributes the pressure to a "60 KB result ceiling" that "pushes callers to small `limit`s".

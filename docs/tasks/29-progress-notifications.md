@@ -8,6 +8,32 @@
 
 Field names and code citations only. No case data.
 
+## ✅ Verification 2026-09-09 — **fully verified; nothing refuted**
+
+Status changed from *diagnosed, not verified*. Every claim in this file checks out against source,
+including its own correction of v12. This is the only file in the 26-32 sweep where verification
+found no error.
+
+| Claim | Verdict | Evidence |
+|---|---|---|
+| The translation layer already exists, outside `src/` | ✅ | `scripts/mcp-bridge/bridge.mjs` — `relayJobEvents` `:137`, `progressToken` read from `_meta` `:231`, relay started `:218-224` |
+| `progress` → `notifications/progress` **with `progress: evt.seq`** | ✅ | `bridge.mjs:167-171` — literally `progress: typeof evt.seq === "number" ? evt.seq : 0` |
+| `thoughts` → `notifications/message` | ✅ | `bridge.mjs:174-179` |
+| Every event carries `seq` | ✅ | `research-jobs.ts` — `const event: ResearchJobEvent = { seq: job.events.length, ts: Date.now(), type, payload }` |
+| `evidence` and `token` are **not** relayed | ✅ | the `switch (evt.type)` in `bridge.mjs` has cases for `progress` and `thoughts` only |
+| `setOutline`, `setCost` and `rlmNote` mutate without calling `emit` | ✅ | all three set `job.<field>` then `job.updatedAt = Date.now()` and return — while `progress`, `evidence`, `thoughts` and `token` immediately above them all call `emit(job, …)`. The contrast is visible in one screenful. |
+| Nothing under `src/` knows about `progressToken` | ✅ | every occurrence of `progressToken` in the repo is in `scripts/mcp-bridge/bridge.mjs` |
+| `bridge.mjs` is outside the jest roots | ✅ | `jest.config.js` `roots: ['<rootDir>/src']` |
+
+**One addition for item 5.** The risk note is sharper than the item. Because the bridge is the *only*
+implementation, "which transport real callers use" is not a nice-to-know — a caller on the in-process
+`mcp-server.ts` path gets no notifications at all and has no way to discover that from the tool
+description. Item 1 (document what streams, and over which transport) therefore closes most of the
+practical gap on its own, and should be done first even if items 2-4 never happen.
+
+**Revised disposition — keep P2, keep the shape.** No re-scoping needed. Item 1 is the highest-value
+line in the file and is nearly free.
+
 ## The report's premise is wrong
 
 v12 §3b states that the NDJSON progress stream *"[n]one of it reaches MCP"* and proposes building a

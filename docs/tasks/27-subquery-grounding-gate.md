@@ -9,6 +9,35 @@
 
 Counts and code citations only. No case data.
 
+## ✅ Verification 2026-09-09 — structural claims all hold; **item 2's open question is answered**; the timing figure remains unmeasured
+
+**CONFIRMED**
+
+| Claim | Evidence |
+|---|---|
+| No grounding check anywhere in the path | the only pre-retrieval decision is `resolveResearchMode(query, options.mode)` — defined `gather-evidence.ts:73`, called `:251` — which takes the query text and never touches the corpus |
+| `rr-grounding.ts` exists and is **imported nowhere** | the file is present at `src/lib/search/rr-grounding.ts`; a recursive search for `rr-grounding` across `src/` and `scripts/` returns no importer. Item 5 stands as written. |
+| Sub-queries are generated in `decompose`, three branches | `fast` single-query, chip dispatch, and `decomposeQuery` under timeout with `heuristicDecompose` fallback — all inside the `timed('decompose', …)` block |
+| Retrieval fans out one call per sub-query | `deep-search.ts:496` `const promises = specs.map(async (spec): Promise<SubQueryResult> => {` — and a second identical fan-out at `:685` the task does not mention |
+| **The proposed insertion point is correct.** Fuse and rerank have already run and `mode` is still downgradeable at the gate | `if (mode === 'deep-rlm')` sits at `gather-evidence.ts:429`; the `fuse` / `rerank` block completes just above it, with `stats.rerankPool` and `stats.finalAfterRerank` already computed |
+
+**ANSWERED — item 2 needs less work than it asks for.** The item says "Confirm whether
+`SubQueryResult` already carries this." **It does:** `SubQueryResult` is `{ subQuery: string; sources:
+DeepSearchSource[]; ms?: number }` at `deep-search.ts:308-318`. Per-sub-query yield is therefore
+computable directly from the fan-out result. Item 2 shrinks from "attribute sources back to
+sub-queries" to "carry the attribution through `deduplicateAndMerge` so it survives fusion" — check
+whether the merge preserves it before writing anything.
+
+**UNVERIFIABLE from source — and deliberately not measured here.** The 49.7 s / five-of-six figure
+needs a `deep-rlm` run against the live corpus; this sweep did not start one. What settles it is
+exactly what item 1 already specifies: re-run the job, record per-sub-query yield above a floor and
+the wall clock each consumed. **Item 1 is correctly written as a gate on the rest of the task** — the
+verification confirms the task's own self-awareness rather than the number. Note that the task's
+title and heading both hard-code "50 s"; if item 1 measures something different, retitle.
+
+**Revised disposition — keep P1, keep item 1 as the gate.** Amend item 2 per the finding above. Note
+that the second fan-out at `deep-search.ts:685` may need the same treatment.
+
 ## Problem
 
 In v12's `deep-rlm` run, five of six generated sub-queries were off-corpus — an entire invented

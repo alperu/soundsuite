@@ -9,6 +9,41 @@
 
 Field names, counts and code citations only. No case data.
 
+## ✅ Verification 2026-09-09 — **verified as written**; the probe cost is understated, not overstated
+
+Status changed from *diagnosed, not verified*. This is the most accurate of the 26-32 specs: every
+citation lands within two lines of its target.
+
+**CONFIRMED**
+
+| Claim | Evidence |
+|---|---|
+| `MAX_CONTEXT = 3` | `get-chunk-context.ts:58` |
+| `SAFE_ID` guard | `:66` (task says `:64`) applied at `:228` (task says `:226`) |
+| Input schema; `rejectsUnknownParams` | `:197`; `:223` (task says `:222`) |
+| Every chunkId-shaped operation is a closure in `executeImpl` | `executeImpl` `:236`; `streamWhere` `:287`, `inStream` `:298`, `collectSide` `:344` — all inside it |
+| **No liftable function exists** | the only module-scope functions are `num` `:154`, `compareRows` `:159`, `clamp` `:625`. Item 1's extraction refactor is required, exactly as stated. |
+| The six probes | target `:267`; `prevProbe`/`nextProbe` `:308-316`; `collectSide` `:358`; `twinRows` `:428` |
+| Probe **floor is 4** | `collectSide` returns `[]` without a query when `need <= 0 \|\| !moreExists` (`:345-346`), so both sides drop out at a document boundary or `before/after: 0` |
+| `twinRows` exists because of duplicate `chunk_index` | confirmed against the store: duplicate indices occur in **4 documents** when measured per stream — matching the comment at `:142-144` |
+
+**REFINED — the task understates its own case.** "1–8 scans" per side is not a range of possible
+query counts to be averaged; `collectSide` is a **retry loop of up to 8 attempts** (`:351`) that
+widens `span` until it has enough rows. So the per-id ceiling is nearer 20 store operations than 6,
+and twenty hits can cost far more than the stated 80–120. The win is larger than the task claims;
+no reason to soften it.
+
+**MEASURED — the clustering premise is plausible but still unproven for a *scan*.** Chunks per
+document in the live store are heavily skewed: over 104 documents the largest holds thousands of
+chunks while the median holds double digits (re-derive by grouping `document_id` and counting). A
+hit set drawn from that store is *likely* to cluster. That is not the same as measuring clustering on
+a real scan's hits, which is what the acceptance table asks for — **keep that acceptance row**; it is
+the one thing here that source reading cannot settle.
+
+**Revised disposition — proceed as written, priority unchanged (P1).** Correct "the floor is 4 and
+the typical case is 6" to add the ceiling, and keep item 1 first: the extraction is genuinely
+required, not a stylistic preference.
+
 ## Problem
 
 `get_chunk_context` takes one `chunkId`. Padding twenty scan hits means twenty calls. v12 identified

@@ -5,6 +5,66 @@
 
 Field names, counts and code citations only. No case data.
 
+## ✅ Verification 2026-09-09 — premises hold; **every line citation has drifted, and item 4 is partly already done**
+
+**CONFIRMED**
+
+| Claim | Evidence |
+|---|---|
+| No `completeness` object exists on either tool | `completeness` appears in `scan-for-pattern.ts` only inside a comment (`:1193`); nowhere in `query-case-knowledge.ts` |
+| Callers must string-match prose | `ScanForPatternResult` (`scan-for-pattern.ts:57-90`) exposes `strategy`, `candidatePool`, `scanned`, `truncated`, `nextCursor`, `warnings` — and no exhaustive/proven boolean |
+| 15 warning strings pushed into one array | `const warnings: string[]` at `:839`; **15** `warnings.push` sites |
+| The return assembly is exactly as quoted | `:1405-1414`, byte-identical to the block quoted below |
+| `query_case_knowledge` computes none of it | `return { results: enrichedResults };` — `query-case-knowledge.ts:708` — the whole assembly |
+| **The five variables really are out of scope at the return** | all inside the FTS `else` branch: `fetchLimit` `:1083`, `poolCapped` `:1117`, `pageFills` `:1138`, `willEscalate` `:1141`, `provenAbsence` `:1144`. The in-scope five are `strategy` `:995`, `candidatePool` `:997`, `scanned` `:998`, `truncated` `:999`, `nextCursor` `:1000`. **Item 1's hoist is real work.** |
+| `documentsSearched` does not exist and cannot be faked | no distinct-document count on either path |
+| `distinctDocs` is a pool statistic, not a corpus denominator | `query-case-knowledge.ts:527` — used only to size a per-document diversity cap |
+| `scanTextColumn` exists and exposes no count API | `src/lib/vector/vector-store.ts:460` — signature confirmed at the cited line |
+
+**REFUTED / STALE**
+
+1. **Every `file:line` in this task is stale**, by +7 near the top of `executeImpl` and by up to +43
+   further down. The table above carries the current numbers. The claims themselves survive — this is
+   citation drift, not a wrong diagnosis — but a reader following the old numbers lands in unrelated
+   code, and the variable table was the part most likely to be trusted without re-checking.
+
+2. **Item 4 is partly already done.** The task treats the corpus denominators as pending work from
+   task 23. `scan-for-pattern.ts:12` already imports `getCorpusDenominator, provenAbsenceClause` from
+   `../corpus-denominator`, and calls them at `:1026`, `:1151` and `:1172`. The denominator is already
+   in the **prose** on the zero-result branches. What item 4 must actually do is narrower: surface the
+   same values as **fields**, and ensure they reach the non-zero branch too — which is precisely the
+   asymmetry this task's closing section already identifies. Reword item 4 from "wire the
+   denominators" to "project the denominators that the prose already carries".
+
+3. **`documentsTotal: 864` in the proposed shape is a frozen number.** The live count differs. Replace
+   the literal in the JSON example with a note that the value comes from
+   `getCorpusDenominator(context, scopeIds)` at call time.
+
+4. **The task's opening example is stale *text*, not just a stale line number — and this strengthens
+   the task.** The quoted warning ending *"so this answer is exhaustive: the absence is proven, not
+   merely unreached"* **no longer exists in the emitted prose.** The current wording is
+   `scan-for-pattern.ts:1157` (*"…the candidate pool was not capped, so this answer is exhaustive over
+   the …"*) and `:1177`. The old sentence survives only in comments and in **negative test
+   assertions** — `src/lib/mcp/__tests__/corpus-denominator.test.ts:56` and
+   `src/lib/mcp/tools/__tests__/scan-for-pattern-full-scan-denominator.test.ts:267, :280, :287` all
+   assert `not.toMatch(/the absence is proven/i)`; `src/lib/mcp/corpus-denominator.ts:185` describes
+   `provenAbsenceClause` as *"the clause that **replaces**"* it.
+
+   So the exact substring this task holds up as the thing callers latch onto **has already been
+   rewritten once, and a test now forbids its return.** That is the argument for the task, made
+   empirically: a caller written against the v12-era string is already broken today, silently, with no
+   error and no version signal — which is precisely the failure `completenessVersion` (item 6) exists
+   to prevent. Update the quoted block to the current wording and cite this history beside it.
+
+**UNVERIFIABLE without a run** — item 7a's "a deliberately absurd query still returned three passages
+scoring 0.73". Settle it by issuing an off-corpus `query_case_knowledge` and recording the score
+distribution; the design guidance (design for the confident-irrelevant case, not the empty one) does
+not depend on the exact figure.
+
+**Revised disposition — keep P0, keep the shape, refresh the citations.** Nothing here is refuted on
+substance. Before item 1 is started, re-derive the variable table from source rather than from this
+file, and rewrite item 4 per point 2 above.
+
 ## Problem
 
 A caller today determines whether an answer is exhaustive by **string-matching English warning
