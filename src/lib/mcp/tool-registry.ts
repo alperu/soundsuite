@@ -217,7 +217,8 @@ export class ToolRegistry {
       return { success: false, error: `Tool "${toolName}" is disabled`, errorCode: 'TOOL_DISABLED', executionTimeMs: 0 };
     }
 
-    // Under `local`, re-probe Ollama (cached 30 s) so a freshly-started
+    // Under `local`, re-probe Ollama (cached 60 s — OLLAMA_PROBE_CACHE_MS in
+    // shared-dependencies.ts) so a freshly-started
     // Ollama is picked up without waiting for the next refreshDependencies().
     if (profile === 'local' && this.toolNeedsLlm(tool)) {
       await this.probeOllama();
