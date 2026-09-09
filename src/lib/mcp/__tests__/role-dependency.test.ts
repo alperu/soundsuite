@@ -26,9 +26,10 @@ const statusCache = jest.requireMock('../../gpu/status-cache');
 const { prisma } = jest.requireMock('../../db/prisma');
 
 /** Minimal shape — only the fields `checkRoleAvailability` reads. */
-function sidecar(role: string, opts: { loaded?: boolean } = {}) {
+function sidecar(role: string, opts: { loaded?: boolean; lastSeen?: number } = {}) {
   return {
     agentUrl: 'http://sidecar.invalid',
+    lastSeen: opts.lastSeen ?? Date.now(),
     containers: { [role]: { status: 'running', name: `ss-${role}` } },
     vram:
       opts.loaded === undefined
@@ -90,6 +91,38 @@ describe('checkRoleAvailability', () => {
     const r = await checkRoleAvailability('reranker');
     expect(r.state).toBe('unavailable');
     expect(r.basis).toMatch(/none with 'reranker' running/);
+  });
+
+it('reports unknown, not unavailable, when every cached sidecar entry is stale', async () => {
+    // Regression: `getAllSidecarStatuses` has NO staleness filter (unlike
+    // `findSidecarsWithRole`), so a fleet that went silent hours ago still
+    // returns a non-empty array. Treating that as "role absent" asserts a host
+    // is down on the strength of a stale snapshot.
+    const old = Date.now() - 10 * 60_000;
+    statusCache.getAllSidecarStatuses.mockReturnValue([
+      sidecar('ocr', { lastSeen: old }),
+      sidecar('embedding', { lastSeen: old }),
+    ]);
+    const r = await checkRoleAvailability('reranker');
+    expect(r.state).toBe('unknown');
+    expect(r.basis).toMatch(/stale/);
+    expect(await roleDependency('reranker').check()).toBe(true);
+  });
+
+  it('still reports unavailable when a fresh sidecar simply lacks the role', async () => {
+    // The staleness filter must not swallow the genuine negative.
+    statusCache.getAllSidecarStatuses.mockReturnValue([
+      sidecar('ocr', { lastSeen: Date.now() }),
+      sidecar('embedding', { lastSeen: Date.now() - 10 * 60_000 }),
+    ]);
+    const r = await checkRoleAvailability('reranker');
+    expect(r.state).toBe('unavailable');
+    expect(r.basis).toMatch(/1 sidecar\(s\) reporting fresh status/);
+  });
+
+  it('distinguishes an empty cache from an entirely stale one in its basis', async () => {
+    statusCache.getAllSidecarStatuses.mockReturnValue([]);
+    expect((await checkRoleAvailability('rlm')).basis).toMatch(/never|ever reported/);
   });
 
   it('never claims unavailable for a vLLM role via a direct host it cannot use', async () => {

@@ -351,6 +351,14 @@ export type FleetRoleName =
  */
 export type RoleAvailability = 'available' | 'unavailable' | 'unknown';
 
+/**
+ * Mirrors `STALE_THRESHOLD_MS` in `../gpu/status-cache`, which is module-private
+ * there. Kept in sync deliberately rather than exported across the boundary: if
+ * they ever diverge, this one being SHORTER only ever yields `unknown` sooner,
+ * which fails open. Never lengthen it past the cache's own threshold.
+ */
+const SIDECAR_STALE_THRESHOLD_MS = 30_000;
+
 export interface RoleAvailabilityResult {
   state: RoleAvailability;
   /** Which signal decided it — for logs and `readyReasons`, not for callers to branch on. */
@@ -436,10 +444,23 @@ export async function checkRoleAvailability(
       basis: `fleet state unreadable (${(err as Error).message})`,
     };
   }
-  if (all.length === 0) {
+
+  // `getAllSidecarStatuses` returns the raw cache with NO staleness filter,
+  // unlike `findSidecarsWithRole` and `isSidecarConnected`, which both drop
+  // entries older than the threshold. Filtering here is therefore required, not
+  // defensive: without it a fleet that has gone entirely silent still yields a
+  // non-empty array, the no-fleet branch never fires, and a role nothing has
+  // reported on in hours is declared `unavailable` — asserting a host is down
+  // on the strength of a stale snapshot, which is the precise confusion this
+  // three-state result exists to prevent.
+  const fresh = all.filter((s) => Date.now() - s.lastSeen <= SIDECAR_STALE_THRESHOLD_MS);
+  if (fresh.length === 0) {
     return {
       state: 'unknown',
-      basis: `no sidecar has reported within the staleness window — the fleet says nothing about '${role}', which is not the same as '${role}' being down`,
+      basis:
+        all.length === 0
+          ? `no sidecar has ever reported — the fleet says nothing about '${role}', which is not the same as '${role}' being down`
+          : `all ${all.length} cached sidecar entries are stale (no heartbeat within ${SIDECAR_STALE_THRESHOLD_MS / 1000}s) — the fleet says nothing current about '${role}'`,
     };
   }
 
@@ -452,7 +473,7 @@ export async function checkRoleAvailability(
 
   return {
     state: 'unavailable',
-    basis: `${all.length} sidecar(s) reporting, none with '${role}' running, and no direct host configured for it`,
+    basis: `${fresh.length} sidecar(s) reporting fresh status, none with '${role}' running, and no direct host configured for it`,
   };
 }
 
