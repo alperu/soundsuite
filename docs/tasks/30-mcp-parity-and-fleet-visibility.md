@@ -1,6 +1,7 @@
 # Parameter parity between tools, and read-only fleet visibility
 
-**Status:** Proposed — **diagnosed, not verified** · **Effort:** S · **Priority:** P2 · **Created:** 2026-09-08
+**Status:** Proposed — parity half diagnosed; **Part 3 amended and re-prioritised 2026-09-09** · **Effort:** S · **Priority:** **P1** (raised from P2) · **Created:** 2026-09-08
+**Blocked by:** [task 39](./39-role-aware-readiness.md) — a fleet tool cannot report role health the registry has no way to express
 **Report:** [`../MCP-Improvements/REPORT-v12-mcp-surface-for-fast-correct-answers.md`](../MCP-Improvements/REPORT-v12-mcp-surface-for-fast-correct-answers.md) §5, §6 item 10
 
 > **Provenance.** The parity gaps are verified by grep. The `multiPass` framing in v12 is **wrong** —
@@ -57,6 +58,53 @@ probing `10.10.20.5:8099` directly from a shell — HTTP 200 in 0.37 s on `/v1/m
 `fleet_status()` would not have needed a shell. And per [task 22](./22-rerank-observability.md), a
 silently degraded reranker is invisible in the response, so fleet health is currently the *only* way
 to distinguish a real rerank from a fallback.
+
+### Amendments — 2026-09-09, from [report v15](../MCP-Improvements/REPORT-v15-sidecar-model-awareness.md) and [task 38](./38-interactive-embedding-budget.md) §5
+
+Four, and the first changes what this tool *is*.
+
+**(a) It must probe, not relay.** The sidecar queries Ollama roles live (`/api/tags`, `/api/ps` —
+`sideCar/src/lib/ollama-api.ts:82`) but has **no equivalent for vLLM**: `sideCar/src/lib/state.ts:412`
+says verbatim that vLLM *"doesn't expose a per-model size endpoint like Ollama's `/api/ps`"*, so it
+infers liveness from `nvidia-smi` PID attribution. The two vLLM roles are **`ss-reranker` and
+`ss-rlm`** — exactly the ones whose health cannot otherwise be asserted. A `fleet_status()` that
+re-serves container state through MCP reproduces the `notReady` defect: green while the path is sick.
+Requirement: a bounded `GET /v1/models` per vLLM role, one short per-host timeout, host reported
+`unknown` on timeout.
+
+**(b) Encode the role→port map once — it currently exists three times and they disagree.**
+
+| Where | Roles | Note |
+|---|---|---|
+| `sideCar/src/lib/state.ts:59+` | 6 (embedding 11434, completion 11435, ocr 11436, code-embedding 11437, reranker 8099, rlm 8100) | the authority |
+| `src/lib/gpu/fleet-router.ts:874-879` | **4** — missing `code-embedding` and `rlm` | docstring `:873` says *"must match sideCar/server.js registry"* — **that file no longer exists** |
+| `src/lib/ai/stream-rlm.ts:53` | 1 — `RLM_PORT = 8100` hardcoded | the value the master's own map omits |
+
+`resolveEndpoint` (`fleet-router.ts:895-897`) already prefers sidecar-reported config over the
+constant, so the stale map is a fallback rather than the live path — which makes consolidating it
+low-risk, and makes leaving it a trap that will not fail loudly.
+
+**A shared Ollama answers on 11434 regardless of role, and this is encoded** —
+`fleet-router.ts:601,606,611` rewrite host-runtime Ollama roles to `port: 11434`. **Never report it
+as drift.**
+
+**(c) `UNREPORTED` is not `down`.** A host that declares a container and returns no status is telling
+you nothing about it; three wrong "role X does not exist" conclusions came from that confusion in one
+session. Distinguish `running` / `exited` / `unloaded` / `not_pulled` / `created` / `unreported` /
+`unreachable`, and never collapse the last two.
+
+⚠️ **This costs more than widening an enum.** There is **no declared status type today** —
+`statusCache.ts` types it bare `string`, the observed literals are `'running' | 'not_found' |
+'error'`, and host-runtime/DMR roles get a **synthetic `'running'`** the sidecar assumes rather than
+probes. Six of the seven states would be invented, and the synthetic value needs an explicit decision:
+a role reported `running` because nothing checked must not keep saying `running` under a vocabulary
+that promises probes.
+
+**(d) It is blocked by [task 39](./39-role-aware-readiness.md).** Readiness is currently one cached
+boolean from a completion-only probe, so the registry has no way to express per-role health. A fleet
+tool reporting what the registry cannot represent would be a second, parallel source of truth.
+Priority raised to P1 for the same reason task 39 is: this is the only way to distinguish a real
+rerank from a fallback.
 
 ## Work
 
