@@ -31,12 +31,14 @@
  * PRIVACY
  *   Evidence text is real case material (cause numbers, party names, filing titles).
  *   Quote it in conversation; never write it to a file, report, or commit. See CLAUDE.md.
- *   Never fetch /api/config — it returns live provider API keys in plaintext.
+ *   Never fetch /api/config bare. It no longer returns key values (apiKeys is
+ *   { provider: { configured, last4 } } and ?key=<row> is refused 403), but there is
+ *   still no reason to read it. The one useful read is ?resolve=localModels.
  */
 
 (function () {
   const ss = {
-    version: '1.0.0',
+    version: '1.1.0',
     origin: location.origin,
     last: null,     // full payload of the most recent exec — extract from here
     runs: {},       // background runs keyed by name
@@ -226,6 +228,254 @@
       };
     },
   };
+
+
+  // ====== v1.1 — computed helpers ==========================================
+  // Every figure these return is computed or quoted from the server. Nothing is
+  // remembered. If a number could go stale in a document, it belongs in here.
+
+  const withTimeout = (p, ms, tag) => Promise.race([
+    p, new Promise((z) => setTimeout(() => z({ __timeout: true, tag, ms }), ms)),
+  ]);
+
+  Object.assign(ss, {
+    /** Detokenise a literal so the coverage rule forces a full scan. */
+    _detok(pattern) {
+      return pattern.replace(/([A-Za-z]{3,})/, (m) => m.slice(0, -1) + '[' + m.slice(-1) + ']');
+    },
+
+    /** Centre a snippet on the match instead of the chunk start. */
+    _centre(text, match, pad) {
+      const t = String(text || ''); const p = pad || 240;
+      const i = match ? t.indexOf(match) : 0; const j = i < 0 ? 0 : i;
+      return (j > p ? '…' : '') + t.slice(Math.max(0, j - p), j + p + 60).replace(/\s+/g, ' ').trim();
+    },
+
+    /**
+     * Provenance footer for a scan result. Quotes the server's absence clause
+     * verbatim when present; only computes coverage when the server had no
+     * reason to state it. Never hand-assemble this.
+     */
+    provenance(result, corpus) {
+      const r = result || ss.last || {}; const W = r.warnings || [];
+      const rows = (r.results || []).length;
+      const served = W.find((w) => /proven absent from/.test(w)) || null;
+      const capped = W.some((w) => /recall was capped/i.test(w));
+      const linespan = W.some((w) => /spans a printed transcript line number/i.test(w));
+      let coverage = null;
+      if (!served && corpus && corpus.documents) {
+        const d = corpus.documents;
+        coverage = { indexed: d.indexed, total: d.total,
+                     pct: (100 * d.indexed / d.total).toFixed(1),   // string: keeps the trailing zero
+                     chunks: corpus.chunks && corpus.chunks.total };
+      }
+      const verdict = rows > 0 ? (capped ? 'matches-found-capped-pool' : 'matches-found')
+        : served ? 'proven-absent'
+        : r.truncated ? 'inconclusive-truncated'
+        : r.nextCursor ? 'inconclusive-more-pages' : 'zero-unqualified';
+      const p = ['strategy: ' + (r.strategy || 'unknown')];
+      if (r.scanned != null) p.push('scanned: ' + r.scanned.toLocaleString('en-US'));
+      if (r.candidatePool != null) p.push('candidatePool: ' + r.candidatePool);
+      p.push('rows: ' + rows, 'truncated: ' + !!r.truncated, 'more pages: ' + !!r.nextCursor);
+      let line = p.join(' · ');
+      if (served) line += '\n' + served;
+      else if (coverage) line += '\nIndex covers ' + coverage.indexed + ' of ' + coverage.total +
+        ' documents (' + coverage.pct + '%), ' + coverage.chunks.toLocaleString('en-US') +
+        ' chunks. An absence is provable only over what is indexed.';
+      if (capped) line += '\nCAVEAT: keyword recall was capped — this count may understate.';
+      if (linespan) line += '\nCAVEAT: a match spans a printed line number; check the break before quoting.';
+      return { line, verdict, servedClause: served, capped, linespan, coverage };
+    },
+
+    /** Scan + dedupe + centred snippets + provenance. The everyday call. */
+    async digest(pattern, o = {}) {
+      const params = Object.assign({ pattern, limit: o.limit || 60 },
+        o.caseId ? { caseId: o.caseId } : {}, o.caseIds ? { caseIds: o.caseIds } : {},
+        o.mode ? { mode: o.mode } : {}, o.fold === false ? { fold: false } : {},
+        o.linePermissive === false ? { linePermissive: false } : {});
+      await ss.exec('scan_for_pattern', params, o);
+      const L = ss.last || {};
+      if (L.error) return { error: L.error };
+      const seen = new Set(); const out = [];
+      for (const r of L.results || []) {
+        const snip = ss._centre(r.text, r.match, o.pad);
+        const key = snip.slice(0, 110);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ cite: String(r.citationShort || r.document || '').slice(0, 64),
+                   page: r.page, type: r.filingType, caseId: r.caseId,
+                   chunkId: r.chunkId, snip });
+      }
+      let corpus = null;
+      if (!(L.warnings || []).some((w) => /proven absent from/.test(w))) {
+        await ss.exec('corpus_status', {}); corpus = ss.last; ss.last = L;
+      }
+      return { raw: (L.results || []).length, unique: out.length,
+               provenance: ss.provenance(L, corpus), passages: out };
+    },
+
+    /**
+     * The control check from §3: run the pattern and a detokenised variant and
+     * compare. Disagreement means the result was about recall, not the corpus.
+     */
+    async control(pattern, o = {}) {
+      const alt = ss._detok(pattern);
+      const run = async (p) => {
+        await ss.exec('scan_for_pattern',
+          Object.assign({ pattern: p, limit: o.limit || 60 },
+            o.caseId ? { caseId: o.caseId } : {}, o.caseIds ? { caseIds: o.caseIds } : {}), o);
+        const L = ss.last || {};
+        return { pattern: p, n: (L.results || []).length, strategy: L.strategy,
+                 scanned: L.scanned, docs: [...new Set((L.results || [])
+                   .map((r) => String(r.citationShort || r.document || '')))].sort() };
+      };
+      const a = await run(pattern);
+      const b = alt === pattern ? null : await run(alt);
+      if (!b) return { a, note: 'pattern already detokenised — no control possible' };
+      const same = a.n === b.n && JSON.stringify(a.docs) === JSON.stringify(b.docs);
+      return { a, b, agree: same,
+               verdict: same ? 'control passed — the result is about the corpus'
+                             : 'CONTROL FAILED — the two disagree; the result is about recall' };
+    },
+
+    /** Paginate a scan to exhaustion, deduped by chunkId. */
+    async exhaust(pattern, o = {}) {
+      let cursor = null; const rows = []; const seen = new Set();
+      let pages = 0; let escalated = false; const maxPages = o.maxPages || 20;
+      do {
+        await ss.exec('scan_for_pattern',
+          Object.assign({ pattern, limit: o.limit || 50 },
+            o.caseId ? { caseId: o.caseId } : {}, o.caseIds ? { caseIds: o.caseIds } : {},
+            cursor ? { cursor } : {}), o);
+        const L = ss.last || {};
+        if (L.error) return { error: L.error, pages };
+        pages++;
+        if ((L.warnings || []).some((w) => /escalating to a full regex scan/i.test(w))) escalated = true;
+        for (const r of L.results || []) {
+          const k = r.chunkId || (r.document + ':' + r.page + ':' + String(r.text).slice(0, 40));
+          if (!seen.has(k)) { seen.add(k); rows.push(r); }
+        }
+        cursor = L.nextCursor;
+      } while (cursor && pages < maxPages);
+      return { pages, unique: rows.length, exhausted: !cursor, escalated,
+               note: escalated ? 'a page escalated mid-answer; earlier rows may repeat — deduped by chunkId' : undefined,
+               rows };
+    },
+
+    /** Widen a hit. Reads the envelope flags, not the array length. */
+    async widen(chunkId, o = {}) {
+      await ss.exec('get_chunk_context',
+        { chunkId, before: o.before == null ? 2 : o.before, after: o.after == null ? 2 : o.after }, o);
+      const L = ss.last || {};
+      if (L.error) return { error: L.error };
+      return {
+        atDocumentStart: L.atDocumentStart, atDocumentEnd: L.atDocumentEnd,
+        contiguous: L.contiguous, orderingAmbiguous: L.orderingAmbiguous,
+        containsDraft: L.containsDraft, notes: L.notes,
+        got: { before: L.returnedBefore, after: L.returnedAfter },
+        safeToMerge: L.contiguous === true && !L.containsDraft && !L.orderingAmbiguous,
+        chunks: (L.chunks || []).map((c) => ({ page: c.page, idx: c.chunkIndex,
+          isTarget: c.isTarget, text: String(c.text || '').replace(/\s+/g, ' ') })),
+      };
+    },
+
+    /** §3a speaker attribution from printed transcript labels. */
+    async speakers(label, o = {}) {
+      const rx = new RegExp('^' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      await ss.exec('scan_for_pattern',
+        Object.assign({ pattern: label.replace(/\./g, '\\.'), limit: o.limit || 100 },
+          o.caseId ? { caseId: o.caseId } : {}), o);
+      const L = ss.last || {};
+      if (L.error) return { error: L.error };
+      const turns = [];
+      for (const r of L.results || []) {
+        const parts = String(r.text || '')
+          .split(/(?=(?:MR\.|MS\.|MRS\.|THE COURT|THE WITNESS)\s*[A-Z'-]*\s*:)/);
+        for (const q of parts) if (rx.test(q.trim()))
+          turns.push({ cite: r.citationShort, page: r.page, chunkId: r.chunkId,
+                       text: q.replace(/\s+/g, ' ').slice(0, 400) });
+      }
+      return { rows: (L.results || []).length, turns: turns.length,
+               basis: 'labels printed in the transcript text, not speakers-column facts',
+               caveat: 'a chunk opening mid-turn loses its first partial turn — recover with ss.widen()',
+               items: turns };
+    },
+
+    /**
+     * Health that actually exercises the path. `notReady` alone is not evidence:
+     * it read [] while retrieval hung and [] while it was healthy.
+     */
+    async preflight(o = {}) {
+      const out = { at: new Date().toISOString() };
+      try {
+        const g = await fetch('/api/admin/gpu-fleet').then((r) => r.json());
+        out.fleet = (g.sidecars || []).map((x) => {
+          const declared = (x.containers || []).map((c) => c.replace(/^ss-/, ''));
+          const reported = Object.keys((x.sidecarStatus || {}).containers || {});
+          return { host: x.hostname, status: x.status, declared, reported,
+                   unreported: declared.filter((d) => !reported.includes(d)) };
+        });
+        out.fleetGaps = out.fleet.filter((f) => f.status === 'connected' && f.unreported.length)
+          .map((f) => f.host + ' declares ' + f.unreported.join(',') + ' but reports nothing');
+        out.minOnline = g.minOnline;
+      } catch (e) { out.fleet = 'unreachable: ' + e.message; }
+      try { out.notReady = (await ss.tools('local')).notReady; } catch (e) { out.notReady = 'err'; }
+      await ss.exec('corpus_status', {});
+      const S = ss.last || {};
+      if (S.documents) out.corpus = { documents: S.documents.indexed + '/' + S.documents.total,
+        pct: (100 * S.documents.indexed / S.documents.total).toFixed(1) + '%',
+        chunks: S.chunks && S.chunks.total, byStatus: S.documents.byStatus };
+      const t0 = Date.now();
+      const probe = await withTimeout(
+        ss.exec('query_case_knowledge', { query: o.probe || 'representation status', limit: 1 }),
+        o.timeoutMs || 15000, 'retrieval');
+      out.retrieval = probe && probe.__timeout
+        ? { ok: false, timedOutAfterMs: probe.ms, note: 'embedding/rerank path is not serving' }
+        : { ok: true, ms: Date.now() - t0 };
+      out.verdict = out.retrieval.ok
+        ? (out.fleetGaps && out.fleetGaps.length ? 'degraded — retrieval works, fleet has unreported containers' : 'healthy')
+        : 'BLOCKED — retrieval path hangs; scan_for_pattern still works (no model path)';
+      return out;
+    },
+
+    /**
+     * Self-describing catalogue. Drift between code and docs is REPORTED, not
+     * hidden — that is the point. Never hand-maintain a list of these elsewhere.
+     */
+    help(name) {
+      const docs = {
+        exec: ['tool, params, opts', 'run any tool; full payload lands in ss.last'],
+        tools: ['profile', 'catalogue + notReady for a profile'],
+        ask: ['query, {limit, caseId}', 'semantic passages (query_case_knowledge)'],
+        scan: ['pattern, {limit, caseId}', 'raw regex scan'],
+        digest: ['pattern, {limit, caseId, caseIds, pad}', 'scan + dedupe + centred snippets + provenance — the everyday call'],
+        control: ['pattern, {caseId}', 'detokenised control check; disagreement means a recall defect'],
+        exhaust: ['pattern, {limit, caseId, maxPages}', 'paginate to exhaustion, deduped by chunkId'],
+        widen: ['chunkId, {before, after}', 'get_chunk_context; returns safeToMerge from the flags'],
+        speakers: ['label, {caseId}', 'transcript turns for MR./MS./THE COURT labels'],
+        provenance: ['result, corpus', 'citable footer; quotes the server clause verbatim'],
+        preflight: ['{timeoutMs, probe}', 'fleet gaps + corpus + a TIMED retrieval probe'],
+        research: ['query, {mode, maxEvidence}', 'fast returns evidence; deep tiers return a jobId'],
+        status: ['jobId, {kind}', 'poll a job'], result: ['jobId, {kind}', 'fetch a finished job'],
+        cancel: ['jobId, {kind}', 'cancel a job'], explain: ['query', 'dry run (routed only)'],
+        cites: ['n', 'cite-ready lines from ss.last'], item: ['i', 'one full item from ss.last'],
+        fire: ['key, tool, params', 'run in background'], peek: ['key', 'check a background run'],
+        summarize: ['j', 'compact view of any payload'], mcp: ['name', 'JSON-RPC surface at :9191'],
+        help: ['name?', 'this'],
+      };
+      if (name) return docs[name] ? { name, args: docs[name][0], why: docs[name][1] } : 'no such function: ' + name;
+      const fns = Object.keys(ss).filter((k) => typeof ss[k] === 'function' && k[0] !== '_');
+      const undocumented = fns.filter((f) => !docs[f]);
+      const orphanedDocs = Object.keys(docs).filter((d) => !fns.includes(d));
+      return {
+        version: ss.version,
+        functions: fns.filter((f) => docs[f]).map((f) => f + '(' + docs[f][0] + ') — ' + docs[f][1]),
+        undocumented, orphanedDocs,
+        drift: (undocumented.length || orphanedDocs.length)
+          ? 'DRIFT: code and docs disagree — fix before relying on this list' : 'none',
+      };
+    },
+  });
 
   window.__ss = ss;
   window.ss = ss;
