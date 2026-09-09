@@ -320,3 +320,170 @@ export function vectorStoreDependency(): ToolDependency {
     check: async () => true,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Fleet role availability (task 39, stage 1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Roles the fleet can serve, as they are keyed in
+ * `CachedSidecarStatus.containers` and `vram.perRole`.
+ *
+ * Deliberately NOT `GpuRole` from `@/lib/gpu/fleet-router`: that union omits
+ * both `rlm` and `code-embedding` (task 39 item 11 / task 30 amendment (b)).
+ * `findSidecarsWithRole` takes a bare `string`, so declaring role dependencies
+ * does not require widening `GpuRole` first — that consolidation is its own
+ * change, with its own blast radius through `ROLE_PORTS` and `resolveEndpoint`.
+ */
+export type FleetRoleName =
+  | 'embedding'
+  | 'completion'
+  | 'ocr'
+  | 'code-embedding'
+  | 'reranker'
+  | 'rlm';
+
+/**
+ * Three outcomes, not two. `unknown` is the load-bearing one: a role the fleet
+ * does not mention is only *unavailable* if we also know nothing else serves
+ * it. "UNREPORTED is not down" — the same rule this repo applies to sidecar
+ * container status, applied to its own readiness check.
+ */
+export type RoleAvailability = 'available' | 'unavailable' | 'unknown';
+
+export interface RoleAvailabilityResult {
+  state: RoleAvailability;
+  /** Which signal decided it — for logs and `readyReasons`, not for callers to branch on. */
+  basis: string;
+}
+
+/**
+ * Roles that can also be served by a directly-configured host rather than a
+ * sidecar. `ai-provider.ts:431,940` uses `ollamaCompletionHost || ollamaHost`;
+ * embedding falls back to `ollamaHost`. The vLLM roles (`reranker`, `rlm`) have
+ * no direct-host path today.
+ */
+const DIRECT_HOST_ROLES: Partial<Record<FleetRoleName, string[]>> = {
+  completion: ['ai.ollamaCompletionHost', 'embedding.ollamaHost'],
+  embedding: ['embedding.ollamaHost'],
+  ocr: ['embedding.ollamaHost'],
+  'code-embedding': ['embedding.ollamaHost'],
+};
+
+async function hasDirectHost(role: FleetRoleName): Promise<boolean> {
+  const keys = DIRECT_HOST_ROLES[role];
+  if (!keys) return false;
+  if (process.env.OLLAMA_HOST) return true;
+  try {
+    const { prisma } = await import('../db/prisma');
+    const rows = await prisma.config.findMany({ where: { key: { in: keys } } });
+    return rows.some((r) => !!r.value);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ask the fleet state the master already holds whether `role` can be served.
+ *
+ * Deliberately does not probe: `status-cache` is refreshed by sidecar
+ * heartbeats every 5 s (`ws-client.ts` HEARTBEAT_INTERVAL) against a 30 s
+ * staleness threshold, so a second probe here would duplicate a cache one
+ * import away and the two would drift.
+ */
+export async function checkRoleAvailability(
+  role: FleetRoleName,
+): Promise<RoleAvailabilityResult> {
+  let statusCache: typeof import('../gpu/status-cache');
+  let running: ReturnType<typeof import('../gpu/status-cache').findSidecarsWithRole>;
+  try {
+    statusCache = await import('../gpu/status-cache');
+    running = statusCache.findSidecarsWithRole(role, 'running');
+  } catch (err) {
+    // A cache that cannot be read has told us nothing about `role`. It must
+    // resolve to `unknown`, never to `unavailable`: `refreshDependencies`
+    // turns a thrown check into `satisfied = false`, so letting this escape
+    // would make a transient fault indistinguishable from a role that is
+    // genuinely absent — the exact confusion this three-state result prevents.
+    return {
+      state: 'unknown',
+      basis: `fleet state unreadable (${(err as Error).message})`,
+    };
+  }
+
+  if (running.length > 0) {
+    // `containers[role].status` can be a synthetic 'running' for host-Ollama and
+    // DMR roles, which the sidecar assumes rather than probes. `vram.perRole`
+    // is the accounted signal, so prefer it for the basis string — but a
+    // running-yet-cold Ollama role still loads on demand, so absence of
+    // residency is not a reason to refuse.
+    const resident = running.filter((s) => s.vram?.perRole?.[role]?.loaded === true);
+    return {
+      state: 'available',
+      basis:
+        resident.length > 0
+          ? `${resident.length} of ${running.length} sidecar(s) report '${role}' running with the model resident`
+          : `${running.length} sidecar(s) report '${role}' running (residency not reported; role loads on demand)`,
+    };
+  }
+
+  let all: ReturnType<typeof import('../gpu/status-cache').getAllSidecarStatuses>;
+  try {
+    all = statusCache.getAllSidecarStatuses();
+  } catch (err) {
+    return {
+      state: 'unknown',
+      basis: `fleet state unreadable (${(err as Error).message})`,
+    };
+  }
+  if (all.length === 0) {
+    return {
+      state: 'unknown',
+      basis: `no sidecar has reported within the staleness window — the fleet says nothing about '${role}', which is not the same as '${role}' being down`,
+    };
+  }
+
+  if (await hasDirectHost(role)) {
+    return {
+      state: 'unknown',
+      basis: `no sidecar reports '${role}', but a direct Ollama host is configured, which the fleet cache does not observe`,
+    };
+  }
+
+  return {
+    state: 'unavailable',
+    basis: `${all.length} sidecar(s) reporting, none with '${role}' running, and no direct host configured for it`,
+  };
+}
+
+/**
+ * A per-tool dependency on a fleet role.
+ *
+ * **Stage 1 ships this with `required: false` on purpose.** `isToolReady` only
+ * blocks on `dep.required && !dep.satisfied`, so an advisory dependency surfaces
+ * role state in `dependencyStatus` without gating anything. This task's premise
+ * is that the current readiness signal is uninformative; the replacement earns
+ * trust by being observed to be right across real degradations before it is
+ * allowed to refuse calls.
+ *
+ * Flipping to `required: true` is a separate, behaviour-changing commit — and a
+ * precondition of retiring the `ollamaUp` global (task 39 item 6), because
+ * `llmProviderDependency` checks *credential presence*, not liveness: a bare
+ * `OLLAMA_HOST` in the environment satisfies it with Ollama stopped.
+ */
+export function roleDependency(
+  role: FleetRoleName,
+  opts: { required?: boolean } = {},
+): ToolDependency {
+  return {
+    key: `fleetRole:${role}`,
+    label: `Fleet role: ${role}`,
+    required: opts.required ?? false,
+    check: async () => {
+      const { state } = await checkRoleAvailability(role);
+      // `unknown` must not block: it means nothing was learned, not that the
+      // role is down. Only a positive "reporting, and absent" refuses.
+      return state !== 'unavailable';
+    },
+  };
+}
