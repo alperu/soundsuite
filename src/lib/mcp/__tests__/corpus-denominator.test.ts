@@ -104,6 +104,38 @@ describe('provenAbsenceClause — the wording rule', () => {
     expect(s).not.toMatch(/NaN|Infinity/);
   });
 
+  it('names the corpus-wide denominator alongside a scoped one', () => {
+    // The caller-side defect this prevents: a scoped clause gave only the
+    // case's figures, so anyone wanting both recomputed the corpus percentage
+    // by hand — and carried a remembered 11.1% onto a corpus that had grown to
+    // 873 documents, where the true figure is 11.0%.
+    const s = provenAbsenceClause(
+      den({
+        scope: 'case',
+        documentsIndexed: 24,
+        documentsTotal: 63,
+        indexedChunks: 10719,
+        coverage: 0.381,
+        corpus: { documentsIndexed: 96, documentsTotal: 873, coverage: 0.11 },
+      }),
+    );
+    expect(s).toContain('24 of 63 documents (38.1% indexed)');
+    expect(s).toContain('96 of 873 corpus-wide, 11.0%');
+    // Both denominators present means neither has to be remembered.
+    expect(s).toMatch(/38\.1%.*11\.0%/);
+  });
+
+  it('does not append a corpus clause when the scope IS the corpus', () => {
+    const s = provenAbsenceClause(den({ scope: 'corpus' }));
+    expect(s).not.toContain('corpus-wide');
+  });
+
+  it('omits the corpus clause when corpus figures are unavailable', () => {
+    const s = provenAbsenceClause(den({ scope: 'case', corpus: undefined }));
+    expect(s).not.toContain('corpus-wide');
+    expect(s).toContain('96 of 864 documents');
+  });
+
   it('distinguishes a sparse scope from a dense one in the emitted text', () => {
     const sparse = provenAbsenceClause(
       den({ scope: 'case', documentsIndexed: 6, documentsTotal: 258, indexedChunks: 380, coverage: 0.023 }),

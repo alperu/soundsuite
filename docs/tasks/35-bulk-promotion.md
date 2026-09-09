@@ -34,18 +34,25 @@ Neither is acceptable as-is, which is why task 34 blocks this one.
 
 ## Measured starting state (2026-09-08)
 
-Per-case backlog, smallest first — this **is** the wave order:
+⚠️ **Do not read a wave order out of this file. Compute it from `corpus_status` when you run.**
 
-| Case | `DISCOVERED` | `INDEXED` | Total | Coverage |
-|---|---|---|---|---|
-| A | 30 | 24 | 54 | 44.4% |
-| B | 39 | 15 | 54 | 27.8% |
-| C | 45 | 19 | 64 | 29.7% |
-| D | 252 | 6 | 258 | 2.3% |
-| E | 402 | 32 | 434 | 7.4% |
+An earlier revision of this task froze a per-case table here and called it "the wave order". **It was
+stale within hours.** Between two measurements the same day the corpus grew 864 → 873, all nine new
+documents landed in a single case, and its coverage fell 44.4% → 38.1% — which reordered the waves.
+A caller quoting the frozen figures also carried a remembered `11.1%` onto the new denominator, where
+the true value is `11.0%`.
 
-**The two largest cases hold 654 of the 768.** Waves A–C total 114 documents and exercise every code
-path the big two will hit, at 15% of the volume. If something systemic is wrong, it shows up there.
+That is the identical defect this series has spent twelve reports removing — the frozen `~35,890` in
+the skill, `"byte-identical as of this commit"` in the client README — reappearing in a task file
+written to fix it. **A number that changes belongs in a query, not in a document.**
+
+The rule for this task: `corpus_status` is the source. Order the waves by ascending `DISCOVERED`
+count at run time, and re-read it between waves, because promoting changes it.
+
+For orientation only — a **dated observation, not an instruction** (2026-09-08, 873 documents):
+roughly 39 / 39 / 45 / 252 / 402 `DISCOVERED` across the five cases, with **the two largest holding
+~85% of the backlog**. The shape is what matters: three small cases exercise every code path the big
+two will hit, at ~15% of the volume. That shape is stable even as the counts move. If something systemic is wrong, it shows up there.
 
 Two facts that bear directly on running this safely:
 
@@ -59,7 +66,7 @@ Two facts that bear directly on running this safely:
 
 | # | Item | Status |
 |---|---|---|
-| 1 | **Promote in waves by case, smallest first** (A → B → C → D → E). A systemic failure then surfaces on 30 documents, not 402. | ☐ |
+| 1 | **Promote in waves by case, smallest `DISCOVERED` count first — read from `corpus_status` at run time, never from this file.** A systemic failure then surfaces on tens of documents, not hundreds. Re-read between waves; promoting changes the ordering input. | ☐ |
 | 2 | **Re-run `corpus_status` after each wave** and record per-case coverage. This is the progress metric, and it is now a one-call measurement. | ☐ |
 | 3 | **Re-run the [task 20](./20-measure-chunk-overlap.md) overlap measurement on newly-ingested documents only** — document-then-index ordering, never page order. This is what proves [task 21](./21-chunk-overlap-defect.md)'s fix holds on the real path rather than in a unit test. Do it after wave A, before wave D. | ☐ |
 | 4 | **Keep the generations distinguishable.** Task 21 item 5 records that partial reindex produces duplicate `chunk_index` values and gaps within one document. Newly-ingested documents must be identifiable — `parserVersion` is the natural marker, and today it has exactly one value (`hybrid-docparse-1`, 22 documents), so a new value cleanly separates the generations. | ☐ |

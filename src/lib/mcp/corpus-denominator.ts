@@ -39,6 +39,22 @@ export interface CorpusDenominator {
   /** documentsIndexed / documentsTotal, 3 dp. `null` when the scope has no documents. */
   coverage: number | null;
   scope: 'corpus' | 'case' | 'cases';
+  /**
+   * Corpus-wide figures, present only when `scope !== 'corpus'`.
+   *
+   * A scoped answer needs BOTH denominators: the case's, because that is what
+   * was searched, and the corpus's, because that is what a reader assumes when
+   * they see a percentage. Without this, a caller wanting both recomputes one
+   * by hand — and one did, carrying a remembered `11.1%` onto a denominator
+   * that had moved to 873 documents (96/873 = 11.0%). Emitting both is what
+   * stops that, and it is the same reason the scan quotes `scanned` next to
+   * `indexedChunks` rather than trusting them to agree.
+   */
+  corpus?: {
+    documentsIndexed: number;
+    documentsTotal: number;
+    coverage: number | null;
+  };
   /** When these numbers were read. They are cached briefly, so this is not "now". */
   asOf: string;
 }
@@ -100,12 +116,32 @@ export async function getCorpusDenominator(
       if (String(g.status) === 'INDEXED') documentsIndexed += n;
     }
 
+    const scope: CorpusDenominator['scope'] =
+      !caseIds || caseIds.length === 0 ? 'corpus' : caseIds.length === 1 ? 'case' : 'cases';
+
+    // A scoped answer also carries the corpus-wide figures, so a caller never
+    // has to recompute or remember them. Recursion is safe and cheap: the
+    // corpus call takes the `caseIds === undefined` branch and is cached under
+    // its own key, so a page of scoped scans pays for it once.
+    let corpus: CorpusDenominator['corpus'];
+    if (scope !== 'corpus') {
+      const whole = await getCorpusDenominator(context);
+      if (whole) {
+        corpus = {
+          documentsIndexed: whole.documentsIndexed,
+          documentsTotal: whole.documentsTotal,
+          coverage: whole.coverage,
+        };
+      }
+    }
+
     const value: CorpusDenominator = {
       documentsIndexed,
       documentsTotal,
       indexedChunks: await countChunks(context, caseIds),
       coverage: documentsTotal ? Math.round((documentsIndexed / documentsTotal) * 1000) / 1000 : null,
-      scope: !caseIds || caseIds.length === 0 ? 'corpus' : caseIds.length === 1 ? 'case' : 'cases',
+      scope,
+      ...(corpus ? { corpus } : {}),
       asOf: new Date().toISOString(),
     };
 
@@ -181,7 +217,19 @@ export function provenAbsenceClause(den: CorpusDenominator | null): string {
   }
 
   const pct = den.coverage === null ? null : `${(den.coverage * 100).toFixed(1)}% indexed`;
-  const tail = `spanning ${idx} of ${docs} documents${pct ? ` (${pct})` : ''}`;
+  let tail = `spanning ${idx} of ${docs} documents${pct ? ` (${pct})` : ''}`;
+
+  // A scoped clause names the corpus-wide figure too. A caller who needs both
+  // must otherwise recompute one, and the percentage is the half that gets
+  // remembered rather than recomputed — which is exactly how a `11.1%` written
+  // against 864 documents survived onto a corpus of 873.
+  if (den.corpus && den.corpus.documentsTotal > 0) {
+    const cIdx = den.corpus.documentsIndexed.toLocaleString('en-US');
+    const cDocs = den.corpus.documentsTotal.toLocaleString('en-US');
+    const cPct =
+      den.corpus.coverage === null ? '' : `, ${(den.corpus.coverage * 100).toFixed(1)}%`;
+    tail += `; ${cIdx} of ${cDocs} corpus-wide${cPct}`;
+  }
 
   return chunks
     ? `proven absent from the ${chunks} indexed chunks of ${noun}, ${tail}`

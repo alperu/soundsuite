@@ -175,8 +175,35 @@ And the wave order for task 35 falls straight out of the per-case backlog — sm
 | D | 252 | 6 | 2.3% |
 | E | 402 | 32 | 7.4% |
 
-**The two largest cases hold 654 of the 768.** Waves A–C total 114 documents and exercise every path
-the big two will hit, at 15% of the volume.
+**The two largest cases hold ~85% of the backlog.** The three small cases exercise every path the big
+two will hit, at ~15% of the volume.
+
+### These numbers moved the same day — treat every table here as dated
+
+Re-measured hours after the table above: **the corpus had grown 864 → 873**, all nine new documents
+landing in the single best-covered case, dropping it from **44.4% to 38.1%** and reordering the
+promotion waves. `lastDocumentUpdatedAt` moved from 21:08 to 23:45.
+
+Two things follow, and both are corrections to this report's own method:
+
+**1. A caller quoting these figures got one wrong in the predictable way.** A search-provenance footer
+written against the new corpus correctly said `96 of 873` and then said `11.1%` — the percentage
+remembered from the old denominator. 96/873 is **11.0%**. The denominator was updated; the derived
+figure was not.
+
+**2. Task 35's wave order was frozen into a task file and was stale within hours.** It has been
+replaced with an instruction to compute the order from `corpus_status` at run time. A number that
+changes belongs in a query, not in a document — the same lesson as the `~35,890` removed from the
+skill and the `"byte-identical as of this commit"` removed from the client README, arriving this time
+inside a task written to fix exactly that class of defect.
+
+**Fixed in the tool rather than in the prose:** a scoped proven-absence clause now names the
+corpus-wide denominator alongside the case's, so no caller has to recompute or remember it:
+
+```
+proven absent from the 10,719 indexed chunks of this case, spanning 24 of 63 documents
+(38.1% indexed); 96 of 873 corpus-wide, 11.0%.
+```
 
 ## 5. Four tasks that do not exist yet
 
