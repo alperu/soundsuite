@@ -119,8 +119,8 @@ reported as drift.
 | 2 | Add a `roleDependency(role: FleetRoleName)` factory beside the existing `…Dependency()` helpers. **Done** (`shared-dependencies.ts`), with two deviations from the spec above, both deliberate: the key is `fleetRole:<role>` (namespaced so it cannot collide with a config-key dependency), and **`required` defaults to `false`** — see item 6. | ☑ done 2026-09-09 |
 | 3 | **Source the check from fleet state the master already holds, do not re-probe.** Confirmed: **nothing under `src/lib/mcp/` reads fleet state today** — grep for `fleet-router\|status-cache\|resolveEndpoint\|getFleetStatus\|getSidecarStatus` returns **zero hits**. The two modules to import are `@/lib/gpu/fleet-router` (`getFleetStatus()`, `resolveEndpoint(role)`, type `GpuRole`) and `@/lib/gpu/status-cache` (`getSidecarStatus(url)`, `isSidecarConnected(url)`, type `CachedSidecarStatus`). Both are server-only and already import prisma, so they are safe for `src/lib/mcp/` — but **must never reach the admin client bundle**, the same constraint that forced `model-capabilities.ts` to exist as a leaf module (`:5-8`). A second probe would duplicate a cache one import away and the two would drift. | ☑ done 2026-09-09 — sourced from `findSidecarsWithRole` + `getAllSidecarStatuses` via a **dynamic** `await import()` inside `check()`, matching the `prisma` convention in the same file and keeping the server-only module off any static import path. |
 | 4 | ~~Establish the cache TTL before gating on it.~~ **Answered — it is fresh enough.** Sidecars **push** their full `/status` to the master every **5 s** (`sideCar/src/lib/ws-client.ts:46 HEARTBEAT_INTERVAL = 5_000`, fired at `:973` HTTP / `:1061-1084` WS), landing in `status-cache.ts` as `CachedSidecarStatus` — per-role `status`, `loadedModels`, `config.port`, `gpuOnly`, `gpuReady`, `vram.perRole`, `idleTimeouts`. **Capability knowledge is inbound and continuous, not something the master polls.** Record the 5 s cadence in the check's comment so the next reader does not re-derive it. | ☑ settled |
-| 5 | Declare roles on the tools that need them. Start with the ones whose failure is currently invisible: `query_case_knowledge` (embedding), `research_evidence` (embedding + completion), the rerank path (reranker), the RLM path (rlm). | ☐ |
-| 6 | **Retire the global — but not before the replacement proves liveness.** ⚠️ **Correction: this item as originally written would have caused a regression.** `llmProviderDependency` (`shared-dependencies.ts:15-38`) checks **credential presence, not liveness** — a bare `OLLAMA_HOST` in the environment satisfies it with Ollama stopped. `ollamaUp = r.reachable && r.generates` (`tool-registry.ts:60`) is therefore currently the **only** thing proving an analysis tool can actually run. Deleting the branch today would turn all nine non-`search` tools green against a dead Ollama — the same defect as the silent degrade, pointed the other way. **Precondition:** `roleDependency('completion')` must prove *reachable && generates*, and be `required: true`, before the global comes out. | ☐ blocked on stage 2 |
+| 5 | ~~Declare roles on the tools that need them.~~ ⚠️ **Correction — this item is largely unbuildable as written, and declaring it anyway would be wrong.** See "Role need is per-call, not per-tool" below. `query_case_knowledge` is **removed** from this item; the reranker and RLM declarations are **deferred** to the per-call mechanism. What survives is the unconditional subset only. | ☐ reshaped |
+| 6 | **Retire the global — but not before the replacement proves liveness.** ⚠️ **Correction: this item as originally written would have caused a regression.** `llmProviderDependency` (`shared-dependencies.ts:15-38`) checks **credential presence, not liveness** — a bare `OLLAMA_HOST` in the environment satisfies it with Ollama stopped. `ollamaUp = r.reachable && r.generates` (`tool-registry.ts:60`) is therefore currently the **only** thing proving an analysis tool can actually run. Deleting the branch today would turn all nine non-`search` tools green against a dead Ollama — the same defect as the silent degrade, pointed the other way. **Precondition:** `roleDependency('completion')` must prove *reachable && generates*, and be `required: true`, before the global comes out. **And note the semantic shift:** `ollamaReadiness()` probes a **single** configured host, so preserving its guarantee fleet-side means *some host serving the role* generates — not *the configured host* does. That is a different check, not a port of the existing one. | ☐ blocked on stage 2 |
 | 7 | **Do not let a role probe hang a readiness call.** Bounded per-host timeout; a host that does not answer is `unknown`, not `down`. | ☐ |
 | 8 | Fix the doc drift found in passing: `tool-registry.ts:220` comments *"cached 30 s"*; the constant is **60 s**. | ☐ |
 | 9 | Tests: a tool with an unsatisfied role dep is `notReady` **with that role named**; a tool needing only embedding is **ready** while completion is down; the previous behaviour (everything ready while a vLLM role is exited) is asserted **gone**. | ☐ |
@@ -164,6 +164,49 @@ by a configured Ollama host — asserted in the tests.
 `containers[role].status` for the *basis string* — status carries the synthetic `'running'` that
 host-Ollama and DMR roles get without a probe — but absence of residency is not a reason to refuse,
 because Ollama loads on demand.
+
+## Role need is per-call, not per-tool — and `ToolDependency` cannot say that
+
+Item 5 assumed each tool has a fixed set of roles. **It does not.** Verified 2026-09-09:
+
+**`query_case_knowledge`** (`query-case-knowledge.ts:241,261`) reaches the embedding role on
+`searchMode` `vector` and `hybrid`, and **never** on `keyword`:
+
+| `searchMode` | Touches embedding? | Behaviour when embedding is down |
+|---|---|---|
+| `keyword` | **no** | unaffected |
+| `vector` | yes | **already fails loudly** — throws coded `EMBEDDING_UNAVAILABLE` (`:262-266`), which the dashboard turns into configure-a-provider guidance |
+| `hybrid` (**default**) | yes | **silently degrades** to keyword/FTS (`:251-256` warning → `:276` fallthrough) and returns success |
+
+So a static `roleDependency('embedding')` on this tool would be wrong on two of three modes: it
+**over-refuses** `keyword`, which needs nothing from the fleet, and adds nothing to `vector`, which
+already fails with a better error than a generic `notReady`. It would convert a working call into a
+refusal — a *new* wrong answer, not a fix for the old one.
+
+**The one mode that is actually broken — `hybrid` — is broken in a way readiness cannot express.**
+The tool is genuinely ready; the *call* degraded. That belongs at the degrade site (item 10), not in
+`isToolReady`.
+
+**`research_evidence`** has the same shape on `tier`: `fast` is one retrieval with no outline,
+`deep`/`deep-report` add rerank, and only `deep-rlm` uses the RLM role. Its declared dependency today
+is `localLlmDependency()` alone (`:150-151, :226-227`).
+
+**Consequence for stage 2.** `ToolDependency.check` is `() => Promise<boolean>` — it receives **no
+call parameters**, so it cannot express "needs embedding unless `searchMode` is `keyword`". Making
+role deps `required: true` therefore cannot be a blanket flip; it is only correct for roles a tool
+needs on *every* call. The conditional cases need a **separate per-call admission check** at the
+point of use, which is a different mechanism with a different failure signal, and should be scoped as
+its own task rather than bent into this one.
+
+This is the same defect the series keeps finding, one layer up: **the readiness mechanism describes
+the tool more precisely than it describes the call.**
+
+### Cost note
+
+`checkRoleAvailability` is uncached. `refreshDependencies` runs deps in parallel, so N declaring
+tools mean N `getAllSidecarStatuses()` calls per refresh — an in-memory `Map` walk, no probe, cheap.
+The `unavailable` path additionally hits `prisma.config.findMany` once per declaring tool via
+`hasDirectHost`. Bounded and rare, but add a memo if item 5's successor declares roles widely.
 
 ## Risks
 
