@@ -31,6 +31,38 @@ so every tool reported ready — including tools depending on a vLLM role that w
 **`notReady` is not a weak signal; it is an uninformative one.** It answers a question nobody asked
 ("can the completion host generate?") in a field that reads as "is this tool usable?".
 
+## What this actually costs today — traced end to end
+
+`query_case_knowledge` with the embedding host **stopped**, settled from source:
+
+| `searchMode` | Outcome |
+|---|---|
+| **`hybrid`** (the default, `query-case-knowledge.ts:188`) | **Silent degrade.** Embed throws → caught at `:245` → `pushWarning({ source: 'embedding', host, reason: 'embed-failed', … })` at `:251-256` → falls through to keyword/FTS at `:276`. **The caller gets a successful result with the vector leg missing.** |
+| `vector` | Hard error — `:261-264` rethrows as `EMBEDDING_UNAVAILABLE` |
+
+**And the readiness gate never fires in either case.** `query_case_knowledge` declares
+`category: 'search'` (`:103`) → `toolNeedsLlm` is false (`tool-registry.ts:156`); it overrides no
+`getDependencies()`, so `base-tool.ts:84-86` returns `[]`. **`isToolReady` returns `{ ready: true }`
+with the embedding host down.**
+
+That is this task's thesis, demonstrated: the tool most dependent on the embedding role is the one
+the readiness system says the least about.
+
+**The silent degrade is the more serious half, and readiness alone does not fix it.** A search tool
+returning fewer results because its vector leg vanished — with no error, and success in the envelope
+— is the same defect this series has spent thirteen reports removing, relocated from *completeness
+claims* to *recall*. Whether that `pushWarning` reaches the MCP response at all, or stops at the
+deep-search boundary, is unsettled and is item 10 below. It is the same question
+[task 22](./22-rerank-observability.md) item 9 asks about the rerank `warn('degraded', …)`.
+
+**Timing, so the failure is not merely silent but slow:** three attempts, each preceded by a 1.5 s
+preflight that fails fast on a refused connection → **floor ≈ 10–14 s**. The upper bound is
+`resolveEndpoint`'s acquire walk across every registered sidecar at 15 s per POST
+(`fleet-router.ts:203`, `:1050-1133`) before throwing at `:1143` — roughly **N × 15 s per attempt**
+with N unreachable sidecars. So [task 38](./38-interactive-embedding-budget.md) §2's ~370 s is not
+just a lower bound; **its shape is wrong** — the real ceiling scales with fleet size, not with
+Ollama's constants alone.
+
 ## The fix is smaller than it looks — the mechanism already exists
 
 An earlier framing held that `category: 'search'` was being overloaded to encode dependencies, and
@@ -85,13 +117,15 @@ reported as drift.
 |---|---|---|
 | 1 | **Confirm before building** (this repo's standing rule — four premises of v12 and three of v14 were refuted this way). Re-verify `tool-registry.ts:47,108-133,167-172,175-180` and `tool-types.ts:65-74` still read as above. | ☐ |
 | 2 | Add a `roleDependency(role: FleetRole)` factory beside the existing `…Dependency()` helpers, returning `{ key: 'role:embedding', label: 'Embedding role', required: true, check }`. Match the existing convention exactly — a differently-shaped helper is worse than none. | ☐ |
-| 3 | **Source the check from fleet state the master already holds, do not re-probe.** The master calls the sidecar per request on the data path (`ollama-embedding-provider.ts:174-182`), and `resolveEndpoint` (`fleet-router.ts:895-897`) already prefers sidecar-reported config over its own constants. A second probe from `src/lib/mcp/` would duplicate a cache one module away and the two would drift. | ☐ |
-| 4 | **Establish the cache TTL before gating on it.** A readiness gate reading state staler than the decision it informs is a new instance of the defect this series keeps finding. The host-Ollama watchdog probes every 15 s (`host-ollama-watchdog.ts:31`); the master's own cache TTL is **not yet established** — settle it, and state it in the code. | ☐ |
+| 3 | **Source the check from fleet state the master already holds, do not re-probe.** Confirmed: **nothing under `src/lib/mcp/` reads fleet state today** — grep for `fleet-router\|status-cache\|resolveEndpoint\|getFleetStatus\|getSidecarStatus` returns **zero hits**. The two modules to import are `@/lib/gpu/fleet-router` (`getFleetStatus()`, `resolveEndpoint(role)`, type `GpuRole`) and `@/lib/gpu/status-cache` (`getSidecarStatus(url)`, `isSidecarConnected(url)`, type `CachedSidecarStatus`). Both are server-only and already import prisma, so they are safe for `src/lib/mcp/` — but **must never reach the admin client bundle**, the same constraint that forced `model-capabilities.ts` to exist as a leaf module (`:5-8`). A second probe would duplicate a cache one import away and the two would drift. | ☐ |
+| 4 | ~~Establish the cache TTL before gating on it.~~ **Answered — it is fresh enough.** Sidecars **push** their full `/status` to the master every **5 s** (`sideCar/src/lib/ws-client.ts:46 HEARTBEAT_INTERVAL = 5_000`, fired at `:973` HTTP / `:1061-1084` WS), landing in `status-cache.ts` as `CachedSidecarStatus` — per-role `status`, `loadedModels`, `config.port`, `gpuOnly`, `gpuReady`, `vram.perRole`, `idleTimeouts`. **Capability knowledge is inbound and continuous, not something the master polls.** Record the 5 s cadence in the check's comment so the next reader does not re-derive it. | ☑ settled |
 | 5 | Declare roles on the tools that need them. Start with the ones whose failure is currently invisible: `query_case_knowledge` (embedding), `research_evidence` (embedding + completion), the rerank path (reranker), the RLM path (rlm). | ☐ |
 | 6 | **Retire the global.** Delete the `!this.ollamaUp` branch at `:175-180` and `toolNeedsLlm` at `:155-157`. Keep the probe itself if it feeds the completion role's own dependency — it becomes one role's check rather than every tool's gate. | ☐ |
 | 7 | **Do not let a role probe hang a readiness call.** Bounded per-host timeout; a host that does not answer is `unknown`, not `down`. | ☐ |
 | 8 | Fix the doc drift found in passing: `tool-registry.ts:220` comments *"cached 30 s"*; the constant is **60 s**. | ☐ |
 | 9 | Tests: a tool with an unsatisfied role dep is `notReady` **with that role named**; a tool needing only embedding is **ready** while completion is down; the previous behaviour (everything ready while a vLLM role is exited) is asserted **gone**. | ☐ |
+| 10 | **Decide what a silent degrade owes the caller**, and verify the existing signal reaches them. `query_case_knowledge` already calls `pushWarning({ source: 'embedding', reason: 'embed-failed' })` (`:251-256`) before falling through to keyword-only — but whether that warning survives to the MCP response is **unsettled**. Trace it. If it does not surface, a caller cannot distinguish a thin result from a degraded one. Same question as [task 22](./22-rerank-observability.md) item 9. | ☐ |
+| 11 | **`GpuRole` omits `rlm`** (`fleet-router.ts:153`), which is why `stream-rlm.ts:195-246` cannot use `resolveEndpoint` and walks `fleet.sidecars` by hand instead, matching `containers.rlm.status === 'running'` and skipping synthetic images. Adding `rlm` to the type is a prerequisite for expressing an RLM role dependency at all — and is the same omission as the missing `rlm` entry in `ROLE_PORTS` ([task 30](./30-mcp-parity-and-fleet-visibility.md) amendment (b)). | ☐ |
 
 ## Risks
 
@@ -119,6 +153,8 @@ reported as drift.
 |---|---|
 | Completion host down, embedding up | embedding-only tools **ready**; completion tools `notReady` naming the completion role |
 | A vLLM role exited | tools depending on it are `notReady` naming that role — the case that currently reads `[]` |
+| Embedding host down, `searchMode: 'hybrid'` | the caller learns the vector leg was missing — not a silent success |
+| Embedding host down, before the call | `isToolReady` is **false** for `query_case_knowledge`, which today returns `{ready: true}` |
 | An unreachable host | reported `unknown`, not `down`; the readiness call still returns promptly |
 | A shared-Ollama role on 11434 | **not** reported as drift or failure |
 | `notReady` | never empty while a required role is genuinely down |
