@@ -245,8 +245,13 @@ describe('gatherEvidence', () => {
       profile: 'local', localOnly: true, mode: 'deep',
       retrieval: { limitPerSubQuery: 7, rerankPoolSize: 40, maxEvidence: 1 },
     });
-    // Trailing arg is the `caseIds` subset scope (docs/tasks/12) — unset here.
-    expect(executeParallelSearchesMock).toHaveBeenCalledWith(expect.anything(), undefined, registry, expect.any(Function), undefined, 7, undefined);
+    // 7th arg is the `caseIds` subset scope (docs/tasks/12) — unset here. 8th is
+    // the retrieval-params object (docs/tasks/30 Part 1); both keys unset, so the
+    // dispatch falls back to searchMode 'hybrid' and sends no recordStatus.
+    expect(executeParallelSearchesMock).toHaveBeenCalledWith(
+      expect.anything(), undefined, registry, expect.any(Function), undefined, 7, undefined,
+      { searchMode: undefined, recordStatus: undefined },
+    );
     expect(deduplicateAndMergeMock).toHaveBeenCalledWith(expect.anything(), 'q', expect.any(Function), { rerankPoolSize: 40 });
     expect(r.evidence).toHaveLength(1);
     expect(r.stats.rerankPool).toBe(2);
@@ -517,5 +522,81 @@ describe('gatherEvidence', () => {
     expect(r.rlm).toMatchObject({ rounds: 0, toolCalls: 0 });
     expect(r.rlm!.notes[0]).toContain('rlm unavailable');
     expect(r.modelsUsed.rlm).toBe('none');
+  });
+});
+
+/**
+ * A failed sub-query and a sub-query that matched nothing both contribute no
+ * evidence. Until this signal existed they were indistinguishable in the
+ * response, so a degraded run read as an empty corpus (docs/tasks/30).
+ */
+describe('gatherEvidence reports failed sub-queries', () => {
+  it('counts nothing as failed on a healthy run, and warns about nothing', async () => {
+    const r = await gatherEvidence('q', registry, { profile: 'local', localOnly: true, mode: 'deep' });
+    expect(r.stats.subQueriesFailed).toBe(0);
+    expect(r.stats.subQueriesDispatched).toBeGreaterThan(0);
+    expect(r.stats).not.toHaveProperty('subQueryFailures');
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('does not count an honest zero-match sub-query as a failure', async () => {
+    executeParallelSearchesMock.mockResolvedValue([
+      { subQuery: 'q', sources: [A, B] },
+      { subQuery: 'sub one', sources: [] },
+    ]);
+    const r = await gatherEvidence('q', registry, { profile: 'local', localOnly: true, mode: 'deep' });
+    expect(r.stats.subQueriesFailed).toBe(0);
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('counts and names a failed sub-query, and says the evidence is incomplete', async () => {
+    executeParallelSearchesMock.mockResolvedValue([
+      { subQuery: 'q', sources: [A, B] },
+      { subQuery: 'sub one', sources: [], error: { code: 'EMBEDDING_UNAVAILABLE', message: 'embed host refused' } },
+    ]);
+    const r = await gatherEvidence('q', registry, { profile: 'local', localOnly: true, mode: 'deep' });
+
+    expect(r.stats.subQueriesFailed).toBe(1);
+    expect(r.stats.subQueriesDispatched).toBe(2);
+    expect(r.stats.subQueryFailures).toEqual([
+      { subQuery: 'sub one', code: 'EMBEDDING_UNAVAILABLE', message: 'embed host refused' },
+    ]);
+
+    // The evidence that DID arrive is still returned — the fan-out is tolerant.
+    expect(r.evidence.length).toBeGreaterThan(0);
+
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings![0]).toMatch(/INCOMPLETE/);
+    expect(r.warnings![0]).toMatch(/not proof the corpus lacks the answer/i);
+    expect(r.warnings![0]).toContain('EMBEDDING_UNAVAILABLE');
+    // Names the denominator, not a bare count.
+    expect(r.warnings![0]).toContain('1 of 2');
+  });
+
+  it('reports a non-embedding failure just the same', async () => {
+    executeParallelSearchesMock.mockResolvedValue([
+      { subQuery: 'q', sources: [], error: { code: 'EXECUTION_ERROR', message: 'the tool failed while executing' } },
+    ]);
+    const r = await gatherEvidence('q', registry, { profile: 'local', localOnly: true, mode: 'deep' });
+    expect(r.stats.subQueriesFailed).toBe(1);
+    expect(r.warnings![0]).toContain('EXECUTION_ERROR');
+  });
+
+  it('distinguishes a degraded empty result from an honest empty one', async () => {
+    executeParallelSearchesMock.mockResolvedValue([
+      { subQuery: 'q', sources: [], error: { code: 'EMBEDDING_UNAVAILABLE', message: 'embed host refused' } },
+    ]);
+    const degraded = await gatherEvidence('q', registry, { profile: 'local', localOnly: true, mode: 'deep' });
+
+    executeParallelSearchesMock.mockResolvedValue([{ subQuery: 'q', sources: [] }]);
+    const honest = await gatherEvidence('q', registry, { profile: 'local', localOnly: true, mode: 'deep' });
+
+    // Both return no evidence; only one of them is evidence about the corpus.
+    expect(degraded.evidence).toHaveLength(0);
+    expect(honest.evidence).toHaveLength(0);
+    expect(degraded.stats.subQueriesFailed).toBe(1);
+    expect(honest.stats.subQueriesFailed).toBe(0);
+    expect(degraded.warnings!.length).toBeGreaterThan(0);
+    expect(honest.warnings).toEqual([]);
   });
 });

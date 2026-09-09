@@ -48,6 +48,27 @@ export const RESEARCH_INPUT_SCHEMA: ToolMetadata['inputSchema'] = {
       description: 'Extra SQL-style filters applied to every retrieval (advanced).',
       items: { type: 'string' },
     },
+    searchMode: {
+      type: 'string',
+      enum: ['vector', 'hybrid', 'keyword'],
+      description:
+        'Search mode: vector, hybrid, or keyword (default: hybrid). Applied to EVERY sub-query ' +
+        'this tool dispatches, including the RLM evidence rounds in deep-rlm. ' +
+        'Note on "vector": if the embedding provider is unavailable the affected sub-query ' +
+        'contributes NO evidence and this tool still returns successfully — so a thin or empty ' +
+        'result under "vector" may mean the embedding role is down, not that the corpus lacks ' +
+        'the answer. "hybrid" degrades to keyword-only instead of dropping the sub-query, and ' +
+        '"keyword" skips embedding entirely.',
+    },
+    recordStatus: {
+      type: 'string',
+      enum: ['filed', 'draft', 'any'],
+      description:
+        'Filter by record status: "filed" returns only chunks from documents with a ' +
+        'recognised court file stamp, "draft" returns only unfiled working copies, ' +
+        '"any" (default) returns both. Drafts are always labelled in results. ' +
+        'Applied to every sub-query.',
+    },
     maxEvidence: {
       type: 'integer',
       description: `Cap on the returned evidence list (default ${EVIDENCE_DEFAULTS.maxEvidence}). Same as retrieval.maxEvidence; this wins if both are given.`,
@@ -139,7 +160,7 @@ export class ResearchEvidenceTool extends BaseMCPTool<ResearchToolParams, Eviden
       name: 'research_evidence',
       displayName: 'Research Evidence',
       description:
-        'Gather ranked evidence for a legal research question — decomposition, hybrid retrieval, keyword backstop, rerank and a sections→evidence outline. Returns EVIDENCE ONLY (chunks with citations, sub-queries, outline, gaps): it never writes a report or any prose — you write that from the evidence. Everything runs locally (Ollama, sidecar reranker, sidecar RLM); nothing leaves this machine. Any provider/model/routing fields in the request are ignored and reported in routing.ignored[]; unknown fields are rejected. Evidence is capped (defaults: ' + `${EVIDENCE_DEFAULTS.maxEvidence} items, ${EVIDENCE_DEFAULTS.maxCharsPerChunk} chars per chunk` + ') and the applied caps are reported in stats.caps — raise maxEvidence / maxCharsPerChunk if you need more. Scope with `caseId` (one case) or `caseIds` (a subset); unscoped covers every case. Scoping selects WHICH cases are searched — it does not raise the evidence cap or the candidate pool. A request the router expects to run long is promoted to a job: poll research_status with the returned jobId.',
+        'Gather ranked evidence for a legal research question — decomposition, hybrid retrieval, keyword backstop, rerank and a sections→evidence outline. Returns EVIDENCE ONLY (chunks with citations, sub-queries, outline, gaps): it never writes a report or any prose — you write that from the evidence. Everything runs locally (Ollama, sidecar reranker, sidecar RLM); nothing leaves this machine. Any provider/model/routing fields in the request are ignored and reported in routing.ignored[]; unknown fields are rejected. Evidence is capped (defaults: ' + `${EVIDENCE_DEFAULTS.maxEvidence} items, ${EVIDENCE_DEFAULTS.maxCharsPerChunk} chars per chunk` + ') and the applied caps are reported in stats.caps — raise maxEvidence / maxCharsPerChunk if you need more. Scope with `caseId` (one case) or `caseIds` (a subset); unscoped covers every case. Scoping selects WHICH cases are searched — it does not raise the evidence cap or the candidate pool. A request the router expects to run long is promoted to a job: poll research_status with the returned jobId. BEFORE concluding the corpus lacks something, check `warnings` and `stats.subQueriesFailed`: a sub-query that FAILED and one that legitimately matched nothing both contribute no evidence, and only these fields tell them apart. Non-zero `subQueriesFailed` means this evidence is INCOMPLETE — `stats.subQueryFailures` names each sub-query and its reason. `stats.rerankApplied` false means the evidence is in first-stage retrieval order, not cross-encoder relevance order.',
       version: '1.0.0',
       category: 'search',
       profiles: ['local', 'routed'],

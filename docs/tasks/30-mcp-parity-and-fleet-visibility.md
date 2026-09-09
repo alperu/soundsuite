@@ -449,6 +449,127 @@ recordStatus: options.recordStatus,
   registry — the RLM-round assertion is the one that catches a half-threaded implementation; and
   `recordStatus` **absent** from the payload when the caller omits it.
 
+### Part 1 landed 2026-09-09 — all six edits, plus one the spec missed
+
+All six applied together, as the spec required. Anchored on identifiers rather than line numbers:
+every anchor in §"the exact patch" had drifted (e.g. `GatherEvidenceOptions` is at `:289`, not
+`:268-287`) because of the accepted task-22 edits to `research-types.ts`. **The spec's line numbers
+were stale; its content was correct.**
+
+**A seventh edit was required.** `parseResearchParams`' return type is
+`Pick<GatherEvidenceOptions, 'mode' | 'caseId' | …>` (`research-params.ts:18`), which does not widen
+automatically. Without adding `'searchMode' | 'recordStatus'` to that `Pick`, Edit 2 compiles at the
+assignment site but the values are invisible to every consumer — the exact "accepted then silently
+dropped" failure Part 1 exists to prevent, and it would have passed a runtime-only test. `tsc` caught
+it; the spec did not list it.
+
+### REFUTED — `searchMode: 'vector'` does not "fail outright"
+
+The spec's closing finding says a `research_evidence` call under `'vector'` "will fail outright
+across every sub-query" once the embedding provider is down. **It will not.** The chain:
+
+`query-case-knowledge.ts:333-335` throws coded `EMBEDDING_UNAVAILABLE` → `BaseMCPTool.execute`
+(`base-tool.ts:228-274`) converts any throw into `{success: false, errorCode}` → and
+`deep-search.ts:511-516` **swallows it**:
+
+```ts
+if (!searchResult.success) {
+  if (searchResult.error && pushWarning) { pushWarning({ source: 'query_case_knowledge', reason: 'tool-error', … }); }
+  return { subQuery, sources: [], ms: Date.now() - startedAt };
+}
+```
+
+The sub-query contributes zero sources and `research_evidence` returns a **successful response with
+thin or empty evidence** — indistinguishable from "the corpus has nothing on this". That is not a
+loud new failure mode; it is a new instance of the degraded-reports-success defect closed for
+`query_case_knowledge` in [task 22](./22-rerank-observability.md) / [task 39](./39-role-aware-readiness.md).
+
+**Two things follow, and both matter:**
+
+1. **The swallow is pre-existing and unconditional.** It catches every sub-query tool error, not just
+   embedding ones. Threading `searchMode` widens its reach; it does not create it.
+2. **The `retrieval` / `warnings` observability cannot cover this path.** Those fields live on a
+   *returned* `QueryCaseKnowledgeResult`. When the tool **throws**, there is no result object, so
+   there is nothing to read. The two mechanisms do not disagree here — they *cannot* meet. The
+   `pushWarning` raised at `:513` is the same dead end documented in task 39:
+   `gather-evidence.ts:274-276` turns it into a transient progress event stored on nothing, so
+   `EvidenceResult` carries no trace of it.
+
+The tool description (Edit 1) therefore states the real behaviour — a sub-query whose embedding fails
+contributes **no evidence** while the call still succeeds — rather than repeating "fails outright".
+
+**Follow-up BUILT 2026-09-09, authorised by the lead** — §"Failed sub-queries are now reported"
+below. Closing it finishes the change rather than extending it: threading `searchMode` widened the
+blast radius of the pre-existing swallow, so leaving it would have shipped a known regression in
+caller-visible honesty.
+
+### Failed sub-queries are now reported
+
+`SubQueryResult` gained an optional `error: { code?, message }`, set at **all three** previously
+silent exits in `executeParallelSearches` — the `!success` branch, the malformed-response branch
+(`MALFORMED_RESULT`), and the `catch`. `gather-evidence.ts` then separates failures from honest
+zero-matches — the only place that still can, since both arrive as `sources: []` — and surfaces:
+
+```ts
+stats.subQueriesDispatched?: number   // the denominator
+stats.subQueriesFailed?: number       // failures, NOT zero-match sub-queries
+stats.subQueryFailures?: Array<{ subQuery: string; code?: string; message: string }>
+warnings?: string[]                   // same contract as scan_for_pattern / query_case_knowledge
+```
+
+All optional, for the same reason `rerankApplied` is: the routed profile must still typecheck with
+them unset.
+
+Constraints honoured, each pinned by test:
+
+- **The swallow at `deep-search.ts:511-516` was NOT narrowed.** One failing sub-query still must not
+  abort the fan-out — the defect was the silence, not the tolerance. A test asserts healthy
+  sub-queries still return their evidence alongside a failed one.
+- **No special-casing of `EMBEDDING_UNAVAILABLE`.** Any reason is reported, including a bare
+  `EXECUTION_ERROR` and a thrown `ECONNRESET`.
+- **A bare count would recreate `notReady`**, so the per-sub-query reason travels with it and the
+  warning names its denominator ("1 of 2 sub-queries FAILED"), never a naked number.
+- Messages are safe to surface: `BaseMCPTool` has already reduced anything off its allowlist to the
+  generic text, so no case content can ride out on `message`.
+- The `research_evidence` description now tells a caller to check `warnings` /
+  `stats.subQueriesFailed` **before** concluding the corpus lacks something.
+
+### Testing lesson worth keeping
+
+**`tsc` caught the seventh edit; a runtime test would not have.** `parseResearchParams` returns
+`Pick<GatherEvidenceOptions, …>`, which does not widen when the underlying interface does. Edit 2
+would have compiled while the values stayed invisible to every consumer — the precise "accepted then
+silently dropped" failure Part 1 exists to prevent, reintroduced by the fix for it. A test asserting
+`options.searchMode === 'keyword'` passes either way, because at runtime the value *is* there; only
+the type says nobody downstream can see it. **When a parser's output type is a `Pick` or any other
+explicit projection, widening the source interface is never sufficient.**
+
+**On `gather-evidence.test.ts:249`.** That assertion encoded an argument *count*, not a behaviour. A
+genuine 8th parameter makes the old expectation wrong, so the expectation was corrected. This was not
+a test weakened to stay green — what it now asserts is strictly more specific than before.
+
+### Semantics verified against `query_case_knowledge`, not taken on trust
+
+- `'keyword'` skips the embed call entirely (`query-case-knowledge.ts:302`) — a latency and cost
+  change across an N-sub-query fan-out, not only a recall change.
+- `'vector'` rethrows `EMBEDDING_UNAVAILABLE` (`:333-335`); `'hybrid'` degrades to keyword-only.
+- `recordStatus` reaches Lance as a hard filter only for `'filed'` / `'draft'`
+  (`query-case-knowledge.ts:432`); `'any'` applies nothing. Hence the conditional spread rather than
+  defaulting to `'any'` — and hence the Risks entry that this is a **behaviour change** still stands
+  and still wants measuring on a fixed query set before and after.
+- The dashboard deep-search caller (`deep-search.ts:2145-2151`, five arguments) is unchanged:
+  `retrievalParams` is undefined, so `searchMode` falls back to the `'hybrid'` literal and no
+  `recordStatus` is sent. Pinned by test, not only by `tsc`.
+
+**Tests.** `src/lib/search/__tests__/search-mode-threading.test.ts` (6) mocks `runRlmWithTools` so the
+**real** `executeTool` builds the real RLM payload — the assertion that catches a half-threaded
+Edit 5 — and asserts phase 1 and the RLM rounds agree given the same options.
+`src/lib/mcp/research/__tests__/research-search-mode-params.test.ts` (9) covers accept / reject /
+omit, that neither key lands in `routing.ignored[]`, and that `parseRetrievalSettings` drops them —
+the evidence for the top-level placement decision. One existing assertion in
+`gather-evidence.test.ts:249` was updated for the new 8th argument: a real contract change, so the
+test was corrected rather than the code bent to keep it green.
+
 ## Risks
 
 - **A fleet tool leaks infrastructure detail into an MCP surface** that a routed profile may expose to

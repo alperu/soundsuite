@@ -315,6 +315,22 @@ export interface SubQueryResult {
    * close to the phase total means the queueing is downstream, not here.
    */
   ms?: number;
+  /**
+   * Set when this sub-query FAILED, as opposed to legitimately matching
+   * nothing. Both cases yield `sources: []`, and without this field they are
+   * indistinguishable to every caller — which is how a `searchMode: 'vector'`
+   * run against a down embedding role produced a successful, empty
+   * `research_evidence` result (docs/tasks/30 §"REFUTED").
+   *
+   * The failure is still tolerated: one bad sub-query must not abort the
+   * fan-out. The defect was the silence, not the tolerance.
+   */
+  error?: {
+    /** `ToolExecutionResult.errorCode`, e.g. `EMBEDDING_UNAVAILABLE`. */
+    code?: string;
+    /** Caller-safe message — `BaseMCPTool` has already redacted anything else. */
+    message: string;
+  };
 }
 
 /** One-line retrieve-phase profile: total, slowest/fastest dispatch, per-query ms. */
@@ -490,6 +506,17 @@ export async function executeParallelSearches(
   limitPerSubQuery: number = 50,
   /** Subset scope (docs/tasks/12). Mutually exclusive with `caseId` upstream. */
   caseIds?: string[],
+  /**
+   * Retrieval params threaded from the caller; absent = today's defaults.
+   *
+   * A trailing options object rather than two more positionals: this signature
+   * already carries seven parameters, four of them optional, and a caller that
+   * transposed two of nine would not fail loudly (docs/tasks/30 Part 1).
+   */
+  retrievalParams?: {
+    searchMode?: 'vector' | 'hybrid' | 'keyword';
+    recordStatus?: 'filed' | 'draft' | 'any';
+  },
 ): Promise<SubQueryResult[]> {
   // Normalize: plain strings become bare specs so the dispatch body has one shape.
   const specs: SubQuerySpec[] = subQueries.map(s => (typeof s === 'string' ? { query: s } : s));
@@ -505,17 +532,40 @@ export async function executeParallelSearches(
         ...(spec.whereClauses && spec.whereClauses.length > 0 ? { whereClauses: spec.whereClauses } : {}),
         ...(spec.softBoostRefs && spec.softBoostRefs.length > 0 ? { softBoostRefs: spec.softBoostRefs } : {}),
         limit: limitPerSubQuery,
-        searchMode: 'hybrid',
+        // Literal default preserved so the dashboard deep-search caller, which
+        // passes only five arguments, is unchanged. `recordStatus` is spread
+        // conditionally rather than defaulted to 'any' — query_case_knowledge
+        // already defaults it, so sending it would only bloat every call.
+        searchMode: retrievalParams?.searchMode ?? 'hybrid',
+        ...(retrievalParams?.recordStatus ? { recordStatus: retrievalParams.recordStatus } : {}),
       }, pushWarning ? { pushWarning } : undefined);
 
       if (!searchResult.success) {
         if (searchResult.error && pushWarning) {
           pushWarning({ source: 'query_case_knowledge', reason: 'tool-error', message: searchResult.error });
         }
-        return { subQuery, sources: [], ms: Date.now() - startedAt };
+        // Tolerated, but no longer silent. `pushWarning` alone does not reach
+        // any response object (docs/tasks/39 §"Item 10 settled"), so the fact
+        // rides back on the result instead.
+        return {
+          subQuery,
+          sources: [],
+          ms: Date.now() - startedAt,
+          error: {
+            ...(searchResult.errorCode ? { code: searchResult.errorCode } : {}),
+            message: searchResult.error ?? 'the sub-query failed without a message',
+          },
+        };
       }
       if (!searchResult.data?.results) {
-        return { subQuery, sources: [], ms: Date.now() - startedAt };
+        // Succeeded but returned no `results` array at all — a malformed
+        // response, not an honest zero-match. Distinguish it from both.
+        return {
+          subQuery,
+          sources: [],
+          ms: Date.now() - startedAt,
+          error: { code: 'MALFORMED_RESULT', message: 'the search returned no results array' },
+        };
       }
 
       const sources: DeepSearchSource[] = searchResult.data.results.map(
@@ -536,9 +586,18 @@ export async function executeParallelSearches(
       );
 
       return { subQuery, sources, ms: Date.now() - startedAt };
-    } catch {
-      // Individual sub-query failure — skip it
-      return { subQuery, sources: [], ms: Date.now() - startedAt };
+    } catch (err) {
+      // Individual sub-query failure — skip it, but say so. A throw here is
+      // not an embedding problem specifically; any reason must be reportable.
+      return {
+        subQuery,
+        sources: [],
+        ms: Date.now() - startedAt,
+        error: {
+          ...(typeof (err as any)?.code === 'string' ? { code: (err as any).code } : {}),
+          message: err instanceof Error ? err.message : String(err),
+        },
+      };
     }
   });
 
@@ -1621,6 +1680,14 @@ export interface RlmEvidenceRoundsOptions {
    */
   inheritedWhereClauses?: string[];
   /**
+   * Retrieval params inherited from the caller, threaded so the RLM rounds use
+   * the SAME mode as phase 1. This payload is built independently of
+   * `executeParallelSearches`, so a parameter honoured there and dropped here
+   * is this repo's recurring half-threading defect (docs/tasks/30 Part 1).
+   */
+  searchMode?: 'vector' | 'hybrid' | 'keyword';
+  recordStatus?: 'filed' | 'draft' | 'any';
+  /**
    * Called when a tool-use round completes (after its tool results are in)
    * with the sources that round discovered and a one-line note describing
    * what the model asked for. Used by the MCP evidence engine to stream
@@ -1802,7 +1869,10 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
             ? { whereClauses: options.inheritedWhereClauses }
             : {}),
           limit,
-          searchMode: 'hybrid',
+          // Must match the phase-1 dispatch in `executeParallelSearches`; see
+          // `RlmEvidenceRoundsOptions.searchMode`.
+          searchMode: options.searchMode ?? 'hybrid',
+          ...(options.recordStatus ? { recordStatus: options.recordStatus } : {}),
         },
         options.pushWarning ? { pushWarning: options.pushWarning } : undefined,
       );

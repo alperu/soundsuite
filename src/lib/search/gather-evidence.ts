@@ -270,6 +270,14 @@ export async function gatherEvidence(
   const truncatedTableIds = new Set<string>();
   const scopeWhere = options.whereClauses && options.whereClauses.length > 0 ? options.whereClauses : undefined;
 
+  /**
+   * Degradation notices carried on the RESULT. `pushWarning` below only emits
+   * a transient progress event — it reaches no response object at all
+   * (docs/tasks/39 §"Item 10 settled"), which is why this array exists
+   * alongside it rather than instead of it.
+   */
+  const warnings: string[] = [];
+
   // Warnings are informational for the evidence engine — surfaced as progress.
   const pushWarning = (w: { source: string; host?: string; reason?: string; message: string }) => {
     emit('warning', `${w.source}${w.host ? ` (${w.host})` : ''}: ${w.reason ? `${w.reason}: ` : ''}${w.message}`);
@@ -346,8 +354,30 @@ export async function gatherEvidence(
     detail: { subQueries: decomposition!.subQueries },
   });
   const subQueryResults: SubQueryResult[] = await timed('retrieve', () =>
-    executeParallelSearches(scopedSpecs, options.caseId, registry, pushWarning, options.chatId, limitPerSubQuery, options.caseIds),
+    executeParallelSearches(scopedSpecs, options.caseId, registry, pushWarning, options.chatId, limitPerSubQuery, options.caseIds,
+      { searchMode: options.searchMode, recordStatus: options.recordStatus }),
   );
+
+  // A failed sub-query and a sub-query that honestly matched nothing both
+  // arrive as `sources: []`. Separate them here — this is the only place that
+  // still can — so the result can say the evidence is INCOMPLETE rather than
+  // letting a caller read thin evidence as an empty corpus (docs/tasks/30).
+  const subQueryFailures = subQueryResults
+    .filter((r) => r.error)
+    .map((r) => ({
+      subQuery: r.subQuery,
+      ...(r.error!.code ? { code: r.error!.code } : {}),
+      message: r.error!.message,
+    }));
+  if (subQueryFailures.length > 0) {
+    const codes = [...new Set(subQueryFailures.map((f) => f.code).filter(Boolean))];
+    warnings.push(
+      `${subQueryFailures.length} of ${subQueryResults.length} sub-queries FAILED and contributed ` +
+        `no evidence${codes.length > 0 ? ` (${codes.join(', ')})` : ''}. This evidence is ` +
+        'INCOMPLETE — the gap is a retrieval failure, not proof the corpus lacks the answer. ' +
+        `See stats.subQueryFailures. First reason: ${subQueryFailures[0].message}`,
+    );
+  }
   // Per-sub-query timings (stream B's instrumentation): summed >> wall clock
   // means the fan-out really is parallel; summed ≈ wall clock means something
   // downstream serialised it. Retrieve is 91 s of the local `deep` run.
@@ -452,6 +482,10 @@ export async function gatherEvidence(
           caseId: options.caseId,
           caseIds: options.caseIds,
           chatId: options.chatId,
+          // Same retrieval params as the phase-1 dispatch above — a mode
+          // honoured in phase 1 and dropped here is the half-threading defect.
+          searchMode: options.searchMode,
+          recordStatus: options.recordStatus,
           history: options.history,
           signal,
           onToken,
@@ -579,6 +613,7 @@ export async function gatherEvidence(
     // produced nothing. The two are not the same to a caller.
     ...(outline !== undefined ? { outline } : {}),
     ...(rlm ? { rlm } : {}),
+    warnings,
     stats: {
       retrievals,
       chunksFused: stats.uniqueAfterDedup,
@@ -588,6 +623,9 @@ export async function gatherEvidence(
       // and `rerankScore` is absent on every row either way (docs/tasks/22).
       rerankApplied: stats.rerankApplied,
       ...(stats.rerankApplied ? {} : { rerankSkipReason: stats.rerankSkipReason }),
+      subQueriesDispatched: subQueryResults.length,
+      subQueriesFailed: subQueryFailures.length,
+      ...(subQueryFailures.length > 0 ? { subQueryFailures } : {}),
       ms: Date.now() - t0,
       phases,
       caps: { maxEvidence, maxCharsPerChunk, evidenceTruncated, evidenceTotalBeforeCap, chunksTruncated, tablesTruncated },

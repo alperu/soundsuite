@@ -136,6 +136,16 @@ export interface EvidenceResult {
     gaps: string[];
   } | null;
   rlm?: { rounds: number; toolCalls: number; notes: string[] };
+  /**
+   * Human-readable degradation notices; `[]` when nothing degraded. Same field
+   * name and contract as `scan_for_pattern.warnings` and
+   * `query_case_knowledge.warnings` — one vocabulary across the three tools.
+   *
+   * A non-empty array means this evidence is thinner than a healthy run's. It
+   * does NOT mean the corpus lacks the answer, so a caller must report the
+   * degradation rather than asserting absence.
+   */
+  warnings?: string[];
   stats: {
     retrievals: number;
     chunksFused: number;
@@ -161,6 +171,29 @@ export interface EvidenceResult {
       | 'degraded'
       | 'score-validation'
       | 'fetch';
+    /**
+     * Sub-queries dispatched in the retrieve phase. The denominator for
+     * `subQueriesFailed`.
+     */
+    subQueriesDispatched?: number;
+    /**
+     * Sub-queries that FAILED, as distinct from returning zero matches. Both
+     * contribute no evidence, and before this field they were
+     * indistinguishable — a `searchMode: 'vector'` run against a down
+     * embedding role returned a successful, empty result that read exactly
+     * like "the corpus has nothing" (docs/tasks/30 §"REFUTED").
+     *
+     * Non-zero means this evidence is INCOMPLETE, not that the corpus lacks
+     * the answer. A failing sub-query never aborts the fan-out.
+     */
+    subQueriesFailed?: number;
+    /**
+     * One entry per failed sub-query, so the reason is actionable rather than
+     * a bare count. Not restricted to embedding faults — any failure reason is
+     * reported. `code` is `ToolExecutionResult.errorCode` where the tool
+     * supplied one (e.g. `EMBEDDING_UNAVAILABLE`).
+     */
+    subQueryFailures?: Array<{ subQuery: string; code?: string; message: string }>;
     ms: number;
     phases: Record<string, number>;
     /** Caps applied to this payload, so truncation is visible to the caller. */
@@ -294,6 +327,14 @@ export interface GatherEvidenceOptions {
   /** Subset scope — mutually exclusive with `caseId` (docs/tasks/12 §2). */
   caseIds?: string[];
   whereClauses?: string[];
+  /**
+   * Retrieval mode for every sub-query, including the RLM evidence rounds.
+   * Same semantics as `query_case_knowledge`. Top-level rather than inside
+   * `RetrievalSettings` because that object is coerced with `positiveInt`.
+   */
+  searchMode?: 'vector' | 'hybrid' | 'keyword';
+  /** Record-status filter for every sub-query. Same semantics as `query_case_knowledge`. */
+  recordStatus?: 'filed' | 'draft' | 'any';
   history?: { role: 'user' | 'assistant'; content: string }[];
   provider?: string;
   model?: string;

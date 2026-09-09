@@ -15,7 +15,10 @@ import { RESEARCH_TIERS } from '../research-types';
 import { McpError } from '../llm-policy';
 
 export interface ParsedResearchParams {
-  options: Pick<GatherEvidenceOptions, 'mode' | 'caseId' | 'caseIds' | 'whereClauses' | 'history' | 'retrieval'>;
+  options: Pick<
+    GatherEvidenceOptions,
+    'mode' | 'caseId' | 'caseIds' | 'whereClauses' | 'searchMode' | 'recordStatus' | 'history' | 'retrieval'
+  >;
   ignored: string[];
 }
 
@@ -44,6 +47,11 @@ const TOP_LEVEL_RETRIEVAL_KEYS: (keyof RetrievalSettings)[] = ['maxEvidence', 'm
  */
 const HONOURED_TOP_LEVEL_KEYS: string[] = [
   'query', 'profile', 'caseId', 'caseIds', 'mode', 'retrieval', 'history', 'preset', 'whereClauses',
+  // Enum strings, so they belong at the top level rather than under `retrieval`:
+  // `parseRetrievalSettings` runs `positiveInt` over every RETRIEVAL_KEY and would
+  // drop them silently. Deliberately NOT in STEERING_KEYS — that set means
+  // accepted-and-ignored, which is their opposite (docs/tasks/30 Part 1).
+  'searchMode', 'recordStatus',
   ...TOP_LEVEL_RETRIEVAL_KEYS,
 ];
 
@@ -102,6 +110,21 @@ export function parseResearchMode(v: unknown): ResearchMode | undefined {
   throw new McpError('INVALID_PARAMS', `mode must be one of auto, ${RESEARCH_TIERS.join(', ')}`);
 }
 
+const SEARCH_MODES = ['vector', 'hybrid', 'keyword'] as const;
+const RECORD_STATUSES = ['filed', 'draft', 'any'] as const;
+
+/**
+ * Enum parser that rejects rather than silently defaulting — the same contract
+ * as `parseResearchMode` above. A bad value must 400 naming the field, not
+ * fall back to the default, which would read to the caller as a knob that had
+ * no effect.
+ */
+function parseEnum<T extends string>(v: unknown, allowed: readonly T[], field: string): T | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v === 'string' && (allowed as readonly string[]).includes(v)) return v as T;
+  throw new McpError('INVALID_PARAMS', `${field} must be one of ${allowed.join(', ')}`);
+}
+
 function parseHistory(v: unknown): GatherEvidenceOptions['history'] {
   if (!Array.isArray(v)) return undefined;
   const turns = v
@@ -158,6 +181,8 @@ export async function parseResearchParams(params: Record<string, unknown> | unde
     ? p.whereClauses.filter((c): c is string => typeof c === 'string' && c.trim().length > 0)
     : undefined;
   const history = parseHistory(p.history);
+  const searchMode = parseEnum(p.searchMode, SEARCH_MODES, 'searchMode');
+  const recordStatus = parseEnum(p.recordStatus, RECORD_STATUSES, 'recordStatus');
 
   // Explicit retrieval knobs win over anything a preset supplies.
   let presetRetrieval: RetrievalSettings | undefined;
@@ -190,6 +215,8 @@ export async function parseResearchParams(params: Record<string, unknown> | unde
       ...(caseId ? { caseId } : {}),
       ...(caseIds ? { caseIds } : {}),
       ...(whereClauses && whereClauses.length > 0 ? { whereClauses } : {}),
+      ...(searchMode ? { searchMode } : {}),
+      ...(recordStatus ? { recordStatus } : {}),
       ...(history ? { history } : {}),
       ...(retrieval ? { retrieval } : {}),
     },
