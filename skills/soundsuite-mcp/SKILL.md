@@ -494,6 +494,7 @@ evolution, plus exhibit retrieval and saved workflows. Get the exact callable na
 | `EMBEDDING_DIMENSION_MISMATCH` | Index built with a different embedding model than the one configured |
 | `EXECUTION_ERROR` | Unexpected server fault; details stay server-side by design |
 | `AUTH_REQUIRED` | Request classified as non-loopback |
+| **fleet saturated** | Only when an operator has enabled the admission cap (**off by default**). The refusal is fast and specific — it names the role, each host as `load/cap`, and an advisory `retryAfterMs`. It is deliberately distinct from "no GPU-ready sidecar": all hosts may be healthy and simply full. Retry after the hint; do not read it as a dead fleet |
 
 ### Reading LLM-tool results correctly
 
