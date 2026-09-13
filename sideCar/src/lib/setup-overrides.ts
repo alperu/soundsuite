@@ -52,9 +52,16 @@ export function applySetupOverrides(): void {
       if (state.hostOsConfidence === 'master-override') {
         log.info(`Skipping local hostOs override (${raw}) — master-pushed override (${state.hostOs}) takes precedence`);
       } else {
+        // applySetupOverrides() runs on EVERY master config push, and the master
+        // re-pushes config on every register. Logging an unchanged value each
+        // time made a hot reconnect loop read as if the override were flapping.
+        // The assignment is idempotent; only the log needed to be.
+        const changed = state.hostOs !== mapped || state.hostOsConfidence !== 'override';
         state.hostOs = mapped;
         state.hostOsConfidence = 'override';
-        log.info(`Applied hostOs override: ${raw}${raw !== mapped ? ` (migrated → ${mapped})` : ''}`);
+        if (changed) {
+          log.info(`Applied hostOs override: ${raw}${raw !== mapped ? ` (migrated → ${mapped})` : ''}`);
+        }
       }
     }
   }

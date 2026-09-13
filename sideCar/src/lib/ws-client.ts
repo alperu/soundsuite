@@ -376,7 +376,29 @@ async function executeCommand(
       // SHARED FIELDS (idleTimeouts, minOnline, registry) still mutate global
       // state — needs namespacing later (v1 limitation).
       if (typeof payload.serverUrl === 'string' && payload.serverUrl) {
-        if (m.serverUrl !== payload.serverUrl) {
+        if (m.serverUrl !== payload.serverUrl && m.connectionMode !== 'disconnected') {
+          // Do NOT adopt a pushed URL for a slot whose socket is up. The master
+          // resolves its canonical URL from SOUND_SUITE_MASTER_URL, then a config
+          // key, then the Host header of whatever most recently hit it
+          // (src/lib/gpu/master-identity.ts) — so the pushed value is not a
+          // verified route, and the master re-pushes it on EVERY register
+          // (ws-relay.ts:509-521). Trading the address this socket is live on for
+          // an unverified one takes the host dark, and recovery means editing
+          // config inside a container on a host that is by then unreachable
+          // (see the startGossipClient comment and task 41). The rekey below
+          // still runs when the slot is not connected — that is the recovery
+          // case it was written for.
+          // Gate on connectionMode, not on `m.ws`: a slot in HTTP-gossip
+          // fallback has `m.ws === null` and is still connected and working on
+          // its current key — and `pollForCommands` routes `config` through the
+          // same handler, so gating on the socket alone would let the rekey move
+          // exactly the host that is already degraded and least able to recover.
+          log.info(
+            `[${m.serverUrl}] Master pushed serverUrl ${payload.serverUrl}; keeping ` +
+            `the key this ${m.connectionMode} connection is working on (rekey only ` +
+            `applies to a slot that is disconnected)`,
+          );
+        } else if (m.serverUrl !== payload.serverUrl) {
           log.info(`[${m.serverUrl}] Master pushed serverUrl rename → ${payload.serverUrl}`);
           const res = rekeyMaster(m.serverUrl, payload.serverUrl);
           if (!res.ok && res.reason === 'conflict') {
@@ -1196,8 +1218,41 @@ export function connectMaster(m: MasterConnection): void {
     // port). Fantom MCP accepts WS upgrades on the same port as its HTTP API
     // (e.g. 3848). Default keeps Sound Suite single-master deployments
     // unchanged.
+    // `m.wsPort` arrives ONLY in a master-identity frame, so it is undefined for
+    // the whole first-connect window — and for as long as a master cannot identify
+    // itself at all. The `?? 3002` default is therefore a GUESS, and on a host that
+    // runs more than one master it is a dangerous one: `serverHost` is the same for
+    // every master on that host, so the ws port is the only thing separating their
+    // endpoints, and an unknown port silently resolves onto Sound Suite's relay.
+    const portExplicit = m.wsPort !== undefined;
     const wsPort = m.wsPort ?? 3002;
     const wsUrl = `ws://${serverHost}:${wsPort}/sidecar`;
+
+    if (!portExplicit) {
+      // If another master on THIS host holds that exact port explicitly, the guess
+      // is not merely unverified — it is certainly wrong, and dialling it would
+      // register this sidecar on someone else's master under the same agentUrl.
+      // The master supersedes per agentUrl, so the two slots then evict each other
+      // roughly every POLL_INTERVAL, and the loser's WS never survives long enough
+      // for its 5s heartbeat to fire even once: `mode: 'websocket'` with
+      // `lastHeartbeatAt: null` and a config write every ~3.5s. Refuse instead, and
+      // say what is missing.
+      const owner = [...state.masters.values()].find((o) => {
+        if (o === m || o.retired || o.wsPort !== wsPort) return false;
+        try { return new URL(o.serverUrl).hostname === serverHost; } catch { return false; }
+      });
+      if (owner) {
+        log.warn(
+          `[${m.serverUrl}] No wsPort known for this master, and the default ${wsPort} ` +
+          `belongs to ${owner.serverUrl} on the same host — refusing to dial it. ` +
+          `Waiting for a master-identity frame to supply the real wsPort (set it in ` +
+          `/setup, or fix the master's host-provisioning row so it can identify itself).`,
+        );
+        scheduleReconnect(m);
+        m.connectionStatus = `Needs wsPort — ${wsPort} belongs to ${owner.serverUrl}`;
+        return;
+      }
+    }
     const agentUrl = getAgentUrl();
 
     // One master, one socket. Two slots keyed differently but dialling the SAME
@@ -1213,8 +1268,13 @@ export function connectMaster(m: MasterConnection): void {
     // master we are already connected to, and say so once.
     for (const other of state.masters.values()) {
       if (other === m || other.retired) continue;
+      // `wsUrl` is a CLAIM on the endpoint, set below before the socket opens and
+      // cleared again the moment the connection ends (close handler,
+      // fallbackToHttp, disconnectMaster). Checking `readyState === OPEN` instead
+      // would miss the case that matters most: `connectAllMasters()` starts every
+      // disconnected slot in the same tick, so at boot neither duplicate has an
+      // open socket yet and both would proceed.
       if (other.wsUrl !== wsUrl) continue;
-      if (other.ws?.readyState !== WebSocket.OPEN) continue;
       log.warn(
         `[${m.serverUrl}] Duplicate master slot: ${wsUrl} is already connected as ` +
         `${other.serverUrl}. Not opening a second socket (it would ping-pong: the ` +
@@ -1450,6 +1510,9 @@ export function connectMaster(m: MasterConnection): void {
       }
       log.info(`[${m.serverUrl}] WebSocket disconnected`);
       m.ws = null;
+      // Release the endpoint claim so a slot that was standing down as a
+      // duplicate can take this master over if we cannot get back.
+      m.wsUrl = undefined;
       m.connectionMode = 'disconnected';
       m.connectionStatus = 'WebSocket disconnected';
       if (m.heartbeatTimer) { clearInterval(m.heartbeatTimer); m.heartbeatTimer = null; }
@@ -1490,6 +1553,8 @@ export function connectMaster(m: MasterConnection): void {
 }
 
 async function fallbackToHttp(m: MasterConnection): Promise<void> {
+  // No WS on this endpoint any more — drop the claim (see connectMaster).
+  m.wsUrl = undefined;
   m.connectionMode = 'http';
   m.connectionStatus = 'Connected via HTTP fallback';
   if (!anyWebSocketConnected()) state.connectionStatus = 'Connected via HTTP fallback';
@@ -1672,6 +1737,12 @@ export async function startGossipClient(): Promise<void> {
   }
 
   startWatchdog();
+}
+
+/** Test seam: drive one HTTP heartbeat, the transport the master's
+ *  `X-Sound-Suite-Master-Url` header rides on. Not used by product code. */
+export async function __testSendHttpHeartbeat(m: MasterConnection): Promise<void> {
+  await sendHttpHeartbeat(m);
 }
 
 // Helper exported for /api/masters routes — not exported above to avoid
