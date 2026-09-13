@@ -73,6 +73,20 @@ if (!g.__ss_ws_sweep__) g.__ss_ws_sweep__ = { timer: null as ReturnType<typeof s
  */
 const LIVENESS_SWEEP_MS = 30_000;
 
+/**
+ * How long a socket may stay connected without sending `register`.
+ *
+ * Supersede-and-close only fires from the `register` branch, so a socket that
+ * connects and never registers is never superseded. The liveness sweep will not
+ * reap it either, as long as it answers pings — leaving a live, unowned socket
+ * holding a descriptor indefinitely. Observed as more open sockets on the relay
+ * port than there are registered sidecars.
+ *
+ * A sidecar registers immediately after the handshake, so this only ever fires
+ * on something that is not completing the protocol.
+ */
+const REGISTER_TIMEOUT_MS = Number(process.env.GPU_WS_REGISTER_TIMEOUT_MS || 30_000);
+
 const sidecars: Map<string, SidecarConnection> = g.__ss_ws_sidecars__;
 const pendingCommands: Map<string, PendingCommand> = g.__ss_ws_pending__;
 const cmdCounter: { value: number } = g.__ss_ws_cmdCounter__;
@@ -221,6 +235,22 @@ export function startWsRelay(): WebSocketServer {
     markAlive(ws);
     ws.on('pong', () => markAlive(ws));
 
+    // Close a socket that never identifies itself. Cleared on register, and on
+    // close so a short-lived connection leaves no timer behind.
+    let registerTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      registerTimer = null;
+      if (registeredUrl) return;
+      logger.warn(
+        `Closing WebSocket that did not register within ${REGISTER_TIMEOUT_MS}ms`,
+      );
+      closeSocket(ws, 1002, 'register-timeout');
+    }, REGISTER_TIMEOUT_MS);
+    registerTimer.unref?.();
+
+    const clearRegisterTimer = () => {
+      if (registerTimer) { clearTimeout(registerTimer); registerTimer = null; }
+    };
+
     ws.on('message', async (raw: Buffer | string) => {
       // Any traffic proves the peer is alive, not just a pong.
       markAlive(ws);
@@ -244,6 +274,7 @@ export function startWsRelay(): WebSocketServer {
           return;
         }
         registeredUrl = msg.agentUrl;
+        clearRegisterTimer();
         // A sidecar that reconnects (its own watchdog forces one after three
         // failed heartbeats — sideCar/src/lib/ws-client.ts) arrives on a NEW
         // socket while the previous one may still be open. Overwriting the map
@@ -383,6 +414,7 @@ export function startWsRelay(): WebSocketServer {
     });
 
     ws.on('close', async () => {
+      clearRegisterTimer();
       if (!registeredUrl) return;
       // Only tear down shared state if the map still points at THIS socket. A
       // superseded socket closing later must not delete the replacement that

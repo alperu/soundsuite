@@ -28,6 +28,9 @@ jest.mock('@/lib/db/prisma', () => ({
 
 const PORT = 34099;
 process.env.GPU_WS_PORT = String(PORT);
+// Short enough to assert against; the module reads this at import time.
+const REGISTER_TIMEOUT_MS = 300;
+process.env.GPU_WS_REGISTER_TIMEOUT_MS = String(REGISTER_TIMEOUT_MS);
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const relay = require('../ws-relay');
@@ -163,6 +166,42 @@ describe('ws-relay socket accounting', () => {
     relay.__sweepForTests(); // no pong arrived -> terminate
 
     await closed(ws);
+    expect(ws.readyState).toBe(WsClient.CLOSED);
+  });
+});
+
+describe('register handshake timeout', () => {
+  it('closes a socket that never registers', async () => {
+    // Supersede-and-close only fires from the register branch, and the liveness
+    // sweep spares anything that answers pings — so without this timeout an
+    // unregistered socket holds a descriptor forever. This is the case that
+    // produced more open sockets than registered sidecars.
+    const ws = await connect();
+    expect(ws.readyState).toBe(WsClient.OPEN);
+
+    await closed(ws);
+    expect(ws.readyState).toBe(WsClient.CLOSED);
+  });
+
+  it('does not close a socket that registers in time', async () => {
+    const ws = await connect();
+    await register(ws, nextAgent());
+
+    // Well past the timeout: registering must disarm it, not merely delay it.
+    await new Promise((r) => setTimeout(r, REGISTER_TIMEOUT_MS * 3));
+    expect(ws.readyState).toBe(WsClient.OPEN);
+
+    ws.close();
+    await closed(ws);
+  });
+
+  it('leaves no timer behind when a socket closes before the timeout', async () => {
+    // A dangling timer firing against an already-closed socket would be a
+    // (small) leak of its own, and would log a misleading close.
+    const ws = await connect();
+    ws.close();
+    await closed(ws);
+    await new Promise((r) => setTimeout(r, REGISTER_TIMEOUT_MS * 2));
     expect(ws.readyState).toBe(WsClient.CLOSED);
   });
 });
