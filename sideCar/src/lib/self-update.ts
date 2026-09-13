@@ -181,7 +181,15 @@ export async function performUpdate(serverUrl: string): Promise<boolean> {
 
     log.info(`Update to v${newVersion} extracted successfully. Restarting...`);
 
-    // 8. Save current agentUrl and serverUrl so the new process uses the same URLs
+    // 8. Save current agentUrl and serverUrl so the new process uses the same URLs.
+    //
+    // This line is the ONLY writer of state.savedAgentUrl, and it is why an
+    // address could stick forever: it used to be read back ahead of both
+    // EXTERNAL_IP and interface detection (ws-client.ts), so each self-update
+    // re-pinned whatever address the host held at the moment of its first
+    // update, and a restart reloaded the pin before any detection ran.
+    // Detection now outranks the saved value, so this write is a fallback hint
+    // rather than a pin — see sideCar/src/lib/agent-address.ts.
     state.savedAgentUrl = getAgentUrl();
     saveConfig();
     const resolvedConfigPath = getConfigPath();

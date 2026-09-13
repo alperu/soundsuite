@@ -8,6 +8,7 @@ import { createLogger } from './logger';
 import { recordDemandSample, getPeakDemand } from './demand-tracker';
 import { tasks } from './task-tracker';
 import { getBootEvents, getBootEpoch } from './boot-events';
+import { detectAdvertisableAddress, type InterfaceMap } from './agent-address';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -44,16 +45,17 @@ function preflightDockerError(role: string | undefined): string | null {
   return null;
 }
 
-// Get primary non-loopback IPv4 address
+// Get primary non-loopback IPv4 address.
+//
+// Shares detectAdvertisableAddress() with the address the sidecar actually
+// advertises (agent-address.ts). It used to do its own first-non-internal-IPv4
+// walk, which on a multi-homed or containerised host could report a different
+// address than the advertised one — including a Docker bridge address the
+// advertiser demotes. /api/status disagreeing with what the master is told to
+// call is its own debugging problem, so there is one detector, not two.
 function getPrimaryIp(): string {
-  const interfaces = os.networkInterfaces();
-  for (const iface of Object.values(interfaces)) {
-    if (!iface) continue;
-    for (const info of iface) {
-      if (info.family === 'IPv4' && !info.internal) return info.address;
-    }
-  }
-  return 'unknown';
+  const picked = detectAdvertisableAddress(os.networkInterfaces() as InterfaceMap);
+  return picked ? picked.address : 'unknown';
 }
 
 // Read version from package.json once at module load

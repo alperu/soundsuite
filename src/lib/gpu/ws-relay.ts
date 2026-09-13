@@ -18,7 +18,12 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createLogger } from '@/lib/logger';
 import { setConfigValue } from '@/lib/db/config';
-import { updateSidecarStatus, markSidecarDisconnected } from '@/lib/gpu/status-cache';
+import {
+  updateSidecarStatus,
+  markSidecarDisconnected,
+  getSidecarStatus,
+  removeSidecarFromCache,
+} from '@/lib/gpu/status-cache';
 import { SidecarError } from '@/lib/gpu/sidecar-error';
 
 const logger = createLogger('WsRelay');
@@ -32,6 +37,24 @@ interface SidecarConnection {
   containers: string[];
   lastSeen: number;
   activeRequests: number;
+  /**
+   * The address this sidecar reached US from, read off the socket — NOT what the
+   * sidecar declared. Recorded; not yet routed on.
+   *
+   * The declared `agentUrl` cannot be right in general: this fleet's master is
+   * sometimes on a VPN, so a host answers at a different address depending on the
+   * path (LAN / Tailscale CGNAT 100.64.0.0/10 / VPN DNS name), and the sidecar
+   * cannot know which network the master is on. The peer address is by
+   * construction correct for whichever path is actually in use — and immune both
+   * to DHCP drift and to mDNS `.local` names, which do not resolve across a VPN
+   * since multicast is not forwarded.
+   *
+   * NOT a callback target yet: that needs probe-and-fallback over candidate
+   * addresses, and the data path's selection lives in `fleet-router.ts`
+   * (`resolveEndpoint`). Recording it now makes real evidence available from the
+   * live fleet. See docs/tasks/41-sidecar-address-drift.md.
+   */
+  observedFromIp?: string;
 }
 
 interface PendingCommand {
@@ -96,6 +119,84 @@ let wss: WebSocketServer | null = g.__ss_wss__ || null;
 const BLOCK_DURATION_MS = 60_000;
 
 function normalizeUrl(u: string): string { return u.replace(/\/+$/, ''); }
+
+/**
+ * Normalise a socket peer address. Node reports IPv4 over a dual-stack listener as
+ * IPv4-mapped IPv6 (`::ffff:192.0.2.1`); strip that so the value is comparable
+ * with a declared address.
+ */
+export function normalizePeerAddress(addr: string | undefined | null): string | undefined {
+  if (!addr) return undefined;
+  const m = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(addr);
+  return m ? m[1] : addr;
+}
+
+/** Host portion of a declared agentUrl, for comparing against the observed peer. */
+export function declaredHostOf(agentUrl: string): string | undefined {
+  try { return new URL(agentUrl).hostname; } catch { return undefined; }
+}
+
+export type AddressMoveOutcome =
+  /** Key moved. `carried` is the entry that was under the old key, or undefined. */
+  | { moved: true; carried?: SidecarConnection }
+  /** Refused: the destination address is held by a DIFFERENT live socket. */
+  | { moved: false; conflictWith: string };
+
+/**
+ * Move a registry entry from one advertised address to another.
+ *
+ * The registry is keyed by `agentUrl`, so a sidecar whose address changes (DHCP
+ * moved the host) would otherwise register a SECOND entry while the first — a
+ * dead address the master still calls — lived on. Worse, on the same-socket path
+ * the old key kept a reference to the *live* socket and the `close` handler only
+ * ever deleted `registeredUrl`, so nothing removed it for the life of the
+ * process and `persistSidecarList()` kept writing it out.
+ *
+ * This is only ever called when the new address arrives on a socket that is
+ * already registered under the old one. Same socket means same sidecar process,
+ * which is what makes the move unambiguous WITHOUT a durable sidecar identity
+ * (see task 41 item 6 — a sidecar reconnecting on a FRESH socket from a new
+ * address still cannot be recognised, and is deliberately not handled here).
+ *
+ * Refuses when the destination is already held by another live socket. Two
+ * sidecars claiming one address is a named conflict, not a silent replacement.
+ */
+export function rekeySidecarAddress(
+  oldUrl: string,
+  newUrl: string,
+  ws: WebSocket,
+): AddressMoveOutcome {
+  const occupant = sidecars.get(newUrl);
+  if (occupant && occupant.ws !== ws) {
+    logger.error('Sidecar address-move REFUSED — destination address claimed by another connection', {
+      from: oldUrl,
+      to: newUrl,
+      conflictingHostname: occupant.hostname,
+      detail: 'Two sidecars are advertising the same address. Neither entry was replaced.',
+    });
+    return { moved: false, conflictWith: occupant.hostname };
+  }
+
+  const carried = sidecars.get(oldUrl);
+  if (carried?.ws === ws) sidecars.delete(oldUrl);
+
+  // Migrate the status cache too — roles / vram / peakDemand live there, also
+  // keyed by agentUrl, and the fleet read surface uses it. Composed from the
+  // existing exports rather than a bespoke helper.
+  const cached = getSidecarStatus(oldUrl);
+  if (cached) {
+    const { agentUrl: _dropped, ...rest } = cached;
+    updateSidecarStatus(newUrl, rest);
+    removeSidecarFromCache(oldUrl);
+  }
+
+  logger.warn('Sidecar advertised address moved — registry re-keyed', {
+    from: oldUrl,
+    to: newUrl,
+    carriedActiveRequests: carried?.activeRequests ?? 0,
+  });
+  return { moved: true, carried };
+}
 
 function isBlocked(agentUrl: string): boolean {
   const expiry = blockedAgents.get(normalizeUrl(agentUrl));
@@ -227,8 +328,12 @@ export function startWsRelay(): WebSocketServer {
   g.__ss_wss__ = wss;
   logger.info(`WebSocket relay server listening on port ${WS_PORT}`);
 
-  wss.on('connection', (ws: WebSocket) => {
+  // The second argument is the HTTP upgrade request. The relay owns its own
+  // listener (`new WebSocketServer({ port: WS_PORT })`) with no proxy in front, so
+  // `req.socket.remoteAddress` is the real peer address rather than a hop's.
+  wss.on('connection', (ws: WebSocket, req: import('http').IncomingMessage) => {
     let registeredUrl: string | null = null;
+    const observedFromIp = normalizePeerAddress(req?.socket?.remoteAddress);
 
     // Liveness is tracked on the socket itself so the sweep needs no side table
     // to keep in sync (and nothing to leak if a socket dies unobserved).
@@ -273,6 +378,31 @@ export function startWsRelay(): WebSocketServer {
           try { ws.close(1008, 'agent-blocked-by-master'); } catch { /* ignore */ }
           return;
         }
+        // A register frame on a socket already registered under a DIFFERENT
+        // address is the sidecar telling us its address changed (its
+        // revalidation tick re-registers on the live socket rather than
+        // reconnecting, precisely so this is unambiguous). Move the key; do not
+        // grow a second entry for one host.
+        let carried: SidecarConnection | undefined;
+        let movedFrom: string | null = null;
+        if (registeredUrl && normalizeUrl(registeredUrl) !== normalizeUrl(msg.agentUrl)) {
+          if (sidecars.get(registeredUrl)?.ws === ws) {
+            const outcome = rekeySidecarAddress(registeredUrl, msg.agentUrl, ws);
+            if (!outcome.moved) {
+              // Keep the existing registration intact and say so. Replacing
+              // silently would hand this socket an address another sidecar owns.
+              ws.send(JSON.stringify({
+                type: 'registered',
+                ok: false,
+                error: `address-conflict: ${msg.agentUrl} is already registered by ${outcome.conflictWith}`,
+              }));
+              return;
+            }
+            carried = outcome.carried;
+            movedFrom = registeredUrl;
+          }
+        }
+
         registeredUrl = msg.agentUrl;
         clearRegisterTimer();
         // A sidecar that reconnects (its own watchdog forces one after three
@@ -288,10 +418,13 @@ export function startWsRelay(): WebSocketServer {
         sidecars.set(msg.agentUrl, {
           ws,
           agentUrl: msg.agentUrl,
-          hostname: msg.hostname || 'unknown',
-          containers: msg.containers || [],
+          hostname: msg.hostname || carried?.hostname || 'unknown',
+          containers: msg.containers || carried?.containers || [],
           lastSeen: Date.now(),
-          activeRequests: 0,
+          // Carried across an address move: the host did not drop its in-flight
+          // work because its IP changed, and zeroing the count would let the
+          // router over-admit against it.
+          activeRequests: carried?.activeRequests ?? 0,
         });
         logger.info('Sidecar registered via WebSocket', {
           agentUrl: msg.agentUrl,
@@ -305,6 +438,33 @@ export function startWsRelay(): WebSocketServer {
         });
 
         await persistSidecarList();
+
+        // The per-host provisioning row (hostOsOverride, per-host master URL /
+        // WS port) is keyed by sidecarUrl too. Carry it to the new address or the
+        // master silently stops pushing identity to a host that only moved IP.
+        // Fire-and-forget, like the identity/config pushes below.
+        if (movedFrom) {
+          const from = movedFrom;
+          import('@/lib/db/host-provisioning').then(async (hp) => {
+            const row = await hp.getProvisioning(from);
+            if (!row) return;
+            await hp.upsertProvisioning({
+              sidecarUrl: msg.agentUrl,
+              hostOsOverride: row.hostOsOverride,
+              masterUrlForHost: row.masterUrlForHost,
+              masterWsPortForHost: row.masterWsPortForHost,
+              notes: row.notes,
+            });
+            await hp.deleteProvisioning(from);
+            logger.info('Host-provisioning row followed the address move', {
+              from, to: msg.agentUrl,
+            });
+          }).catch((err) => {
+            logger.warn('Failed to move host-provisioning row after address change', {
+              from, to: msg.agentUrl, error: (err as Error).message,
+            });
+          });
+        }
 
         // Acknowledge registration
         ws.send(JSON.stringify({ type: 'registered', ok: true }));

@@ -30,6 +30,13 @@ import { createLogger } from './logger';
 import { checkForUpdate, performUpdate } from './self-update';
 import { tasks } from './task-tracker';
 import { emitBootEvent } from './boot-events';
+import {
+  AddressStabilityTracker,
+  resolveAgentUrl,
+  shouldReadvertise,
+  type InterfaceMap,
+  type ResolvedAgentUrl,
+} from './agent-address';
 
 const log = createLogger('gossip');
 
@@ -48,25 +55,144 @@ const POLL_INTERVAL = 3_000;       // 3s poll when WS is down
 
 // ─── Agent URL detection ──────────────────────────────────────────────────
 
+// The address we are currently advertising. Resolved once, then changed ONLY by
+// revalidateAgentUrl(). getAgentUrl() is called on every heartbeat (via
+// buildFullStatus), so it must not re-run detection each time: on a multi-homed
+// host that would let the advertised address flap between NICs several times a
+// minute, and with the master-side re-key each flip migrates registry state.
+let currentAgentUrl: string | null = null;
+
+// Debounce for re-advertisement — a replacement must be seen on N consecutive
+// revalidation ticks before it is adopted.
+const addressStability = new AddressStabilityTracker();
+
+/**
+ * Host of a configured master, used to break ties on a multi-homed host: the
+ * interface on the master's /24 is the one that can reach it. Hint only — null
+ * when no master is configured or its URL is unparseable.
+ */
+function firstMasterHost(): string | null {
+  for (const serverUrl of state.masters.keys()) {
+    try { return new URL(serverUrl).hostname; } catch { /* try the next */ }
+  }
+  if (state.serverUrl) {
+    try { return new URL(state.serverUrl).hostname; } catch { /* fall through */ }
+  }
+  return null;
+}
+
+function resolveNow(): ResolvedAgentUrl {
+  return resolveAgentUrl({
+    env: { AGENT_URL: process.env.AGENT_URL, EXTERNAL_IP: process.env.EXTERNAL_IP },
+    savedAgentUrl: state.savedAgentUrl,
+    interfaces: os.networkInterfaces() as InterfaceMap,
+    port: PORT,
+    masterHost: firstMasterHost(),
+  });
+}
+
 export function getAgentUrl(): string {
-  if (process.env.AGENT_URL) return process.env.AGENT_URL;
-  if (state.savedAgentUrl) return state.savedAgentUrl;
-  if (process.env.EXTERNAL_IP) return `http://${process.env.EXTERNAL_IP}:${PORT}`;
+  if (currentAgentUrl) return currentAgentUrl;
+  const resolved = resolveNow();
+  currentAgentUrl = resolved.url;
+  log.info(
+    `Advertised address resolved: ${resolved.url} (source=${resolved.source}` +
+    `${resolved.iface ? `, iface=${resolved.iface}` : ''})`,
+  );
+  return currentAgentUrl;
+}
 
-  const interfaces = os.networkInterfaces();
-  let fallback: string | null = null;
-
-  for (const name of Object.keys(interfaces)) {
-    for (const iface of interfaces[name]!) {
-      if (iface.family !== 'IPv4' || iface.internal) continue;
-      if (iface.address.startsWith('172.17.') || iface.address.startsWith('172.18.')) {
-        if (!fallback) fallback = iface.address;
-        continue;
-      }
-      return `http://${iface.address}:${PORT}`;
+/**
+ * Boot-time reconciliation. `state.savedAgentUrl` is only ever written by the
+ * self-update path (self-update.ts) and is self-perpetuating, so a host that has
+ * self-updated once carries the address it had at that moment forever. Detection
+ * now outranks it (agent-address.ts), so the value getAgentUrl() returns at boot
+ * is already correct — this just writes the correction back so the config file
+ * stops carrying the stale pin, and says so in the log.
+ */
+export function initAgentAddress(): void {
+  const pinned = state.savedAgentUrl;
+  const url = getAgentUrl();
+  if (pinned && pinned !== url) {
+    log.warn(
+      `Advertised address corrected at boot: persisted pin ${pinned} → ${url} ` +
+      `(the pin was written by a past self-update and is no longer this host's address)`,
+    );
+  }
+  if (pinned !== url) {
+    state.savedAgentUrl = url;
+    try { saveConfig(); } catch (err) {
+      log.warn(`Failed to persist corrected agentUrl: ${(err as Error).message}`);
     }
   }
-  return `http://${fallback || '127.0.0.1'}:${PORT}`;
+}
+
+/**
+ * One revalidation tick: if the address we advertise is no longer one of this
+ * host's own addresses, re-detect and re-advertise. Re-registers on every live
+ * socket so the master can re-key its registry entry rather than growing a
+ * second one (src/lib/gpu/ws-relay.ts handles the same-socket move).
+ *
+ * Returns the new URL when it changed, else null. No-ops when AGENT_URL or
+ * EXTERNAL_IP is set — a NAT'd host correctly advertises a non-local address.
+ */
+export function revalidateAgentUrl(): string | null {
+  const current = getAgentUrl();
+  const decision = shouldReadvertise({
+    current,
+    env: { AGENT_URL: process.env.AGENT_URL, EXTERNAL_IP: process.env.EXTERNAL_IP },
+    interfaces: os.networkInterfaces() as InterfaceMap,
+    port: PORT,
+    masterHost: firstMasterHost(),
+    tracker: addressStability,
+  });
+
+  if (decision.reason === 'awaiting-stability') {
+    const p = addressStability.progress;
+    log.info(
+      `Advertised address ${current} is no longer local; candidate ${p.candidate} ` +
+      `seen ${p.streak}/${p.samples} times — holding until stable`,
+    );
+    return null;
+  }
+  if (!decision.act) return null;
+
+  const next = decision.next!;
+  // Loud on purpose, with both values: a silent address change is its own
+  // debugging problem, and this one moves what the master calls.
+  log.warn(`Advertised address CHANGED: ${current} → ${next} (old address is no longer local to this host)`);
+  emitBootEvent(`Advertised address changed: ${current} → ${next}`, { from: current, to: next });
+
+  currentAgentUrl = next;
+  state.savedAgentUrl = next;
+  try { saveConfig(); } catch (err) {
+    log.warn(`Failed to persist changed agentUrl: ${(err as Error).message}`);
+  }
+  reregisterOnLiveSockets(next);
+  return next;
+}
+
+/**
+ * Re-send `register` on every open socket. Deliberately reuses the existing
+ * connection instead of forcing a reconnect: on the same socket the master can
+ * prove the new address belongs to the sidecar it is already talking to, which
+ * is what lets it move the registry key instead of creating a duplicate.
+ */
+function reregisterOnLiveSockets(agentUrl: string): void {
+  for (const m of state.masters.values()) {
+    if (m.ws?.readyState !== WebSocket.OPEN) continue;
+    try {
+      m.ws.send(JSON.stringify({
+        type: 'register',
+        agentUrl,
+        hostname: getDisplayHostname(),
+        containers: getRegisteredContainers(),
+      }));
+      log.info(`[${m.serverUrl}] Re-registered with corrected agentUrl ${agentUrl}`);
+    } catch (err) {
+      log.warn(`[${m.serverUrl}] Re-register after address change failed: ${(err as Error).message}`);
+    }
+  }
 }
 
 function getDisplayHostname(): string {
@@ -1319,6 +1445,19 @@ export async function startGossipClient(): Promise<void> {
   if (state.masters.size === 0 && state.serverUrl) {
     ensureMaster(state.serverUrl);
   }
+
+  // DELIBERATELY NOT CALLED: initAgentAddress() / revalidateAgentUrl().
+  //
+  // Both replace the persisted address with a locally-detected one, which is
+  // unsafe on a fleet whose master is sometimes on a VPN: the host is reachable
+  // at a DIFFERENT address depending on the path (LAN vs Tailscale CGNAT vs VPN
+  // DNS name), and the sidecar cannot know which network the master is on right
+  // now. A wrong guess takes the host dark, and recovering it means editing
+  // config inside a container on a machine that is by then unreachable.
+  //
+  // Only the master knows which path is in use, so the callback address is
+  // OBSERVED master-side from the socket's peer address (src/lib/gpu/ws-relay.ts)
+  // rather than declared here. See docs/tasks/41-sidecar-address-drift.md.
 
   // Connect FIRST so heartbeats flow during slow provisioning
   connectAllMasters();

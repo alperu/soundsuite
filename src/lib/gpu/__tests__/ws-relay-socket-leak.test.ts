@@ -33,6 +33,18 @@ const REGISTER_TIMEOUT_MS = 300;
 process.env.GPU_WS_REGISTER_TIMEOUT_MS = String(REGISTER_TIMEOUT_MS);
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+// The relay caches its server and maps on globalThis so Next.js module
+// isolation cannot produce two of them. Jest reuses a worker process across test
+// FILES, so that cache leaks between suites: a second relay suite would call
+// startWsRelay(), find an existing __ss_wss__ from the first, and silently share
+// its server — making any assertion on a global socket count measure the other
+// suite's connections. Reset the cache so this suite gets its own relay.
+const __g = globalThis as any;
+for (const k of ['__ss_wss__', '__ss_ws_sidecars__', '__ss_ws_pending__',
+                 '__ss_ws_sweep__', '__ss_ws_blocked__', '__ss_ws_cmdCounter__']) {
+  delete __g[k];
+}
+
 const relay = require('../ws-relay');
 
 let agentSeq = 0;
@@ -66,6 +78,27 @@ function register(ws: WsClient, agentUrl: string): Promise<void> {
 const closed = (ws: WsClient) =>
   new Promise<void>((resolve) => (ws.readyState === WsClient.CLOSED ? resolve() : ws.once('close', () => resolve())));
 
+/**
+ * Poll until the relay's socket count settles on `expected`.
+ *
+ * The client's 'close' event fires when the CLIENT socket closes; the relay
+ * removes the socket from `wss.clients` on its own 'close', which lands a tick
+ * or more later. Asserting the count instantaneously therefore races, and the
+ * gap widens under a loaded suite (jest runs files across ~9 workers). Polling
+ * still proves the property — a leaked socket never settles — without encoding
+ * a scheduling assumption.
+ */
+async function expectSocketCount(expected: number, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last = relay.getRelaySocketCount();
+  while (Date.now() < deadline) {
+    last = relay.getRelaySocketCount();
+    if (last === expected) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`relay socket count settled at ${last}, expected ${expected}`);
+}
+
 beforeAll(() => { relay.startWsRelay(); });
 afterAll(() => { relay.stopWsRelay(); });
 
@@ -87,7 +120,7 @@ describe('ws-relay socket accounting', () => {
 
     // And exactly one socket should remain — this is the count that used to
     // climb by one on every reconnect until the FD table was full.
-    expect(relay.getRelaySocketCount()).toBe(1);
+    await expectSocketCount(1);
 
     second.close();
     await closed(second);
@@ -135,7 +168,7 @@ describe('ws-relay socket accounting', () => {
 
     // Only once the handshakes have drained is the relay's own count meaningful;
     // a socket mid-close is still in wss.clients and that is not a leak.
-    expect(relay.getRelaySocketCount()).toBe(1);
+    await expectSocketCount(1);
 
     live.close();
     await closed(live);
