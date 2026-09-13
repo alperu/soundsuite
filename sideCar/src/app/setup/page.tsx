@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState, useCallback } from 'react';
 
 type HostOs = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | 'unknown';
@@ -607,7 +608,7 @@ export default function SetupPage() {
             Configure the runtime backend for this sidecar. Selections persist and apply live.
           </p>
         </div>
-        <a href="/" className="text-sm text-blue-600 hover:underline">← Back to dashboard</a>
+        <Link href="/" className="text-sm text-blue-600 hover:underline">← Back to dashboard</Link>
       </div>
 
       {error && (

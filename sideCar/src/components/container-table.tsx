@@ -367,16 +367,23 @@ function LogsModal({ role, onClose }: { role: string; onClose: () => void }) {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true); setErr(null);
-    fetch(`/api/logs?role=${encodeURIComponent(role)}&tail=${tail}`)
-      .then(async r => {
-        const j = await r.json();
-        if (cancelled) return;
-        if (!r.ok) setErr(j.error || `HTTP ${r.status}`);
-        else setLogs(j.logs || '(empty)');
-      })
-      .catch(e => { if (!cancelled) setErr(String(e)); })
-      .finally(() => { if (!cancelled) setLoading(false); });
+    // The resets live inside `load` rather than the effect body: calling
+    // setState synchronously there triggers cascading renders (and Next 16's
+    // react-hooks/set-state-in-effect rejects it at build time).
+    const load = () => {
+      setLoading(true);
+      setErr(null);
+      fetch(`/api/logs?role=${encodeURIComponent(role)}&tail=${tail}`)
+        .then(async r => {
+          const j = await r.json();
+          if (cancelled) return;
+          if (!r.ok) setErr(j.error || `HTTP ${r.status}`);
+          else setLogs(j.logs || '(empty)');
+        })
+        .catch(e => { if (!cancelled) setErr(String(e)); })
+        .finally(() => { if (!cancelled) setLoading(false); });
+    };
+    load();
     return () => { cancelled = true; };
   }, [role, tail]);
 
