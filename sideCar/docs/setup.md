@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - **Docker** installed and running — this is the only hard requirement
-- Network access to the Sound Suite server (172.16.16.9)
+- Network access to the Sound Suite server (192.0.2.10)
 - Node.js 18+ is optional — if not found, the sidecar runs inside a Docker container automatically
 
 ## First: Build on the Server
@@ -11,7 +11,7 @@
 Before any sidecar can download, create a build on the server machine:
 
 ```bash
-# On the server (172.16.16.9)
+# On the server (192.0.2.10)
 cd /path/to/court-lens-mcp
 ./scripts/buildSidecar.sh
 ```
@@ -22,7 +22,7 @@ cd /path/to/court-lens-mcp
 
 ```powershell
 # Download the latest build
-Invoke-WebRequest -Uri "http://172.16.16.9:3000/api/admin/gpu/sidecars/download" -OutFile "sidecar-latest.tar.gz"
+Invoke-WebRequest -Uri "http://192.0.2.10:3000/api/admin/gpu/sidecars/download" -OutFile "sidecar-latest.tar.gz"
 
 # Extract
 tar xzf sidecar-latest.tar.gz
@@ -32,7 +32,7 @@ cd sidecar
 ### Linux / macOS
 
 ```bash
-curl -o sidecar-latest.tar.gz http://172.16.16.9:3000/api/admin/gpu/sidecars/download
+curl -o sidecar-latest.tar.gz http://192.0.2.10:3000/api/admin/gpu/sidecars/download
 tar xzf sidecar-latest.tar.gz
 cd sidecar
 ```
@@ -58,24 +58,24 @@ Starting in Docker mode on port 8098...
 
 ```powershell
 # Pass server IP as argument
-.\start.bat http://172.16.16.9:3000
+.\start.bat http://192.0.2.10:3000
 
 # Or set as environment variable
-$env:SERVER_URL = "http://172.16.16.9:3000"
+$env:SERVER_URL = "http://192.0.2.10:3000"
 .\start.bat
 
 # Custom port
 $env:PORT = "9000"
-.\start.bat http://172.16.16.9:3000
+.\start.bat http://192.0.2.10:3000
 ```
 
 ### Linux / macOS
 
 ```bash
-./start.sh http://172.16.16.9:3000
+./start.sh http://192.0.2.10:3000
 
 # Or with env vars
-SERVER_URL=http://172.16.16.9:3000 PORT=9000 ./start.sh
+SERVER_URL=http://192.0.2.10:3000 PORT=9000 ./start.sh
 ```
 
 ### Subsequent launches
@@ -114,20 +114,20 @@ docker rm -f ss-sidecar       # Remove (start.bat will recreate)
 **Dashboard UI:**
 1. Start the sidecar: `.\start.bat`
 2. Open `http://localhost:8098` in a browser
-3. Enter `http://172.16.16.9:3000` in the connection form
+3. Enter `http://192.0.2.10:3000` in the connection form
 
 **API call (PowerShell):**
 ```powershell
 Invoke-RestMethod -Uri "http://localhost:8098/api/ws-connect" `
   -Method POST -ContentType "application/json" `
-  -Body '{"serverUrl": "http://172.16.16.9:3000"}'
+  -Body '{"serverUrl": "http://192.0.2.10:3000"}'
 ```
 
 **API call (Linux/macOS):**
 ```bash
 curl -X POST http://localhost:8098/api/ws-connect \
   -H "Content-Type: application/json" \
-  -d '{"serverUrl": "http://172.16.16.9:3000"}'
+  -d '{"serverUrl": "http://192.0.2.10:3000"}'
 ```
 
 **Config file:**
@@ -136,7 +136,7 @@ Create `config.json` (set `CONFIG_PATH` to its location):
 
 ```json
 {
-  "serverUrl": "http://172.16.16.9:3000",
+  "serverUrl": "http://192.0.2.10:3000",
   "mode": "searching"
 }
 ```
@@ -208,11 +208,11 @@ Run `./scripts/buildSidecar.sh` on the server first to create a build.
 ### PowerShell `curl` doesn't work
 PowerShell aliases `curl` to `Invoke-WebRequest`. Use the proper syntax:
 ```powershell
-Invoke-WebRequest -Uri "http://172.16.16.9:3000/api/admin/gpu/sidecars/download" -OutFile "sidecar-latest.tar.gz"
+Invoke-WebRequest -Uri "http://192.0.2.10:3000/api/admin/gpu/sidecars/download" -OutFile "sidecar-latest.tar.gz"
 ```
 Or use `curl.exe` (the real curl bundled with Windows 10+):
 ```powershell
-curl.exe -o sidecar-latest.tar.gz http://172.16.16.9:3000/api/admin/gpu/sidecars/download
+curl.exe -o sidecar-latest.tar.gz http://192.0.2.10:3000/api/admin/gpu/sidecars/download
 ```
 
 ### 'node' is not recognized (Windows)
@@ -221,8 +221,8 @@ This is expected if Node.js isn't installed. The launcher detects this and runs 
 ### Sidecar can't reach the server
 ```powershell
 # Windows — test connectivity
-Test-NetConnection -ComputerName 172.16.16.9 -Port 3000
-Test-NetConnection -ComputerName 172.16.16.9 -Port 3002
+Test-NetConnection -ComputerName 192.0.2.10 -Port 3000
+Test-NetConnection -ComputerName 192.0.2.10 -Port 3002
 ```
 Both port 3000 (HTTP) and 3002 (WebSocket) must be accessible.
 

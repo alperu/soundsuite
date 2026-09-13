@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Sound Suite Sidecar — Download & Install (Linux/macOS)
 # Usage:
-#   ./install.sh                          # defaults to http://172.16.16.9:3000
+#   ./install.sh                          # defaults to http://192.0.2.10:3000
 #   ./install.sh http://192.168.1.50:3000 # custom server
 #   INSTALL_DIR=/opt/sidecar ./install.sh # custom install path
 set -euo pipefail
 
-SERVER="${1:-http://172.16.16.9:3000}"
+SERVER="${1:-http://192.0.2.10:3000}"
 # Default install dir: <cwd>/sidecar — keeps the user on the drive/folder they
 # invoked the installer from. Override with: INSTALL_DIR=/opt/sidecar ./install.sh
 INSTALL_DIR="${INSTALL_DIR:-$PWD/sidecar}"
