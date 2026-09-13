@@ -184,8 +184,15 @@ export default function AdminHostProvisioning() {
       await Promise.all([loadFleet(), loadProvisioning()]);
       if (!cancelled) setLoading(false);
     })();
+    // Both halves must re-poll. The rows themselves come from the fleet, but the
+    // override fields are looked up as `recordsByUrl[s.url]` — so when a host
+    // changes address, a provisioning map fetched once at mount has no entry
+    // under the new key and the operator sees blank OS / master-URL inputs for a
+    // host that does have overrides. Polling only the fleet made the row follow
+    // the address while its settings appeared to vanish.
     reloadTimer.current = setInterval(() => {
       loadFleet();
+      loadProvisioning();
     }, 5000);
     const tickTimer = setInterval(() => setNow(Date.now()), 1000);
     return () => {

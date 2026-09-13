@@ -27,7 +27,6 @@ import { requireAdminApiAccess } from '@/lib/api/route-guard';
 import {
   HostProvisioningRecord,
   deleteProvisioning,
-  getProvisioning,
   isValidHostOs,
   isValidWsPort,
   listProvisioning,
@@ -35,6 +34,7 @@ import {
   normalizeSidecarUrl,
   upsertProvisioning,
 } from '@/lib/db/host-provisioning';
+import { moveProvisioningAddress } from '@/lib/gpu/provisioning-address-move';
 
 export async function GET(request: NextRequest) {
   const denied = await requireAdminApiAccess(request, 'host-provisioning');
@@ -152,28 +152,25 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: 'fromSidecarUrl and toSidecarUrl are identical' }, { status: 400 });
     }
 
-    // A row already at the destination is a conflict, not something to overwrite:
-    // the operator would silently lose that host's OS pin and master URL.
-    const existingAtTarget = await getProvisioning(to);
-    if (existingAtTarget) {
+    // Shared with the automatic path in ws-relay's register handler so the two
+    // cannot drift. A row already at the destination is a conflict, not
+    // something to overwrite: the operator would silently lose that host's OS
+    // pin and master URL.
+    const move = await moveProvisioningAddress(from, to);
+    if (move.status === 'conflict') {
       return NextResponse.json(
-        { error: `a provisioning row already exists for ${to} — delete it first`, conflict: to },
+        {
+          error: `a provisioning row already exists for ${move.conflictWith} — delete it first`,
+          conflict: move.conflictWith,
+        },
         { status: 409 },
       );
     }
-
-    const row = await getProvisioning(from);
-    let provisioning: HostProvisioningRecord | null = null;
-    if (row) {
-      provisioning = await upsertProvisioning({
-        sidecarUrl: to,
-        hostOsOverride: row.hostOsOverride,
-        masterUrlForHost: row.masterUrlForHost,
-        masterWsPortForHost: row.masterWsPortForHost,
-        notes: row.notes,
-      });
-      await deleteProvisioning(from);
+    if (move.status === 'error') {
+      return NextResponse.json({ error: move.error }, { status: 500 });
     }
+    const provisioning: HostProvisioningRecord | null =
+      move.status === 'moved' ? move.provisioning : null;
 
     // Forget the old address rather than re-keying its live socket here. The
     // registry key is re-keyed ONLY on the sidecar-initiated path in ws-relay,
