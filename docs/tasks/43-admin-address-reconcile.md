@@ -1,8 +1,15 @@
-# An automatic address change never reaches the admin pages
+# An address change strands the host's provisioning row
 
-**Status:** Proposed · **Effort:** S–M · **Priority:** P1 · **Created:** 2026-09-13
+*(Renamed 2026-09-13. Was "An automatic address change never reaches the admin
+pages" — see R0: there is no automatic address change, and the address the pages
+show is correct. The real defect is the provisioning row, not the display.)*
+
+**Status:** Investigated — premise refuted, narrower bug found and partly fixed ·
+**Effort:** S–M · **Priority:** P1 · **Created:** 2026-09-13
 **Reported:** sidecars updated to the build carrying [task 41](./41-sidecar-address-drift.md),
 but `/admin/hostprov` and `/admin/gpu` still show the previous address.
+**~~Premise~~ REFUTED (R0):** task 41 shipped no automatic re-detection, and the
+displayed address is the one the sidecar really advertises.
 **Interacts with:** [task 41](./41-sidecar-address-drift.md) (address resolution) ·
 [task 42](./42-sidecar-master-slot-churn.md) (the sidecar is reconnecting in a loop
 on at least one host, which may mask or amplify this)
@@ -10,7 +17,78 @@ on at least one host, which may mask or amplify this)
 Field names and code citations only. No case data. `sideCar/` is published
 publicly — do not put real addresses in anything under it.
 
-## Item 1 findings (2026-09-13) — three premises REFUTED
+## R0 — the task's own premise is REFUTED: nothing re-advertises (2026-09-13)
+
+The header claims the task-41 build made addresses re-detect automatically. **It
+did not.** Verified in the committed sidecar source:
+
+- `initAgentAddress()` (`sideCar/src/lib/ws-client.ts:122`) and
+  `revalidateAgentUrl()` (`:148`) are **defined and never called**. The only other
+  reference is the rationale at `:1616` — *"DELIBERATELY NOT CALLED"* — because a
+  locally-detected address is unsafe on a fleet whose master is sometimes on a
+  VPN; a wrong guess takes the host dark.
+- `reregisterOnLiveSockets()` (`:190`) is called **only** from
+  `revalidateAgentUrl()` at `:180`, so the whole chain is unreachable.
+- `resolveAgentUrl` precedence (`agent-address.ts:169-178`) is
+  `AGENT_URL → EXTERNAL_IP → savedAgentUrl → detected → loopback`:
+  **`savedAgentUrl` still outranks detection.**
+
+So in 2.3.77 **no sidecar changes its advertised address by itself**, and the
+master's `rekeySidecarAddress()` path — which fires only on a register frame
+carrying a new address over an already-registered socket — **cannot be reached
+from the sidecar at all.**
+
+### BUT addresses still change — and a live stranded row is observable right now
+
+R0 means no sidecar re-advertises *autonomously*. It does **not** mean addresses
+never change. Observed live during this task, from two reads minutes apart:
+
+| Store | Before | After |
+|---|---|---|
+| live `/api/admin/gpu-fleet` | host `X` | host `Y` |
+| `gpu.sidecars` | `X` | `Y` (followed) |
+| `HostProvisioning` | `X` | **still `X`** (stranded) |
+
+Same port, same address shape — one host moved IP. Because it came back on a
+**fresh socket** (a restart, not a live re-register), `rekeySidecarAddress()` did
+not fire, so the provisioning carry at `ws-relay.ts:446-479` did not fire either.
+Result, true of the live fleet as of 2026-09-13:
+
+- one `HostProvisioning` row stranded at an address no host holds, and
+- one live, connected host with **no provisioning row at all**.
+
+The consequence is not a stale address on screen — it is that
+`resolveMasterEndpointForHost(Y)` returns `null` (`resolve-master-url-for-host.ts:30-31`),
+so `buildMasterIdentityFrame` returns `null` and **the master pushes no identity
+to that host**, and `/admin/hostprov` renders its OS / master-URL overrides blank
+(`recordsByUrl[s.url]` undefined → `emptyRecord`, `admin-host-provisioning.tsx:204`).
+
+The likely trigger is the 2.3.77 upgrade itself: that release moved `EXTERNAL_IP`
+**above** `savedAgentUrl` (`agent-address.ts:169-178`), so any host with
+`EXTERNAL_IP` set to something other than its pin changes its advertised address
+on the next restart — which is exactly "the sidecars were updated".
+
+### The reported symptom, specifically
+
+**The address on screen is correct, and there is no ghost.** A live read of
+`/api/admin/gpu-fleet` (the same ungated call the pages poll every 5 s) returns
+**5 rows, all `connected`, all `websocket`** — no extra disconnected entry, so the
+status-cache ghost described further down is **not** occurring right now.
+
+So for the address itself the pages are **displaying the truth**: a host that has
+not moved is still advertising its `savedAgentUrl`, and 2.3.77 deliberately does
+not re-detect it. It reads as "stale" only because the operator expected the
+update to re-detect. The recovery path is `EXTERNAL_IP` / `AGENT_URL` on the host,
+or the `PATCH` endpoint — not a master-side sync.
+
+**Everything below about the `PATCH`-vs-automatic asymmetry is a LATENT bug, not
+the cause of the live symptom.** It becomes reachable the moment
+`revalidateAgentUrl()` is wired up, and must not be reported as today's cause.
+The status-cache ghost described further down is likewise reachable only when an
+address actually changes — i.e. via operator action (`EXTERNAL_IP`/`AGENT_URL`,
+or a first boot with no saved address), never autonomously.
+
+## Item 1 findings (2026-09-13) — three further premises REFUTED
 
 **R1. Neither page renders a `HostProvisioning` row's address.** Both render the
 address from `/api/admin/gpu-fleet`. `admin-host-provisioning.tsx:299-301`
@@ -138,9 +216,10 @@ list, its contents are already being rewritten frequently.
 | # | Item | Status |
 |---|---|---|
 | 1 | **Confirm before building.** For each of the two pages, trace the exact data source end to end and record it. | ☑ Done — R1/R2/R3 refuted; both pages read `getFleetStatus()`. Real cause is a status-cache ghost. |
-| 2 | **Make the automatic path complete.** | ☑ Already existed in `HEAD` (`ws-relay.ts:446-479`) — premise refuted. Extracted to one shared function anyway, for item 4. |
-| 3 | **Do not edit `ws-relay.ts`** — specify the hook instead. | ☑ Spec above, not applied. |
-| 4 | **Decide what happens when the destination row already exists.** A named conflict, not a silent overwrite. | ☑ **This was the real unbuilt gap** — the committed carry upserted blind. Now guarded. |
+| 2 | **Make the automatic path complete.** | ☑ Already existed in `HEAD` (`ws-relay.ts:446-479`) — premise refuted. Extracted to one shared function anyway, for item 4. **Latent: unreachable until `revalidateAgentUrl()` is wired (R0).** |
+| 3 | **Do not edit `ws-relay.ts`** — specify the hook instead. | ☑ Spec above, not applied. **Latent, same reason.** |
+| 4 | **Decide what happens when the destination row already exists.** A named conflict, not a silent overwrite. | ☑ Guarded — the committed carry upserted blind. **Live via `PATCH` (the only reachable caller); latent on the ws-relay path.** |
+| 4b | **NEW — the live bug R0 exposed:** a fresh-socket address change strands the row and leaves the live host with none, so the master pushes it no identity. | ☐ **Not fixed.** Needs durable sidecar identity to move automatically; today the operator must re-enter overrides or `PATCH`. See R0. |
 | 5 | **Make the pages reflect reality without a manual reload.** | ☑ Both already polled every 5 s (R3). Fixed the separate once-at-mount `loadProvisioning()` bug. |
 | 6 | **Show the address's provenance on the page.** | ☐ **BLOCKED** — the sidecar computes it but never sends it; needs a `sideCar/**` frame change. |
 | 7 | Tests. | ☑ 11 cases on the guarded move. A "page fetch after a move" test is not meaningful given R1 — the page never read the row's address. |
@@ -234,7 +313,14 @@ hosts report the same hostname. **This is a named open choice, not an oversight*
 — it wants the durable-identity decision (task 41 item 6), and the eviction
 itself would land in `ws-relay.ts`, which this task may not edit.
 
-**There is a working operator workaround today.** `removeSidecar()`
+**Not observed live.** A read of `/api/admin/gpu-fleet` during this task returned 5
+rows, all `connected` — no ghost. The mechanism below is real but is a documented
+hypothetical, reachable only when an address actually changes; it is **not** the
+cause of the reported symptom (R0 is). The `/admin/gpu` remove path below is
+therefore *how to clear a ghost should one appear*, not the operator's answer
+today — that is `EXTERNAL_IP` / `AGENT_URL` or `PATCH`.
+
+**How to clear a ghost, if one appears.** `removeSidecar()`
 (`fleet-router.ts:492-521`) is the one reachable path that calls
 `removeSidecarFromCache()`, and `/admin/gpu`'s remove action reaches it
 (`gpu-fleet/route.ts` POST `action: 'remove'`). Removing the stale row from
@@ -252,6 +338,24 @@ occupied destination refused with nothing merged; two hosts swapping addresses
 both refused; no write when there is no row; idempotent on a repeated completed
 move; no-op on an unchanged or empty address; a database failure reported rather
 than thrown, with the old row intact.
+
+**Honest coverage gap:** the source-first reorder is a behaviour change on `PATCH`
+— the *only currently-reachable* caller (R0) — and it is covered at module level
+only. There is no route-level test for `PATCH` (there were none before either), so
+"11 tests pass" does not mean the reachable surface is tested.
+
+**Item 6 is blocked on both frames, confirmed.** The register frame carries
+`agentUrl`/`hostname`/`containers` (`ws-client.ts:185-189,1178-1183`) and
+`buildFullStatus()` (`:284-300`) adds `agentUrl` + `hostname` but **no source**;
+`state.ts:449` holds only `savedAgentUrl`, with no source field. `resolved.source`
+exists solely in a log line (`ws-client.ts:108`). The one-line `sideCar` change
+needed: persist `resolved.source` into `state` at resolve time and include it in
+`buildFullStatus()`; the master then has it in `sidecarStatus` and the components
+can render it beside the address exactly as they already render
+`s.sidecarStatus?.host?.os`. **Not built here — `sideCar/**` is out of territory.**
+I did not build an observed-vs-declared badge as a substitute: it answers "which
+network path" rather than "pinned or detected", so it would not have made this
+confusion self-diagnosing.
 
 `npx tsc --noEmit` clean for all three touched files. `npx jest src/lib/gpu/` — 86
 pass; the only failing suite is `sidecar-master-rekey.test.ts`, which imports
