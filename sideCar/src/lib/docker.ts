@@ -483,6 +483,262 @@ export async function removeContainer(containerName: string): Promise<string> {
   throw new Error(`remove ${containerName} failed (${status}): ${body.slice(0, 200)}`);
 }
 
+/**
+ * Restart a container via the Docker API's restart endpoint.
+ *
+ * Deliberately NOT stop-then-start: that is two round trips with a window in
+ * which a crash leaves the container down, and a container cannot reliably
+ * issue the second call after stopping itself. `POST /containers/{id}/restart`
+ * makes the daemon perform the kill and the start, so it works even when the
+ * caller is the container being restarted.
+ *
+ * `t` is the seconds Docker waits after SIGTERM before SIGKILL.
+ *
+ * When the target is the caller's own container the HTTP response will never
+ * arrive — the socket dies with the process. That transport error is
+ * indistinguishable from a request that never reached the daemon, so callers
+ * restarting themselves must treat a rejection as "unknown, not failed" and
+ * get the real outcome from whether the container comes back. See
+ * `src/app/api/restart/route.ts`.
+ */
+export async function restartContainer(idOrName: string, t = 10): Promise<string> {
+  assertDockerAvailable();
+  log.info(`Restarting container ${idOrName} (t=${t}s)`);
+  const { status, body } = await dockerRequest('POST', `/containers/${idOrName}/restart?t=${t}`);
+  if (status === 204) {
+    log.info(`Container ${idOrName}: restarted`);
+    return 'restarted';
+  }
+  if (status === 404) throw new Error(`restart ${idOrName} failed: no such container`);
+  throw new Error(`restart ${idOrName} failed (${status}): ${body.slice(0, 200)}`);
+}
+
+/** Why a self-restart cannot be performed. Each code is separately actionable. */
+export type SelfRefusalCode =
+  | 'docker-unreachable'
+  | 'not-in-container'
+  | 'self-unresolvable'
+  | 'sources-disagree'
+  | 'resolved-is-managed';
+
+export interface SelfResolved {
+  ok: true;
+  /** Full 64-hex container ID when known, else the 12-hex short ID. */
+  id: string;
+  shortId: string;
+  /** Container name from Docker inspect, without the leading slash. */
+  name: string;
+  source: 'mountinfo' | 'hostname';
+  /** True when mountinfo and the in-container hostname independently agree. */
+  corroborated: boolean;
+}
+
+export interface SelfRefused {
+  ok: false;
+  reason: SelfRefusalCode;
+  /** Operator-facing sentence naming exactly what disagreed or was missing. */
+  detail: string;
+}
+
+export type SelfResolution = SelfResolved | SelfRefused;
+
+/**
+ * Injectable readers so every branch of resolveSelfContainer() is testable
+ * without Docker and without being inside a container. Production defaults
+ * read the real runtime.
+ */
+export interface SelfProbes {
+  readMountinfo(): string | null;
+  readHostname(): string;
+  dockerEnvFileExists(): boolean;
+  dockerAvailable(): boolean;
+  /** Resolve a container ID to its name. null when Docker says no such container. */
+  inspectName(idOrName: string): Promise<string | null>;
+}
+
+export const defaultSelfProbes: SelfProbes = {
+  readMountinfo() {
+    try { return fs.readFileSync('/proc/self/mountinfo', 'utf8'); } catch { return null; }
+  },
+  readHostname() {
+    // Read from /etc/hostname rather than os.hostname() so the value is the
+    // container's own, not a resolver-massaged one.
+    try { return fs.readFileSync('/etc/hostname', 'utf8').trim(); } catch { return ''; }
+  },
+  dockerEnvFileExists() {
+    try { return fs.existsSync('/.dockerenv'); } catch { return false; }
+  },
+  dockerAvailable: isDockerAvailable,
+  async inspectName(idOrName: string) {
+    const { status, body } = await dockerRequest('GET', `/containers/${idOrName}/json`);
+    if (status === 404) return null;
+    if (status !== 200) throw new Error(`inspect ${idOrName} failed (${status})`);
+    const name: string | undefined = JSON.parse(body).Name;
+    return name ? name.replace(/^\//, '') : null;
+  },
+};
+
+/**
+ * The set of container names this sidecar MANAGES. Restarting one of these
+ * would be "stop a model container" wearing a self-restart button's label, so
+ * a resolved self-identity landing in this set is a hard refusal.
+ *
+ * Note what is NOT here: the `ss-` prefix. The sidecar's own container is
+ * conventionally `ss-sidecar`, so a prefix rule would refuse every legitimate
+ * restart. The discriminator has to be the explicit managed set — the registry
+ * container names plus `state.CONTAINER_NAME`, which despite its name is the
+ * legacy handle for a managed model container (it defaults to
+ * `vllm-reranker`, and handlers.ts reads it as the reranker).
+ */
+export function managedContainerNames(): string[] {
+  const names = new Set<string>();
+  for (const def of Object.values(state.registry)) {
+    if (def?.containerName) names.add(def.containerName);
+  }
+  if (state.CONTAINER_NAME) names.add(state.CONTAINER_NAME);
+  return Array.from(names);
+}
+
+/** Pull every distinct 64-hex container ID that appears in mountinfo. */
+function containerIdsFromMountinfo(raw: string): string[] {
+  const ids = new Set<string>();
+  const re = /\/containers\/([0-9a-f]{64})\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) ids.add(m[1]);
+  return Array.from(ids);
+}
+
+/**
+ * Resolve which container the sidecar is itself running in, from the runtime.
+ *
+ * Why not `state.CONTAINER_NAME`: it is an operator-set env var that means the
+ * managed reranker container, not self (default `vllm-reranker`). Trusting it
+ * would aim a restart at a sibling model container.
+ *
+ * Two independent sources:
+ *  1. `/proc/self/mountinfo` — Docker bind-mounts /etc/hostname, /etc/hosts and
+ *     /etc/resolv.conf from `/var/lib/docker/containers/<64-hex>/`, so the ID
+ *     appears there. Nothing inside the container can forge it; not `--hostname`,
+ *     not an env var. This is the primary source.
+ *  2. The in-container hostname — Docker defaults it to the 12-hex short ID.
+ *     Used to corroborate, and as a fallback when mountinfo carries no ID.
+ *
+ * `/proc/self/cgroup` is deliberately unused: under cgroup v2 it commonly reads
+ * `0::/` with no container ID in it.
+ *
+ * Every failure returns a distinct named reason. A generic failure here would
+ * be the `notReady` defect — a signal that says nothing actionable.
+ */
+export async function resolveSelfContainer(probes: SelfProbes = defaultSelfProbes): Promise<SelfResolution> {
+  if (!probes.dockerAvailable()) {
+    return {
+      ok: false,
+      reason: 'docker-unreachable',
+      detail:
+        'The Docker API is not reachable from the sidecar. Run the container with ' +
+        '-v /var/run/docker.sock:/var/run/docker.sock, or set DOCKER_HOST.',
+    };
+  }
+
+  const raw = probes.readMountinfo();
+  const hostname = probes.readHostname();
+  const hostnameIsShortId = /^[0-9a-f]{12}$/.test(hostname);
+  const mountIds = raw ? containerIdsFromMountinfo(raw) : [];
+
+  if (mountIds.length > 1) {
+    return {
+      ok: false,
+      reason: 'sources-disagree',
+      detail:
+        `/proc/self/mountinfo names ${mountIds.length} different container IDs ` +
+        `(${mountIds.map((i) => i.slice(0, 12)).join(', ')}). Cannot tell which one is this ` +
+        'sidecar, so nothing will be restarted.',
+    };
+  }
+
+  let id: string | null = null;
+  let source: 'mountinfo' | 'hostname' = 'mountinfo';
+  let corroborated = false;
+
+  if (mountIds.length === 1) {
+    id = mountIds[0];
+    if (hostnameIsShortId) {
+      if (id.startsWith(hostname)) {
+        corroborated = true;
+      } else {
+        return {
+          ok: false,
+          reason: 'sources-disagree',
+          detail:
+            `/proc/self/mountinfo says this container is ${id.slice(0, 12)} but the ` +
+            `in-container hostname says ${hostname}. Refusing to guess which is this sidecar.`,
+        };
+      }
+    }
+  } else if (hostnameIsShortId) {
+    id = hostname;
+    source = 'hostname';
+  }
+
+  if (!id) {
+    // No container ID from either source. Distinguish "running bare-metal"
+    // (npm run dev / npm start on the host — there is no container to restart)
+    // from "in a container but unidentifiable".
+    if (!probes.dockerEnvFileExists() && raw === null) {
+      return {
+        ok: false,
+        reason: 'not-in-container',
+        detail:
+          'The sidecar is not running inside a Docker container (no /.dockerenv and no ' +
+          '/proc/self/mountinfo), so there is no container to restart. Restart the process ' +
+          'the way it was started.',
+      };
+    }
+    return {
+      ok: false,
+      reason: 'self-unresolvable',
+      detail:
+        'Could not determine this sidecar\'s own container ID: /proc/self/mountinfo carries no ' +
+        `/containers/<id> path and the hostname (${hostname || 'empty'}) is not a 12-hex ` +
+        'short container ID. Refusing rather than guessing a target.',
+    };
+  }
+
+  let name: string | null;
+  try {
+    name = await probes.inspectName(id);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'self-unresolvable',
+      detail: `Docker inspect of ${id.slice(0, 12)} failed: ${(err as Error).message}`,
+    };
+  }
+  if (!name) {
+    return {
+      ok: false,
+      reason: 'self-unresolvable',
+      detail:
+        `Resolved own container ID as ${id.slice(0, 12)} but Docker reports no such container. ` +
+        'The Docker socket may belong to a different daemon than the one running this sidecar.',
+    };
+  }
+
+  const managed = managedContainerNames();
+  if (managed.includes(name)) {
+    return {
+      ok: false,
+      reason: 'resolved-is-managed',
+      detail:
+        `Resolved own container as "${name}" (${id.slice(0, 12)}), but that is a container this ` +
+        `sidecar manages (managed set: ${managed.join(', ')}). Restarting it would stop a model ` +
+        'container, not the sidecar. Refusing.',
+    };
+  }
+
+  return { ok: true, id, shortId: id.slice(0, 12), name, source, corroborated };
+}
+
 export interface ExpectedConfig {
   Image: string;
   Cmd?: string[];

@@ -85,6 +85,27 @@ interface LogEntry {
   message: string;
 }
 
+/**
+ * GET /api/restart — whether the sidecar can restart its own container, and if
+ * not, exactly why. `reason` is one of the named refusal codes from
+ * `lib/docker.ts` (docker-unreachable, not-in-container, self-unresolvable,
+ * sources-disagree, resolved-is-managed), never a generic failure.
+ */
+interface RestartFeasibility {
+  canRestart: boolean;
+  reason?: string;
+  detail?: string;
+  note?: string;
+  counters?: string;
+  target?: {
+    id: string;
+    shortId: string;
+    name: string;
+    identifiedBy: 'mountinfo' | 'hostname';
+    corroborated: boolean;
+  };
+}
+
 function formatAge(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   const s = Math.floor(ms / 1000);
@@ -117,11 +138,41 @@ export default function Home() {
   const updateStateRef = useRef(updateState);
   useEffect(() => { updateStateRef.current = updateState; }, [updateState]);
 
+  // --- Self-restart of the sidecar's own container (task #45) ---------------
+  // Feasibility comes from GET /api/restart so the control can be disabled with
+  // a reason, rather than offering an action that is going to fail.
+  const [restartInfo, setRestartInfo] = useState<RestartFeasibility | null>(null);
+  const [restartState, setRestartState] = useState<'idle' | 'confirming' | 'requesting' | 'restarting'>('idle');
+  const restartStateRef = useRef(restartState);
+  useEffect(() => { restartStateRef.current = restartState; }, [restartState]);
+  // The sidecar's bootEpoch as observed just before we asked it to restart. A
+  // restart is only confirmed once /api/status reports a DIFFERENT epoch: the
+  // 202 reports the request, not the outcome, and the first poll afterwards can
+  // still reach the old process during the ~250ms response-flush delay.
+  const preRestartEpochRef = useRef<number | null>(null);
+
   const addLog = useCallback((message: string, atMs?: number) => {
     const now = atMs !== undefined ? new Date(atMs) : new Date();
     const time = now.toLocaleTimeString('en-US', { hour12: false });
     setLogs((prev) => [...prev.slice(-200), { time, message }]);
   }, []);
+
+  // Restart feasibility probe. Called explicitly rather than keyed off a
+  // `restartState` dependency: every path back to 'idle' must refetch, and a
+  // transition React batches away would otherwise leave a stale
+  // `canRestart: true` — an enabled button after a refusal, or a target with a
+  // container ID that no longer exists after a recreate. Declared here, above
+  // the status poll that calls it, so it is initialized before that effect's
+  // dependency array is evaluated. Deliberately not on a fast interval: it does
+  // a Docker inspect, and nothing about it changes minute to minute.
+  const refreshRestartInfo = useCallback(() => {
+    fetch('/api/restart')
+      .then((r) => r.json())
+      .then((d: RestartFeasibility) => setRestartInfo(d))
+      .catch(() => setRestartInfo(null));
+  }, []);
+
+  useEffect(() => { refreshRestartInfo(); }, [refreshRestartInfo]);
 
   useEffect(() => {
     let active = true;
@@ -199,6 +250,20 @@ export default function Home() {
           setUpdateAvailable(null);
           addLog('Sidecar restarted successfully after update');
         }
+
+        // After an operator-requested self-restart, the only honest proof the
+        // restart happened is a new boot epoch — a reachable /api/status alone
+        // could still be the pre-restart process answering.
+        if (restartStateRef.current === 'restarting') {
+          const epoch = typeof data.bootEpoch === 'number' ? data.bootEpoch : null;
+          if (epoch !== null && preRestartEpochRef.current !== null && epoch !== preRestartEpochRef.current) {
+            preRestartEpochRef.current = null;
+            setRestartState('idle');
+            addLog('Sidecar container restarted — back online');
+            // The container may have a new ID; re-resolve the target.
+            refreshRestartInfo();
+          }
+        }
       } catch (err) {
         if (!active) return;
         setError((err as Error).message);
@@ -211,7 +276,26 @@ export default function Home() {
       active = false;
       clearInterval(id);
     };
-  }, [addLog]);
+  }, [addLog, refreshRestartInfo]);
+
+  // Bound the 'restarting' state. If the sidecar never comes back — or comes
+  // back without a bootEpoch to compare — the UI would otherwise pulse
+  // "Restarting..." forever with the button gone and feasibility never
+  // refetched, recoverable only by a manual reload. Time out and say plainly
+  // that the outcome is unconfirmed rather than implying either result.
+  useEffect(() => {
+    if (restartState !== 'restarting') return;
+    const id = setTimeout(() => {
+      preRestartEpochRef.current = null;
+      setRestartState('idle');
+      addLog(
+        'Restart not confirmed within 3 minutes — the sidecar has not reported a new boot epoch. ' +
+        'It may still be starting, or it may have failed to come back; check the container on the host.',
+      );
+      refreshRestartInfo();
+    }, 180_000);
+    return () => clearTimeout(id);
+  }, [restartState, addLog, refreshRestartInfo]);
 
   // Sync editing timeouts from server when not dirty
   useEffect(() => {
@@ -378,6 +462,44 @@ export default function Home() {
     return () => { clearTimeout(initial); clearInterval(interval); };
   }, []);
 
+  const handleRestart = async () => {
+    setRestartState('requesting');
+    // Capture the pre-restart boot epoch BEFORE the request, so the recovery
+    // check has something to compare against.
+    preRestartEpochRef.current = typeof status?.bootEpoch === 'number' ? status.bootEpoch : null;
+    addLog('Requesting sidecar container restart...');
+    try {
+      const res = await fetch('/api/restart', { method: 'POST' });
+      const data = await res.json();
+      if (res.status === 202 && data.restarting) {
+        addLog(
+          `Restart accepted for ${data.target.name} (${data.target.shortId}). ` +
+          'Waiting for the sidecar to come back — this is not a success signal yet.',
+        );
+        setRestartState('restarting');
+        if (preRestartEpochRef.current === null) {
+          // Without a pre-restart epoch there is nothing to compare, so the
+          // recovery check can never fire. Say so instead of spinning forever.
+          addLog('No bootEpoch was known before the restart — reload the page manually to confirm.');
+        }
+      } else {
+        // Named refusal — surface the reason, not a generic failure. Refetch:
+        // feasibility can have changed since the GET that enabled the button.
+        addLog(`Restart refused (${data.reason || 'unknown'}): ${data.detail || 'no detail given'}`);
+        setRestartState('idle');
+        refreshRestartInfo();
+      }
+    } catch (err) {
+      // A transport error here is ambiguous: the request may have landed and
+      // killed the container before the response could return.
+      addLog(
+        `Restart request did not return cleanly (${(err as Error).message}). ` +
+        'If the container was already killed this is expected — waiting to see if it comes back.',
+      );
+      setRestartState('restarting');
+    }
+  };
+
   const handleUpdate = async () => {
     setUpdateState('updating');
     addLog('Starting self-update...');
@@ -435,6 +557,55 @@ export default function Home() {
             })()}
           </div>
           <div className="flex items-center gap-2">
+            {/* Restart the sidecar's OWN container. Operator-initiated only —
+                nothing in the app may trigger this on a condition. */}
+            {restartState === 'idle' && (
+              restartInfo?.canRestart ? (
+                <button
+                  onClick={() => setRestartState('confirming')}
+                  className="rounded-md px-3 py-1.5 text-sm bg-amber-100 text-amber-900 hover:bg-amber-200"
+                  title={
+                    `Restarts this sidecar's own container: ${restartInfo.target?.name} ` +
+                    `(${restartInfo.target?.shortId}). ${restartInfo.note ?? ''}`
+                  }
+                >
+                  Restart Sidecar
+                </button>
+              ) : (
+                <button
+                  disabled
+                  className="rounded-md px-3 py-1.5 text-sm bg-slate-100 text-slate-400 cursor-not-allowed"
+                  title={
+                    restartInfo
+                      ? `Cannot restart (${restartInfo.reason}): ${restartInfo.detail}`
+                      : 'Cannot restart: the sidecar did not answer the restart feasibility check.'
+                  }
+                >
+                  Restart Sidecar
+                </button>
+              )
+            )}
+            {restartState === 'confirming' && (
+              <>
+                <button
+                  onClick={handleRestart}
+                  className="rounded-md px-3 py-1.5 text-sm bg-amber-600 text-white hover:bg-amber-700"
+                >
+                  Restart {restartInfo?.target?.name} ({restartInfo?.target?.shortId})?
+                </button>
+                <button
+                  onClick={() => setRestartState('idle')}
+                  className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+              </>
+            )}
+            {(restartState === 'requesting' || restartState === 'restarting') && (
+              <span className="px-3 py-1.5 rounded-md text-sm bg-amber-100 text-amber-900 animate-pulse">
+                Restarting sidecar...
+              </span>
+            )}
             <a
               href="/setup"
               className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100"
@@ -463,6 +634,40 @@ export default function Home() {
             )}
           </div>
         </div>
+        {restartState === 'confirming' && (
+          <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+            <p className="font-medium">
+              Restart container <code>{restartInfo?.target?.name}</code>{' '}
+              (<code>{restartInfo?.target?.shortId}</code>)
+            </p>
+            <ul className="mt-1 list-disc pl-5 space-y-0.5 text-xs">
+              <li>
+                Identified from the container runtime via{' '}
+                {restartInfo?.target?.identifiedBy === 'mountinfo'
+                  ? '/proc/self/mountinfo'
+                  : 'the in-container hostname'}
+                {restartInfo?.target?.corroborated
+                  ? ', corroborated by the in-container hostname.'
+                  : ' (single source — not corroborated).'}
+              </li>
+              <li>
+                Every master connection drops for a few seconds. This page will reconnect on its own.
+              </li>
+              <li>{restartInfo?.note}</li>
+              <li>{restartInfo?.counters}</li>
+              <li>
+                To restart the Docker <em>engine</em> itself, use the operator SSH action
+                (OliveTin <code>docker-ctl.sh</code>) — a container cannot restart the engine it runs on.
+              </li>
+            </ul>
+          </div>
+        )}
+        {restartState === 'restarting' && (
+          <p className="mt-2 text-sm text-amber-700">
+            Restart requested. Waiting for the sidecar to report a new boot epoch — until then the
+            outcome is unknown.
+          </p>
+        )}
         {error && (
           <p className="mt-2 text-sm text-red-600">
             Connection error: {error}

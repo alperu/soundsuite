@@ -2,8 +2,8 @@
 
 All endpoints are on the sidecar, default `http://<gpu-host>:8098`. JSON in, JSON
 out. There is no authentication — **the sidecar is not safe to expose to an
-untrusted network.** It can start processes and read GPU state; keep it on a
-private network or a VPN.
+untrusted network.** It can start processes, read GPU state, and — since
+`POST /restart` — restart its own container; keep it on a private network or a VPN.
 
 ## Lifecycle
 
@@ -191,6 +191,61 @@ manages this itself.
 Update the sidecar in place from its master's build manifest, preserving
 configuration. `version` in `/status` lets a master spot a fleet on mixed builds —
 worth checking when two hosts that should behave identically do not.
+
+### `GET /restart` · `POST /restart`
+
+Restart **the sidecar's own container**. Restarting the sidecar has more than once
+been the thing that actually cleared a stuck state, and it otherwise needs shell
+access to the host — which is exactly what an operator lacks when a host is
+misbehaving.
+
+**Not** the Docker engine. A container cannot restart the daemon it runs on, and on
+macOS/Windows that daemon lives in a VM it has no authority over. Engine
+start/stop/restart is a separate operator action over SSH (OliveTin
+`build/docker/docker-ctl.sh`).
+
+`GET` returns feasibility so a UI can disable the control with a reason:
+
+```json
+{ "canRestart": true,
+  "target": { "id": "<64-hex>", "shortId": "<12-hex>", "name": "ss-sidecar",
+              "identifiedBy": "mountinfo", "corroborated": true } }
+```
+
+`POST` returns **`202`** with the same `target`, then issues the restart ~250 ms
+later so the response can flush. The `202` reports that the request was accepted,
+**not that the restart succeeded** — once the daemon kills the container nothing
+can be sent, so the only proof is the sidecar coming back. Poll `/status` and wait
+for a *different* `bootEpoch`; a reachable `/status` alone may still be the
+pre-restart process answering.
+
+**The target is resolved from the runtime, never from `CONTAINER_NAME`.** That env
+var names a managed *model* container (it defaults to `vllm-reranker`, and
+`/status` reads it as the reranker), so trusting it would aim the restart at a
+sibling. Resolution reads the container ID out of `/proc/self/mountinfo` — Docker
+bind-mounts `/etc/hostname` from `/var/lib/docker/containers/<64-hex>/`, and
+nothing inside the container can forge that — and corroborates it against the
+in-container hostname, which Docker defaults to the 12-hex short ID.
+
+Refusals are `409` with a named `reason` and a `detail` that says what was missing
+or what disagreed:
+
+| `reason` | Meaning |
+|---|---|
+| `docker-unreachable` | No usable Docker socket. Mount `/var/run/docker.sock` or set `DOCKER_HOST`. |
+| `not-in-container` | Running bare-metal on the host — there is no container to restart. |
+| `self-unresolvable` | In a container, but its ID could not be determined, or Docker has no such container. |
+| `sources-disagree` | mountinfo and the hostname name different containers, or mountinfo names several. Never guesses. |
+| `resolved-is-managed` | The resolved container is one this sidecar manages. Names both identities and the managed set. |
+
+Operator-initiated only. Nothing in the sidecar triggers this on a condition: a
+self-restart loop on a remote host is very hard to break.
+
+Two consequences worth knowing. A restart does **not** restart the model
+containers — host-Ollama and Docker Model Runner roles are unaffected by design,
+so a restart aimed at clearing a stuck *model* will look like it did nothing. And
+it discards in-memory `activeRequests` accounting while the masters' view of it
+survives; `POST /reset-counters` is the remedy.
 
 ## The WebSocket protocol
 
