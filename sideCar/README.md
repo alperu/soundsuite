@@ -176,9 +176,22 @@ Fixes flow upstream-first.
 
 ## Licence
 
-**Not yet declared.** Until a licence file is added, no permission to use, copy or
-distribute this code is granted — treat it as all rights reserved. If you want to
-use it, open an issue and ask.
+[Project Sandstar Source-Available License (PSSL) v1.1](LICENSE) — the same
+licence the rest of Project Sandstar uses, with a section added for this
+component.
 
-(Other repositories in this organisation use AFL-3.0; that is precedent, not a
-decision about this one.)
+**Source-available, not open source.** In short:
+
+- **Free**, including commercially, when the applications requesting inference
+  from SideCar are Licensor applications — the Fantom MCP Server, the Axon MCP
+  Server, Sound Suite, or software within a Project Sandstar deployment. Use it on
+  as many hosts as you like. Read, modify and redistribute it under §2.
+- **A commercial licence is required** to serve inference to third-party or
+  other-vendor applications, or to resell or broker that inference.
+
+The test is the **requesting application**, not the data. SideCar consumes no
+point values or control data, so the Packet Rule that governs the other Licensed
+Software (§3.2) does not apply here — §1.7.1, §1.8.1 and §3.1.1 state the
+SideCar-specific test instead.
+
+Read [LICENSE](LICENSE) for the binding terms; this summary is not one.
