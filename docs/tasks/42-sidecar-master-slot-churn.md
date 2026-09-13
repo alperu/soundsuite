@@ -483,3 +483,78 @@ two changes that alter steady-state connection behaviour are the
 A revert that keeps 2-5 and drops only those two returns 2.3.77 behaviour exactly.
 Shipping the defaulted-port fix instead keeps all of it and fixes the underlying
 defect — that is the recommended path.
+
+
+## Round 4 — the fleet-wide generator: `absorbMasterUrlHeader`
+
+Rounds 1-3 were all correct about defects but wrong about *this* incident. The
+version-split theory is **refuted by the rollback**: 2.3.79 (behaviourally 2.3.77)
+is still broken, and 2.3.78 is healthy on one host and broken on another. Version is
+not the discriminator, so the `wsPort ?? 3002` boot race cannot be the cause of the
+fleet-wide churn either — it predicted a split that does not exist. (It is still a
+real defect and its fix stays; it is simply not this.)
+
+**The generator is `absorbMasterUrlHeader` (`ws-client.ts`).** It parsed
+`X-Sound-Suite-Master-Url` from every master→sidecar reply and did:
+
+```ts
+if (state.masters.has(normalized)) return;
+ensureMaster(normalized, {});          // <-- a SECOND slot for the master that
+saveConfig();                          //     sent this very response
+```
+
+A **fifth** instance of the class in the table above, and the one that matters: the
+master has sent that header since the initial release, on every heartbeat, poll and
+result reply, so the path is live and identical on 2.3.77, 2.3.78 and 2.3.79. That
+is exactly the shape of the evidence — churn on all five hosts, on every version,
+surviving a rollback.
+
+The added slot has **no `wsPort`**, so `m.wsPort ?? 3002` dials it at the default,
+which is the same endpoint the original slot uses whenever that master is Sound
+Suite. Both slots register with the same `agentUrl`; the master supersedes per
+`agentUrl`, not per slot; they evict each other indefinitely. `841` supersessions /
+10 min over 5 hosts is one register per host every **~3.6 s** — the shape of a churn
+driven by the HTTP gossip path, not by a reconnect backoff.
+
+**Fixed:** the header is recorded in the log (once per value, not once per reply)
+and creates nothing. The recovery it was written for never needed a slot — we are
+talking to that master right now over `m.serverUrl`, and `saveConfig()` already
+persists that key. One master is one slot.
+
+### The team lead's two named suspects are both innocent
+
+- **`Auto-pushed config on register`** (original) and **`Closing superseded sidecar
+  socket`** (`59f0691c`, one day old) — reproduced *as a pair*, with the realistic
+  full `pushFullConfig` payload (`enabledModes`, `modelOverrides`, `runtimes`,
+  `minOnline`, `idleTimeouts`) rather than a bare `serverUrl`. Test *one master stays
+  one register across the auto-push + supersede pair*: 1 registration. The pair does
+  **not** sustain re-registration on its own. The master's supersede is the right
+  behaviour and should stay — it was supplying energy to a loop, but the loop needed
+  a second slot to exist, and the header was creating one.
+
+### The visible symptom, explained and fixed
+
+`connectionMode: 'websocket'` + `lastHeartbeatAt: None` + `consecutiveFailures: 0`
+were **all three accurate simultaneously**. There is no path that reaches
+`websocket` without arming the heartbeat timer — the timer is armed in the `open`
+handler. It is a **5 s interval that every new socket resets**, so a connection
+superseded more often than every 5 s never fires it once. `consecutiveFailures: 0`
+is correct because nothing fails: registration succeeds every cycle.
+
+Fixed independently of the generator: the sidecar now **heartbeats once
+immediately on register**, then on the interval, guarded on epoch and socket state.
+`lastHeartbeatAt: null` on a registered slot is now impossible, and the master gets
+real status at connect time instead of 5 s later. Test: *sends a heartbeat as soon
+as it registers* — fails without the change (`lastHeartbeatAt` `undefined`).
+
+### Harness additions
+
+`FakeMaster` now owns a real `http.Server` (a bare `WebSocketServer` answers 400 to
+every plain request, which made the HTTP-gossip path untestable), serves the
+heartbeat / poll / result endpoints, and can attach
+`X-Sound-Suite-Master-Url`. `ws-client.ts` gained one test seam,
+`__testSendHttpHeartbeat`, used by no product code.
+
+Suite: **19 tests** in `src/lib/gpu/__tests__/sidecar-master-rekey.test.ts`;
+`npx jest src/lib/gpu` is 8 suites / **124 tests**, green on three consecutive runs.
+Three of the four round-4 assertions failed before these fixes.

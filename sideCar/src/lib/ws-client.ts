@@ -259,24 +259,42 @@ function httpPost(
 }
 
 /**
- * Parse `X-Sound-Suite-Master-Url` header from any master→sidecar response.
- * Idempotent: only adds when URL is new. Persists via saveConfig() so a
- * subsequent boot (e.g. after docker volume GC) recovers the master URL
- * without operator intervention.
+ * Parse `X-Sound-Suite-Master-Url` from a master→sidecar response.
+ *
+ * This used to call `ensureMaster(normalized, {})` whenever the URL was not
+ * already a key — **adding a second slot for the master whose own response
+ * carried the header**. One master, two slots. The added slot had no `wsPort`, so
+ * `m.wsPort ?? 3002` dialled it at the default, which is the same endpoint the
+ * original slot uses whenever that master is Sound Suite. Both slots then register
+ * with the same `agentUrl`; the master supersedes per `agentUrl` rather than per
+ * slot, so they evict each other indefinitely. The header rides on EVERY
+ * heartbeat, poll and result reply, and the master has always sent it — which is
+ * why the churn appeared on every sidecar version and survived a rollback.
+ *
+ * The recovery this was written for does not need a new slot: we are talking to
+ * the master right now, over `m.serverUrl`, and `saveConfig()` already persists
+ * that key. A URL we have not dialled is unverified (task 41 — a wrong address
+ * takes the host dark), so it is recorded in the log and nowhere else.
+ *
+ * Same rule as the `master-identity` frame: **one master is one slot.**
  */
-function absorbMasterUrlHeader(headers: http.IncomingHttpHeaders, sourceLabel: string): void {
+function absorbMasterUrlHeader(
+  m: MasterConnection,
+  headers: http.IncomingHttpHeaders,
+  sourceLabel: string,
+): void {
   const raw = headers['x-sound-suite-master-url'];
   const masterUrl = Array.isArray(raw) ? raw[0] : raw;
   if (typeof masterUrl !== 'string' || masterUrl.length === 0) return;
   const normalized = masterUrl.replace(/\/+$/, '');
-  if (state.masters.has(normalized)) return;
-  try {
-    ensureMaster(normalized, {});
-    saveConfig();
-    log.info(`Master self-identified via header (${sourceLabel}): ${normalized}`);
-  } catch (err) {
-    log.warn(`Failed to absorb master URL header "${normalized}": ${(err as Error).message}`);
-  }
+  if (normalized === m.serverUrl) return;
+  if (m.absorbedHeaderUrl === normalized) return;   // log once per value, not per reply
+  m.absorbedHeaderUrl = normalized;
+  log.info(
+    `[${m.serverUrl}] Master self-identified via header (${sourceLabel}) as ` +
+    `${normalized} — NOT adding a second slot for it. Keeping the key this ` +
+    `connection works on; set the canonical URL in /setup if it should change.`,
+  );
 }
 
 // ─── Rich status builder ──────────────────────────────────────────────────
@@ -1053,7 +1071,7 @@ async function sendHttpHeartbeat(m: MasterConnection): Promise<void> {
       m.authToken,
     );
 
-    absorbMasterUrlHeader(respHeaders, 'heartbeat');
+    absorbMasterUrlHeader(m, respHeaders, 'heartbeat');
 
     if (status === 200) {
       if (m.httpHeartbeatFailCount > 0) {
@@ -1106,7 +1124,7 @@ async function pollForCommands(m: MasterConnection): Promise<void> {
       m.authToken,
     );
 
-    absorbMasterUrlHeader(respHeaders, 'poll');
+    absorbMasterUrlHeader(m, respHeaders, 'poll');
 
     if (status === 200) {
       const response = JSON.parse(responseBody);
@@ -1152,7 +1170,7 @@ async function reportResult(
         { commandId, result: result || {}, error },
         m.authToken,
       );
-      absorbMasterUrlHeader(respHeaders, 'result');
+      absorbMasterUrlHeader(m, respHeaders, 'result');
     } catch (err) {
       log.error(`[${m.serverUrl}] Failed to report result for ${commandId}: ${(err as Error).message}`);
     }
@@ -1340,6 +1358,41 @@ export function connectMaster(m: MasterConnection): void {
 
       if (m.heartbeatTimer) clearInterval(m.heartbeatTimer);
       m.wsHeartbeatFailCount = 0;
+
+      // Heartbeat ONCE immediately, then on the interval.
+      //
+      // The interval below is 5s and every new socket resets it, so a connection
+      // that is superseded more often than every 5s never fires it even once. The
+      // result was a slot reporting `connectionMode: 'websocket'` with
+      // `lastHeartbeatAt: null` and `consecutiveFailures: 0` — all three accurate,
+      // and together a host the master believed was live while it had never said
+      // anything. Registering and then going silent is worse than reporting
+      // disconnected. An immediate beat also gives the master real status at
+      // connect time instead of 5s later.
+      const beat = async (): Promise<void> => {
+        if (stale() || ws.readyState !== WebSocket.OPEN) return;
+        try {
+          const statusData = await buildFullStatus();
+          if (stale() || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(JSON.stringify({
+            type: 'heartbeat',
+            containers: getRegisteredContainers(),
+            activeRequests: getTotalActiveRequests(),
+            statusData,
+          }));
+          m.wsHeartbeatFailCount = 0;
+          m.lastHeartbeatAt = Date.now();
+        } catch (err) {
+          m.wsHeartbeatFailCount++;
+          log.error(`[${m.serverUrl}] WS heartbeat failed (${m.wsHeartbeatFailCount}x): ${(err as Error).message}`);
+          if (m.wsHeartbeatFailCount >= 3) {
+            log.warn(`[${m.serverUrl}] WS heartbeat failed 3 times, forcing reconnect`);
+            ws.terminate();
+          }
+        }
+      };
+      void beat();
+
       m.heartbeatTimer = setInterval(async () => {
         if (ws.readyState !== WebSocket.OPEN) {
           log.warn(`[${m.serverUrl}] WS heartbeat: socket not open, skipping`);
@@ -1400,6 +1453,25 @@ export function connectMaster(m: MasterConnection): void {
             // which recorded the symptom with the cause unknown).
             //
             // One master is one slot. Never add a slot from an identity frame.
+            // Record the master's own claim about its identity BEFORE dedup, so a
+            // slot that announces the same canonical URL as another can be
+            // recognised as the same master even when the two dialled completely
+            // different addresses (multi-homed master: LAN + VPN).
+            m.announcedCanonicalUrl = normalized;
+            const twin = [...state.masters.values()].find(
+              (o) => o !== m && !o.retired && o.announcedCanonicalUrl === normalized,
+            );
+            if (twin) {
+              log.warn(
+                `[${m.serverUrl}] Same master as ${twin.serverUrl}: both announced ` +
+                `canonical URL ${normalized}. Two slots for one master register with ` +
+                `the same agentUrl and the master supersedes per agentUrl, so they ` +
+                `evict each other indefinitely. Retiring ${twin.serverUrl}; keeping ` +
+                `the key carrying this frame.`,
+              );
+              retireMaster(twin);
+              saveConfig();
+            }
             const existing = state.masters.get(normalized);
             if (existing && existing !== m) {
               // Two keys, one master — by construction, since this master says

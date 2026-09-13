@@ -648,6 +648,39 @@ describe('the master self-identifying over HTTP', () => {
   });
 });
 
+describe('a multi-homed master reached at two different addresses', () => {
+  // The fleet's real shape: masters answer on a LAN address AND a Tailscale
+  // address. `discoverMasters()` (config.ts) probes candidates and keys a slot by
+  // exact URL string for each one that answers, and `POST /api/masters` (the
+  // master's own reverse-poll channel) does the same — so ONE master becomes TWO
+  // slots whose dialled endpoints differ by HOSTNAME. No string comparison of
+  // endpoints can catch that; only the master's own `canonicalUrl` can.
+  it('retires the duplicate once both slots hear the same canonical URL', async () => {
+    masterA.supersedeOnRegister = true;
+    masterA.pushIdentityAndConfig = true;
+    masterA.canonicalUrl = 'http://master-canonical.invalid:3000';
+
+    // Two keys for one listener, reached by two different host spellings.
+    const viaLan: MasterConnection = ensureMaster(`http://127.0.0.1:${masterA.wsPort}`, { wsPort: masterA.wsPort });
+    const viaVpn: MasterConnection = ensureMaster(`http://localhost:${masterA.wsPort}`, { wsPort: masterA.wsPort });
+    // Different dial endpoints — the endpoint guard cannot see these as one master.
+    expect(new URL(viaLan.serverUrl).hostname).not.toBe(new URL(viaVpn.serverUrl).hostname);
+
+    wsClient.connectMaster(viaLan);
+    await masterA.waitForRegistrations(1);
+    wsClient.connectMaster(viaVpn);
+    await sleep(3000);
+
+    // Exactly one slot survives, and it is not churning.
+    const live = [viaLan, viaVpn].filter((x) => !x.retired && state.masters.get(x.serverUrl) === x);
+    expect(live).toHaveLength(1);
+    expect(live[0].ws).not.toBeNull();
+    const settled = masterA.registrations;
+    await sleep(2500);
+    expect(masterA.registrations).toBe(settled);
+  });
+});
+
 describe('disconnectMaster', () => {
   it('does not re-arm a reconnect for the master it just disconnected', async () => {
     const { mA } = await connectBoth();

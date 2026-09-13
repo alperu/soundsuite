@@ -784,6 +784,24 @@ export interface MasterConnection {
    *  the identical URL are the same master process by construction — that is
    *  a string comparison, not an inference about the network. */
   wsUrl?: string;
+  /** Last value seen in `X-Sound-Suite-Master-Url` for this master, so the
+   *  "self-identified as" line is logged once per value rather than on every
+   *  heartbeat, poll and result reply. */
+  absorbedHeaderUrl?: string;
+  /**
+   * The canonical URL this master announced about ITSELF in a `master-identity`
+   * frame. This is the only authoritative identity the sidecar ever gets: two
+   * slots that announce the same canonical URL are the same master process, no
+   * matter which address each of them dialled.
+   *
+   * Comparing dial endpoints cannot see that case. A multi-homed master answers on
+   * a LAN address and on a VPN/Tailscale address; `discoverMasters()` and
+   * `POST /api/masters` both key slots by exact URL string, so one master becomes
+   * two slots whose `wsUrl`s differ by HOSTNAME. Both then register with the same
+   * agentUrl, and the master supersedes per agentUrl — the ping-pong again, at a
+   * site no string comparison can catch.
+   */
+  announcedCanonicalUrl?: string;
 }
 
 export function getMaster(url: string): MasterConnection | undefined {
