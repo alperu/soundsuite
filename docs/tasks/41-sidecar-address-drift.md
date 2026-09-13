@@ -86,6 +86,12 @@ that has **never self-updated** carries `agentUrl: null` and is unaffected.
 Migration story therefore: "every host that has self-updated at least once is
 pinned to the address it had at that moment", not "an older build wrote it".
 
+> **Superseded in part.** The VPN constraint below arrived after this section was
+> written and overturns REFUTED 2's conclusion and REFUTED 3 entirely. Read
+> "Reframing: the master must observe, not the sidecar declare" before acting on
+> either. The observations in both still hold; the *conclusions* drawn from them
+> did not survive.
+
 ### REFUTED 2 — `EXTERNAL_IP` does not currently win
 
 The brief states `AGENT_URL` and `EXTERNAL_IP` "must keep winning". `AGENT_URL`
@@ -94,10 +100,11 @@ above it, so a pinned address already overrides an operator's deliberate
 `EXTERNAL_IP`. Restoring `EXTERNAL_IP` above the saved value is a deliberate
 behaviour change shipped with this fix, not an incidental one.
 
-Target order: `AGENT_URL` → `EXTERNAL_IP` → detection → `savedAgentUrl`
-(fallback) → `127.0.0.1`. With that order the "is this address still local?"
-check becomes *structurally* unable to fire when either env var is set, rather
-than depending on a conditional someone must remember.
+The order first proposed here — `AGENT_URL` → `EXTERNAL_IP` → detection →
+`savedAgentUrl` → `127.0.0.1` — **is not what shipped.** Putting detection above
+the persisted value is refuted by the VPN case below. Shipped order:
+`AGENT_URL` → `EXTERNAL_IP` → `savedAgentUrl` → detection → `127.0.0.1`.
+Only the `EXTERNAL_IP` inversion is corrected.
 
 ### REFUTED 3 — item 10 needs no migration path; it is subsumed
 
@@ -105,9 +112,24 @@ than depending on a conditional someone must remember.
 `gpu-fleet/route.ts:114`) already closes the WS, block-lists the `agentUrl` for
 60 s, drops the status-cache entry and rewrites the persisted list. The only
 reason a delete did not stick is that the pinned sidecar re-advertised the same
-stale address after the block expired. Once detection is primary (item 2) the
-sidecar unpins itself, and the existing delete path is sufficient. Nothing new
-was built for item 10.
+stale address after the block expired.
+
+**This conclusion is itself now refuted.** It rested on "once detection is primary
+the sidecar unpins itself" — and detection is deliberately *not* primary (see the
+VPN reframing). A pinned host therefore keeps re-advertising its stale address
+after the 60 s block expires, so `removeSidecar()` clears the master's view but
+does not fix the host. **Item 10 is not solved.** The two real recovery paths:
+
+- **Available today:** set `AGENT_URL` or `EXTERNAL_IP` on the sidecar container.
+  Both now correctly outrank the persisted pin (that is the `EXTERNAL_IP` fix), so
+  this works on the next container start without touching config inside the container.
+- **The right fix, designed not built:** the master already pushes a
+  `master-identity` frame that the sidecar persists. The same channel can push a
+  *corrected agentUrl* derived from the observed peer address. That is the clean
+  recovery — no operator action, no shell inside a container — but it adds a
+  master→sidecar config-mutation path, and pushing an address that has not been
+  probe-validated could take a host dark exactly like the re-detection would have.
+  It needs the probe first. Not built deliberately.
 
 ### REFINED — the duplicate is worse than "a second entry"
 
@@ -125,6 +147,95 @@ to fix, and it is fixable without settling item 6.
 `persistSidecarList()` (`ws-relay.ts`) rebuilds `gpu.sidecars` wholly from the
 live connection map, so operator-added entries and their `note` fields are
 dropped on every register. Not a regression from this change.
+
+## Reframing: the master must observe, not the sidecar declare (2026-09-13)
+
+New constraint from the user, which invalidates part of this task as written and
+part of what was first built against it: **the master is sometimes on a VPN, and a
+sidecar host is reachable at a different address depending on the path.** The same
+hosts appear as private LAN addresses, as VPN DNS names, and as Tailscale CGNAT
+addresses in `100.64.0.0/10`. `mcpserver.local` is an mDNS name, and **mDNS does
+not cross a VPN** — multicast is not forwarded — so a `.local` name that resolves
+on the LAN fails over the VPN and the host looks *down* rather than misaddressed.
+
+There is therefore **no single correct address for the sidecar to advertise.** The
+right one depends on which network the master is on right now, which the sidecar
+cannot know.
+
+### REFUTED (the task's own item 3, written before the VPN was known)
+
+> "At startup and every N heartbeats, compare the advertised address against
+> `os.networkInterfaces()`. If the advertised host is not a local address,
+> re-detect and re-advertise."
+
+Wrong as written, in three separate ways:
+
+1. A **VPN DNS name** is not an IP literal, so there is nothing to compare.
+2. A **Tailscale address is local** (it is a real address on `tailscale0`) yet is
+   not the LAN address — so "is it local?" says yes for an address that only works
+   over the VPN, and yes for the LAN one too. The test cannot discriminate.
+3. A **NAT'd address is correctly non-local**, so the test fires on exactly the
+   case where the operator's pin must be honoured.
+
+### REFUTED (my own, from the first implementation of item 3)
+
+The `/24` tie-break ("prefer the interface on the master's subnet") is **near
+useless for Tailscale**: it hands each node a scattered `/32` inside
+`100.64.0.0/10`, so a master at `100.64.5.7` shares no `/24` with a node at
+`100.64.91.3`. Detection then falls back to "first non-bridge in OS order" and
+picks the **LAN** address for a VPN-side master.
+
+**This was a fleet-outage bug in the first draft of this work.** `initAgentAddress()`
+ran at boot, before the first register, and overwrote the persisted pin with that
+detected address. A host reachable only over the VPN would have been re-pinned to
+a LAN address the master cannot reach, gone dark, and been unrecoverable without
+editing config inside a container on a machine that was by then unreachable —
+across the whole fleet at once, since sidecars auto-update. It was removed before
+anything shipped. Nothing now calls it.
+
+### REFUTED — item 2's premise, and my own REFUTED 2 conclusion
+
+Item 2 proposed "make detection primary, saved value as fallback… the likely
+answer is no [saved should not outrank detection]". That is wrong under multi-path.
+A persisted address **has at least once reached a master**; a detected address has
+been validated by nothing at all. Preferring the unvalidated one is a regression
+dressed as a fix.
+
+So the shipped order is `AGENT_URL` → `EXTERNAL_IP` → `savedAgentUrl` → detection
+→ loopback. Only the `EXTERNAL_IP` inversion — a genuine bug, an operator's
+deliberate setting being silently overridden — is corrected. **No host's advertised
+address changes in this release** unless `EXTERNAL_IP` was being wrongly overridden.
+
+### The design that does work: observe the peer address
+
+The master holds the socket, and the relay owns its own listener
+(`new WebSocketServer({ port: WS_PORT })`, `ws-relay.ts:293`) with **no proxy in
+front** — so `req.socket.remoteAddress` in the `connection` handler is the true
+peer address. By construction that is the address the sidecar reached this master
+*from*, and therefore correct for whichever path is in use. It is immune to DHCP
+drift, to multi-homing, and to mDNS not crossing the VPN. No sidecar-side heuristic
+can match it, because only the master knows which network it is on.
+
+**Prior art confirming the shape:** `SidecarEntry.lastSeenFromIp` already exists and
+is populated on the HTTP register path (`src/app/api/admin/gpu/sidecars/register/route.ts:61`)
+— recorded and never used. Note it reads only `x-forwarded-for` / `x-real-ip`, so it
+is **empty with no proxy in front**; the WS path reads the socket directly and is
+strictly better evidence.
+
+Known limits, which is why this is recorded and not yet routed on:
+
+- The peer address is a usable callback target only if the sidecar's **port** is
+  reachable at it. Behind NAT or a one-way tunnel it is the translated address with
+  no forwarded port — so `AGENT_URL` / `EXTERNAL_IP` must keep winning.
+- The **port** must come from the sidecar's declared `agentUrl` / `AGENT_PORT`; the
+  source port is ephemeral.
+- IPv4-mapped IPv6 (`::ffff:192.0.2.1`) needs normalising — done.
+
+The full shape, for the next stage: the sidecar advertises **candidates** (its
+detected addresses plus any pin), the master prefers the **observed** peer address,
+and probes down the candidate list when it does not answer. That also answers
+item 8 for free — a candidate that does not answer is *unreachable*, a different
+and more useful claim than *unreported*.
 
 ## Why this is worse than a cosmetic display issue
 
@@ -155,6 +266,73 @@ A generated id stored beside the config is probably right, but it inherits the
 same staleness question the address has: a cloned VM carries its source's id. Any
 choice must say what happens when two sidecars present the same identity.
 
+## ⚠️ CORRECTION — what 2.3.77 actually shipped (2026-09-13)
+
+Commit `6a4e0004`'s message describes a **first draft that was withdrawn**, not the
+code it commits. Recorded here because that message would otherwise be read as
+documentation of shipped behaviour.
+
+**The message claims** detection is primary, revalidation runs on the 30 s
+watchdog, and recovery is bounded at ~90 s. **None of that is in the build.**
+`sideCar/src/lib/ws-client.ts:1449` says so explicitly — *"DELIBERATELY NOT
+CALLED: initAgentAddress() / revalidateAgentUrl()"* — and the shipped precedence
+in `agent-address.ts` is:
+
+```
+AGENT_URL → EXTERNAL_IP → savedAgentUrl → detection → loopback
+```
+
+`savedAgentUrl` still outranks detection. **No host's advertised address changes
+by itself in 2.3.77.**
+
+### Why the draft was withdrawn — it was a fleet-outage bug
+
+The `/24` tie-break is near-useless on Tailscale: it hands out scattered `/32`s
+inside `100.64.0.0/10`, so a master at `100.64.5.7` shares no `/24` with a node at
+`100.64.91.3`. Detection then falls through to "first non-bridge address in OS
+order" and picks the **LAN** address. A VPN-only host would have gone dark —
+unrecoverable without a shell inside a container on a machine that is by then
+unreachable, and fleet-wide at once via auto-update.
+
+### What 2.3.77 does contain
+
+- **`EXTERNAL_IP` now outranks `savedAgentUrl`.** It previously sat *below* the
+  pin, so a deliberate operator setting was silently overridden. This is the one
+  behaviour change on the sidecar side, and it is the supported recovery path.
+- Master-side `rekeySidecarAddress()` and the `PATCH /api/admin/host-provisioning`
+  correction endpoint.
+- `handlers.ts` and `ws-client.ts` now share one address detector, so `/api/status`
+  cannot report a different address than the one advertised.
+
+### Consequences for the open items
+
+- **Item 10 is NOT solved.** An earlier note claimed it was subsumed because "the
+  sidecar unpins itself". It does not. `removeSidecar()` clears the master's view
+  and the host re-advertises the same pinned address after the 60 s block expires.
+  **Today's real recovery is `EXTERNAL_IP` or `AGENT_URL` set on the host**, or the
+  new `PATCH` endpoint.
+- The original **item 3** ("is the advertised host still local?") is wrong three
+  ways and must not be built as written: a VPN DNS name is not an IP literal; a
+  Tailscale address *is* local but is not the LAN one, so the test cannot
+  discriminate; and a NAT'd address is correctly non-local, so the test fires
+  exactly where the pin must be honoured.
+
+### Identity (item 6) — decided
+
+Hostname is out, and the VPN supplies a reason beyond collisions: a `.local` name
+that fails over a VPN looks like the host being *down*. **The socket is the
+identity** for a connection's duration — unspoofable, unclonable, and already what
+`rekeySidecarAddress()` relies on. A generated persistent id is **deferred**: with
+the peer address observed master-side, recognising a sidecar across connections
+buys much less, and a cloned VM would carry its source's id anyway.
+
+### Master-side observation, recorded but not routed on
+
+`wss.on('connection', (ws, req))` now records the normalised
+`req.socket.remoteAddress` as `observedFromIp` / `lastSeenFromIp`. **It is recorded,
+not used for routing.** Switching the data path onto it needs probe-and-fallback,
+and `resolveEndpoint` lives in `fleet-router.ts`. That remains open.
+
 ## Work
 
 Status legend: ☑ done · ◐ partially done, remainder named · ☐ not built.
@@ -162,15 +340,15 @@ Status legend: ☑ done · ◐ partially done, remainder named · ☐ not built.
 | # | Item | Status |
 |---|---|---|
 | 1 | **Confirm before building** (four premises of v12 and three of v14 were refuted this way). Re-verify `ws-client.ts:51-70`, `config.ts:90-91,206`, `instrumentation.ts:145-146`, `ws-relay.ts:291`, and that no master route updates `agentUrl`. Also find **where `savedAgentUrl` is first written** — only the load path is visible, so the original writer is unidentified. If nothing writes it, the `.242` value came from an older build and that changes the migration story. | ☑ |
-| 2 | **Decide whether a saved address should outrank detection at all.** The likely answer is no: make detection primary and treat the saved value as a fallback for when detection yields nothing useful. `AGENT_URL` and `EXTERNAL_IP` **must keep winning** — operators set those deliberately for NAT and multi-homed hosts, and breaking that is worse than the bug being fixed. | ☑ |
-| 3 | **Revalidate at boot and on a timer.** At startup and every N heartbeats, compare the advertised address against `os.networkInterfaces()`. If the advertised host is not a local address, re-detect and re-advertise. Log the change loudly with both values — a silent address change is its own debugging problem. | ☑ |
+| 2 | **Decide whether a saved address should outrank detection at all.** The likely answer is no: make detection primary and treat the saved value as a fallback for when detection yields nothing useful. `AGENT_URL` and `EXTERNAL_IP` **must keep winning** — operators set those deliberately for NAT and multi-homed hosts, and breaking that is worse than the bug being fixed. | ◐ |
+| 3 | **Revalidate at boot and on a timer.** At startup and every N heartbeats, compare the advertised address against `os.networkInterfaces()`. If the advertised host is not a local address, re-detect and re-advertise. Log the change loudly with both values — a silent address change is its own debugging problem. | ☐ |
 | 4 | **Do not let a Docker-internal address win.** `ws-client.ts:58-62` already skips `172.17.`/`172.18.` and keeps them only as a last-resort fallback. Any re-detection must preserve that, or a containerised sidecar will advertise an address only it can reach. | ☑ |
 | 5 | **Add a master-side reconcile path.** Same identity (item 6) arriving on a different `agentUrl` must **update** the entry, not create a second one: move the registry key, migrate `roles`/`vram`/`activeRequests`, close the old socket, and persist. This is where the duplicate-host bug gets prevented. | ◐ |
 | 6 | **Choose the identity and write down what a collision does.** See the table above. Whatever is chosen, two sidecars presenting the same identity must produce a visible, named conflict rather than one silently replacing the other. | ☐ |
 | 7 | **Give the operator a manual override.** `/admin/hostprov` already edits per-host master URL and WS port; add the ability to correct or forget a stale address, so recovery does not require editing a config file inside a container. | ☑ |
 | 8 | **Distinguish unreachable from unreported.** A registry entry whose address does not answer should be visibly unreachable, not merely stale-looking. This is the same rule as [task 39](./39-role-aware-readiness.md): reported-status and reachability are separate claims, and the fleet currently only makes the first. | ☐ |
 | 9 | Tests: a saved address that is no longer local is replaced; `AGENT_URL` still wins; a Docker-internal address is not preferred over a LAN one; a re-register from a new address updates rather than duplicates; a colliding identity is reported. | ☑ |
-| 10 | **Clean up the entry that is already wrong.** `mcpserver.local` is registered at `.242` today. The fix must either migrate it or make removing it possible without hand-editing persisted state. | ☑ |
+| 10 | **Clean up the entry that is already wrong.** `mcpserver.local` is registered at `.242` today. The fix must either migrate it or make removing it possible without hand-editing persisted state. | ☐ |
 
 ## What was built (2026-09-13)
 
@@ -179,37 +357,54 @@ Status legend: ☑ done · ◐ partially done, remainder named · ☐ not built.
 Holds every decision; takes the interface map, env and port as arguments so the
 rules are testable without a host to run on.
 
-- `resolveAgentUrl` — `AGENT_URL` → `EXTERNAL_IP` → detection → `savedAgentUrl` →
-  `127.0.0.1`. Items 2 and the REFUTED-2 reorder.
+- `resolveAgentUrl` — `AGENT_URL` → `EXTERNAL_IP` → `savedAgentUrl` → detection →
+  `127.0.0.1`. Only the `EXTERNAL_IP` inversion is fixed; detection stays below the
+  persisted value because of the VPN case, so **no host's advertised address changes
+  in this release** unless `EXTERNAL_IP` was being wrongly overridden.
 - `detectAdvertisableAddress` — preserves the exact `172.17.`/`172.18.` demotion
   (item 4; deliberately **not** widened to 172.16/12, which would demote a real
   LAN on 172.20.x), and prefers a non-bridge address on the master's `/24` over
   "whichever the OS listed first" (the multi-homed risk).
-- `advertisedHostLocality` — `local` / `not-local` / `unknown`. A URL whose host is
-  not an IPv4 literal is `unknown` and never touched: a hostname cannot be checked
-  against `os.networkInterfaces()` without resolution, and a name is operator intent.
-- `AddressStabilityTracker` — N consecutive agreeing detections (default 3) before
-  adoption; any disagreement restarts the count. The flap guard.
-- `shouldReadvertise` — one tick. Returns `pinned-by-env` first, so the
-  "is it local?" test is structurally unreachable when either env var is set.
+- `advertisedHostLocality`, `AddressStabilityTracker`, `shouldReadvertise` —
+  **built and tested, but NOTHING CALLS THEM.** They are the building blocks for a
+  later release once the probe path exists. Kept because the logic is correct and
+  the tests document it; dead by design, not by oversight.
 
 ### Sidecar — `ws-client.ts`
 
-- `getAgentUrl()` now delegates and **caches**. It is called on every heartbeat
-  via `buildFullStatus()`; re-running detection there would let a multi-homed host
-  flap several times a minute. The value changes only through `revalidateAgentUrl()`.
-- `initAgentAddress()` — called from `startGossipClient()` *before* the first
-  `connectAllMasters()`, so a moved host never advertises the stale address even
-  once. Logs pin → corrected and persists the correction.
-- `revalidateAgentUrl()` — rides the existing 30 s watchdog. With the 3-sample
-  debounce, **recovery after a DHCP move is bounded at ~90 s** (acceptance row 1).
-  Logs both values loudly and emits a boot event.
+- `getAgentUrl()` delegates to `resolveAgentUrl` and **caches**. It is called on
+  every heartbeat via `buildFullStatus()`, so re-resolving there would let a
+  multi-homed host flap several times a minute.
+- `initAgentAddress()` and `revalidateAgentUrl()` exist but are **not called from
+  anywhere.** Both replace the persisted address with a detected one, which is the
+  fleet-outage path described in the reframing. The two call sites that existed in
+  the first draft — `startGossipClient()` and the 30 s `startWatchdog()` tick — were
+  removed, and a comment at each site records why.
 - `reregisterOnLiveSockets()` — re-registers on the **live** socket rather than
-  forcing a reconnect. That is what makes the master's decision unambiguous.
-- `self-update.ts:185` keeps its write; a comment now records that it was the sole
-  writer and why it is now a hint rather than a pin.
+  forcing a reconnect, which is what makes the master's re-key decision
+  unambiguous. Also currently reachable only via `revalidateAgentUrl()`.
+- `self-update.ts:185` keeps its write; a comment records that it was the sole
+  writer of the pin and how the loop perpetuated itself.
+- `handlers.ts:48` `getPrimaryIp()` now shares `detectAdvertisableAddress()` instead
+  of its own scan, so `/api/status` cannot report a different address than the
+  advertiser would pick.
 
-### Master — `src/lib/gpu/ws-relay.ts`
+### Master — `src/lib/gpu/ws-relay.ts` — the observed peer address
+
+- `wss.on('connection', (ws, req) => …)` — the second argument was always there and
+  unused. `observedFromIp` now records `normalizePeerAddress(req.socket.remoteAddress)`
+  on the connection entry, carried through `persistSidecarList()` as
+  `lastSeenFromIp` (the field the HTTP register path already writes) and exposed on
+  `getConnectedSidecars()`.
+- `normalizePeerAddress()` strips `::ffff:` from IPv4-mapped IPv6.
+- Registration logs `agentUrl`, `observedFromIp` and `declaredMatchesObserved`
+  together, so a declared/observed disagreement is visible in the fleet's own logs.
+- **Recorded, not routed on.** Switching the data path to it needs probe-and-
+  fallback over candidates, and `resolveEndpoint` lives in `fleet-router.ts` —
+  outside this task's file territory. Recording it now makes real evidence from the
+  live fleet available to whoever builds that.
+
+### Master — `src/lib/gpu/ws-relay.ts` — the re-key (item 5a)
 
 - `rekeySidecarAddress(oldUrl, newUrl, ws)` — exported, moves the registry key,
   migrates the status-cache entry (composed from `getSidecarStatus` →
@@ -231,7 +426,12 @@ rules are testable without a host to run on.
 `{ fromSidecarUrl, toSidecarUrl }`: refuses if a row already exists at the
 destination (409 — overwriting would lose that host's OS pin), moves the row, then
 calls the existing `removeSidecar(from)` to close + block-list + forget the stale
-entry. Recovery without hand-editing a config file inside a container.
+entry.
+
+Scope honestly stated: this clears the **master's** view. It does not un-pin a
+running sidecar, which will re-advertise its persisted address once the 60 s block
+expires — see the corrected REFUTED 3. Pair it with `AGENT_URL` / `EXTERNAL_IP` on
+the host to make the correction stick.
 
 It deliberately does **not** re-key a live socket. `registeredUrl` is a closure
 variable in the connection handler; re-keying from a route would leave it pointing
@@ -256,7 +456,8 @@ makes the sidecar reconnect and register its own (now revalidated) address.
   `still-local` — it would advertise loopback for the life of the process, and the
   pin-detection could not reach it. `listCandidates()` already filters `internal`,
   so loopback correctly falls out as `not-local` and re-detects. Covered by
-  "escapes the loopback dead end once a real interface comes up".
+  "escapes the loopback dead end once a real interface comes up" — a test over a
+  path that, after the reframing, nothing calls automatically.
 - **`handlers.ts:48` had a second, disagreeing detector.** Item 1 named three
   interface-scan sites. `getPrimaryIp()` did its own first-non-internal-IPv4 walk
   with no bridge demotion, so on a multi-homed or containerised host `/api/status`
@@ -273,24 +474,47 @@ accepting while another refuses on `address-conflict` leaves the sidecar committ
 to an address one master rejected. The conflict is named in that master's log, so
 the acceptance row is met; an ack-checking rollback path belongs with 5b.
 
-### Item 6 — options and collision behaviour, not decided
+### Item 6 — decided: the socket is the identity; hostname is out; defer the id
 
-Not settled by evidence, so per the brief it is written down rather than guessed.
-All three need a wire-format change (`register` gains an id field) plus a master
-column, so none is a drop-in.
+**`hostname` is ruled out by the user's decision, and the VPN case adds a reason
+beyond the collisions already in the table:** a name that resolves on one network
+path and not another (`.local` over a VPN) fails *as if the host were down*, which
+is strictly worse than a wrong address. `getDisplayHostname()`
+(`sideCar/src/lib/ws-client.ts:~72-84`) stays purely cosmetic — nothing routes or
+keys on it, and it is not removed, because it is what makes the fleet UI readable.
 
-| Option | Durable across | Breaks on | Collision behaviour required |
-|---|---|---|---|
-| **A. uuid in `config.json`**, generated on first boot | restart, DHCP move, `docker rm` (config is volume-mounted) | config reset / volume GC → looks like a new host; **VM or container-image clone → two hosts share one id** | Second claimant refused, both hostnames named, operator must clear one config. Cannot self-heal: neither side knows which is the clone. |
-| **B. uuid + machine fingerprint** (`/etc/machine-id`, or Docker host id via `/info`) | as A, and a clone differs if the fingerprint does | fingerprint unavailable in some containers; `machine-id` is itself cloned by naive VM copies | Same id + different fingerprint → treat as distinct, log the split. Same id + same fingerprint → genuine duplicate, refuse. |
-| **C. operator-assigned name** in `/admin/hostprov` | anything — it is declared, not derived | needs an operator action per host; a typo collides silently | Refuse the second claim at assignment time (unique constraint), which is the only option where the collision is caught *before* traffic. |
+**Decision: for the duration of a connection, the socket *is* the identity.** That
+is not a fallback — it is a stronger claim than any declared value, because it
+cannot be spoofed, cloned or drift. It is what item 5a already exploits: a new
+address on an already-registered socket is provably the same sidecar process, so
+the registry key moves instead of duplicating. Combined with the observed peer
+address, the master now learns both *who* (this socket) and *where* (the address it
+connected from) without the sidecar declaring either.
 
-Recommendation to settle it: **B for the automatic path, C as the override** — B
-recognises a moved host without operator action, C is the escape hatch when B's
-fingerprint is unavailable or a clone must be split. Whatever is chosen, the
-refuse-and-name behaviour built in 5a's conflict branch is the template: a
-collision is a named, logged conflict with an `ok:false` ack, never a silent
-replacement.
+**A durable generated id is deferred, and the observation is why.** Its only job
+was to recognise a sidecar *across* connections — and with the peer address
+observed, a reconnecting sidecar's correct address is known from the connection
+itself, so a persistent id buys much less than it did when the sidecar's
+declaration was the only source. It is also not a free win: a cloned VM carries its
+source's id, so the collision path has to be real, not theoretical. Not worth the
+wire-format change and master column until the probe-and-fallback path exists and
+can say what it would be used for.
+
+**Standing collision rule (implemented, not theoretical):** one address claimed by
+a *different* live socket is **refused** — `logger.error` naming both hostnames, an
+`{ok:false, error:'address-conflict: …'}` ack to the challenger, and **neither entry
+replaced**. Proven by "two sidecars claiming one address names the conflict and
+replaces neither entry". Any future identity scheme inherits this shape.
+
+For the record, the options that were weighed before the observation made them
+less necessary:
+
+| Option | Durable across | Breaks on |
+|---|---|---|
+| **A. uuid in `config.json`** | restart, DHCP move, `docker rm` | config reset / volume GC; **VM or image clone → two hosts share one id** |
+| **B. uuid + machine fingerprint** (`/etc/machine-id`, Docker host id) | as A, and a clone differs if the fingerprint does | fingerprint unavailable in some containers; `machine-id` is itself cloned by naive VM copies |
+| **C. operator-assigned name** in `/admin/hostprov` | anything — declared, not derived | needs an action per host; a typo collides, though at assignment time where it can be caught |
+
 
 ### Item 8 — deliberately not built
 
