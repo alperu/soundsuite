@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.4.0](https://github.com/alperu/soundsuite/compare/v1.3.6...v1.4.0) (2026-09-13)
+
+
+### Features
+
+* **mcp:** close v5 residual gaps; wire the outline model to admin config ([931ae89](https://github.com/alperu/soundsuite/commit/931ae891ccd85d2d1f2f5990a42893996f3fd377))
+* **mcp:** guard the API surface, add discovery tools, make scan a real regex ([7d148b3](https://github.com/alperu/soundsuite/commit/7d148b398898722760594814407c0661843ef113))
+* **mcp:** make local evidence citable and bounded (v4 fixes) ([c4cee6f](https://github.com/alperu/soundsuite/commit/c4cee6fa83eaea466d333cdfbe46e9a86e9cba94))
+* **mcp:** split the MCP surface into local (evidence) and routed (LLM router) profiles ([59a9236](https://github.com/alperu/soundsuite/commit/59a92365fa04f093184bdb50bb4a32b3f390ac07))
+* **search:** draft-record guard + v3 MCP follow-up fixes ([0cb5dd8](https://github.com/alperu/soundsuite/commit/0cb5dd8f4ce28d78fa1842664485a34128d5f0da))
+
+
+### Bug Fixes
+
+* a fully-stale fleet reported a role unavailable instead of unknown ([4fa2f5b](https://github.com/alperu/soundsuite/commit/4fa2f5bd40619218159a85635f82b8e5561362e2))
+* **mcp:** assertCasesExist fails loudly when it cannot validate ([e581586](https://github.com/alperu/soundsuite/commit/e5815863887fd6591c33a19e288c5a9ac3fe80c7))
+* **mcp:** citation parity under caseIds ([af0986d](https://github.com/alperu/soundsuite/commit/af0986db1350fa9e6fe74520ec76e7f99c8a863c))
+* **mcp:** multi-case scoping, parameter typing, and no ORM leaks on the search tools ([d838531](https://github.com/alperu/soundsuite/commit/d8385310e33df1a6fb94f3bf877015ef899ab4ac))
+* **mcp:** scan_for_pattern recall soundness — branch coverage and honest exhaustion ([1ee0a4f](https://github.com/alperu/soundsuite/commit/1ee0a4ff3c243331cd787eaedc465f7ae7223e62))
+
 ## [1.3.6](https://github.com/alperu/soundsuite/compare/v1.3.5...v1.3.6) (2026-09-03)
 
 
