@@ -724,3 +724,42 @@ describe('reconnect ownership', () => {
     await settle(() => mA.ws === null, 'orphan socket closed');
   });
 });
+
+describe('one master, one socket', () => {
+  it('connectMaster on an already-connected slot does not open a second socket', async () => {
+    // The root defect behind the fleet-wide reconnect loop. connectMaster checked
+    // only `m.retired`, so any caller could open a second socket, and the open
+    // handler's `m.ws = ws` then discarded the only reference to the first. That
+    // orphan could be closed by nobody but the master — which is why masters grew
+    // a supersede close, why closing it fed a ~1.1s loop, and why 10,196 sockets
+    // once accumulated from a single host.
+    const m: MasterConnection = ensureMaster(urlA, { wsPort: masterA.wsPort });
+    wsClient.connectMaster(m);
+    await masterA.waitForRegistrations(1);
+    const firstSocket = m.ws;
+
+    // Call it again, repeatedly, exactly as scheduleReconnect would.
+    wsClient.connectMaster(m);
+    wsClient.connectMaster(m);
+    wsClient.connectMaster(m);
+    await sleep(600);
+
+    // One registration total, and the same socket object throughout: no second
+    // socket was created, so there is no orphan for anyone to clean up.
+    expect(masterA.registrations).toBe(1);
+    expect(m.ws).toBe(firstSocket);
+    expect(m.ws?.readyState).toBe(1); // OPEN
+  });
+
+  it('still reconnects after the socket genuinely closes', async () => {
+    // The guard must not wedge the slot shut — a dead socket has to be replaceable,
+    // or a host never recovers from a real disconnect.
+    const m: MasterConnection = ensureMaster(urlA, { wsPort: masterA.wsPort });
+    wsClient.connectMaster(m);
+    await masterA.waitForRegistrations(1);
+
+    m.ws?.close();
+    await settle(() => masterA.registrations >= 2, 'reconnect after a real close', 8000);
+    expect(masterA.registrations).toBeGreaterThanOrEqual(2);
+  });
+});

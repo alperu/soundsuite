@@ -97,6 +97,39 @@ if (!g.__ss_ws_sweep__) g.__ss_ws_sweep__ = { timer: null as ReturnType<typeof s
 const LIVENESS_SWEEP_MS = 30_000;
 
 /**
+ * How long a superseded socket is left open before the sweep terminates it.
+ *
+ * The relay used to close it immediately, and that turned one spurious client
+ * reconnect into a self-sustaining loop: the close landed in the sidecar's close
+ * handler, the sidecar reconnected on its 1s floor, the new register superseded
+ * again. Measured at ~1.1s per cycle on three of five hosts, indefinitely.
+ *
+ * Delaying the close breaks the FEEDBACK, not the symptom: a single reconnect
+ * stays a single event because nothing is closed in response to it. The Fantom
+ * MCP server, an independent master implementation talking to these same
+ * sidecars, does exactly this and does not flap — which is the controlled
+ * comparison that identified this (see
+ * docs/MCP-Improvements/REPORT-v17-master-socket-obligations.md).
+ *
+ * This stays in place even after the client stops opening redundant sockets. A
+ * master faces clients it cannot upgrade — older sidecars, and now third-party
+ * ones, since the sidecar is published. Tolerating a client that reconnects too
+ * often is the correct posture at a trust boundary, not a workaround.
+ *
+ * Deliberately shorter than Fantom's 2 minutes: it chose that with the cause
+ * unknown, and at observed churn rates it holds ~300 descriptors per host. The
+ * sweep runs every 30s regardless, so the damping is the same and the held
+ * descriptor count is an order of magnitude lower. `0` restores immediate
+ * termination, which is how the old behaviour stays testable.
+ */
+const SUPERSEDED_GRACE_MS = Number(
+  process.env.GPU_WS_SUPERSEDED_GRACE_MS ?? 45_000,
+);
+
+/** Marks when a socket was superseded, so the sweep can reap it after the grace. */
+const SUPERSEDED_AT = Symbol.for('ss.wsRelay.supersededAt');
+
+/**
  * How long a socket may stay connected without sending `register`.
  *
  * Supersede-and-close only fires from the `register` branch, so a socket that
@@ -289,7 +322,19 @@ function closeSocket(ws: WebSocket, code: number, reason: string): void {
  */
 function runLivenessSweep(): void {
   if (!wss) return;
+  const now = Date.now();
   for (const client of wss.clients) {
+    // Superseded sockets are reaped on time, not on liveness. An orphan the
+    // client has stopped referencing still answers pings (the `ws` library
+    // replies at protocol level), so the ALIVE check below can never reclaim it.
+    const supersededAt = (client as any)[SUPERSEDED_AT] as number | undefined;
+    if (supersededAt !== undefined && now - supersededAt > SUPERSEDED_GRACE_MS) {
+      logger.info('Terminating superseded sidecar socket after grace', {
+        supersededForMs: now - supersededAt,
+      });
+      try { client.terminate(); } catch { /* ignore */ }
+      continue;
+    }
     if ((client as any)[ALIVE] !== true) {
       // Terminate, not close: it has already failed to answer a ping, so a
       // graceful handshake would wait for a peer that is not listening.
@@ -417,8 +462,23 @@ export function startWsRelay(): WebSocketServer {
         // it, leaking one file descriptor per reconnect. Close it explicitly.
         const superseded = sidecars.get(msg.agentUrl);
         if (superseded && superseded.ws !== ws) {
-          logger.info('Closing superseded sidecar socket', { agentUrl: msg.agentUrl });
-          closeSocket(superseded.ws, 1012, 'superseded-by-new-registration');
+          if (SUPERSEDED_GRACE_MS === 0) {
+            logger.info('Closing superseded sidecar socket (grace disabled)', {
+              agentUrl: msg.agentUrl,
+            });
+            closeSocket(superseded.ws, 1012, 'superseded-by-new-registration');
+          } else if ((superseded.ws as any)[SUPERSEDED_AT] === undefined) {
+            // Mark, do not close. Closing here is what fed the reconnect loop —
+            // see SUPERSEDED_GRACE_MS. The sweep reaps it after the grace whether
+            // or not it is still answering pings, so descriptors stay bounded:
+            // a live orphan pongs happily and the liveness check alone would
+            // never reclaim it.
+            (superseded.ws as any)[SUPERSEDED_AT] = Date.now();
+            logger.info('Marked superseded sidecar socket for reaping', {
+              agentUrl: msg.agentUrl,
+              graceMs: SUPERSEDED_GRACE_MS,
+            });
+          }
         }
         sidecars.set(msg.agentUrl, {
           ws,

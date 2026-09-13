@@ -31,6 +31,8 @@ process.env.GPU_WS_PORT = String(PORT);
 // Short enough to assert against; the module reads this at import time.
 const REGISTER_TIMEOUT_MS = 300;
 process.env.GPU_WS_REGISTER_TIMEOUT_MS = String(REGISTER_TIMEOUT_MS);
+// Non-zero so re-register MARKS rather than closes; 1ms so one sweep reaps it.
+process.env.GPU_WS_SUPERSEDED_GRACE_MS = '1';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 // The relay caches its server and maps on globalThis so Next.js module
@@ -103,7 +105,7 @@ beforeAll(() => { relay.startWsRelay(); });
 afterAll(() => { relay.stopWsRelay(); });
 
 describe('ws-relay socket accounting', () => {
-  it('closes the superseded socket when a sidecar re-registers', async () => {
+  it('reaps the superseded socket via the sweep when a sidecar re-registers', async () => {
     const agent = nextAgent();
     const first = await connect();
     await register(first, agent);
@@ -113,7 +115,10 @@ describe('ws-relay socket accounting', () => {
     const second = await connect();
     await register(second, agent);
 
-    // The previous socket must be closed, not merely dereferenced.
+    // The previous socket is MARKED, not closed — closing it here is what fed the
+    // ~1.1s reconnect loop. It must still be reclaimed, just by the sweep rather
+    // than synchronously, so descriptors stay bounded.
+    relay.__sweepForTests();
     await closed(first);
     expect(first.readyState).toBe(WsClient.CLOSED);
     expect(second.readyState).toBe(WsClient.OPEN);
@@ -134,6 +139,7 @@ describe('ws-relay socket accounting', () => {
     await register(first, agent);
     const second = await connect();
     await register(second, agent);
+    relay.__sweepForTests();
     await closed(first);
     // Let the relay's own close handler run before asserting on its effects.
     await new Promise((r) => setTimeout(r, 50));
@@ -158,6 +164,11 @@ describe('ws-relay socket accounting', () => {
 
     const superseded = sockets.slice(0, -1);
     const live = sockets[sockets.length - 1];
+
+    // Each re-register marked its predecessor; one sweep reclaims them all. The
+    // property under test is unchanged — nothing accumulates without bound — only
+    // the moment of reclamation moved.
+    relay.__sweepForTests();
 
     // The property that matters: every superseded socket actually reaches CLOSED.
     // Before the fix these stayed OPEN forever — one leaked descriptor per
@@ -236,5 +247,50 @@ describe('register handshake timeout', () => {
     await closed(ws);
     await new Promise((r) => setTimeout(r, REGISTER_TIMEOUT_MS * 2));
     expect(ws.readyState).toBe(WsClient.CLOSED);
+  });
+});
+
+describe('superseded sockets are marked, not closed', () => {
+  it('leaves the incumbent OPEN when a sidecar re-registers', async () => {
+    // The whole point: closing here fed a ~1.1s reconnect loop, because the close
+    // landed in the sidecar's close handler and it reconnected on its 1s floor.
+    // A single spurious reconnect must stay a single event.
+    const agent = nextAgent();
+    const first = await connect();
+    await register(first, agent);
+    const second = await connect();
+    await register(second, agent);
+
+    // Give an immediate close every chance to happen.
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(first.readyState).toBe(WsClient.OPEN);
+    expect(second.readyState).toBe(WsClient.OPEN);
+    // Both are held, which is the bounded cost of not closing: the sweep reaps
+    // the marked one after the grace.
+    await expectSocketCount(2);
+
+    first.close(); second.close();
+    await Promise.all([closed(first), closed(second)]);
+  });
+
+  it('reaps the superseded socket once the grace has elapsed', async () => {
+    const agent = nextAgent();
+    const first = await connect();
+    await register(first, agent);
+    const second = await connect();
+    await register(second, agent);
+
+    // The test build sets the grace to 0ms via env, so one sweep reaps it.
+    relay.__sweepForTests();
+
+    await closed(first);
+    expect(first.readyState).toBe(WsClient.CLOSED);
+    // Reaped on TIME, not on liveness — an orphan still answers pings, so the
+    // pong check alone could never reclaim it.
+    expect(second.readyState).toBe(WsClient.OPEN);
+
+    second.close();
+    await closed(second);
   });
 });

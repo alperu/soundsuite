@@ -1223,6 +1223,31 @@ export function connectMaster(m: MasterConnection): void {
     log.info(`[${m.serverUrl}] connectMaster: slot is retired — not connecting`);
     return;
   }
+  // One master, one socket — enforced where sockets are CREATED.
+  //
+  // This guard is the root fix for the fleet-wide reconnect loop. Without it,
+  // anything that calls connectMaster on an already-connected slot opens a second
+  // socket, and the `open` handler's `m.ws = ws` then discards the only reference
+  // to the first one. That orphan cannot be closed by us — we no longer know it
+  // exists — so the MASTER became the only party able to close it. That is why
+  // masters grew a supersede-on-register close, why closing it fed a 1.1s
+  // reconnect loop, and why before any such close existed one host accumulated
+  // 10,196 open sockets until every child_process.spawn failed with `spawn EBADF`.
+  //
+  // Refusing here removes the orphan rather than arranging for someone else to
+  // clean it up: no second socket, nothing to supersede, no master-side
+  // prosthesis needed. See docs/MCP-Improvements/REPORT-v17-master-socket-obligations.md.
+  //
+  // CONNECTING counts. connectAllMasters() starts every slot in one tick, so a
+  // readyState===OPEN-only test would let two attempts through before either
+  // finishes its handshake — which is precisely the boot case.
+  if (m.ws && (m.ws.readyState === WebSocket.OPEN || m.ws.readyState === WebSocket.CONNECTING)) {
+    log.debug(
+      `[${m.serverUrl}] connectMaster: a socket is already ` +
+      `${m.ws.readyState === WebSocket.OPEN ? 'open' : 'connecting'} — not opening a second`,
+    );
+    return;
+  }
   // Every attempt gets its own epoch. The callbacks below capture it, so an
   // earlier attempt's close/error/timeout cannot touch this slot once a newer
   // attempt — or `disconnectMaster` — has moved past it.
