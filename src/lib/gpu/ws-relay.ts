@@ -290,8 +290,31 @@ async function persistSidecarList(): Promise<void> {
 /** Symbol key for per-socket liveness, so it cannot collide with `ws` internals. */
 const ALIVE = Symbol.for('ss.wsRelay.alive');
 
+/** Consecutive sweeps this socket has failed to answer a ping. */
+const MISSES = Symbol.for('ss.wsRelay.pingMisses');
+
+/**
+ * How many consecutive missed pings before a socket is presumed dead.
+ *
+ * One missed ping is NOT evidence of death. `ws` answers pings automatically, so
+ * a miss means the peer's event loop did not run — and a sidecar's event loop does
+ * heavy work on it: Docker calls, pulling a model into VRAM, OCR. A stall longer
+ * than one sweep is normal there, not fatal.
+ *
+ * Terminating on a single miss made the sweep behave like a policy close: it killed
+ * sockets whose peers were merely busy, the sidecar reconnected, and it re-registered.
+ * Measured after the supersede grace landed (which is what let sockets live long
+ * enough to be swept at all): 8 unresponsive-terminations per 90 s across five
+ * healthy hosts, accounting for most of the residual re-registration.
+ *
+ * At 3 misses a genuinely dead peer is still reclaimed within ~3 sweeps, so the
+ * descriptor bound that motivated the sweep is preserved — it is just less eager.
+ */
+const PING_MISS_TOLERANCE = Number(process.env.GPU_WS_PING_MISS_TOLERANCE ?? 3);
+
 function markAlive(ws: WebSocket): void {
   (ws as any)[ALIVE] = true;
+  (ws as any)[MISSES] = 0;
 }
 
 /**
@@ -336,10 +359,24 @@ function runLivenessSweep(): void {
       continue;
     }
     if ((client as any)[ALIVE] !== true) {
-      // Terminate, not close: it has already failed to answer a ping, so a
-      // graceful handshake would wait for a peer that is not listening.
-      logger.warn('Terminating unresponsive sidecar socket (no pong since last sweep)');
-      try { client.terminate(); } catch { /* ignore */ }
+      const misses = ((client as any)[MISSES] ?? 0) + 1;
+      (client as any)[MISSES] = misses;
+      if (misses >= PING_MISS_TOLERANCE) {
+        // Terminate, not close: it has failed several pings, so a graceful
+        // handshake would wait for a peer that is not listening.
+        logger.warn('Terminating unresponsive sidecar socket', {
+          consecutiveMissedPings: misses,
+          tolerance: PING_MISS_TOLERANCE,
+        });
+        try { client.terminate(); } catch { /* ignore */ }
+        continue;
+      }
+      // Busy, not dead. Ping again and give it another sweep.
+      logger.debug('Sidecar socket missed a ping — within tolerance', {
+        consecutiveMissedPings: misses,
+        tolerance: PING_MISS_TOLERANCE,
+      });
+      try { client.ping(); } catch { /* ignore */ }
       continue;
     }
     (client as any)[ALIVE] = false;

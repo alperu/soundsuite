@@ -198,19 +198,58 @@ describe('ws-relay socket accounting', () => {
     await closed(ws);
   });
 
-  it('terminates a socket that never answers a ping', async () => {
+  it('tolerates a single missed ping — a busy peer is not a dead one', async () => {
+    // One miss means the peer's event loop did not run. A sidecar loads models and
+    // talks to Docker on that loop, so a stall longer than one sweep is normal.
+    // Terminating here made the sweep behave like a policy close.
     const ws = await connect();
     await register(ws, nextAgent());
-
-    // Suppress the automatic pong so the socket looks dead to the relay.
     (ws as any)._receiver?.removeAllListeners('ping');
     ws.pong = () => {};
 
-    relay.__sweepForTests(); // marks it pending
-    relay.__sweepForTests(); // no pong arrived -> terminate
+    relay.__sweepForTests(); // arms
+    relay.__sweepForTests(); // miss 1 — must NOT terminate
+
+    await new Promise((r) => setTimeout(r, 100));
+    expect(ws.readyState).toBe(WsClient.OPEN);
+
+    ws.close();
+    await closed(ws);
+  });
+
+  it('terminates a socket that misses the full tolerance of pings', async () => {
+    const ws = await connect();
+    await register(ws, nextAgent());
+    (ws as any)._receiver?.removeAllListeners('ping');
+    ws.pong = () => {};
+
+    // arm, then miss 1, 2, 3 — the third reaches the default tolerance.
+    for (let i = 0; i < 5; i++) relay.__sweepForTests();
 
     await closed(ws);
     expect(ws.readyState).toBe(WsClient.CLOSED);
+  });
+
+  it('a pong resets the miss counter, so intermittent stalls never accumulate', async () => {
+    // A peer that stalls, recovers, stalls again must never be terminated — the
+    // counter has to reset on traffic, not decay.
+    const ws = await connect();
+    await register(ws, nextAgent());
+
+    for (let cycle = 0; cycle < 4; cycle++) {
+      // stall for one sweep
+      const origPong = ws.pong.bind(ws);
+      ws.pong = () => {};
+      relay.__sweepForTests();
+      // recover: restore pong and let a real one through
+      ws.pong = origPong;
+      relay.__sweepForTests();
+      await new Promise((r) => setTimeout(r, 60));
+    }
+
+    expect(ws.readyState).toBe(WsClient.OPEN);
+    ws.close();
+    await closed(ws);
   });
 });
 
