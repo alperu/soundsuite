@@ -1160,6 +1160,25 @@ export function connectMaster(m: MasterConnection): void {
 
     ws.on('close', () => {
       clearTimeout(connectTimeout);
+      // This closure captures the socket that closed, but mutates the per-master
+      // state `m`, which may by now point at a NEWER socket. Tearing down
+      // unconditionally is a self-sustaining reconnect loop:
+      //
+      //   master closes the superseded socket -> this handler nulls m.ws (the
+      //   LIVE one) -> the live socket is orphaned, still open, referenced by
+      //   nothing -> mode flips to disconnected -> reconnect -> the master
+      //   supersedes again -> repeat, leaking one socket per turn.
+      //
+      // Observed as `mode: websocket` with a heartbeat many minutes stale on a
+      // 5s interval: state describing a connection nothing is using. The master
+      // guards the mirror image of this race in src/lib/gpu/ws-relay.ts.
+      //
+      // `m.ws === null` must still fall through: that is the failed-handshake /
+      // connect-timeout path, which genuinely needs the reconnect scheduled.
+      if (m.ws && m.ws !== ws) {
+        log.info(`[${m.serverUrl}] Superseded WebSocket closed; live connection retained`);
+        return;
+      }
       log.info(`[${m.serverUrl}] WebSocket disconnected`);
       m.ws = null;
       m.connectionMode = 'disconnected';
@@ -1174,6 +1193,13 @@ export function connectMaster(m: MasterConnection): void {
     ws.on('error', async (err: Error) => {
       clearTimeout(connectTimeout);
       log.error(`[${m.serverUrl}] WebSocket error: ${err.message || 'unknown'}`);
+      // Same identity rule as 'close': an error on a socket we have already
+      // replaced must not disturb the live connection. Release it and stop.
+      if (m.ws && m.ws !== ws) {
+        log.info(`[${m.serverUrl}] Error on superseded WebSocket; terminating it only`);
+        try { ws.terminate(); } catch { /* ignore */ }
+        return;
+      }
       if (!m.ws) {
         log.info(`[${m.serverUrl}] Falling back to HTTP gossip...`);
         ws.terminate();
