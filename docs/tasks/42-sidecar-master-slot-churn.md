@@ -558,3 +558,53 @@ heartbeat / poll / result endpoints, and can attach
 Suite: **19 tests** in `src/lib/gpu/__tests__/sidecar-master-rekey.test.ts`;
 `npx jest src/lib/gpu` is 8 suites / **124 tests**, green on three consecutive runs.
 Three of the four round-4 assertions failed before these fixes.
+
+
+## Round 5 — closing the class: every site that can make one master into two slots
+
+The audit the earlier rounds never did: **every** `ensureMaster` call site, asked the
+single question "can this produce a second slot for a master we already have?"
+
+| Site | Verdict |
+|---|---|
+| `ws-connect/route.ts:21`, `status/route.ts:32` | Operator action. Fine. |
+| `ws-client.ts` (`startGossipClient`) | Guarded by `state.masters.size === 0`. Fine. |
+| `config.ts:162` (`loadSavedConfig`) | **Yes** — merges config.json + sidecar.config.json + `SIDECAR_MASTERS`, deduped by **exact string**. An alias and a canonical name both survive boot. |
+| `config.ts:521` (`discoverMasters`) | **Yes** — probes candidate base URLs and keys a slot per URL that answers. A master answering on two addresses becomes two slots. |
+| `POST /api/masters` | **Yes** — the master's own reverse-poll channel. If the sidecar is already connected to that master under a different key, this adds a duplicate. |
+| `absorbMasterUrlHeader` | **Was yes** — fixed in round 4. |
+| `master-identity` handler | **Was yes** — fixed in round 1. |
+
+The three remaining sites share a property that defeats every fix so far: a
+multi-homed master (LAN address **and** VPN/Tailscale address — which is this
+fleet's actual shape) produces two slots whose dialled endpoints differ by
+**hostname**. The `connectMaster` endpoint claim compares `ws://host:port/sidecar`
+strings, so it sees two different endpoints and lets both connect. Both then register
+with the same `agentUrl`, and the master supersedes per `agentUrl`. Ping-pong, at a
+site no URL comparison can reach.
+
+**The only authoritative identity the sidecar ever receives is the master's own
+`canonicalUrl`**, in the `master-identity` frame. Two slots that hear the same
+`canonicalUrl` are the same master process regardless of what either dialled. So
+each slot now records `announcedCanonicalUrl`, and a slot that learns a canonical URL
+another live slot has already announced retires that twin (keeping the slot carrying
+the current frame) with a WARN naming both keys.
+
+This fixes the three remaining generators without touching them: whichever of them
+created the duplicate, the duplicate is retired as soon as the master identifies
+itself. It also means the fix does not depend on guessing which address is "right" —
+the master says.
+
+Test: *retires the duplicate once both slots hear the same canonical URL* — two keys
+(`127.0.0.1` and `localhost`) for one listener, so the endpoint guard provably cannot
+see them as one master. Fails without the change (2 live slots, churning).
+
+**Caveat, stated rather than hidden:** this depends on the master being able to
+identify itself. A master whose `buildMasterIdentityFrame()` returns null — the
+stranded `HostProvisioning` row case — announces nothing, so duplicates from these
+three sites survive until it can. That is the master-side fix already noted in round
+3; the sidecar now degrades to "two slots, churning" only in that window rather than
+permanently.
+
+Suite: **20 tests**; `npx jest src/lib/gpu` is 8 suites / **125 tests**, green on
+three consecutive runs. `sideCar` tsc clean apart from task 45's `page.tsx`.
