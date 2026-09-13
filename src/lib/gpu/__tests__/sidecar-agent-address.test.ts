@@ -69,25 +69,39 @@ describe('resolveAgentUrl precedence', () => {
     expect(r).toEqual({ url: 'http://198.51.100.7:8098', source: 'env:EXTERNAL_IP' });
   });
 
-  it('detection beats a persisted address — this is the drift bug', () => {
+  it('a persisted address still beats detection — deliberately, because of VPN paths', () => {
     const r = resolveAgentUrl({
       env: {},
-      savedAgentUrl: 'http://192.0.2.242:8098', // pinned by a past self-update
-      interfaces: ifaces({ en0: [['192.0.2.238']] }), // where DHCP moved the host
+      savedAgentUrl: 'http://192.0.2.242:8098',
+      interfaces: ifaces({ en0: [['192.0.2.238']] }),
+      port: PORT,
+    });
+    expect(r).toEqual({ url: 'http://192.0.2.242:8098', source: 'saved' });
+  });
+
+  it('detects only when there is no persisted address to honour', () => {
+    const r = resolveAgentUrl({
+      env: {},
+      savedAgentUrl: null,
+      interfaces: ifaces({ en0: [['192.0.2.238']] }),
       port: PORT,
     });
     expect(r.url).toBe('http://192.0.2.238:8098');
     expect(r.source).toBe('detected');
   });
 
-  it('falls back to the persisted address only when nothing routable exists', () => {
+  it('a Tailscale-only host is not handed its LAN address by the /24 tie-break', () => {
+    // Tailscale hands out scattered /32s in 100.64.0.0/10, so a master at
+    // 100.64.5.7 shares no /24 with a node at 100.64.91.3 and the preference
+    // cannot fire. This is the mechanism by which an automatic re-advertise would
+    // have picked the LAN address and taken the host dark for a VPN-side master —
+    // which is why nothing re-advertises automatically.
     const r = resolveAgentUrl({
-      env: {},
-      savedAgentUrl: 'http://192.0.2.242:8098',
-      interfaces: ifaces({ lo0: [['127.0.0.1', true]] }),
-      port: PORT,
+      env: {}, savedAgentUrl: null, port: PORT,
+      masterHost: '100.64.5.7',
+      interfaces: ifaces({ en0: [['192.0.2.10']], tailscale0: [['100.64.91.3']] }),
     });
-    expect(r).toEqual({ url: 'http://192.0.2.242:8098', source: 'saved' });
+    expect(r.url).toBe('http://192.0.2.10:8098');
   });
 
   it('falls back to loopback with neither an interface nor a saved value', () => {

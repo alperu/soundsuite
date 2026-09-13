@@ -1,13 +1,13 @@
 @echo off
 REM Sound Suite Sidecar — Download & Install (Windows)
 REM Usage:
-REM   install.bat                          # defaults to http://172.16.16.9:3000
+REM   install.bat                          # defaults to http://192.0.2.10:3000
 REM   install.bat http://192.168.1.50:3000 # custom server
 REM   set INSTALL_DIR=D:\sidecar && install.bat  # custom install path
 setlocal enabledelayedexpansion
 
 set "SERVER=%~1"
-if "!SERVER!"=="" set "SERVER=http://172.16.16.9:3000"
+if "!SERVER!"=="" set "SERVER=http://192.0.2.10:3000"
 REM Default install dir: <current dir>\sidecar — keeps the user on the drive
 REM they invoked the installer from. Override with: set INSTALL_DIR=D:\path
 if "!INSTALL_DIR!"=="" set "INSTALL_DIR=%CD%\sidecar"

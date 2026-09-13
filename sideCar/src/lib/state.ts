@@ -1,4 +1,7 @@
 import type { WebSocket } from 'ws';
+import { createLogger } from './logger';
+
+const stateLog = createLogger('state');
 
 export const CONTAINER_PREFIX = 'ss-';
 
@@ -751,6 +754,36 @@ export interface MasterConnection {
   lastHeartbeatAt?: number;
   pendingCommands: Map<string, PendingCommand>;
   connectionStatus: string;
+  /**
+   * Bumped by every `connectMaster` attempt and by `disconnectMaster`. The
+   * socket callbacks capture the value they were created under and bail when it
+   * no longer matches, so a close or error belonging to a connection we have
+   * already replaced or torn down cannot mutate this slot or schedule a
+   * reconnect. Comparing `m.ws !== ws` is not enough on its own:
+   * `disconnectMaster` nulls `m.ws` before the close event lands, and the close
+   * handler's `m.ws === null` case deliberately falls through to
+   * `scheduleReconnect` (that is the failed-handshake path), so a manual
+   * disconnect re-armed the reconnect it had just cancelled.
+   */
+  wsEpoch: number;
+  /**
+   * Set when a slot is taken out of service for good (operator removal, or a
+   * duplicate of a master we are already connected to). A retired connection
+   * never reconnects, whatever fires late.
+   */
+  retired?: boolean;
+  /**
+   * Consecutive failed connect/heartbeat cycles. Once past
+   * UNREACHABLE_AFTER_FAILURES the slot reports `unreachable` instead of
+   * logging an error every cycle — *unreported is not down*, so it keeps
+   * retrying on the capped backoff. A master that is merely rebooting must not
+   * be abandoned.
+   */
+  unreachable?: boolean;
+  /** The `ws://host:port/sidecar` this slot last dialled. Two slots that dial
+   *  the identical URL are the same master process by construction — that is
+   *  a string comparison, not an inference about the network. */
+  wsUrl?: string;
 }
 
 export function getMaster(url: string): MasterConnection | undefined {
@@ -781,6 +814,7 @@ export function ensureMaster(
     wsHeartbeatFailCount: 0,
     pendingCommands: new Map(),
     connectionStatus: '',
+    wsEpoch: 0,
   };
   state.masters.set(url, m);
   syncLegacyServerUrl();
@@ -789,20 +823,62 @@ export function ensureMaster(
 
 export function removeMaster(url: string): MasterConnection | undefined {
   const m = state.masters.get(url);
-  if (m) state.masters.delete(url);
+  if (m) {
+    // A master count that changes without the connection having been torn down
+    // means something dropped the only reference to a live socket and its
+    // timers. The whole of task 42 was invisible because this was never said
+    // out loud. Callers should go through `retireMaster` (ws-client.ts).
+    if (m.ws || m.heartbeatTimer || m.pollTimer || m.wsReconnectTimer) {
+      stateLog.warn(
+        `Master slot ${url} removed while still live ` +
+        `(ws=${m.ws ? 'open' : 'null'}, heartbeat=${!!m.heartbeatTimer}, ` +
+        `poll=${!!m.pollTimer}, reconnect=${!!m.wsReconnectTimer}) — ` +
+        `its connection is now orphaned`,
+      );
+    }
+    state.masters.delete(url);
+  }
   syncLegacyServerUrl();
   return m;
 }
 
-export function rekeyMaster(oldUrl: string, newUrl: string): MasterConnection | undefined {
+/**
+ * Outcome of a rekey. `undefined` used to mean both "no such master" and,
+ * implicitly, nothing else — a collision was silently applied. Callers need to
+ * tell the two failure modes apart, so the result is discriminated.
+ */
+export type RekeyResult =
+  | { ok: true; master: MasterConnection }
+  | { ok: false; reason: 'not-found' }
+  | { ok: false; reason: 'conflict'; occupant: MasterConnection };
+
+/**
+ * Move a master slot to a new key.
+ *
+ * A destination that is already occupied is a CONFLICT, not a silent overwrite.
+ * The old code did `delete(oldUrl)` then `set(newUrl, m)`, which dropped the
+ * `MasterConnection` already at `newUrl` on the floor: the map shrank by one
+ * while that object kept a live `ws`, a live `heartbeatTimer` and a live
+ * reconnect chain referenced by nothing. Replacing an entry in a map of live
+ * connections is never just a `set`.
+ *
+ * The refusal path must not mutate anything — no `delete`, no `m.serverUrl`
+ * write, no `syncLegacyServerUrl()`. A half-applied rekey is worse than the
+ * overwrite it replaces. `api/masters/[serverUrl]` already answers 409 for this
+ * collision on the operator-driven rename path; this makes every other caller
+ * agree with it.
+ */
+export function rekeyMaster(oldUrl: string, newUrl: string): RekeyResult {
   const m = state.masters.get(oldUrl);
-  if (!m) return undefined;
-  if (oldUrl === newUrl) return m;
+  if (!m) return { ok: false, reason: 'not-found' };
+  if (oldUrl === newUrl) return { ok: true, master: m };
+  const occupant = state.masters.get(newUrl);
+  if (occupant && occupant !== m) return { ok: false, reason: 'conflict', occupant };
   state.masters.delete(oldUrl);
   m.serverUrl = newUrl;
   state.masters.set(newUrl, m);
   syncLegacyServerUrl();
-  return m;
+  return { ok: true, master: m };
 }
 
 /** Returns the first master URL (insertion order) or null. Used for legacy

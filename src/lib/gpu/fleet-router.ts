@@ -25,6 +25,11 @@ import { resolveModelFromConfig, type ModeName } from '@/lib/gpu/mode-catalog';
 import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
 import { seedAssignmentsForHost } from '@/lib/db/role-registry-seed';
 import { getProvisioning } from '@/lib/db/host-provisioning';
+import {
+  resolveSidecarAddress,
+  peekAddressChoice,
+  type AddressBasis,
+} from '@/lib/gpu/sidecar-address-probe';
 
 const logger = createLogger('FleetRouter');
 
@@ -264,6 +269,21 @@ export interface SidecarEntry {
   status: 'connected' | 'disconnected';
   containers: string[];
   note?: string;
+  /**
+   * The address the sidecar reached the master FROM — observed on its socket rather
+   * than declared by it. `ws-relay.ts` records it as `observedFromIp` and persists
+   * it here. Consumed by `sidecar-address-probe.ts` as a fallback callback target
+   * when the advertised address does not answer, which is what makes `EXTERNAL_IP`
+   * optional for a containerised sidecar that can only see the Docker bridge.
+   *
+   * The value was already written to `gpu.sidecars` and already survived
+   * `readSidecarList()` / `writeSidecarList()` (both raw JSON) — it was simply
+   * absent from *this* declaration, so TypeScript could not see it. Three other
+   * local declarations of the same persisted shape already carry it
+   * (`sidecars/register/route.ts:18`, `sidecars/heartbeat/route.ts:22`,
+   * `sidecar-reconnect-watchdog.ts:48`); that duplication is pre-existing.
+   */
+  lastSeenFromIp?: string;
 }
 
 export interface SidecarStatus {
@@ -277,6 +297,16 @@ export interface SidecarStatus {
 
 export interface FleetSidecar extends SidecarEntry {
   sidecarStatus?: SidecarStatus;
+  /**
+   * The address the master is actually calling, and why (task 44 item 5).
+   * `null` until something has resolved an address for this host — reading it never
+   * triggers a probe, so the fleet read surface stays cheap.
+   *
+   * `advertised` — the address the sidecar declared (includes an operator pin).
+   * `observed`   — the peer address off its socket; the advertised one did not answer.
+   * `advertised-unverified` — nothing answered; using the advertised address anyway.
+   */
+  effectiveAddress?: { baseUrl: string; basis: AddressBasis; decidedAt: number } | null;
 }
 
 export type GpuRole = 'embedding' | 'completion' | 'ocr' | 'reranker';
@@ -382,6 +412,15 @@ async function writeSidecarList(list: SidecarEntry[]): Promise<void> {
 /**
  * Get fleet status: merges DB sidecar list with live WS connections + status cache.
  */
+/**
+ * Address currently in use for a host, for display only. Never probes — a fleet
+ * listing must not fire N reachability checks.
+ */
+function describeChoice(url: string): FleetSidecar['effectiveAddress'] {
+  const c = peekAddressChoice(url);
+  return c ? { baseUrl: c.baseUrl, basis: c.basis, decidedAt: c.decidedAt } : null;
+}
+
 export async function getFleetStatus(): Promise<FleetStatus> {
   const dbList = await readSidecarList();
   const allCached = statusCache.getAllSidecarStatuses();
@@ -411,6 +450,8 @@ export async function getFleetStatus(): Promise<FleetStatus> {
       status: isConnected ? 'connected' : entry.status,
       lastSeen: cached ? new Date(cached.lastSeen).toISOString() : entry.lastSeen,
       sidecarStatus: cached as any,
+      // Read-only peek — never probes, so the fleet read surface stays cheap.
+      effectiveAddress: describeChoice(entry.url),
     });
   }
 
@@ -425,6 +466,7 @@ export async function getFleetStatus(): Promise<FleetStatus> {
         status: statusCache.isSidecarConnected(cached.agentUrl) ? 'connected' : 'disconnected',
         containers: Object.values(cached.containers).map(c => c.name).filter(Boolean),
         sidecarStatus: cached as any,
+        effectiveAddress: describeChoice(cached.agentUrl),
       });
     }
   }
@@ -1029,6 +1071,44 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
     const cfgPort = cached?.containers?.[role]?.config?.port;
     return typeof cfgPort === 'number' && cfgPort > 0 ? cfgPort : port;
   };
+
+  /**
+   * Hostname to actually call this sidecar on (task 44).
+   *
+   * Normally the host of its advertised `url`, which is today's behaviour and is
+   * also how an operator's `AGENT_URL` / `EXTERNAL_IP` pin arrives here. When that
+   * address does not answer a probe and the master observed a different peer
+   * address on the sidecar's own socket, the observed one is used instead — which
+   * is what lets a containerised sidecar that can only see the Docker bridge be
+   * reached with no `EXTERNAL_IP` set at all.
+   *
+   * Every substitution is probed first, and on total failure this returns the
+   * advertised hostname unchanged: on the embedding / rerank / RLM data path,
+   * failing back to today's behaviour beats any clever guess.
+   *
+   * ONE helper for all three return paths below, deliberately — three ragged edits
+   * on this function is how a regression gets in.
+   */
+  const hostFor = async (sidecar: FleetSidecar): Promise<string> => {
+    const declared = (() => {
+      try { return new URL(sidecar.url).hostname; } catch { return sidecar.url; }
+    })();
+    try {
+      const cached = statusCache.getSidecarStatus(sidecar.url);
+      const choice = await resolveSidecarAddress({
+        advertisedUrl: sidecar.url,
+        observedIp: sidecar.lastSeenFromIp,
+        expectVersion: cached?.version,
+      });
+      return choice.hostname || declared;
+    } catch (err) {
+      logger.warn(`Address resolution failed for ${sidecar.hostname} — using advertised address`, {
+        url: sidecar.url, error: (err as Error).message,
+      });
+      return declared;
+    }
+  };
+
   const exclude = new Set(options?.excludeHosts ?? []);
   const isExcluded = (sidecarUrl: string): boolean => {
     if (exclude.size === 0) return false;
@@ -1253,7 +1333,7 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
   }
 
   if (bestSidecar) {
-    const hostname = new URL(bestSidecar.url).hostname;
+    const hostname = await hostFor(bestSidecar);
     const resolvedPort = portFor(bestSidecar);
     // Send acquire to register the request + reset idle timer.
     //
@@ -1306,7 +1386,7 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
     try {
       const result = await sendToSidecar(sidecar.url, '/acquire', { role });
       if (!result.error) {
-        const hostname = new URL(sidecar.url).hostname;
+        const hostname = await hostFor(sidecar);
         const resolvedPort = portFor(sidecar);
         logger.info(`Route resolved: ${role} → ${sidecar.hostname} (${hostname}:${resolvedPort}), container=acquired, action=${result.action}`, {
           phase: 2,
@@ -1333,7 +1413,7 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
     try {
       const result = await sendToSidecar(sidecar.url, '/acquire', { role });
       if (!result.error) {
-        const hostname = new URL(sidecar.url).hostname;
+        const hostname = await hostFor(sidecar);
         const resolvedPort = portFor(sidecar);
         logger.info(`Route resolved: ${role} → ${sidecar.hostname} (${hostname}:${resolvedPort}), container=acquired (was disconnected)`, {
           phase: 3,

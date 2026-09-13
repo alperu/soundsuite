@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { state, removeMaster, rekeyMaster } from '@/lib/state';
 import { saveConfig } from '@/lib/config';
-import { disconnectMaster, connectMaster } from '@/lib/ws-client';
+import { disconnectMaster, connectMaster, retireMaster } from '@/lib/ws-client';
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
 
@@ -37,8 +37,9 @@ export async function DELETE(
         { status: 404, headers: cors },
       );
     }
-    disconnectMaster(m);
-    removeMaster(serverUrl);
+    // retireMaster, not disconnect+delete: it closes the socket, clears all
+    // three timers and marks the slot so nothing that fires late revives it.
+    retireMaster(m);
     saveConfig();
     return NextResponse.json(
       { ok: true, removed: serverUrl },
@@ -114,7 +115,15 @@ export async function PATCH(
     if ('clear' in wsPortChange) m.wsPort = undefined;
 
     if (urlChanged && newUrl) {
-      rekeyMaster(currentUrl, newUrl);
+      const res = rekeyMaster(currentUrl, newUrl);
+      if (!res.ok) {
+        // The 409 above should have caught a conflict; this is the belt-and-
+        // braces branch so a refused rekey can never read as a successful one.
+        return NextResponse.json(
+          { error: `Rename ${currentUrl} -> ${newUrl} refused: ${res.reason}` },
+          { status: res.reason === 'conflict' ? 409 : 404, headers: cors },
+        );
+      }
     }
 
     saveConfig();

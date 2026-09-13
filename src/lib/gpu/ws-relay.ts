@@ -241,6 +241,11 @@ async function persistSidecarList(): Promise<void> {
       lastSeen: new Date(s.lastSeen).toISOString(),
       status: s.ws.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
       containers: s.containers,
+      // Same field the HTTP register path already writes
+      // (src/app/api/admin/gpu/sidecars/register/route.ts:61). That one reads only
+      // x-forwarded-for / x-real-ip and so is EMPTY with no proxy in front; this
+      // one reads the socket, making it strictly better evidence of the path in use.
+      lastSeenFromIp: s.observedFromIp,
     }));
     await setConfigValue('gpu.sidecars', JSON.stringify(list));
   } catch (err) {
@@ -425,10 +430,17 @@ export function startWsRelay(): WebSocketServer {
           // work because its IP changed, and zeroing the count would let the
           // router over-admit against it.
           activeRequests: carried?.activeRequests ?? 0,
+          observedFromIp,
         });
+        // Log declared and observed together. On a VPN / Tailscale path they
+        // legitimately differ, and that difference is exactly the evidence needed
+        // to decide whether the observed address should become the callback target.
         logger.info('Sidecar registered via WebSocket', {
           agentUrl: msg.agentUrl,
           hostname: msg.hostname,
+          observedFromIp,
+          declaredMatchesObserved:
+            observedFromIp ? declaredHostOf(msg.agentUrl) === observedFromIp : null,
         });
 
         // Feed status cache on registration
@@ -695,10 +707,12 @@ export function getConnectedSidecars(): Array<{
   containers: string[];
   lastSeen: number;
   activeRequests: number;
+  /** Peer address off the socket — see SidecarConnection.observedFromIp. */
+  observedFromIp?: string;
 }> {
   return Array.from(sidecars.values())
     .filter(s => s.ws.readyState === WebSocket.OPEN)
-    .map(({ agentUrl, hostname, containers, lastSeen, activeRequests }) => ({
-      agentUrl, hostname, containers, lastSeen, activeRequests,
+    .map(({ agentUrl, hostname, containers, lastSeen, activeRequests, observedFromIp }) => ({
+      agentUrl, hostname, containers, lastSeen, activeRequests, observedFromIp,
     }));
 }

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { handleStatus } from '@/lib/handlers';
 import { state, ensureMaster, removeMaster } from '@/lib/state';
 import { saveConfig } from '@/lib/config';
-import { connectMaster, disconnectMaster, disconnectAllMasters } from '@/lib/ws-client';
+import { connectMaster, disconnectMaster, disconnectAllMasters, retireMaster } from '@/lib/ws-client';
 import { switchMode } from '@/lib/containers';
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
@@ -39,13 +39,10 @@ export async function POST(request: NextRequest) {
       // body.serverUrl optional — if provided, drop only that master. Else drop all.
       if (typeof serverUrl === 'string' && serverUrl) {
         const m = state.masters.get(serverUrl);
-        if (m) {
-          disconnectMaster(m);
-          removeMaster(serverUrl);
-        }
+        if (m) retireMaster(m);
       } else {
+        for (const m of [...state.masters.values()]) retireMaster(m);
         disconnectAllMasters();
-        for (const url of [...state.masters.keys()]) removeMaster(url);
       }
       saveConfig();
       return NextResponse.json({ message: 'Disconnected' }, { headers: cors });

@@ -52,6 +52,15 @@ let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 const PORT = parseInt(process.env.AGENT_PORT || process.env.PORT || '8098', 10);
 const HEARTBEAT_INTERVAL = 5_000;  // 5s heartbeat
 const POLL_INTERVAL = 3_000;       // 3s poll when WS is down
+// Once the reconnect backoff has grown past this, the master is REPORTED
+// unreachable: it shows as such in /api/status and stops logging an error every
+// cycle. It is NOT given up on — the capped backoff keeps retrying, because a
+// master that is merely rebooting must come back without operator action.
+// 1s doubling reaches 64s after six consecutive failures.
+const UNREACHABLE_AFTER_DELAY_MS = 60_000;
+// Same idea on the HTTP-gossip path, counted in consecutive heartbeat failures
+// rather than in backoff. At the 5s heartbeat this is ~1 minute.
+const UNREACHABLE_AFTER_FAILURES = 12;
 
 // ─── Agent URL detection ──────────────────────────────────────────────────
 
@@ -369,7 +378,24 @@ async function executeCommand(
       if (typeof payload.serverUrl === 'string' && payload.serverUrl) {
         if (m.serverUrl !== payload.serverUrl) {
           log.info(`[${m.serverUrl}] Master pushed serverUrl rename → ${payload.serverUrl}`);
-          rekeyMaster(m.serverUrl, payload.serverUrl);
+          const res = rekeyMaster(m.serverUrl, payload.serverUrl);
+          if (!res.ok && res.reason === 'conflict') {
+            // A rename onto a slot another master already holds used to be a
+            // silent `set()`: the occupant fell out of the map with its socket
+            // and timers still running, and `masters` shrank by one with
+            // nothing above INFO to say so. The sidecar cannot know which slot
+            // the operator meant, so refuse and say both URLs out loud. The
+            // operator resolves it from /setup, which answers 409 for the same
+            // collision (api/masters/[serverUrl] PATCH).
+            log.warn(
+              `[${m.serverUrl}] REFUSED serverUrl rename → ${payload.serverUrl}: ` +
+              `that URL is already held by a different master slot. Both slots ` +
+              `kept as-is; no master was dropped. Resolve it by removing one ` +
+              `entry in /setup.`,
+            );
+          } else if (!res.ok) {
+            log.warn(`[${m.serverUrl}] serverUrl rename → ${payload.serverUrl} failed: ${res.reason}`);
+          }
         }
       }
       if (payload.idleTimeouts) Object.assign(state.idleTimeouts, payload.idleTimeouts);
@@ -1012,6 +1038,7 @@ async function sendHttpHeartbeat(m: MasterConnection): Promise<void> {
         log.info(`[${m.serverUrl}] HTTP heartbeat recovered after ${m.httpHeartbeatFailCount} failures`);
       }
       m.httpHeartbeatFailCount = 0;
+      m.unreachable = false;
       m.lastHeartbeatAt = Date.now();
       try {
         const response = JSON.parse(responseBody);
@@ -1027,7 +1054,23 @@ async function sendHttpHeartbeat(m: MasterConnection): Promise<void> {
     }
   } catch (err) {
     m.httpHeartbeatFailCount++;
-    log.error(`[${m.serverUrl}] HTTP heartbeat failed (${m.httpHeartbeatFailCount}x): ${(err as Error).message}`);
+    // `HTTP heartbeat failed (53x)` at ERROR, once per cycle, forever, is how a
+    // master nobody wants any more reads in the log: as noise rather than as a
+    // dead entry. Report it once at WARN, then keep retrying quietly. Still
+    // retrying — unreachable is not gone.
+    if (m.httpHeartbeatFailCount === UNREACHABLE_AFTER_FAILURES) {
+      m.unreachable = true;
+      log.warn(
+        `[${m.serverUrl}] Master reported UNREACHABLE after ` +
+        `${m.httpHeartbeatFailCount} consecutive heartbeat failures ` +
+        `(${(err as Error).message}). Shown as unreachable in /api/status; ` +
+        `still retrying, and further failures log at debug.`,
+      );
+    } else if (m.unreachable) {
+      log.debug(`[${m.serverUrl}] HTTP heartbeat failed (${m.httpHeartbeatFailCount}x): ${(err as Error).message}`);
+    } else {
+      log.error(`[${m.serverUrl}] HTTP heartbeat failed (${m.httpHeartbeatFailCount}x): ${(err as Error).message}`);
+    }
   }
 }
 
@@ -1136,6 +1179,16 @@ function stopUpdateChecks(): void {
 // ─── Per-master WebSocket connection ─────────────────────────────────────
 
 export function connectMaster(m: MasterConnection): void {
+  if (m.retired) {
+    log.info(`[${m.serverUrl}] connectMaster: slot is retired — not connecting`);
+    return;
+  }
+  // Every attempt gets its own epoch. The callbacks below capture it, so an
+  // earlier attempt's close/error/timeout cannot touch this slot once a newer
+  // attempt — or `disconnectMaster` — has moved past it.
+  m.wsEpoch = (m.wsEpoch ?? 0) + 1;
+  const epoch = m.wsEpoch;
+  const stale = () => m.wsEpoch !== epoch;
   log.info(`[${m.serverUrl}] connectMaster: attempting (currentMode=${m.connectionMode}, reconnectDelay=${m.wsReconnectDelay}ms)`);
   try {
     const serverHost = new URL(m.serverUrl).hostname;
@@ -1147,12 +1200,48 @@ export function connectMaster(m: MasterConnection): void {
     const wsUrl = `ws://${serverHost}:${wsPort}/sidecar`;
     const agentUrl = getAgentUrl();
 
+    // One master, one socket. Two slots keyed differently but dialling the SAME
+    // ws endpoint are the same master process, and the master supersedes per
+    // agentUrl rather than per slot: each slot's register closes the other's
+    // socket, each close schedules its own reconnect, and the pair ping-pongs on
+    // the 1s backoff forever (6 registrations in 5s, reproduced in
+    // src/lib/gpu/__tests__/sidecar-master-rekey.test.ts; seen from the master
+    // side as 221 reconnects / 90s in mcpfantom's soundsuiteMaster.ts, where the
+    // cause was recorded as unknown). Refuse the redundant socket instead. The
+    // holder may well be the alias rather than the canonical key — we do not
+    // guess which is "right", we just decline to open a second connection to a
+    // master we are already connected to, and say so once.
+    for (const other of state.masters.values()) {
+      if (other === m || other.retired) continue;
+      if (other.wsUrl !== wsUrl) continue;
+      if (other.ws?.readyState !== WebSocket.OPEN) continue;
+      log.warn(
+        `[${m.serverUrl}] Duplicate master slot: ${wsUrl} is already connected as ` +
+        `${other.serverUrl}. Not opening a second socket (it would ping-pong: the ` +
+        `master supersedes per agentUrl, not per slot). Remove one of the two ` +
+        `entries in /setup.`,
+      );
+      m.wsReconnectDelay = Math.max(m.wsReconnectDelay, 60_000);
+      scheduleReconnect(m);
+      // After scheduleReconnect, which writes its own "Reconnecting in Ns"
+      // status: the operator needs to see WHY this slot is idle.
+      m.connectionStatus = `Duplicate of ${other.serverUrl} — not connecting`;
+      return;
+    }
+    m.wsUrl = wsUrl;
+
     log.info(`[${m.serverUrl}] Connecting to ${wsUrl} (agentUrl: ${agentUrl})...`);
     const headers: Record<string, string> = {};
     if (m.authToken) headers['Authorization'] = `Bearer ${m.authToken}`;
     const ws = new WebSocket(wsUrl, { headers });
 
     const connectTimeout = setTimeout(async () => {
+      if (stale()) {
+        // A newer attempt or a teardown owns this slot now. Release the socket
+        // this attempt opened — nothing else references it — and stop.
+        try { ws.terminate(); } catch { /* ignore */ }
+        return;
+      }
       log.warn(`[${m.serverUrl}] WebSocket connect timed out, falling back to HTTP gossip`);
       ws.terminate();
       await fallbackToHttp(m);
@@ -1160,7 +1249,14 @@ export function connectMaster(m: MasterConnection): void {
 
     ws.on('open', () => {
       clearTimeout(connectTimeout);
+      if (stale()) {
+        log.info(`[${m.serverUrl}] WebSocket opened for a superseded attempt — closing it`);
+        try { ws.close(); } catch { /* ignore */ }
+        return;
+      }
       log.info(`[${m.serverUrl}] WebSocket connected`);
+      m.unreachable = false;
+      m.httpHeartbeatFailCount = 0;
       m.wsReconnectDelay = 1000;
       m.ws = ws;
       m.connectionMode = 'websocket';
@@ -1230,18 +1326,56 @@ export function connectMaster(m: MasterConnection): void {
         if (canonical) {
           const normalized = canonical.replace(/\/+$/, '');
           try {
-            // If the current connection's key differs only after normalization,
-            // re-key this slot rather than creating a 2nd master entry.
-            if (m.serverUrl !== normalized && m.serverUrl.replace(/\/+$/, '') === normalized) {
-              log.info(`[${m.serverUrl}] master-identity rekey → ${normalized}`);
-              rekeyMaster(m.serverUrl, normalized);
-            }
+            // THIS is where `masters` grew duplicates. The old code rekeyed only
+            // when the difference was a trailing slash, and otherwise called
+            // `ensureMaster(normalized)` — adding a SECOND slot for the master
+            // we are already talking to. Both slots then register with the same
+            // agentUrl, the master supersedes per agentUrl rather than per slot,
+            // so each slot's register closes the other's socket and each close
+            // schedules its own reconnect: a ~1 s supersede ping-pong. Measured
+            // at 6 registrations in 5 s in
+            // src/lib/gpu/__tests__/sidecar-master-rekey.test.ts, and
+            // independently at 221 reconnects / 90 s from the master side
+            // (mcpfantom soundsuiteMaster.ts, SUPERSEDED_GRACE_MS comment,
+            // which recorded the symptom with the cause unknown).
+            //
+            // One master is one slot. Never add a slot from an identity frame.
             const existing = state.masters.get(normalized);
-            const portChanged = wsPort !== undefined && existing?.wsPort !== wsPort;
-            if (!existing || portChanged) {
-              ensureMaster(normalized, wsPort !== undefined ? { wsPort } : {});
+            if (existing && existing !== m) {
+              // Two keys, one master — by construction, since this master says
+              // `normalized` is its own canonical URL. Retire the duplicate
+              // (socket closed, timers cleared, never reconnects) and keep the
+              // slot whose socket is carrying this frame.
+              log.warn(
+                `[${m.serverUrl}] master-identity: ${normalized} is a second slot ` +
+                `for THIS master — retiring the duplicate to stop the supersede ` +
+                `ping-pong. Masters ${state.masters.size} → ${state.masters.size - 1}.`,
+              );
+              retireMaster(existing);
               saveConfig();
-              log.info(`Master identified: ${normalized}${wsPort !== undefined ? ` (wsPort=${wsPort})` : ''}`);
+            } else if (m.serverUrl !== normalized && m.serverUrl.replace(/\/+$/, '') === normalized) {
+              // Trailing-slash-only difference: re-key this slot in place.
+              log.info(`[${m.serverUrl}] master-identity rekey → ${normalized}`);
+              const res = rekeyMaster(m.serverUrl, normalized);
+              if (res.ok) saveConfig();
+              else log.warn(`[${m.serverUrl}] master-identity rekey → ${normalized} refused: ${res.reason}`);
+            } else if (m.serverUrl !== normalized) {
+              // The master announces a genuinely different URL. Do NOT adopt it
+              // as this slot's key and do NOT add a slot: the key we are
+              // connected on demonstrably works, and the announced one is
+              // unverified. On a host whose master is sometimes behind a VPN a
+              // wrong address takes the host dark and recovery means editing
+              // config inside a container (see the startGossipClient comment and
+              // docs/tasks/41-sidecar-address-drift.md).
+              log.info(
+                `[${m.serverUrl}] master-identity announced ${normalized}; keeping ` +
+                `the key that is working (no second slot)`,
+              );
+            }
+            if (wsPort !== undefined && m.wsPort !== wsPort) {
+              m.wsPort = wsPort;
+              saveConfig();
+              log.info(`Master identified: ${m.serverUrl} (wsPort=${wsPort})`);
             }
           } catch (err) {
             log.warn(`master-identity handling failed for "${normalized}": ${(err as Error).message}`);
@@ -1301,6 +1435,15 @@ export function connectMaster(m: MasterConnection): void {
       //
       // `m.ws === null` must still fall through: that is the failed-handshake /
       // connect-timeout path, which genuinely needs the reconnect scheduled.
+      // `m.ws !== ws` catches the case where a newer socket is already
+      // installed. The epoch catches the two it cannot see: a manual
+      // `disconnectMaster` (which nulls `m.ws` *before* this event lands, so the
+      // `m.ws === null` fall-through below re-armed the very reconnect the
+      // disconnect had just cancelled), and a slot that has been retired.
+      if (stale()) {
+        log.info(`[${m.serverUrl}] Closed socket belongs to a superseded attempt; nothing to do`);
+        return;
+      }
       if (m.ws && m.ws !== ws) {
         log.info(`[${m.serverUrl}] Superseded WebSocket closed; live connection retained`);
         return;
@@ -1318,7 +1461,15 @@ export function connectMaster(m: MasterConnection): void {
 
     ws.on('error', async (err: Error) => {
       clearTimeout(connectTimeout);
-      log.error(`[${m.serverUrl}] WebSocket error: ${err.message || 'unknown'}`);
+      if (stale()) {
+        try { ws.terminate(); } catch { /* ignore */ }
+        return;
+      }
+      // A slot that has been reported unreachable keeps retrying on the capped
+      // backoff, but stops logging an error every cycle — the whole point of
+      // item 6 is that a dead entry reads as dead, not as noise.
+      if (m.unreachable) log.debug(`[${m.serverUrl}] WebSocket error (unreachable): ${err.message || 'unknown'}`);
+      else log.error(`[${m.serverUrl}] WebSocket error: ${err.message || 'unknown'}`);
       // Same identity rule as 'close': an error on a socket we have already
       // replaced must not disturb the live connection. Release it and stop.
       if (m.ws && m.ws !== ws) {
@@ -1354,10 +1505,33 @@ async function fallbackToHttp(m: MasterConnection): Promise<void> {
 }
 
 export function scheduleReconnect(m: MasterConnection): void {
+  if (m.retired) return;
   if (m.wsReconnectTimer) clearTimeout(m.wsReconnectTimer);
-  // Master may have been removed between scheduling and firing
+  // Consecutive failures without a successful connect. Reported, not given up
+  // on: a master that is merely rebooting must come back on its own.
+  if (!m.unreachable && m.wsReconnectDelay >= UNREACHABLE_AFTER_DELAY_MS) {
+    m.unreachable = true;
+    log.warn(
+      `[${m.serverUrl}] Master reported UNREACHABLE after repeated failures ` +
+      `(backoff now ${Math.round(m.wsReconnectDelay / 1000)}s). Still retrying — ` +
+      `unreported is not down, and unreachable is not gone. Per-cycle errors ` +
+      `are demoted to debug until it answers.`,
+    );
+  }
   m.wsReconnectTimer = setTimeout(() => {
-    if (!state.masters.has(m.serverUrl)) return;
+    m.wsReconnectTimer = null;
+    // IDENTITY, not key. `state.masters.has(m.serverUrl)` was true for an
+    // orphaned connection whose key had been taken over by another
+    // MasterConnection, so the orphan reconnected and re-registered forever.
+    if (m.retired) return;
+    if (state.masters.get(m.serverUrl) !== m) {
+      log.warn(
+        `[${m.serverUrl}] Reconnect cancelled: this connection no longer owns ` +
+        `its key (another slot does) — retiring the orphan`,
+      );
+      retireMaster(m);
+      return;
+    }
     connectMaster(m);
   }, m.wsReconnectDelay);
   m.connectionStatus = `Reconnecting in ${Math.round(m.wsReconnectDelay / 1000)}s...`;
@@ -1370,6 +1544,12 @@ export function scheduleReconnect(m: MasterConnection): void {
 }
 
 export function disconnectMaster(m: MasterConnection): void {
+  // Bump the epoch FIRST. The `ws.close()` below fires its close event
+  // asynchronously, by which time `m.ws` is already null — and the close
+  // handler's `m.ws === null` branch is the failed-handshake path, which
+  // deliberately schedules a reconnect. Without this bump, disconnecting a
+  // master re-armed the reconnect it had just cancelled.
+  m.wsEpoch = (m.wsEpoch ?? 0) + 1;
   if (m.wsReconnectTimer) { clearTimeout(m.wsReconnectTimer); m.wsReconnectTimer = null; }
   if (m.heartbeatTimer) { clearInterval(m.heartbeatTimer); m.heartbeatTimer = null; }
   if (m.pollTimer) { clearInterval(m.pollTimer); m.pollTimer = null; }
@@ -1379,7 +1559,29 @@ export function disconnectMaster(m: MasterConnection): void {
   }
   m.connectionMode = 'disconnected';
   m.pendingCommands.clear();
+  m.wsUrl = undefined;
+  // Process-wide update checks were only ever stopped from the close handler,
+  // which now (correctly) returns early for a socket this teardown has already
+  // invalidated. Stop them here so a manual disconnect of the last WS master
+  // does not leave the interval armed.
+  if (!anyWebSocketConnected()) stopUpdateChecks();
   log.info(`[${m.serverUrl}] Disconnected (manual)`);
+}
+
+/**
+ * The ONLY safe way to take a slot out of the map. Tears the connection down
+ * (socket closed, all three timers cleared, epoch bumped) and marks it retired
+ * so nothing that fires late can revive it, THEN removes the key.
+ *
+ * Callers that just `state.masters.delete(url)` — or that replaced an entry with
+ * a bare `set()` — leave a `MasterConnection` with a live socket, a live
+ * heartbeat and a live reconnect chain referenced by nothing. See
+ * docs/tasks/42-sidecar-master-slot-churn.md.
+ */
+export function retireMaster(m: MasterConnection): void {
+  m.retired = true;
+  disconnectMaster(m);
+  if (state.masters.get(m.serverUrl) === m) removeMaster(m.serverUrl);
 }
 
 // ─── Fan-out wrappers ────────────────────────────────────────────────────
@@ -1421,6 +1623,7 @@ function startWatchdog(): void {
   if (watchdogTimer) return;
   watchdogTimer = setInterval(() => {
     for (const m of state.masters.values()) {
+      if (m.retired) continue;
       const wsOk = m.ws?.readyState === WebSocket.OPEN;
       const httpOk = m.connectionMode === 'http';
       if (!wsOk && !httpOk && !m.wsReconnectTimer) {

@@ -14,6 +14,10 @@ function snapshot() {
     connectionMode: m.connectionMode,
     lastHeartbeatAt: m.lastHeartbeatAt ?? null,
     lastSeenServerVersion: m.lastSeenServerVersion ?? null,
+    // Reported, not given up on: the sidecar is still retrying on the capped
+    // backoff. UNREPORTED is not down; unreachable is not gone.
+    unreachable: m.unreachable === true,
+    consecutiveFailures: m.httpHeartbeatFailCount,
   }));
 }
 

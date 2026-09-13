@@ -1074,6 +1074,11 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
       lastHeartbeatAt: m.lastHeartbeatAt ?? null,
       lastSeenServerVersion: m.lastSeenServerVersion ?? null,
       pendingCommandCount: m.pendingCommands.size,
+      // A master that refuses connections must read as unreachable, not as an
+      // ERROR line every cycle. Still being retried on the capped backoff —
+      // UNREPORTED is not down, and unreachable is not gone.
+      unreachable: m.unreachable === true,
+      consecutiveFailures: m.httpHeartbeatFailCount,
     })),
     savedAgentUrl: state.savedAgentUrl,
     dockerMode: getDockerMode(),

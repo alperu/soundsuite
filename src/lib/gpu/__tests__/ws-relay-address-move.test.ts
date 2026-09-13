@@ -193,6 +193,52 @@ describe('a sidecar whose address changes', () => {
   });
 });
 
+describe('the master observes where a sidecar actually connected from', () => {
+  it('records the socket peer address alongside the declared one', async () => {
+    // The sidecar declares an address it cannot validate. The peer address is by
+    // construction the one it reached this master from — correct for whichever
+    // path is in use (LAN / VPN / Tailscale), which the sidecar cannot know.
+    const declared = 'http://192.0.2.77:8098';
+    const ws = await connect();
+    await register(ws, declared);
+
+    const entry = relay.getConnectedSidecars().find((s: any) => s.agentUrl === declared);
+    // The test client dials loopback, so that is legitimately what was observed —
+    // and it differs from the declared address, which is the whole point.
+    expect(entry.observedFromIp).toBe('127.0.0.1');
+    expect(entry.observedFromIp).not.toBe(relay.declaredHostOf(declared));
+
+    const last = JSON.parse(persisted[persisted.length - 1]);
+    expect(last.find((e: any) => e.url === declared).lastSeenFromIp).toBe('127.0.0.1');
+
+    ws.close();
+    await closed(ws);
+  });
+
+  it('normalises IPv4-mapped IPv6 peer addresses', () => {
+    // Node reports IPv4 over a dual-stack listener this way; left as-is it would
+    // never compare equal to a declared address.
+    expect(relay.normalizePeerAddress('::ffff:192.0.2.1')).toBe('192.0.2.1');
+    expect(relay.normalizePeerAddress('192.0.2.1')).toBe('192.0.2.1');
+    expect(relay.normalizePeerAddress('fe80::1')).toBe('fe80::1');
+    expect(relay.normalizePeerAddress(undefined)).toBeUndefined();
+  });
+
+  it('keeps reporting the real peer across an address move', async () => {
+    const from = oldAddr();
+    const to = 'http://192.0.2.245:8098';
+    const ws = await connect();
+    await register(ws, from);
+    await register(ws, to);
+
+    const entry = relay.getConnectedSidecars().find((s: any) => s.agentUrl === to);
+    expect(entry.observedFromIp).toBe('127.0.0.1');
+
+    ws.close();
+    await closed(ws);
+  });
+});
+
 describe('two sidecars claiming one address', () => {
   it('names the conflict and replaces neither entry', async () => {
     const held = 'http://192.0.2.250:8098';
