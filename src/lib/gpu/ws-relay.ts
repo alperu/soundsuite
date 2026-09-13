@@ -53,6 +53,25 @@ if (!g.__ss_ws_cmdCounter__) g.__ss_ws_cmdCounter__ = { value: 0 };
 // deletion. Operators get ~60 s to stop the sidecar process or unconfigure
 // its master URL before the block expires.
 if (!g.__ss_ws_blocked__) g.__ss_ws_blocked__ = new Map<string, number>();
+// Liveness sweep timer. Held on globalThis for the same reason the maps are:
+// Next.js re-evaluates this module per context, and a second interval would
+// double-ping every socket.
+if (!g.__ss_ws_sweep__) g.__ss_ws_sweep__ = { timer: null as ReturnType<typeof setInterval> | null };
+
+/**
+ * How often the relay pings each sidecar socket. A socket that has not answered
+ * a ping since the previous sweep is terminated.
+ *
+ * Why this must exist: `ws` only emits 'close' when the peer sends a TCP FIN.
+ * A sidecar that dies, or whose VPN path drops, sends nothing — the socket stays
+ * ESTABLISHED on this side forever and its file descriptor is never released.
+ * Measured in production: ~10,200 ESTABLISHED sockets from a single sidecar host
+ * accumulated over ~3.7 days, exhausting the process file-descriptor table, after
+ * which every child_process spawn (the OCR worker, pdfimages, pdftoppm) failed
+ * with `spawn EBADF`. Nothing in the relay was wrong about the sidecars it knew
+ * about; it simply never learned the others were gone.
+ */
+const LIVENESS_SWEEP_MS = 30_000;
 
 const sidecars: Map<string, SidecarConnection> = g.__ss_ws_sidecars__;
 const pendingCommands: Map<string, PendingCommand> = g.__ss_ws_pending__;
@@ -115,6 +134,77 @@ async function persistSidecarList(): Promise<void> {
 }
 
 /** Start the WebSocket relay server */
+/** Symbol key for per-socket liveness, so it cannot collide with `ws` internals. */
+const ALIVE = Symbol.for('ss.wsRelay.alive');
+
+function markAlive(ws: WebSocket): void {
+  (ws as any)[ALIVE] = true;
+}
+
+/**
+ * Close a socket and guarantee the descriptor is released.
+ *
+ * `ws.close()` is a graceful handshake: it waits for the peer's close frame. A
+ * peer that is already gone never sends one, so the socket would sit in CLOSING
+ * indefinitely — the same leak by another name. Terminate after a short grace
+ * period if it has not finished closing on its own.
+ */
+function closeSocket(ws: WebSocket, code: number, reason: string): void {
+  try {
+    ws.close(code, reason);
+  } catch {
+    /* already closing or destroyed */
+  }
+  setTimeout(() => {
+    if (ws.readyState !== WebSocket.CLOSED) {
+      try { ws.terminate(); } catch { /* ignore */ }
+    }
+  }, 5_000).unref?.();
+}
+
+/**
+ * Ping every connected sidecar; terminate any that did not answer the previous
+ * ping. This is what makes a silently-dead peer observable — see
+ * `LIVENESS_SWEEP_MS` for why the relay cannot rely on 'close' alone.
+ */
+function runLivenessSweep(): void {
+  if (!wss) return;
+  for (const client of wss.clients) {
+    if ((client as any)[ALIVE] !== true) {
+      // Terminate, not close: it has already failed to answer a ping, so a
+      // graceful handshake would wait for a peer that is not listening.
+      logger.warn('Terminating unresponsive sidecar socket (no pong since last sweep)');
+      try { client.terminate(); } catch { /* ignore */ }
+      continue;
+    }
+    (client as any)[ALIVE] = false;
+    try { client.ping(); } catch { /* ignore */ }
+  }
+}
+
+function startLivenessSweep(): void {
+  if (g.__ss_ws_sweep__.timer) return;
+  g.__ss_ws_sweep__.timer = setInterval(runLivenessSweep, LIVENESS_SWEEP_MS);
+  g.__ss_ws_sweep__.timer.unref?.();
+}
+
+/** Drive one sweep pass. Exported for tests only — production uses the interval. */
+export function __sweepForTests(): void {
+  runLivenessSweep();
+}
+
+function stopLivenessSweep(): void {
+  if (g.__ss_ws_sweep__.timer) {
+    clearInterval(g.__ss_ws_sweep__.timer);
+    g.__ss_ws_sweep__.timer = null;
+  }
+}
+
+/** Number of open sockets the relay is holding — for tests and diagnostics. */
+export function getRelaySocketCount(): number {
+  return wss ? wss.clients.size : 0;
+}
+
 export function startWsRelay(): WebSocketServer {
   if (wss) return wss;
   if (g.__ss_wss__) { wss = g.__ss_wss__; return wss!; }
@@ -126,7 +216,14 @@ export function startWsRelay(): WebSocketServer {
   wss.on('connection', (ws: WebSocket) => {
     let registeredUrl: string | null = null;
 
+    // Liveness is tracked on the socket itself so the sweep needs no side table
+    // to keep in sync (and nothing to leak if a socket dies unobserved).
+    markAlive(ws);
+    ws.on('pong', () => markAlive(ws));
+
     ws.on('message', async (raw: Buffer | string) => {
+      // Any traffic proves the peer is alive, not just a pong.
+      markAlive(ws);
       let msg: any;
       try {
         msg = JSON.parse(typeof raw === 'string' ? raw : raw.toString());
@@ -147,6 +244,16 @@ export function startWsRelay(): WebSocketServer {
           return;
         }
         registeredUrl = msg.agentUrl;
+        // A sidecar that reconnects (its own watchdog forces one after three
+        // failed heartbeats — sideCar/src/lib/ws-client.ts) arrives on a NEW
+        // socket while the previous one may still be open. Overwriting the map
+        // entry alone drops the only reference to that socket without closing
+        // it, leaking one file descriptor per reconnect. Close it explicitly.
+        const superseded = sidecars.get(msg.agentUrl);
+        if (superseded && superseded.ws !== ws) {
+          logger.info('Closing superseded sidecar socket', { agentUrl: msg.agentUrl });
+          closeSocket(superseded.ws, 1012, 'superseded-by-new-registration');
+        }
         sidecars.set(msg.agentUrl, {
           ws,
           agentUrl: msg.agentUrl,
@@ -276,12 +383,19 @@ export function startWsRelay(): WebSocketServer {
     });
 
     ws.on('close', async () => {
-      if (registeredUrl) {
-        logger.info('Sidecar WebSocket disconnected', { agentUrl: registeredUrl });
-        sidecars.delete(registeredUrl);
-        markSidecarDisconnected(registeredUrl);
-        await persistSidecarList();
+      if (!registeredUrl) return;
+      // Only tear down shared state if the map still points at THIS socket. A
+      // superseded socket closing later must not delete the replacement that
+      // just registered, or the sidecar would be marked disconnected while its
+      // live connection is sitting in the map.
+      if (sidecars.get(registeredUrl)?.ws !== ws) {
+        logger.info('Superseded sidecar socket closed', { agentUrl: registeredUrl });
+        return;
       }
+      logger.info('Sidecar WebSocket disconnected', { agentUrl: registeredUrl });
+      sidecars.delete(registeredUrl);
+      markSidecarDisconnected(registeredUrl);
+      await persistSidecarList();
     });
 
     ws.on('error', (err) => {
@@ -293,12 +407,18 @@ export function startWsRelay(): WebSocketServer {
     logger.error('WebSocket relay server error', err);
   });
 
+  startLivenessSweep();
+
   return wss;
 }
 
 /** Stop the WebSocket relay server */
 export function stopWsRelay(): void {
   if (wss) {
+    stopLivenessSweep();
+    // `wss.close()` stops listening but does NOT close established client
+    // sockets, so terminate them explicitly or they outlive the relay.
+    for (const client of wss.clients) closeSocket(client, 1001, 'relay-shutting-down');
     wss.close();
     wss = null;
     sidecars.clear();
