@@ -12,6 +12,8 @@ const G = processGlobal('docker', () => ({
   dockerMode: 'none' as 'socket' | 'tcp' | 'none',
   isInDocker: null as boolean | null,
   dockerHostName: null as string | null,
+  /** Image pulls in flight, keyed by the image string. See pullImage(). */
+  pullsInFlight: new Map<string, Promise<boolean>>(),
 }));
 
 function getDefaultSocketPath(): string {
@@ -1084,6 +1086,23 @@ export async function loadOllamaModel(
   }
 }
 
+/**
+ * Ensure `image` is present locally, pulling it if it is not.
+ *
+ * One pull per image per process. Four ollama roles (embedding, code-embedding,
+ * completion, ocr) share `ollama/ollama`, and an acquire burst provisions them
+ * concurrently — each caller used to open its own `POST /images/create`, so a
+ * host that needed the image once was seen pulling it four or five times at
+ * once, every progress line interleaved ("0/1 layers" × 4, "3/4 layers"),
+ * and the operator read it as "downloading from scratch again". The daemon
+ * dedupes layer bytes, but every extra stream restarts progress reporting and
+ * holds a 30-minute request open.
+ *
+ *   - Present already (`GET /images/<image>/json` → 200): return without pulling.
+ *   - Pull in flight for this image: await that promise instead of starting a
+ *     second one. Progress callbacks from later joiners are not wired to the
+ *     first stream — they get the final `100 / Complete` when it resolves.
+ */
 export async function pullImage(
   image: string,
   opts?: { onProgress?: (progress: number, detail: string) => void },
@@ -1096,6 +1115,38 @@ export async function pullImage(
   }
   assertDockerAvailable();
 
+  const inFlight = G.pullsInFlight.get(image);
+  if (inFlight) {
+    log.info(`Pull of ${image} already in progress — joining it instead of starting another`);
+    const ok = await inFlight;
+    if (ok) opts?.onProgress?.(100, 'Complete');
+    return ok;
+  }
+
+  try {
+    const { status } = await dockerRequest('GET', `/images/${encodeURIComponent(image)}/json`);
+    if (status === 200) {
+      log.debug(`Image ${image} already present — skipping pull`);
+      opts?.onProgress?.(100, 'Complete');
+      return true;
+    }
+  } catch (err) {
+    // Inspect failing is not a reason to skip the pull; fall through and let
+    // the pull itself report a real Docker problem.
+    log.debug(`Image inspect for ${image} failed (${(err as Error).message}) — pulling`);
+  }
+
+  const pull = pullImageUncached(image, opts).finally(() => {
+    G.pullsInFlight.delete(image);
+  });
+  G.pullsInFlight.set(image, pull);
+  return pull;
+}
+
+async function pullImageUncached(
+  image: string,
+  opts?: { onProgress?: (progress: number, detail: string) => void },
+): Promise<boolean> {
   // Split image:tag — Docker API requires separate fromImage and tag params.
   // Without explicit tag, Docker pulls ALL tags (dozens of versions).
   let imgName = image;
