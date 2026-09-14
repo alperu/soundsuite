@@ -192,7 +192,7 @@ function runtimesForMode(modeName: string): Record<RuntimeChoice, boolean> {
 }
 
 /** OS-aware default runtime for the "Reset to defaults" path. */
-function defaultRuntimeForRow(
+export function defaultRuntimeForRow(
   modeName: string,
   os: ModeOs | string | undefined,
   hasNvidia: boolean,
@@ -830,11 +830,19 @@ export default function AdminRoleAssignments() {
                                     // name. Prefer what the sidecar actually resolved
                                     // (it can see SS_HOST_OLLAMA_PORT / SS_DMR_PORT;
                                     // we cannot), fall back to the runtime default.
-                                    const reported = reportedPortFor(sidecar, mode.name, selectedRuntime);
-                                    const port = reported ?? portForRuntime(mode.name, selectedRuntime);
+                                    // A disabled row has selectedRuntime === null, but it
+                                    // still has a port to show: the one it would bind if
+                                    // enabled. Falling through to MODE_PORTS here would
+                                    // reprint the original bug on exactly the rows an
+                                    // operator reads while deciding what to turn on.
+                                    const portRuntime =
+                                      selectedRuntime ??
+                                      defaultRuntimeForRow(mode.name, sidecar.os, !!sidecar.hasNvidia);
+                                    const reported = reportedPortFor(sidecar, mode.name, portRuntime);
+                                    const port = reported ?? portForRuntime(mode.name, portRuntime);
                                     if (port == null) return <span className="text-gray-300">—</span>;
                                     const shared =
-                                      selectedRuntime === 'host' || selectedRuntime === 'docker-model-runner';
+                                      portRuntime === 'host' || portRuntime === 'docker-model-runner';
                                     return (
                                       <span
                                         className="font-mono text-gray-600 text-[11px]"
@@ -843,7 +851,7 @@ export default function AdminRoleAssignments() {
                                             ? `Reported by ${sidecar.hostname}.`
                                             : 'Default for the selected runtime — overridable per host.') +
                                           (shared
-                                            ? selectedRuntime === 'host'
+                                            ? portRuntime === 'host'
                                               ? ' One native Ollama serves every host role on this single port; roles are told apart by model, not by port.'
                                               : ' Docker Model Runner serves every role from this single endpoint.'
                                             : '')
