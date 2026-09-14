@@ -6,6 +6,7 @@ import { state, ensureMaster, syncLegacyServerUrl } from './state';
 import { createLogger } from './logger';
 import { loadSidecarConfig, saveSidecarConfig } from './sidecar-config';
 import { emitBootEvent } from './boot-events';
+import { processGlobal } from './process-global';
 
 const log = createLogger('config');
 
@@ -51,8 +52,24 @@ export function loadSavedConfig(): Record<string, unknown> | null {
   // work via the legacy fallback chain.
   // Collect master URLs from all sources, deduped (insertion order = priority).
   const collected = new Map<string, MasterEntry>();
-  const addMaster = (e: MasterEntry) => {
+  const addMaster = (e: MasterEntry, source = 'config.json') => {
     if (!e.serverUrl) return;
+    // The block-list is honoured HERE, at the one funnel every source passes
+    // through, rather than only at POST /api/masters. Found live: an operator
+    // removed a dead master (block-list seeded on boot, 1 URL) and the very
+    // next line re-added it from SOUND_SUITE_MASTER_URL — a value baked into
+    // the container's environment when it was first created, which self-update
+    // never touches. "Removed" has to mean removed from every source, or the
+    // operator has no way to clear it short of recreating the container.
+    if (isMasterBlocked(e.serverUrl)) {
+      log.warn(
+        `Ignoring blocked master ${e.serverUrl} from ${source}. It was removed in ` +
+        `Setup and stays removed. If the source is the container environment ` +
+        `(SOUND_SUITE_MASTER_URL / SERVER_URL / SIDECAR_MASTERS), that value is ` +
+        `stale — recreate the container with the current master URL to clear it.`,
+      );
+      return;
+    }
     const existing = collected.get(e.serverUrl);
     if (existing) {
       if (e.authToken && !existing.authToken) existing.authToken = e.authToken;
@@ -132,7 +149,7 @@ export function loadSavedConfig(): Record<string, unknown> | null {
   try {
     const sidecarConfig = loadSidecarConfig();
     if (sidecarConfig?.serverUrl) {
-      addMaster({ serverUrl: sidecarConfig.serverUrl });
+      addMaster({ serverUrl: sidecarConfig.serverUrl }, 'sidecar.config.json');
       log.info(`Loaded serverUrl from sidecar.config.json: ${sidecarConfig.serverUrl}`);
     }
   } catch (err) {
@@ -147,14 +164,14 @@ export function loadSavedConfig(): Record<string, unknown> | null {
     for (const tok of envList.split(',').map(s => s.trim()).filter(Boolean)) {
       const [url, wsPortStr] = tok.split('|');
       const wsPort = wsPortStr ? Number(wsPortStr) : undefined;
-      addMaster({ serverUrl: url, wsPort: Number.isFinite(wsPort) && wsPort! > 0 ? wsPort : undefined });
+      addMaster({ serverUrl: url, wsPort: Number.isFinite(wsPort) && wsPort! > 0 ? wsPort : undefined }, 'SIDECAR_MASTERS env');
     }
     log.info(`Loaded masters from SIDECAR_MASTERS env: ${envList}`);
   }
   const envUrl = process.env.SOUND_SUITE_MASTER_URL || process.env.SERVER_URL;
   if (envUrl) {
-    addMaster({ serverUrl: envUrl });
     const which = process.env.SOUND_SUITE_MASTER_URL ? 'SOUND_SUITE_MASTER_URL' : 'SERVER_URL';
+    addMaster({ serverUrl: envUrl }, `${which} env`);
     log.info(`Loaded serverUrl from ${which} env: ${envUrl}`);
   }
 
@@ -284,26 +301,28 @@ export function saveConfig(): void {
  * retired at runtime and returned on every restart, and the API could not delete it
  * because it was no longer in the live map.
  */
-const blocked = new Set<string>();
-let blockedSeeded = false;
+const G = processGlobal('config', () => ({
+  blocked: new Set<string>(),
+  blockedSeeded: false,
+}));
 
 function norm(u: string): string { return u.replace(/\/+$/, ''); }
 
 /** Seed the block-list from disk once, so a reboot keeps operator removals. */
 export function seedBlockedMasters(data: Record<string, unknown> | null): void {
-  if (blockedSeeded) return;
-  blockedSeeded = true;
+  if (G.blockedSeeded) return;
+  G.blockedSeeded = true;
   const raw = data?.blockedMasters;
   if (Array.isArray(raw)) {
-    for (const u of raw) if (typeof u === 'string') blocked.add(norm(u));
+    for (const u of raw) if (typeof u === 'string') G.blocked.add(norm(u));
   }
-  if (blocked.size) log.info(`Block-list seeded with ${blocked.size} master URL(s)`);
+  if (G.blocked.size) log.info(`Block-list seeded with ${G.blocked.size} master URL(s)`);
 }
 
-export function blockedMasterList(): string[] { return [...blocked]; }
+export function blockedMasterList(): string[] { return [...G.blocked]; }
 
 export function isMasterBlocked(serverUrl: string): boolean {
-  return blocked.has(norm(serverUrl));
+  return G.blocked.has(norm(serverUrl));
 }
 
 /**
@@ -320,12 +339,12 @@ export function isMasterBlocked(serverUrl: string): boolean {
  * API could not delete it because it was no longer in the live map.
  */
 export function blockMaster(serverUrl: string): void {
-  blocked.add(norm(serverUrl));
+  G.blocked.add(norm(serverUrl));
   log.info(`Master blocked (will not be re-added): ${serverUrl}`);
 }
 
 export function unblockMaster(serverUrl: string): boolean {
-  return blocked.delete(norm(serverUrl));
+  return G.blocked.delete(norm(serverUrl));
 }
 
 /** Master URLs present in the persisted config that have no live slot. */

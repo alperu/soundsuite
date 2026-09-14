@@ -1,6 +1,7 @@
 import { state, dockerSupportsGpu, type GpuInfo } from './state';
 import { dockerRequest, dockerRequestWithBody, pullImage, execInContainer, getContainerState } from './docker';
 import { createLogger } from './logger';
+import { processGlobal } from './process-global';
 
 const log = createLogger('gpu');
 
@@ -16,20 +17,23 @@ const NVIDIA_SMI_CMD = ['nvidia-smi', '--query-gpu=index,name,memory.total,memor
 // regardless of whether the container is Ollama, vLLM, or anything else.
 const NVIDIA_SMI_PROCS_CMD = ['nvidia-smi', '--query-compute-apps=pid,used_memory,process_name', '--format=csv,noheader,nounits'];
 
-let imageReady = false;
+const G = processGlobal('gpu', () => ({
+  imageReady: false,
+  containerPidCache: { at: 0, pids: {} as Record<string, number> },
+}));
 
 /** Ensure the CUDA image exists locally. Pulls once if missing. */
 async function ensureImage(): Promise<boolean> {
-  if (imageReady) return true;
+  if (G.imageReady) return true;
   const { status } = await dockerRequest('GET', `/images/${encodeURIComponent(GPU_IMAGE)}/json`);
   if (status === 200) {
-    imageReady = true;
+    G.imageReady = true;
     return true;
   }
   log.info(`GPU image not found locally, pulling ${GPU_IMAGE}...`);
   try {
     await pullImage(GPU_IMAGE);
-    imageReady = true;
+    G.imageReady = true;
     return true;
   } catch (err) {
     log.error(`Failed to pull GPU image: ${(err as Error).message}`);
@@ -257,11 +261,10 @@ export async function discoverGpuProcesses(): Promise<GpuProcess[]> {
  * Container PIDs are stable for the container's lifetime — cached briefly
  * to avoid hammering the Docker API.
  */
-let containerPidCache: { at: number; pids: Record<string, number> } = { at: 0, pids: {} };
 const CONTAINER_PID_TTL = 15_000;
 
 export async function getRoleHostPids(): Promise<Record<string, number>> {
-  if (Date.now() - containerPidCache.at < CONTAINER_PID_TTL) return containerPidCache.pids;
+  if (Date.now() - G.containerPidCache.at < CONTAINER_PID_TTL) return G.containerPidCache.pids;
   const pids: Record<string, number> = {};
   for (const [role, def] of Object.entries(state.registry)) {
     if (def.runtime === 'host' || def.runtime === 'docker-model-runner') continue;
@@ -275,7 +278,7 @@ export async function getRoleHostPids(): Promise<Record<string, number>> {
       // Container may not exist on this sidecar — skip silently.
     }
   }
-  containerPidCache = { at: Date.now(), pids };
+  G.containerPidCache = { at: Date.now(), pids };
   return pids;
 }
 

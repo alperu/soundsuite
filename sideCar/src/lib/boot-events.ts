@@ -15,6 +15,7 @@
  *    /api/status every few seconds and captures the fresh trace immediately).
  */
 import { createLogger } from './logger';
+import { processGlobal } from './process-global';
 
 const log = createLogger('boot');
 
@@ -30,27 +31,29 @@ export interface BootEvent {
 }
 
 const RING_CAP = 100;
-const buffer: BootEvent[] = [];
-let nextSeq = 1;
+const G = processGlobal('boot-events', () => ({
+  buffer: [] as BootEvent[],
+  nextSeq: 1,
+  bootEpoch: Date.now(),
+}));
 
 /**
  * Stable per-process boot epoch (ms). Frozen at module init; survives the life
  * of the Node process. Consumers (UI / master) reset their seq high-water-mark
  * when this changes to re-render the fresh boot trace after a restart.
  */
-const bootEpoch = Date.now();
-export function getBootEpoch(): number { return bootEpoch; }
+export function getBootEpoch(): number { return G.bootEpoch; }
 
 /** Emit a boot event: append to the ring buffer + log via standard logger. */
 export function emitBootEvent(message: string, meta?: Record<string, unknown>): void {
   const ev: BootEvent = {
-    seq: nextSeq++,
+    seq: G.nextSeq++,
     ts: Date.now(),
     message,
     ...(meta && Object.keys(meta).length > 0 ? { meta } : {}),
   };
-  buffer.push(ev);
-  if (buffer.length > RING_CAP) buffer.splice(0, buffer.length - RING_CAP);
+  G.buffer.push(ev);
+  if (G.buffer.length > RING_CAP) G.buffer.splice(0, G.buffer.length - RING_CAP);
   // Mirror to logger so it also reaches stdout / sidecar logs.
   if (meta && Object.keys(meta).length > 0) log.info(message, meta);
   else log.info(message);
@@ -58,10 +61,10 @@ export function emitBootEvent(message: string, meta?: Record<string, unknown>): 
 
 /** Return all boot events currently buffered (newest last). */
 export function getBootEvents(): BootEvent[] {
-  return buffer.slice();
+  return G.buffer.slice();
 }
 
 /** Latest emitted seq (0 when no events yet). Lets pollers detect "no new events". */
 export function getLatestBootSeq(): number {
-  return nextSeq - 1;
+  return G.nextSeq - 1;
 }

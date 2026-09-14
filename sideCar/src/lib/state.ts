@@ -1,5 +1,6 @@
 import type { WebSocket } from 'ws';
 import { createLogger } from './logger';
+import { processGlobal } from './process-global';
 
 const stateLog = createLogger('state');
 
@@ -341,7 +342,7 @@ const DMR_ROLES = (process.env.SS_DMR_ROLES || '')
   .filter(Boolean);
 const DMR_BUDGET_MB = parseInt(process.env.SS_DMR_BUDGET_MB || '0', 10);
 
-export const state = {
+export const state = processGlobal('state', () => ({
   // Container registry (mutable clone of defaults)
   registry: JSON.parse(JSON.stringify(defaultRegistry)) as Record<string, ContainerDef>,
 
@@ -489,7 +490,7 @@ export const state = {
   dmrRoles: new Set<string>(DMR_ROLES),
   dmrBudgetMb: DMR_BUDGET_MB,
   dmrLastHealth: { at: 0, ok: false } as DmrHealth,
-};
+}));
 
 /**
  * Defensive accessor for Set-typed runtime fields on `state`.

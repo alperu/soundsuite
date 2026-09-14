@@ -1,4 +1,5 @@
-/**
+
+import { processGlobal } from './process-global';/**
  * Task Tracker — Lightweight in-memory tracker for long-running sidecar operations.
  *
  * Surfaces real-time progress for image pulls, model pulls, and VRAM loads
@@ -19,8 +20,10 @@ export interface Task {
 }
 
 let nextId = 1;
-const active = new Map<string, Task>();
-const history: Task[] = [];
+const G = processGlobal('task-tracker', () => ({
+  active: new Map<string, Task>(),
+  history: [] as Task[],
+}));
 const MAX_HISTORY = 50;
 
 function genId(): string {
@@ -29,7 +32,7 @@ function genId(): string {
 
 export function start(type: Task['type'], label: string, role?: string): string {
   const id = genId();
-  active.set(id, {
+  G.active.set(id, {
     id,
     type,
     label,
@@ -41,43 +44,43 @@ export function start(type: Task['type'], label: string, role?: string): string 
 }
 
 export function update(id: string, patch: { progress?: number; detail?: string }): void {
-  const task = active.get(id);
+  const task = G.active.get(id);
   if (!task) return;
   if (patch.progress !== undefined) task.progress = patch.progress;
   if (patch.detail !== undefined) task.detail = patch.detail;
 }
 
 export function complete(id: string): void {
-  const task = active.get(id);
+  const task = G.active.get(id);
   if (!task) return;
   task.status = 'completed';
   task.completedAt = Date.now();
   task.progress = 100;
-  active.delete(id);
-  history.push(task);
-  if (history.length > MAX_HISTORY) history.shift();
+  G.active.delete(id);
+  G.history.push(task);
+  if (G.history.length > MAX_HISTORY) G.history.shift();
 }
 
 export function fail(id: string, error: string): void {
-  const task = active.get(id);
+  const task = G.active.get(id);
   if (!task) return;
   task.status = 'failed';
   task.completedAt = Date.now();
   task.error = error;
-  active.delete(id);
-  history.push(task);
-  if (history.length > MAX_HISTORY) history.shift();
+  G.active.delete(id);
+  G.history.push(task);
+  if (G.history.length > MAX_HISTORY) G.history.shift();
 }
 
 /** Return all active tasks + recent history (last 10 completed/failed). */
 export function getAll(): Task[] {
-  const recentHistory = history.slice(-10);
-  return [...Array.from(active.values()), ...recentHistory];
+  const recentHistory = G.history.slice(-10);
+  return [...Array.from(G.active.values()), ...recentHistory];
 }
 
 /** Return only active (running) tasks. */
 export function getActive(): Task[] {
-  return Array.from(active.values());
+  return Array.from(G.active.values());
 }
 
 export const tasks = { start, update, complete, fail, getAll, getActive };

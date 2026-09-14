@@ -2,12 +2,17 @@ import http from 'http';
 import fs from 'fs';
 import { state } from './state';
 import { createLogger } from './logger';
+import { processGlobal } from './process-global';
 
 const log = createLogger('docker');
 
 /** Resolved Docker connection — set once by initDocker() or lazily on first use */
-let resolvedConnection: { socketPath?: string; hostname?: string; port?: number } | null = null;
-let dockerMode: 'socket' | 'tcp' | 'none' = 'none';
+const G = processGlobal('docker', () => ({
+  resolvedConnection: null as { socketPath?: string; hostname?: string; port?: number } | null,
+  dockerMode: 'none' as 'socket' | 'tcp' | 'none',
+  isInDocker: null as boolean | null,
+  dockerHostName: null as string | null,
+}));
 
 function getDefaultSocketPath(): string {
   if (process.platform === 'win32') return '//./pipe/docker_engine';
@@ -50,8 +55,8 @@ export async function initDocker(): Promise<void> {
       const opts = tcpOpts(host);
       const ok = await pingDocker(opts);
       if (ok) {
-        resolvedConnection = opts;
-        dockerMode = 'tcp';
+        G.resolvedConnection = opts;
+        G.dockerMode = 'tcp';
         log.info(`Docker connected via DOCKER_HOST TCP ${host}`);
         await getDockerHostInfo();
         return;
@@ -63,8 +68,8 @@ export async function initDocker(): Promise<void> {
         const opts = { socketPath: host };
         const ok = await pingDocker(opts);
         if (ok) {
-          resolvedConnection = opts;
-          dockerMode = 'socket';
+          G.resolvedConnection = opts;
+          G.dockerMode = 'socket';
           log.info(`Docker connected via DOCKER_HOST socket ${host}`);
           await getDockerHostInfo();
           return;
@@ -80,8 +85,8 @@ export async function initDocker(): Promise<void> {
     const opts = { socketPath };
     const ok = await pingDocker(opts);
     if (ok) {
-      resolvedConnection = opts;
-      dockerMode = 'socket';
+      G.resolvedConnection = opts;
+      G.dockerMode = 'socket';
       log.info(`Docker connected via Unix socket ${socketPath}`);
       await getDockerHostInfo();
       return;
@@ -94,8 +99,8 @@ export async function initDocker(): Promise<void> {
     const opts = { hostname: host, port: 2375 };
     const ok = await pingDocker(opts);
     if (ok) {
-      resolvedConnection = opts;
-      dockerMode = 'tcp';
+      G.resolvedConnection = opts;
+      G.dockerMode = 'tcp';
       log.info(`Docker connected via TCP ${host}:2375`);
       await getDockerHostInfo();
       return;
@@ -103,8 +108,8 @@ export async function initDocker(): Promise<void> {
   }
 
   // Nothing worked — skip host info fetch
-  dockerMode = 'none';
-  resolvedConnection = null;
+  G.dockerMode = 'none';
+  G.resolvedConnection = null;
   log.error(
     'Docker not reachable. Tried: ' +
     (process.env.DOCKER_HOST ? `DOCKER_HOST=${process.env.DOCKER_HOST}, ` : '') +
@@ -116,7 +121,7 @@ export async function initDocker(): Promise<void> {
 
 /** Build http.request connection options — uses resolved connection or falls back to DOCKER_HOST/socket */
 function dockerConnectionOpts(): { socketPath?: string; hostname?: string; port?: number } {
-  if (resolvedConnection) return resolvedConnection;
+  if (G.resolvedConnection) return G.resolvedConnection;
   // Fallback if initDocker() wasn't called yet — use DOCKER_HOST or default socket
   if (process.env.DOCKER_HOST) {
     const host = process.env.DOCKER_HOST;
@@ -127,25 +132,24 @@ function dockerConnectionOpts(): { socketPath?: string; hostname?: string; port?
 }
 
 /** Get current Docker connection mode for diagnostics */
-export function getDockerMode(): string { return dockerMode; }
+export function getDockerMode(): string { return G.dockerMode; }
 
 /**
  * Detect if the sidecar itself is running inside a Docker container.
  * When true, 'localhost' refers to the sidecar container, NOT the Docker host.
  */
-let _isInDocker: boolean | null = null;
 function isRunningInDocker(): boolean {
-  if (_isInDocker !== null) return _isInDocker;
+  if (G.isInDocker !== null) return G.isInDocker;
   try {
     // /.dockerenv exists inside Docker containers
-    if (fs.existsSync('/.dockerenv')) { _isInDocker = true; return true; }
+    if (fs.existsSync('/.dockerenv')) { G.isInDocker = true; return true; }
     // Fallback: check cgroup (Linux)
     if (fs.existsSync('/proc/1/cgroup')) {
       const cgroup = fs.readFileSync('/proc/1/cgroup', 'utf8');
-      if (cgroup.includes('docker') || cgroup.includes('containerd')) { _isInDocker = true; return true; }
+      if (cgroup.includes('docker') || cgroup.includes('containerd')) { G.isInDocker = true; return true; }
     }
   } catch { /* ignore */ }
-  _isInDocker = false;
+  G.isInDocker = false;
   return false;
 }
 
@@ -170,43 +174,42 @@ export function getDockerHost(role?: string): string {
     if (def?.runtime === 'docker-model-runner') return state.dmrHost;
   }
   // TCP mode: Docker host is explicitly known
-  if (resolvedConnection?.hostname) return resolvedConnection.hostname;
+  if (G.resolvedConnection?.hostname) return G.resolvedConnection.hostname;
   // Socket mode: if sidecar runs in Docker, localhost is the sidecar container itself
   if (isRunningInDocker()) return 'host.docker.internal';
   return 'localhost';
 }
 
 /** Cached Docker host hostname (from GET /info → Name field) */
-let dockerHostName: string | null = null;
 
 /** Get the Docker host's actual hostname via GET /info. Cached after first call. */
 export async function getDockerHostInfo(): Promise<{ name: string | null }> {
-  if (dockerHostName) return { name: dockerHostName };
+  if (G.dockerHostName) return { name: G.dockerHostName };
   try {
     const { status, body } = await dockerRequest('GET', '/info');
     if (status === 200) {
       const info = JSON.parse(body);
       if (info.Name) {
-        dockerHostName = info.Name;
-        log.info(`Docker host hostname: ${dockerHostName}`);
+        G.dockerHostName = info.Name;
+        log.info(`Docker host hostname: ${G.dockerHostName}`);
       }
     }
   } catch (err) {
     log.warn(`Failed to get Docker host info: ${(err as Error).message}`);
   }
-  return { name: dockerHostName };
+  return { name: G.dockerHostName };
 }
 
 /** Get cached Docker host hostname (non-async, returns null if not yet fetched). */
-export function getDockerHostName(): string | null { return dockerHostName; }
+export function getDockerHostName(): string | null { return G.dockerHostName; }
 
 /** Check if Docker is reachable. Returns false if initDocker() failed and no fallback is available. */
 export function isDockerAvailable(): boolean {
   // Even if initDocker() set mode='none' (e.g. ping timed out), the default socket
   // fallback in dockerConnectionOpts() may still work. Only return false if we
   // explicitly confirmed no connection AND no socket exists as fallback.
-  if (resolvedConnection) return true;
-  if (dockerMode !== 'none') return true;
+  if (G.resolvedConnection) return true;
+  if (G.dockerMode !== 'none') return true;
   // Fallback: check if default socket exists (dockerConnectionOpts will use it)
   const socketPath = getDefaultSocketPath();
   if (process.env.DOCKER_HOST) return true; // let it try

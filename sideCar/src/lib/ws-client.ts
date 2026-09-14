@@ -30,6 +30,7 @@ import { createLogger } from './logger';
 import { checkForUpdate, performUpdate } from './self-update';
 import { tasks } from './task-tracker';
 import { emitBootEvent } from './boot-events';
+import { processGlobal } from './process-global';
 import {
   AddressStabilityTracker,
   resolveAgentUrl,
@@ -42,12 +43,16 @@ const log = createLogger('gossip');
 
 // Per-master "first successful connect" flag. Emits the boot event once per
 // boot per master, not on every reconnect / heartbeat cycle.
-const firstConnectEmitted = new Set<string>();
+const G = processGlobal('ws-client', () => ({
+  firstConnectEmitted: new Set<string>(),
+  updateCheckInterval: null as ReturnType<typeof setInterval> | null,
+  watchdogTimer: null as ReturnType<typeof setInterval> | null,
+  currentAgentUrl: null as string | null,
+  addressStability: new AddressStabilityTracker(),
+}));
 
 // Update-check is a process-wide concern, not per-master. Run it once against
 // the first master only — the binary doesn't need N parallel update probes.
-let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
-let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
 const PORT = parseInt(process.env.AGENT_PORT || process.env.PORT || '8098', 10);
 const HEARTBEAT_INTERVAL = 5_000;  // 5s heartbeat
@@ -69,11 +74,9 @@ const UNREACHABLE_AFTER_FAILURES = 12;
 // buildFullStatus), so it must not re-run detection each time: on a multi-homed
 // host that would let the advertised address flap between NICs several times a
 // minute, and with the master-side re-key each flip migrates registry state.
-let currentAgentUrl: string | null = null;
 
 // Debounce for re-advertisement — a replacement must be seen on N consecutive
 // revalidation ticks before it is adopted.
-const addressStability = new AddressStabilityTracker();
 
 /**
  * Host of a configured master, used to break ties on a multi-homed host: the
@@ -101,14 +104,14 @@ function resolveNow(): ResolvedAgentUrl {
 }
 
 export function getAgentUrl(): string {
-  if (currentAgentUrl) return currentAgentUrl;
+  if (G.currentAgentUrl) return G.currentAgentUrl;
   const resolved = resolveNow();
-  currentAgentUrl = resolved.url;
+  G.currentAgentUrl = resolved.url;
   log.info(
     `Advertised address resolved: ${resolved.url} (source=${resolved.source}` +
     `${resolved.iface ? `, iface=${resolved.iface}` : ''})`,
   );
-  return currentAgentUrl;
+  return G.currentAgentUrl;
 }
 
 /**
@@ -153,11 +156,11 @@ export function revalidateAgentUrl(): string | null {
     interfaces: os.networkInterfaces() as InterfaceMap,
     port: PORT,
     masterHost: firstMasterHost(),
-    tracker: addressStability,
+    tracker: G.addressStability,
   });
 
   if (decision.reason === 'awaiting-stability') {
-    const p = addressStability.progress;
+    const p = G.addressStability.progress;
     log.info(
       `Advertised address ${current} is no longer local; candidate ${p.candidate} ` +
       `seen ${p.streak}/${p.samples} times — holding until stable`,
@@ -172,7 +175,7 @@ export function revalidateAgentUrl(): string | null {
   log.warn(`Advertised address CHANGED: ${current} → ${next} (old address is no longer local to this host)`);
   emitBootEvent(`Advertised address changed: ${current} → ${next}`, { from: current, to: next });
 
-  currentAgentUrl = next;
+  G.currentAgentUrl = next;
   state.savedAgentUrl = next;
   try { saveConfig(); } catch (err) {
     log.warn(`Failed to persist changed agentUrl: ${(err as Error).message}`);
@@ -1191,8 +1194,8 @@ function stopHttpHeartbeat(m: MasterConnection): void {
 // ─── Update checks (process-wide, runs against first master) ─────────────
 
 function startUpdateChecks(): void {
-  if (updateCheckInterval) return;
-  updateCheckInterval = setInterval(async () => {
+  if (G.updateCheckInterval) return;
+  G.updateCheckInterval = setInterval(async () => {
     const first = state.masters.values().next().value as MasterConnection | undefined;
     if (!first) return;
     const { available, version } = await checkForUpdate(first.serverUrl);
@@ -1213,7 +1216,7 @@ function startUpdateChecks(): void {
 }
 
 function stopUpdateChecks(): void {
-  if (updateCheckInterval) { clearInterval(updateCheckInterval); updateCheckInterval = null; }
+  if (G.updateCheckInterval) { clearInterval(G.updateCheckInterval); G.updateCheckInterval = null; }
 }
 
 // ─── Per-master WebSocket connection ─────────────────────────────────────
@@ -1364,8 +1367,8 @@ export function connectMaster(m: MasterConnection): void {
       m.ws = ws;
       m.connectionMode = 'websocket';
       m.connectionStatus = 'Connected via WebSocket';
-      if (!firstConnectEmitted.has(m.serverUrl)) {
-        firstConnectEmitted.add(m.serverUrl);
+      if (!G.firstConnectEmitted.has(m.serverUrl)) {
+        G.firstConnectEmitted.add(m.serverUrl);
         emitBootEvent(`Connected to master ${m.serverUrl} via ws`, { url: m.serverUrl, transport: 'ws' });
       }
       // Aggregate connectionStatus is "best-of" the masters
@@ -1575,8 +1578,21 @@ export function connectMaster(m: MasterConnection): void {
       }
     });
 
-    ws.on('close', () => {
+    ws.on('close', (code: number, reasonBuf: Buffer) => {
       clearTimeout(connectTimeout);
+      // The close code is the only thing in this event that says WHO hung up,
+      // and it was being discarded. Two masters — separate processes, separate
+      // implementations — were observed dropping within 300 ms of each other
+      // ~20 s after connecting, and nothing in either party's log could say
+      // whether the peer closed, we closed, or the tunnel died underneath both.
+      //   1000/1001 with a reason  → the peer closed on purpose (reason says why)
+      //   1012                     → Sound Suite superseded this socket
+      //   1006 (no close frame)    → TCP dropped: network / VPN / host NAT, not a peer
+      // REPORT-v17: "instrument the relationship, not the components."
+      const reason = reasonBuf?.length ? reasonBuf.toString() : '';
+      const closeDesc =
+        code === 1006 ? 'code=1006 (no close frame — connection dropped, not closed by peer)'
+        : `code=${code}${reason ? ` reason="${reason}"` : ''}`;
       // This closure captures the socket that closed, but mutates the per-master
       // state `m`, which may by now point at a NEWER socket. Tearing down
       // unconditionally is a self-sustaining reconnect loop:
@@ -1605,13 +1621,13 @@ export function connectMaster(m: MasterConnection): void {
         log.info(`[${m.serverUrl}] Superseded WebSocket closed; live connection retained`);
         return;
       }
-      log.info(`[${m.serverUrl}] WebSocket disconnected`);
+      log.info(`[${m.serverUrl}] WebSocket disconnected — ${closeDesc}`);
       m.ws = null;
       // Release the endpoint claim so a slot that was standing down as a
       // duplicate can take this master over if we cannot get back.
       m.wsUrl = undefined;
       m.connectionMode = 'disconnected';
-      m.connectionStatus = 'WebSocket disconnected';
+      m.connectionStatus = `WebSocket disconnected (${code === 1006 ? 'dropped, 1006' : `code ${code}`})`;
       if (m.heartbeatTimer) { clearInterval(m.heartbeatTimer); m.heartbeatTimer = null; }
       // If no master is on WS, stop process-wide update checks.
       if (!anyWebSocketConnected()) stopUpdateChecks();
@@ -1659,8 +1675,8 @@ async function fallbackToHttp(m: MasterConnection): Promise<void> {
   startHttpHeartbeat(m);
   startUpdateChecks();
   log.info(`[${m.serverUrl}] Running in HTTP gossip mode (heartbeat + poll)`);
-  if (!firstConnectEmitted.has(m.serverUrl)) {
-    firstConnectEmitted.add(m.serverUrl);
+  if (!G.firstConnectEmitted.has(m.serverUrl)) {
+    G.firstConnectEmitted.add(m.serverUrl);
     emitBootEvent(`Connected to master ${m.serverUrl} via http`, { url: m.serverUrl, transport: 'http' });
   }
   scheduleReconnect(m);
@@ -1764,7 +1780,7 @@ export function disconnectAllMasters(): void {
   for (const m of state.masters.values()) {
     disconnectMaster(m);
   }
-  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+  if (G.watchdogTimer) { clearInterval(G.watchdogTimer); G.watchdogTimer = null; }
   stopUpdateChecks();
 }
 
@@ -1782,8 +1798,8 @@ export function disconnectWebSocket(): void {
 // ─── Connection watchdog ─────────────────────────────────────────────────
 
 function startWatchdog(): void {
-  if (watchdogTimer) return;
-  watchdogTimer = setInterval(() => {
+  if (G.watchdogTimer) return;
+  G.watchdogTimer = setInterval(() => {
     for (const m of state.masters.values()) {
       if (m.retired) continue;
       const wsOk = m.ws?.readyState === WebSocket.OPEN;

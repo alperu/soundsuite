@@ -25,14 +25,17 @@ import { state } from './state';
 import { ollamaIsReady, ollamaPs } from './ollama-api';
 import { dmrIsReady } from './dmr-api';
 import { createLogger } from './logger';
+import { processGlobal } from './process-global';
 
 const log = createLogger('host-runtime-watchdog');
 
 const PROBE_INTERVAL_MS = 15_000;
 const RECONCILE_EVERY_N_TICKS = 4; // ≈ every 60 s
 
-let timer: ReturnType<typeof setInterval> | null = null;
-let tickCount = 0;
+const G = processGlobal('host-ollama-watchdog', () => ({
+  timer: null as ReturnType<typeof setInterval> | null,
+  tickCount: 0,
+}));
 
 /** Find any role currently configured as host-runtime. The host endpoint is
  *  shared across all such roles, so any one of them is sufficient for the
@@ -195,7 +198,7 @@ function hostNeedsWatchdog(): boolean {
 }
 
 export function startHostOllamaWatchdog(): void {
-  if (timer) return;
+  if (G.timer) return;
   const shouldRun =
     state.hostOllamaEnabled ||
     state.dmrEnabled ||
@@ -217,23 +220,23 @@ export function startHostOllamaWatchdog(): void {
     state.hostOllamaEnabled || hasHostRuntimeRole() || hostNeedsWatchdog();
   if (ollamaShouldProbe()) void probeOnce();
   if (state.dmrEnabled) void probeDmrOnce();
-  timer = setInterval(() => {
-    tickCount++;
+  G.timer = setInterval(() => {
+    G.tickCount++;
     if (ollamaShouldProbe()) void probeOnce();
     if (state.dmrEnabled) void probeDmrOnce();
     // Reconcile only makes sense when at least one host-runtime role is in
     // the registry — the mac-fallback path has no roles to reconcile against.
-    if (tickCount % RECONCILE_EVERY_N_TICKS === 0 && (state.hostOllamaEnabled || hasHostRuntimeRole())) {
+    if (G.tickCount % RECONCILE_EVERY_N_TICKS === 0 && (state.hostOllamaEnabled || hasHostRuntimeRole())) {
       void reconcileOnce();
     }
   }, PROBE_INTERVAL_MS);
 }
 
 export function stopHostOllamaWatchdog(): void {
-  if (timer) {
-    clearInterval(timer);
-    timer = null;
-    tickCount = 0;
+  if (G.timer) {
+    clearInterval(G.timer);
+    G.timer = null;
+    G.tickCount = 0;
     log.info('host-runtime watchdog stopped');
   }
 }

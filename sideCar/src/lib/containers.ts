@@ -8,6 +8,7 @@ import { clearIdleTimerForRole } from './idle-timers';
 import { saveConfig } from './config';
 import { createLogger } from './logger';
 import { tasks } from './task-tracker';
+import { processGlobal } from './process-global';
 
 /**
  * Build a synthetic ContainerState for a host-runtime role. The sidecar
@@ -209,7 +210,9 @@ const log = createLogger('containers');
 // Tracks the last remediation attempt for a gpuOnly role so the watchdog
 // doesn't hammer Ollama when we're already in a known-bad state.
 const REMEDIATE_COOLDOWN_MS = 60_000;
-const lastRemediateAttempt: Record<string, number> = {};
+const G = processGlobal('containers', () => ({
+  lastRemediateAttempt: {} as Record<string, number>,
+}));
 
 /**
  * Free GPU VRAM in preparation for loading `role`.
@@ -426,9 +429,9 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
             log.warn(`CPU OFFLOAD: ${role} model ${m.name} is running entirely on CPU — inference will be very slow`);
           }
           if (def.gpuOnly && (partial || allCpu) && !state.modelLoading.has(role)) {
-            const last = lastRemediateAttempt[role] || 0;
+            const last = G.lastRemediateAttempt[role] || 0;
             if (Date.now() - last >= REMEDIATE_COOLDOWN_MS) {
-              lastRemediateAttempt[role] = Date.now();
+              G.lastRemediateAttempt[role] = Date.now();
               log.warn(`gpuOnly watchdog: ${role}/${m.name} on CPU — unloading and reloading with full GPU`);
               state.modelLoading.add(role);
               const remediateTaskId = tasks.start('model-load', `Remediate ${m.name} (force GPU)`, role);
