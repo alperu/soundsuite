@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { state, ensureMaster } from '@/lib/state';
-import { saveConfig } from '@/lib/config';
+import { saveConfig, persistedOnlyMasters, isMasterBlocked } from '@/lib/config';
 import { connectMaster } from '@/lib/ws-client';
 import { createLogger } from '@/lib/logger';
 
@@ -30,7 +30,26 @@ function parseWsPort(raw: unknown): number | undefined | { error: string } {
 }
 
 export async function GET() {
-  return NextResponse.json({ masters: snapshot() }, { headers: cors });
+  const live = snapshot();
+  // Entries that exist in config.json with no live slot. They were invisible here,
+  // so DELETE 404'd on them and an operator could never clear a stale master — it
+  // simply came back on the next boot. Surfaced so the UI can offer Remove.
+  const orphans = persistedOnlyMasters(live.map((m) => m.serverUrl)).map((o) => ({
+    serverUrl: o.serverUrl,
+    wsPort: o.wsPort,
+    connectionMode: 'not-loaded' as const,
+    lastHeartbeatAt: null,
+    lastSeenServerVersion: null,
+    unreachable: false,
+    consecutiveFailures: 0,
+    persistedOnly: true,
+    // No wsPort means `wsPort ?? 3002` at dial time, which is another master's
+    // relay on a shared host — two slots, one agentUrl, mutual eviction.
+    warning: o.wsPort === null
+      ? 'No wsPort set — this would dial the default 3002, which may be another master\u2019s relay.'
+      : undefined,
+  }));
+  return NextResponse.json({ masters: [...live, ...orphans] }, { headers: cors });
 }
 
 export async function POST(request: Request) {
@@ -68,6 +87,14 @@ export async function POST(request: Request) {
       );
     }
 
+    if (isMasterBlocked(serverUrl)) {
+      log.warn(`Refusing to add blocked master ${serverUrl} (removed by an operator)`);
+      return NextResponse.json(
+        { error: `Master was removed by an operator and will not be re-added: ${serverUrl}`,
+          hint: 'Re-add it deliberately from Setup if this was not intended.' },
+        { status: 409, headers: cors },
+      );
+    }
     const existed = state.masters.has(serverUrl);
     const m = ensureMaster(serverUrl, { authToken, wsPort: wsPortParsed as number | undefined });
     try {

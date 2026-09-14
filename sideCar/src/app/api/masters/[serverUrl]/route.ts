@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { state, removeMaster, rekeyMaster } from '@/lib/state';
-import { saveConfig } from '@/lib/config';
+import { saveConfig , blockMaster, persistedOnlyMasters } from '@/lib/config';
 import { disconnectMaster, connectMaster, retireMaster } from '@/lib/ws-client';
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
@@ -32,6 +32,22 @@ export async function DELETE(
     const serverUrl = decodeURIComponent(encoded);
     const m = state.masters.get(serverUrl);
     if (!m) {
+      // Not live — but it may still be in config.json, which is exactly how a stale
+      // master became undeletable: retired at runtime, so absent from the map, yet
+      // re-created from the file on the next boot. Clear it from persistence and
+      // block it, otherwise "Remove" silently undoes itself.
+      const orphan = persistedOnlyMasters([...state.masters.keys()])
+        .find((o) => o.serverUrl.replace(/\/+$/, '') === serverUrl.replace(/\/+$/, ''));
+      if (orphan) {
+        blockMaster(serverUrl);
+        saveConfig(); // rewrites masters from the live map, dropping the orphan
+        return NextResponse.json(
+          { message: `Removed ${serverUrl} from persisted config`, removedFrom: 'persisted-config' },
+          { headers: cors },
+        );
+      }
+    }
+    if (!m) {
       return NextResponse.json(
         { error: `Master not found: ${serverUrl}` },
         { status: 404, headers: cors },
@@ -40,6 +56,7 @@ export async function DELETE(
     // retireMaster, not disconnect+delete: it closes the socket, clears all
     // three timers and marks the slot so nothing that fires late revives it.
     retireMaster(m);
+    blockMaster(serverUrl);
     saveConfig();
     return NextResponse.json(
       { ok: true, removed: serverUrl },

@@ -65,6 +65,7 @@ export function loadSavedConfig(): Record<string, unknown> | null {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
       data = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) as Record<string, unknown>;
+      seedBlockedMasters(data);
 
       // Multi-master field (preferred, new)
       for (const e of parseMastersField(data.masters)) addMaster(e);
@@ -201,6 +202,8 @@ export function saveConfig(): void {
     const data = {
       // Canonical multi-master field
       masters,
+      // Operator removals must outlive a reboot — see loadBlockedMasters().
+      blockedMasters: blockedMasterList(),
       // Legacy single-URL field — kept so older parsers still work.
       serverUrl: firstUrl,
       agentUrl: state.savedAgentUrl,
@@ -265,6 +268,88 @@ export function saveConfig(): void {
 }
 
 /** Return the resolved config file path for diagnostics. */
+
+/**
+ * Master URLs an operator has explicitly removed.
+ *
+ * Removal has to survive a reboot, and it has to survive whatever added the entry
+ * in the first place. Without this, `loadSavedConfig()` re-creates the slot from
+ * config.json on the next boot, `discoverMasters()` re-probes it, and the master's
+ * reverse-poll (`POST /api/masters`) re-adds it — so "Remove" in the UI appeared to
+ * work and then silently undid itself.
+ *
+ * The concrete case: a stale entry with NO wsPort resolved to `wsPort ?? 3002`,
+ * which is another master's relay on this fleet. Two slots then registered with the
+ * same agentUrl against the same relay and evicted each other indefinitely. It was
+ * retired at runtime and returned on every restart, and the API could not delete it
+ * because it was no longer in the live map.
+ */
+const blocked = new Set<string>();
+let blockedSeeded = false;
+
+function norm(u: string): string { return u.replace(/\/+$/, ''); }
+
+/** Seed the block-list from disk once, so a reboot keeps operator removals. */
+export function seedBlockedMasters(data: Record<string, unknown> | null): void {
+  if (blockedSeeded) return;
+  blockedSeeded = true;
+  const raw = data?.blockedMasters;
+  if (Array.isArray(raw)) {
+    for (const u of raw) if (typeof u === 'string') blocked.add(norm(u));
+  }
+  if (blocked.size) log.info(`Block-list seeded with ${blocked.size} master URL(s)`);
+}
+
+export function blockedMasterList(): string[] { return [...blocked]; }
+
+export function isMasterBlocked(serverUrl: string): boolean {
+  return blocked.has(norm(serverUrl));
+}
+
+/**
+ * Record an operator removal so it outlives a reboot AND whatever added it.
+ *
+ * Without this, "Remove" silently undid itself: loadSavedConfig() re-created the
+ * slot from config.json on the next boot, discoverMasters() re-probed the URL, and
+ * the master's reverse-poll (POST /api/masters) re-added it.
+ *
+ * The case that forced it: a stale entry with NO wsPort resolved to
+ * `wsPort ?? 3002` — another master's relay on this fleet. Two slots then
+ * registered with the same agentUrl against the same relay and evicted each other
+ * indefinitely. It was retired at runtime and came back on every restart, and the
+ * API could not delete it because it was no longer in the live map.
+ */
+export function blockMaster(serverUrl: string): void {
+  blocked.add(norm(serverUrl));
+  log.info(`Master blocked (will not be re-added): ${serverUrl}`);
+}
+
+export function unblockMaster(serverUrl: string): boolean {
+  return blocked.delete(norm(serverUrl));
+}
+
+/** Master URLs present in the persisted config that have no live slot. */
+export function persistedOnlyMasters(
+  liveUrls: string[],
+): Array<{ serverUrl: string; wsPort: number | null }> {
+  try {
+    const data = loadSavedConfig();
+    const raw = Array.isArray(data?.masters) ? (data!.masters as unknown[]) : [];
+    const live = new Set(liveUrls.map(norm));
+    const out: Array<{ serverUrl: string; wsPort: number | null }> = [];
+    for (const e of raw) {
+      if (!e || typeof e !== 'object') continue;
+      const url = (e as Record<string, unknown>).serverUrl;
+      if (typeof url !== 'string' || live.has(norm(url))) continue;
+      const wp = (e as Record<string, unknown>).wsPort;
+      out.push({ serverUrl: url, wsPort: typeof wp === 'number' ? wp : null });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export function getConfigPath(): string { return CONFIG_PATH; }
 
 // ─── Recent-masters hint file (Channel 4) ────────────────────────────────
