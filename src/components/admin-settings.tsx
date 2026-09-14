@@ -46,10 +46,20 @@ const PROVIDER_MODELS: Record<string, Array<{ name: string; label: string; size:
 
 // Code-aware embedding models for the ss-code-embedding role. Separate from
 // the text embedding models above — used for agent/code search. Ollama only.
-const CODE_EMBEDDING_MODELS: Array<{ name: string; label: string; size: number }> = [
-  { name: 'hf.co/jinaai/jina-code-embeddings-1.5b-GGUF:Q8_0', label: 'Jina Code Embeddings 1.5B — Q8_0 (1536 dims, code-aware)', size: 1650 * 1024 * 1024 },
-  { name: 'hf.co/jinaai/jina-code-embeddings-1.5b-GGUF:F16', label: 'Jina Code Embeddings 1.5B — F16 (1536 dims, highest precision)', size: 3090 * 1024 * 1024 },
-  { name: 'hf.co/jinaai/jina-code-embeddings-0.5b-GGUF:Q8_0', label: 'Jina Code Embeddings 0.5B — Q8_0 (lighter)', size: 600 * 1024 * 1024 },
+const CODE_EMBEDDING_MODELS: Array<{
+  name: string;
+  label: string;
+  size: number;
+  dims: number;
+  /** One-line description shown once the model is selected. */
+  about: string;
+}> = [
+  { name: 'hf.co/jinaai/jina-code-embeddings-1.5b-GGUF:Q8_0', label: 'Jina Code Embeddings 1.5B — Q8_0 (1536 dims, code-aware)', size: 1650 * 1024 * 1024, dims: 1536, about: 'Code-aware embeddings (Qwen2.5-Coder-1.5B base, last-token pooling)' },
+  { name: 'hf.co/jinaai/jina-code-embeddings-1.5b-GGUF:F16', label: 'Jina Code Embeddings 1.5B — F16 (1536 dims, highest precision)', size: 3090 * 1024 * 1024, dims: 1536, about: 'Code-aware embeddings (Qwen2.5-Coder-1.5B base, last-token pooling, F16 weights)' },
+  { name: 'hf.co/jinaai/jina-code-embeddings-0.5b-GGUF:Q8_0', label: 'Jina Code Embeddings 0.5B — Q8_0 (896 dims, lighter)', size: 600 * 1024 * 1024, dims: 896, about: 'Code-aware embeddings (Qwen2.5-Coder-0.5B base, last-token pooling)' },
+  { name: 'qwen3-embedding:0.6b', label: 'Qwen3 Embedding 0.6B (0.6B params, 1024 dims, 32K context)', size: 639 * 1024 * 1024, dims: 1024, about: 'General-purpose Qwen3 embedding, 0.6B parameters, 1024 dims' },
+  { name: 'qwen3-embedding:4b', label: 'Qwen3 Embedding 4B (4B params, 2560 dims, 40K context)', size: 2500 * 1024 * 1024, dims: 2560, about: 'General-purpose Qwen3 embedding, 4B parameters, 2560 dims' },
+  { name: 'qwen3-embedding:8b', label: 'Qwen3 Embedding 8B (8B params, 4096 dims, 32K context)', size: 5000 * 1024 * 1024, dims: 4096, about: 'General-purpose Qwen3 embedding, 8B parameters, 4096 dims' },
 ];
 
 export default function AdminSettings({ initialConfig, initialModelDownloads }: AdminSettingsProps) {
@@ -413,32 +423,43 @@ export default function AdminSettings({ initialConfig, initialModelDownloads }: 
               ))}
             </select>
 
-            {config.codeOllamaModel && (
-              <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <div className="flex gap-2 mb-2">
-                  <svg className="h-5 w-5 text-blue-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <div>
-                    <h4 className="text-sm font-semibold text-blue-800">Code model is pulled from Hugging Face</h4>
-                    <p className="text-xs text-blue-700 mt-1">
-                      This is an <code>hf.co/…</code> reference, so the sidecar pulls it
-                      automatically when the role is enabled. To pre-pull it manually on
-                      the machine running Ollama:
-                    </p>
-                    <pre className="mt-2 px-3 py-2 bg-gray-900 text-green-400 text-sm rounded font-mono select-all whitespace-pre-wrap">
-                      ollama pull {config.codeOllamaModel}
-                    </pre>
-                    <p className="text-xs text-blue-600 mt-2">
-                      Code-aware embeddings (Qwen2.5-Coder-1.5B base, last-token pooling,
-                      1536 dims; ~{formatBytes(CODE_EMBEDDING_MODELS.find(m => m.name === config.codeOllamaModel)?.size || 0)}).
-                      Then assign the <code>ss-code-embedding</code> role to a sidecar on
-                      the <strong>Role Assignments</strong> page to serve it.
-                    </p>
+            {config.codeOllamaModel && (() => {
+              const selected = CODE_EMBEDDING_MODELS.find(m => m.name === config.codeOllamaModel);
+              const fromHf = config.codeOllamaModel.startsWith('hf.co/');
+              return (
+                <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                  <div className="flex gap-2 mb-2">
+                    <svg className="h-5 w-5 text-blue-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <div>
+                      <h4 className="text-sm font-semibold text-blue-800">
+                        {fromHf ? 'Code model is pulled from Hugging Face' : 'Code model is pulled from the Ollama registry'}
+                      </h4>
+                      <p className="text-xs text-blue-700 mt-1">
+                        {fromHf ? (
+                          <>This is an <code>hf.co/…</code> reference, so the sidecar pulls it
+                          automatically when the role is enabled.</>
+                        ) : (
+                          <>The sidecar pulls it automatically when the role is enabled.</>
+                        )}{' '}
+                        To pre-pull it manually on the machine running Ollama:
+                      </p>
+                      <pre className="mt-2 px-3 py-2 bg-gray-900 text-green-400 text-sm rounded font-mono select-all whitespace-pre-wrap">
+                        ollama pull {config.codeOllamaModel}
+                      </pre>
+                      <p className="text-xs text-blue-600 mt-2">
+                        {selected
+                          ? <>{selected.about}; {selected.dims} dims; ~{formatBytes(selected.size)}.</>
+                          : <>Custom model.</>}{' '}
+                        Then assign the <code>ss-code-embedding</code> role to a sidecar on
+                        the <strong>Role Assignments</strong> page to serve it.
+                      </p>
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         )}
 
