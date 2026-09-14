@@ -33,7 +33,16 @@ interface SidecarSummary {
   os?: ModeOs | string;
   gpuSummary?: string;
   hasNvidia?: boolean;
-  containers?: Record<string, { loadedModels?: Array<{ name: string; size?: number }> }>;
+  containers?: Record<
+    string,
+    {
+      loadedModels?: Array<{ name: string; size?: number }>;
+      /** Synthetic marker: 'host-ollama' / 'dmr' mean the status was assumed, not probed. */
+      image?: string;
+      /** Post-override port — see reportedPortFor(). */
+      config?: { port?: number };
+    }
+  >;
 }
 
 type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner';
@@ -55,11 +64,11 @@ const RUNTIME_COLUMNS: Array<{ key: RuntimeChoice; short: string; label: string 
 ];
 
 /**
- * Default port each role binds on the sidecar host. For Ollama-backed roles
- * this is what the sidecar exposes for the per-role container (the host
- * native Ollama always shares 11434). For vLLM-backed roles this is the
- * container's listening port. Source of truth: sideCar/src/lib/state.ts
- * defaultRegistry and sideCar/src/lib/mode-templates.ts:resolveMode().
+ * Per-role ports for the **Docker-managed** runtimes only. These were chosen so
+ * several Docker Ollama containers could coexist on one host; they are NOT the
+ * port a role binds under the host or DMR runtimes. Use portForRuntime().
+ * Source of truth: sideCar/src/lib/state.ts defaultRegistry and
+ * sideCar/src/lib/mode-templates.ts:resolveMode().
  */
 const MODE_PORTS: Record<string, number> = {
   'ss-embedding': 11434,
@@ -69,6 +78,70 @@ const MODE_PORTS: Record<string, number> = {
   'ss-reranker': 8099,
   'ss-rlm': 8100,
 };
+
+/** Defaults for the two runtimes that serve every role from ONE endpoint. */
+const HOST_OLLAMA_DEFAULT_PORT = 11434; // SS_HOST_OLLAMA_PORT
+const DMR_DEFAULT_PORT = 12434; // SS_DMR_PORT
+
+/**
+ * The port a role binds under a given runtime.
+ *
+ * **The port is a function of (role, runtime), not of role.** Native Ollama is
+ * one process with one listener: every host-runtime Ollama role shares it and
+ * is told apart by *model*, not by port — sideCar/src/lib/state.ts:667
+ * overwrites def.port with SS_HOST_OLLAMA_PORT for exactly this reason, and
+ * probing the per-role ports gets ECONNREFUSED because nothing listens there.
+ * Docker Model Runner collapses the same way onto state.dmrPort (state.ts:619),
+ * so on a Mac ss-reranker is 12434, not 8099 — the master calls
+ * /engines/vllm/v1/rerank on the DMR port directly (sideCar/docs/API.md).
+ *
+ * This is not a Mac special case. Mac is merely the OS where
+ * hostOs === 'mac-docker-ollama' makes 'host' the default runtime with no env
+ * var set; picking 'host' on Linux collapses identically.
+ *
+ * Both shared ports are env-overridable on the host, which we cannot see from
+ * here — so these are defaults, and reportedPortFor() supersedes them.
+ */
+export function portForRuntime(modeName: string, runtime: RuntimeChoice | null): number | undefined {
+  if (runtime === 'host') return HOST_OLLAMA_DEFAULT_PORT;
+  if (runtime === 'docker-model-runner') return DMR_DEFAULT_PORT;
+  return MODE_PORTS[modeName];
+}
+
+/**
+ * The port the sidecar itself resolved for this role, or undefined.
+ *
+ * /status reports containers keyed by role name **without** the `ss-` prefix,
+ * and `config.port` is the value *after* the host-Ollama / DMR rewrite — so it
+ * already accounts for SS_HOST_OLLAMA_PORT / SS_DMR_PORT.
+ *
+ * Only authoritative when the row's selected runtime matches the one the host
+ * is actually running: the radios describe a future state the live port says
+ * nothing about. `image` carries that signal — 'host-ollama' and 'dmr' are
+ * synthetic markers meaning the status was assumed, not probed; any other
+ * image is a genuine Docker-managed container.
+ */
+export function reportedPortFor(
+  sidecar: SidecarSummary,
+  modeName: string,
+  selectedRuntime: RuntimeChoice | null,
+): number | undefined {
+  const container = sidecar.containers?.[modeName.replace(/^ss-/, '')];
+  const port = container?.config?.port;
+  // `port: 0` is what the registry carries for roles that bind nothing (ss-cuda
+  // reports it live) — a placeholder, not an endpoint. Never render it.
+  if (typeof port !== 'number' || !Number.isFinite(port) || port <= 0) return undefined;
+
+  if (container?.image === 'host-ollama') {
+    return selectedRuntime === 'host' ? port : undefined;
+  }
+  if (container?.image === 'dmr') {
+    return selectedRuntime === 'docker-model-runner' ? port : undefined;
+  }
+  return selectedRuntime === 'docker-ollama' || selectedRuntime === 'docker-vllm'
+    ? port
+    : undefined;
+}
 
 /**
  * Per-OS runtime availability. windows-docker-wsl2 runs Docker via WSL2 with
@@ -696,7 +769,7 @@ export default function AdminRoleAssignments() {
                         <thead>
                           <tr className="text-[11px] text-gray-500">
                             <th className="text-left font-medium py-1 pr-3">Role</th>
-                            <th className="text-center font-medium py-1 px-2" title="Default port the role binds on the sidecar host">Port</th>
+                            <th className="text-center font-medium py-1 px-2" title="Port the role binds under the selected runtime. * marks a port shared by every role on this host.">Port</th>
                             {RUNTIME_COLUMNS.map((col) => {
                               const colAvail = osAvailable[col.key];
                               return (
@@ -752,13 +825,35 @@ export default function AdminRoleAssignments() {
                                   )}
                                 </td>
                                 <td className="text-center py-1.5 px-2">
-                                  {MODE_PORTS[mode.name] != null ? (
-                                    <span className="font-mono text-gray-600 text-[11px]" title="Default port — overridable per host">
-                                      {MODE_PORTS[mode.name]}
-                                    </span>
-                                  ) : (
-                                    <span className="text-gray-300">—</span>
-                                  )}
+                                  {(() => {
+                                    // Port follows the SELECTED runtime, not the role
+                                    // name. Prefer what the sidecar actually resolved
+                                    // (it can see SS_HOST_OLLAMA_PORT / SS_DMR_PORT;
+                                    // we cannot), fall back to the runtime default.
+                                    const reported = reportedPortFor(sidecar, mode.name, selectedRuntime);
+                                    const port = reported ?? portForRuntime(mode.name, selectedRuntime);
+                                    if (port == null) return <span className="text-gray-300">—</span>;
+                                    const shared =
+                                      selectedRuntime === 'host' || selectedRuntime === 'docker-model-runner';
+                                    return (
+                                      <span
+                                        className="font-mono text-gray-600 text-[11px]"
+                                        title={
+                                          (reported
+                                            ? `Reported by ${sidecar.hostname}.`
+                                            : 'Default for the selected runtime — overridable per host.') +
+                                          (shared
+                                            ? selectedRuntime === 'host'
+                                              ? ' One native Ollama serves every host role on this single port; roles are told apart by model, not by port.'
+                                              : ' Docker Model Runner serves every role from this single endpoint.'
+                                            : '')
+                                        }
+                                      >
+                                        {port}
+                                        {shared && <span className="text-gray-400"> *</span>}
+                                      </span>
+                                    );
+                                  })()}
                                 </td>
                                 {RUNTIME_COLUMNS.map((col) => {
                                   const colAvail = osAvailable[col.key] && modeRuntimes[col.key] && modeAvailableOnHost;
