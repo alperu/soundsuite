@@ -302,6 +302,24 @@ new manifest for a long time before any sidecar takes it.
 no `npm run build`, no dashboard restart. A new *tarball* still needs
 `buildSidecar.sh`.
 
+**Public mirror + GitHub Releases.** `sideCar/` is also published as its own
+repo, `github.com/Project-SandStar/SideCar` (git remote `sandstar`). Its history
+is `git subtree split --prefix=sideCar`, so every release goes there as well:
+
+```bash
+./scripts/buildSidecar.sh patch        # bump + tarball + manifest (as above)
+git commit -am "Release sidecar X.Y.Z …" && git push
+./scripts/publishSidecarGithub.sh      # subtree push → sandstar/main, tag vX.Y.Z,
+                                       # GitHub Release with the tarball + manifest
+```
+
+The publish script is idempotent and never force-pushes: it refuses if
+`sideCar/` has uncommitted changes (the split is taken from HEAD), if HEAD's
+`sideCar/package.json` does not carry the version being published, or if the
+split would not fast-forward the mirror (someone committed directly to the
+mirror — merge that into `sideCar/` here first). A published tag is never moved;
+bump and release again instead.
+
 ### Auto-Commit Hook
 
 The Stop hook (`.claude/hooks/commit-on-complete.sh`) only commits if a **signal file** exists at `.claude/.pending-commit-message`. Without it, changes stay staged — no auto-commit.
