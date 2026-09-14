@@ -21,13 +21,28 @@ export async function POST(request: Request) {
     const m = ensureMaster(url, { authToken });
     saveConfig();
 
-    if (!existed) {
+    // This endpoint is documented as "force a WebSocket reconnect" and is what
+    // an operator reaches for when a slot is stuck. It used to call
+    // connectMaster ONLY for a brand-new slot, so on an existing one it did
+    // nothing at all and answered "Already connected" — while that same
+    // response carried connectionMode: 'disconnected'. The one case it was
+    // needed for was the one case it skipped.
+    //
+    // connectMaster is idempotent by design: it returns early if a socket is
+    // already OPEN or CONNECTING, so calling it on a genuinely live slot is a
+    // no-op rather than a second socket.
+    const live = m.connectionMode === 'websocket';
+    if (!live) {
       connectMaster(m);
     }
 
     return NextResponse.json(
       {
-        message: existed ? `Already connected to ${url}` : `Connecting to ${url}...`,
+        message: live
+          ? `Already connected to ${url}`
+          : existed
+            ? `Reconnecting to ${url}...`
+            : `Connecting to ${url}...`,
         master: {
           serverUrl: m.serverUrl,
           connectionMode: m.connectionMode,
