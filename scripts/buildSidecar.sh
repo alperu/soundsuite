@@ -74,130 +74,29 @@ echo "$NEW_VERSION" > "$STAGE_DIR/sidecar/VERSION"
 # Create cross-platform launcher scripts
 
 # --- start.sh (Linux/macOS) ---
-cat > "$STAGE_DIR/sidecar/start.sh" << 'LAUNCHER_SH'
-#!/usr/bin/env bash
-# Sound Suite Sidecar Launcher (Linux/macOS)
-# Usage: ./start.sh [SERVER_URL]
-#   ./start.sh http://172.16.16.9:3000
-#   SERVER_URL=http://172.16.16.9:3000 ./start.sh
-#   PORT=9000 ./start.sh http://172.16.16.9:3000
-set -euo pipefail
-DIR="$(cd "$(dirname "$0")" && pwd)"
-PORT="${PORT:-8098}"
-VER=$(cat "$DIR/VERSION")
+# Ship the SAME launcher the docs tell operators to curl standalone.
+#
+# This used to be a 120-line heredoc generated right here. It drifted: the
+# standalone copy in public/ grew --docker/-d parsing, Mac SS_HOST_OLLAMA=1
+# defaulting and EXTERNAL_IP detection, and the heredoc got none of it. The
+# tarball therefore shipped a launcher that took "--docker" as the master URL,
+# so the documented one-liner produced SOUND_SUITE_MASTER_URL=--docker, an
+# "Invalid URL" reconnect loop, and Node mode instead of a container.
+#
+# One file, copied — never a second transcription. If you need to change the
+# launcher, change public/sideCar/scripts/start.sh and rebuild.
+LAUNCHER_SRC="$PROJECT_ROOT/public/sideCar/scripts/start.sh"
+[ -f "$LAUNCHER_SRC" ] || { echo "[ERROR] Missing launcher source: $LAUNCHER_SRC"; exit 1; }
+cp "$LAUNCHER_SRC" "$STAGE_DIR/sidecar/start.sh"
 
-# Master URL: positional arg > SOUND_SUITE_MASTER_URL > legacy SERVER_URL
-if [ -n "${1:-}" ]; then
-  export SOUND_SUITE_MASTER_URL="$1"
-  export SERVER_URL="$1"
-fi
-# Cross-fill so either env var alone is enough
-if [ -z "${SOUND_SUITE_MASTER_URL:-}" ] && [ -n "${SERVER_URL:-}" ]; then
-  export SOUND_SUITE_MASTER_URL="$SERVER_URL"
-fi
-if [ -z "${SERVER_URL:-}" ] && [ -n "${SOUND_SUITE_MASTER_URL:-}" ]; then
-  export SERVER_URL="$SOUND_SUITE_MASTER_URL"
-fi
-
-# --- Dependency checks ---
-echo "Sound Suite Sidecar v$VER"
-echo "========================"
-
-# Check Docker
-if ! command -v docker &>/dev/null; then
-  echo "[ERROR] Docker is not installed or not in PATH."
-  echo "  Install: https://docs.docker.com/get-docker/"
+# Guard the exact regression above: the shipped launcher must strip --docker
+# before it reads the master URL. Cheap, and it fails the build rather than
+# the fleet.
+grep -q -- '--docker|-d) FORCE_DOCKER=1' "$STAGE_DIR/sidecar/start.sh" || {
+  echo "[ERROR] Shipped start.sh does not parse --docker. The documented"
+  echo "        install one-liner would set SOUND_SUITE_MASTER_URL=--docker."
   exit 1
-fi
-if ! docker info &>/dev/null 2>&1; then
-  echo "[ERROR] Docker daemon is not running."
-  echo "  Start Docker Desktop or run: sudo systemctl start docker"
-  exit 1
-fi
-echo "[OK] Docker"
-
-# Check Node.js (optional — fallback to Docker mode)
-if command -v node &>/dev/null; then
-  NODE_VER=$(node -v)
-  NODE_MAJOR=$(echo "$NODE_VER" | sed 's/v//' | cut -d. -f1)
-  if [ "$NODE_MAJOR" -lt 18 ]; then
-    echo "[WARN] Node.js $NODE_VER found but v18+ is required."
-    echo "  Falling back to Docker mode. Or upgrade: https://nodejs.org"
-    USE_DOCKER=1
-  else
-    echo "[OK] Node.js $NODE_VER"
-  fi
-else
-  echo "[INFO] Node.js not found — running in Docker mode."
-  USE_DOCKER=1
-fi
-
-# Check GPU (optional)
-if command -v nvidia-smi &>/dev/null; then
-  GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
-  echo "[OK] GPU: $GPU_NAME"
-else
-  echo "[INFO] nvidia-smi not found — GPU detection will use Docker probe."
-fi
-
-echo "========================"
-
-# --- Launch ---
-if [ "${USE_DOCKER:-}" = "1" ]; then
-  echo "Starting in Docker mode on port $PORT..."
-  [ -n "${SERVER_URL:-}" ] && echo "Connecting to server: $SERVER_URL"
-
-  DOCKER_ARGS="-d --name ss-sidecar --restart unless-stopped"
-  # On Linux use host networking for full LAN access; on macOS use port mapping
-  if [ "$(uname)" = "Linux" ]; then
-    DOCKER_ARGS="$DOCKER_ARGS --network host"
-  else
-    DOCKER_ARGS="$DOCKER_ARGS -p $PORT:8098"
-  fi
-  DOCKER_ARGS="$DOCKER_ARGS --add-host=host.docker.internal:host-gateway"
-  DOCKER_ARGS="$DOCKER_ARGS -v /var/run/docker.sock:/var/run/docker.sock"
-  DOCKER_ARGS="$DOCKER_ARGS -v ss-sidecar-config:/app/config"
-  DOCKER_ARGS="$DOCKER_ARGS -e NODE_ENV=production"
-  DOCKER_ARGS="$DOCKER_ARGS -e CONFIG_PATH=/app/config/config.json"
-  [ -n "${SOUND_SUITE_MASTER_URL:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SOUND_SUITE_MASTER_URL=$SOUND_SUITE_MASTER_URL"
-  [ -n "${SERVER_URL:-}" ] && DOCKER_ARGS="$DOCKER_ARGS -e SERVER_URL=$SERVER_URL"
-
-  # Detect host's LAN IP so the sidecar registers with a reachable address
-  # (inside Docker, network interfaces show the bridge IP 172.17.x.x which is unreachable)
-  if [ "$(uname)" != "Linux" ]; then
-    # macOS/other: detect LAN IP from host interfaces
-    HOST_IP=$(ifconfig 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | grep -v '172.17' | head -1 | awk '{print $2}')
-    if [ -n "$HOST_IP" ]; then
-      DOCKER_ARGS="$DOCKER_ARGS -e EXTERNAL_IP=$HOST_IP"
-      echo "  Host IP: $HOST_IP"
-    fi
-  fi
-  # Linux with --network host doesn't need EXTERNAL_IP (host interfaces are visible)
-
-  # Pass real hostname into container (os.hostname() returns container ID inside Docker)
-  DOCKER_ARGS="$DOCKER_ARGS -e SIDECAR_HOSTNAME=$(hostname)"
-
-  # Remove old container if exists
-  docker rm -f ss-sidecar 2>/dev/null || true
-
-  # Build image from the extracted files
-  docker build -t ss-sidecar:v$VER -f "$DIR/Dockerfile.run" "$DIR"
-  eval docker run $DOCKER_ARGS ss-sidecar:v$VER
-
-  echo "Sidecar running as Docker container 'ss-sidecar'."
-  echo "  Dashboard: http://localhost:$PORT"
-  echo "  Logs:      docker logs -f ss-sidecar"
-  echo "  Stop:      docker stop ss-sidecar"
-else
-  echo "Starting on port $PORT..."
-  [ -n "${SERVER_URL:-}" ] && echo "Connecting to server: $SERVER_URL"
-  export NODE_ENV=production
-  export PORT="$PORT"
-  export HOSTNAME=0.0.0.0
-  export CONFIG_PATH="$DIR/config/config.json"
-  exec node "$DIR/server.js"
-fi
-LAUNCHER_SH
+}
 chmod +x "$STAGE_DIR/sidecar/start.sh"
 
 # --- start.bat (Windows) ---

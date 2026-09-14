@@ -1,12 +1,43 @@
 #!/usr/bin/env bash
 # Sound Suite Sidecar — Download & Install (Linux/macOS)
 # Usage:
-#   ./install.sh                          # defaults to http://192.0.2.10:3000
-#   ./install.sh http://192.168.1.50:3000 # custom server
-#   INSTALL_DIR=/opt/sidecar ./install.sh # custom install path
+#   ./install.sh                                   # defaults to http://192.0.2.10:3000
+#   ./install.sh http://192.0.2.50:3000            # custom server
+#   ./install.sh --docker http://192.0.2.50:3000   # install, then start in Docker mode
+#   INSTALL_DIR=/opt/sidecar ./install.sh          # custom install path
 set -euo pipefail
 
+# Pull --docker / -d out of the positional args first so they don't get
+# mistaken for the master URL (which is the first remaining positional arg).
+# Same convention as start.sh — the flag is documented in the install one-liner
+# on /docs, so accepting it here is not optional: without this loop `--docker`
+# becomes SERVER and every subsequent URL is built from it.
+FORCE_DOCKER="${FORCE_DOCKER:-0}"
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --docker|-d) FORCE_DOCKER=1 ;;
+    -h|--help)
+      sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    -*)
+      echo "[ERROR] Unknown option: $arg"
+      echo "  Usage: ./install.sh [--docker] [master-url]"
+      exit 2
+      ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+set -- "${ARGS[@]:-}"
+
 SERVER="${1:-http://192.0.2.10:3000}"
+
+# A bare flag left in SERVER means the parsing above regressed. Fail loudly
+# rather than building URLs like "--docker/sideCar/builds/manifest.json".
+case "$SERVER" in
+  -*) echo "[ERROR] '$SERVER' is not a master URL. Usage: ./install.sh [--docker] [master-url]"; exit 2 ;;
+esac
 # Default install dir: <cwd>/sidecar — keeps the user on the drive/folder they
 # invoked the installer from. Override with: INSTALL_DIR=/opt/sidecar ./install.sh
 INSTALL_DIR="${INSTALL_DIR:-$PWD/sidecar}"
@@ -158,7 +189,22 @@ echo "================================"
 echo " Installed v$VERSION"
 echo "================================"
 echo ""
+# --docker means "install, then start in container mode" — this is what the
+# one-liner on /docs promises. On a Mac that matters beyond convenience:
+# start.sh --docker enables SS_HOST_OLLAMA=1, so model calls route to native
+# Ollama (Metal). Without it the sidecar runs containerized Ollama, which has
+# no GPU passthrough on Docker Desktop and is silently CPU-only.
+if [ "$FORCE_DOCKER" = "1" ]; then
+  echo "Starting in Docker mode..."
+  echo ""
+  cd "$INSTALL_DIR"
+  exec ./start.sh --docker "$SERVER"
+fi
+
 echo "Start the sidecar:"
 echo "  cd $INSTALL_DIR"
-echo "  ./start.sh $SERVER"
+echo "  ./start.sh --docker $SERVER"
+echo ""
+echo "  (--docker is required on macOS: Docker Desktop has no GPU passthrough,"
+echo "   so start.sh --docker routes model calls to native Ollama on the host.)"
 echo ""

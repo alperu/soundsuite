@@ -1,12 +1,36 @@
 @echo off
 REM Sound Suite Sidecar — Download & Install (Windows)
 REM Usage:
-REM   install.bat                          # defaults to http://192.0.2.10:3000
-REM   install.bat http://192.168.1.50:3000 # custom server
-REM   set INSTALL_DIR=D:\sidecar && install.bat  # custom install path
+REM   install.bat                                  # defaults to http://192.0.2.10:3000
+REM   install.bat http://192.0.2.50:3000           # custom server
+REM   install.bat --docker http://192.0.2.50:3000  # install, then start it
+REM   set INSTALL_DIR=D:\sidecar && install.bat   # custom install path
 setlocal enabledelayedexpansion
 
-set "SERVER=%~1"
+REM Pull --docker / -d out of the positional args first so they don't get
+REM mistaken for the master URL. Same trap install.sh had: without this loop
+REM "--docker" became SERVER and every URL was built from it, producing
+REM "--docker/sideCar/builds/manifest.json".
+set "FORCE_DOCKER=0"
+set "SERVER="
+:parse_args
+if "%~1"=="" goto args_done
+if /i "%~1"=="--docker" goto flag_docker
+if /i "%~1"=="-d" goto flag_docker
+echo.%~1| findstr /b /c:"-" >nul && (
+    echo [ERROR] Unknown option: %~1
+    echo   Usage: install.bat [--docker] [master-url]
+    endlocal
+    exit /b 2
+)
+if not defined SERVER set "SERVER=%~1"
+goto next_arg
+:flag_docker
+set "FORCE_DOCKER=1"
+:next_arg
+shift
+goto parse_args
+:args_done
 if "!SERVER!"=="" set "SERVER=http://192.0.2.10:3000"
 REM Default install dir: <current dir>\sidecar — keeps the user on the drive
 REM they invoked the installer from. Override with: set INSTALL_DIR=D:\path
@@ -124,6 +148,15 @@ echo ================================
 echo  Installed v!VERSION!
 echo ================================
 echo.
+if "!FORCE_DOCKER!"=="1" (
+    echo Starting...
+    echo.
+    cd /d "!INSTALL_DIR!"
+    if exist "!TMP!" rmdir /s /q "!TMP!" 2>nul
+    endlocal & call start.bat %SERVER%
+    exit /b %ERRORLEVEL%
+)
+
 echo Start the sidecar:
 echo   cd !INSTALL_DIR!
 echo   start.bat !SERVER!
