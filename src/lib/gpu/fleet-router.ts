@@ -952,11 +952,29 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
  * The key rides the same WebSocket as the rest of the config and is held in
  * memory on the sidecar only — never written to its config.json, never surfaced
  * by /api/status.
+ *
+ * `domain` (added for ss-rlm-sandbox): this master's self-declaration of
+ * which retrieval domain it drives the RLM sandbox pattern over — 'legal'
+ * for Sound Suite (query_case_knowledge / query_case_graph). The Fantom MCP
+ * master declares 'code' (search_code / search_symbols / search_files) from
+ * its OWN codebase — this repo cannot and does not speak for it. See
+ * docs/SPEC-ss-rlm-sandbox.md for the full two-master contract and why the
+ * sidecar must treat a master with no `domain` as unconfigured rather than
+ * defaulting to either side.
+ *
+ * `rlm-sandbox`'s model/mode ride this SAME per-master channel (allowedModels
+ * / modeByRole), not the global `modelOverrides` used for the other modes —
+ * deliberately. Two masters can pick different sandbox models (legal
+ * reasoning over pleadings vs. code reasoning over an unfamiliar language
+ * are not obviously the same choice), and `modelOverrides` has exactly one
+ * value per sidecar — it would let one master's pick silently clobber the
+ * other's. The per-master map already exists precisely to avoid that.
  */
 export function buildOpenRouterPush(cfg: AppConfig): {
   apiKey: string;
   allowedModels: Record<string, { model: string; provider?: string; dims?: number }>;
   modeByRole: Record<string, string>;
+  domain: 'legal' | 'code';
 } | null {
   if (!cfg.openRouterEnabled || !cfg.openRouterApiKey) return null;
 
@@ -980,6 +998,11 @@ export function buildOpenRouterPush(cfg: AppConfig): {
   add('embedding', cfg.openRouterEmbeddingModel);
   add('code-embedding', cfg.openRouterCodeEmbeddingModel);
   add('reranker', cfg.openRouterRerankModel);
+  // ss-rlm-sandbox — this master's own model choice (set on /admin/openrouter,
+  // not a fleet-wide global; see that page's note). `add()` falls through to
+  // the bare `{ model: id }` shape for a chat model like this, same as an
+  // unrecognized rerank id.
+  add('rlm-sandbox', cfg.rlmSandboxModel);
 
   // Modes come from `virtualInference.mode.<role>`. This used to push a
   // hardcoded 'local-first' for every role, so the sidecar reported a mode the
@@ -1012,8 +1035,11 @@ export function buildOpenRouterPush(cfg: AppConfig): {
     // then fall back.
     modeByRole['reranker'] = 'local-first';
   }
+  if (allowedModels['rlm-sandbox']) {
+    modeByRole['rlm-sandbox'] = sidecarMode(cfg.virtualInferenceModeRlm);
+  }
 
-  return { apiKey: cfg.openRouterApiKey, allowedModels, modeByRole };
+  return { apiKey: cfg.openRouterApiKey, allowedModels, modeByRole, domain: 'legal' };
 }
 
 export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {
