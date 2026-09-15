@@ -1,0 +1,257 @@
+# `ss-rlm-sandbox` — runtime design
+
+**Status:** Design agreed, implementation in progress · **Created:** 2026-09-15
+**Supersedes on points of conflict:** the 2026-09-15 design note ("run the RLM
+pattern instead of hosting an RLM model") and [`SPEC-ss-rlm-sandbox.md`](./SPEC-ss-rlm-sandbox.md) §3
+**Depends on:** [task 50](./tasks/50-rlm-sandbox-unassignable.md) (shipped in sidecar 2.4.8)
+
+This document exists because the two prior documents were written *before anyone
+read the library's source*. Six of their load-bearing claims turn out to be
+wrong or stale. Where this file and those conflict, this one was checked against
+`alexzhang13/rlm@854e688f`, vendored at [`public/rlm/`](../public/rlm/).
+
+---
+
+## 1. Corrections to the prior documents
+
+| claim | reality | where it came from |
+|---|---|---|
+| "the `rlm` library", not on PyPI | Distribution is **`rlms`**; the *module* is `rlm`. It **is** on PyPI. | `pyproject.toml:name` |
+| Tools must be passed as **Python code strings** — host callables cannot cross the process boundary | True only for **isolated** environments. `custom_tools` takes **callables**; with `environment="local"` they stay in-process. | `RLM.__init__` docstring |
+| Use `DockerREPL` (`environment="docker"`) | Cannot: it shells out to the `docker` CLI, which needs the socket. Spec §4 forbids the socket in the sandbox, and the sidecar never passes it (`docker.ts:927-934`). | see §3 |
+| `docker build -f Dockerfile.sandbox` | **No such file upstream.** The docstring in `docker_repl.py` references a file that does not exist in the repo. | verified at `854e688f` |
+| Role is `type: 'utility'` | `type: 'vllm'`. Utility roles are skipped by `ensureContainerForRole()`. | already corrected in SPEC §6 |
+| OpenRouter is a cost-tracking *backend* | There is no OpenRouter client. Backends are `openai`, `anthropic`, `gemini`, `azure_openai`, `portkey`. OpenRouter is reached as `openai` + `base_url`. | `rlm/clients/` |
+
+The last one has a consequence, in §5.
+
+---
+
+## 2. Architecture
+
+```
+                   ┌─ CONTROL PLANE ─────────────────────────────┐
+                   │  pull / start / stop, lease, idle timer      │
+  master :3000 ────┤                                             │
+    │  /config     │   SIDECAR :8098                             │
+    │              │   · per-master OpenRouter key               │
+    │              │   · allowedModels['rlm-sandbox']            │
+    │              │        │ docker run (runtime: docker-cpu)   │
+    │              │        ▼                                    │
+    │  DATA PLANE  │   ╔══════════════════════════════════════╗  │
+    └──────────────────▶║ ss-rlm-sandbox              :8101    ║  │
+   resolveRlmEndpoint() ║  server.py  — OpenAI-compatible shim ║  │
+   POST /v1/chat/…      ║     │                                ║  │
+                        ║     ▼                                ║  │
+                        ║  RLM(environment="local")            ║  │
+                        ║   model-written Python, in-process    ║  │
+                        ║     │                     │           ║  │
+                        ╚═════│═════════════════════│═══════════╝  │
+                              │ llm_query           │ custom_tools │
+                              │ rlm_query           │ (callables)  │
+                              ▼                     ▼              │
+                    sidecar /v1/chat/completions   master HTTP     │
+                        (NEW — §4)                  (stubbed, §7)  │
+                              │                                    │
+                              ▼                                    │
+                        OpenRouter — deepseek/deepseek-v4-flash    │
+                                                                   │
+  KEY LIVES HERE ──────────────────────────────────────────────────┘
+  (sidecar, per master — never in the container)
+```
+
+The sidecar is **control plane only**. It creates the container and manages its
+lease, but the master's inference call goes **straight to `:8101`** —
+`resolveRlmEndpoint()` returns `http://<sidecar-host>:8101` and dials it
+directly. Same shape as the Docker Model Runner path.
+
+---
+
+## 3. Decision: `environment="local"`, not `"docker"`
+
+The design note's central recommendation was to use the library's own
+`DockerREPL`, on the strength of its docs: *"The container runs fully isolated
+from the host; a lightweight host-side proxy bridges LM access back into the
+container."* That is genuinely elegant — **for the topology the note assumed**,
+where the `rlm` library runs *on the host*.
+
+What shipped is a different topology: the library runs **inside** a
+sidecar-managed role container. In that position `DockerREPL` means *nested*
+Docker — our container would have to spawn its own children, which requires
+`/var/run/docker.sock` inside it. That is the one thing spec §4 calls
+non-negotiable, and it is not a theoretical objection: role containers get only
+`ollama-models` or `huggingface-cache` binds (`sideCar/src/lib/docker.ts:927-934`).
+There is no socket to use.
+
+So: **the container is the isolation boundary**, and the REPL runs in-process
+inside it. That is spec §4's own stated reasoning — "container isolation is
+considered sufficient" — merely applied one layer out from where the note put it.
+
+Nothing is lost. `llm_query`, `rlm_query`, `custom_tools`, `persistent=True`,
+`compaction=True` and the recursion controls are the `RLM` class's API, not
+`DockerREPL`'s. One thing is *gained*: with `local`, `custom_tools` accepts
+ordinary Python callables, so the retrieval tools are functions rather than
+injected code strings.
+
+**If the threat model changes**, `environment="e2b"` / `"modal"` remains a
+one-line swap — those are hosted microVMs and need no local socket. That escape
+hatch is intact; only the `docker` value is unavailable to us.
+
+---
+
+## 4. New component: `virtual-chat` on the sidecar
+
+**This is the piece that does not exist, and everything else depends on it.**
+
+Today the sidecar's virtual-inference surface is three **WebSocket** actions —
+`virtual-embed`, `virtual-rerank`, `virtual-key-info` (`ws-client.ts:374-376`) —
+all invoked *by a master, over that master's socket*. There is no `virtual-chat`,
+and no HTTP route for any of them. The sandbox needs the opposite direction:
+container → sidecar → OpenRouter.
+
+**Route:** `sideCar/src/app/api/v1/chat/completions/route.ts`
+
+OpenAI-compatible, so the container configures
+`RLM(backend="openai", backend_kwargs={"base_url": "http://<sidecar>:8098/v1", "api_key": "<scoped>"})`
+and the library needs no OpenRouter awareness at all.
+
+It reuses what already works: `openrouter-client.ts` for the call, and
+`virtual-inference.ts:221` for per-master `apiKey` + `allowedModels` resolution.
+
+### 4.1 Which master's key? — decided
+
+The existing `virtual-*` actions get `m.serverUrl` for free because they arrive
+over that master's WebSocket. An HTTP route has no such context, and the key,
+the model and the spend are all **per master** by design so Sound Suite and
+Fantom cannot clobber each other.
+
+**v1 resolves to the single configured master, and fails loudly with 409 when
+more than one is configured.** Not "pick the first" — that silently spends one
+master's budget on the other's model, and Fantom's half of the contract is not
+started, so one master is the real state today rather than a simplification.
+
+When Fantom lands, the master threads its own identity: `resolveRlmEndpoint()`
+already returns a struct the master controls, so the master sends its
+`serverUrl` when it dials `:8101`, and `server.py` forwards it as a header. That
+is a small additive change, and the 409 is what will force it to happen rather
+than be forgotten.
+
+---
+
+## 5. Safety rails — and one that is inert
+
+`RLM.__init__` ships the limits spec §4 asked for:
+
+| parameter | setting | why |
+|---|---|---|
+| `max_timeout` | **yes** | "Model-written loops do not reliably terminate." The primary rail. |
+| `max_tokens` | **yes** | Total input+output ceiling. |
+| `max_errors` | **yes** | Stops a loop erroring in circles. |
+| `max_iterations` | default 30 | Root-loop bound. |
+| `max_concurrent_subcalls` | 4 (default) | An RLM fans out; this bounds the burst. |
+| `max_budget` | **INERT — do not rely on it** | See below. |
+
+**`max_budget` does not work through our proxy.** Its docstring: *"Requires
+cost-tracking backend (e.g. OpenRouter)"* — it reads cost off the response. Our
+route presents as a generic `openai` backend, so that field is absent and the
+parameter silently becomes a no-op. On a role that makes many sub-calls per
+question, a budget cap that looks configured and does nothing is worse than an
+absent one.
+
+Two ways out, in order of preference:
+
+1. **Pass OpenRouter's `usage` through verbatim** in the route's response. Then
+   `max_budget` works as designed. Preferred, and cheap.
+2. Leave it unset and rely on `max_timeout` + `max_tokens` + `max_errors`, with
+   OpenRouter's own per-role daily caps as the backstop.
+
+Until (1) ships, **`max_budget` must not be passed** — an unset parameter is
+honest, a dead one is not.
+
+---
+
+## 6. The image
+
+```dockerfile
+FROM python:3.11-slim
+ARG MASTER_URL
+ARG RLMS_SHA256
+# Vendored from the master, not PyPI/GitHub: the build host may have a route to
+# a master and nothing else. Checksum-verified, same discipline as install.sh.
+ADD ${MASTER_URL}/rlm/rlms-latest.tar.gz /tmp/rlms.tar.gz
+RUN echo "${RLMS_SHA256}  /tmp/rlms.tar.gz" | sha256sum -c - \
+ && mkdir -p /tmp/rlms && tar xzf /tmp/rlms.tar.gz -C /tmp/rlms \
+ && pip install --no-cache-dir /tmp/rlms && rm -rf /tmp/rlms*
+COPY server.py /app/server.py
+USER nobody
+EXPOSE 8101
+CMD ["python", "/app/server.py"]
+```
+
+`server.py` is the only code we write — roughly 100 lines:
+
+1. Serve `POST /v1/chat/completions` on 8101 (what the master dials) and
+   `GET /health`.
+2. Construct `RLM(...)` with `backend="openai"`, `backend_kwargs` pointing at the
+   sidecar route, `environment="local"`, the §5 rails, and `custom_tools`.
+3. Return an OpenAI-shaped response.
+
+Registry entry is already correct and needs no change: `port: 8101`, `vram: 0`,
+`type: 'vllm'`, `requiresGpu: false`, runtime `docker-cpu`
+(`sideCar/src/lib/state.ts:220`, `mode-templates.ts:rlmSandboxDef`).
+
+**Open: where the image is published.** `soundsuite/rlm-sandbox:latest` is the
+string in the registry and it 404s on Docker Hub. Whatever replaces it must be
+changed in **both** `state.ts` and `mode-templates.ts` — the registry-overwrite
+trap, where editing only `defaultRegistry` is silently dropped at runtime.
+
+---
+
+## 7. Explicitly not in this pass
+
+- **Master-side HTTP tool endpoints.** `query_case_knowledge` / `query_case_graph`
+  are not exposed over HTTP, so `custom_tools` is **stubbed**. The sandbox will
+  run its loop and reason over the prompt it is given; it cannot yet retrieve.
+  That is enough to prove the image, the contract and the routing, and it keeps
+  this pass out of the master's MCP surface.
+- **Fantom's half** — `domain: 'code'`, `search_code` / `search_symbols` /
+  `search_files`. Not started, not ours.
+- **`RLM_CONTEXT_TOKENS`**, which clamps to 40,960 (`ss-rlm`'s vLLM ceiling) even
+  on the sandbox path where the hosted model advertises ~1.05 M. Being addressed
+  separately; see `stream-rlm.ts`.
+- **Evaluating the pattern against the fine-tune.** Spec §6's open question
+  stands: do not retire `ss-rlm` on the strength of a design document.
+
+---
+
+## 8. Verification order
+
+Deliberately bottom-up — each step is provable before the next exists, so a
+failure is never debugged through two layers of container.
+
+1. **Route alone.** `curl -s localhost:8098/v1/chat/completions -d '{...}'`
+   returns a real completion from `deepseek/deepseek-v4-flash`. No image yet.
+2. **Route rejects ambiguity.** Two configured masters → 409, not a guess.
+3. **Image builds** on a host with only a master route, and the sha256 check
+   fails closed on a corrupted tarball.
+4. **Container answers** `GET /health`, then `/v1/chat/completions` with a
+   trivial prompt, run by hand with `docker run`.
+5. **Sidecar starts it** from a role assignment: the row goes *not provisioned*
+   → *running*, `/api/status` reports `config.port: 8101`.
+6. **Master routes to it** — set `virtualInference.mode.rlm = 'local-first'`
+   with no `ss-rlm` anywhere, and confirm the `notice` event that marks a
+   degraded answer fires.
+
+Only (6) exercises `resolveRlmEndpoint`'s fallback, and only it proves the
+feature. (1)–(5) are what make (6) debuggable.
+
+---
+
+## 9. References
+
+- [`SPEC-ss-rlm-sandbox.md`](./SPEC-ss-rlm-sandbox.md) — two-master contract; §4 security constraints stand unchanged
+- [`tasks/50-rlm-sandbox-unassignable.md`](./tasks/50-rlm-sandbox-unassignable.md) — why the role could not be assigned until 2.4.8
+- [`public/rlm/`](../public/rlm/) — the vendored library, pinned at `854e688f`
+- `sideCar/src/lib/state.ts:179-243` — registry entry and its reasoning
+- `src/lib/ai/stream-rlm.ts:307-342` — the fallback that dials `:8101`
+- [arXiv 2512.24601](https://arxiv.org/abs/2512.24601) — Zhang, Kraska, Khattab

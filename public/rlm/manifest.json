@@ -1,0 +1,31 @@
+{
+  "package": "rlms",
+  "module": "rlm",
+  "version": "0.1.3",
+  "filename": "rlms-0.1.3.tar.gz",
+  "sha256": "ef7bdc256ec5160eb075a0f87b94256f344584803c63461b8d27ef79c37063d2",
+  "size": 93842,
+  "source": "https://github.com/alexzhang13/rlm",
+  "commit": "854e688fbba9d8f8989e3da9989812e4b6dfe270",
+  "vendoredAt": "2026-09-15T20:53:00Z",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 Alex Zhang",
+  "paper": "arXiv 2512.24601 — Zhang, Kraska, Khattab",
+  "contents": [
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+    "MANIFEST.IN",
+    "rlm/"
+  ],
+  "excluded": [
+    "media/",
+    "docs/",
+    "examples/",
+    "tests/",
+    "training/",
+    "visualizer/",
+    ".git/"
+  ],
+  "note": "Trimmed to what `pip install .` needs: 13 MB checkout -> 92 KB. The excluded directories are documentation, paper media, the fine-tune training code and the trace visualizer; none are imported by the `rlm` module."
+}
