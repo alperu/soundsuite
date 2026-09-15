@@ -6,6 +6,8 @@
 import { getConfig, AppConfig } from '@/lib/db/config';
 import { createLogger } from '@/lib/logger';
 import { rerankerLifecycle } from './reranker-lifecycle';
+import { rerankDocuments, recordSpend } from '@/lib/openrouter/client';
+import { findRerankModel } from '@/lib/openrouter/models';
 
 const logger = createLogger('Reranker');
 
@@ -239,9 +241,15 @@ export async function rerank<T extends RerankableResult>(
     logger.info('Reranking skipped', { reason: 'provider set to none' });
     return skipped('provider-none', results, { message: 'Rerank provider is set to "none".' });
   }
-  if (!config.rerankHost) {
+  // The no-host guard only applies to vLLM — OpenRouter has no host to probe
+  // (requirement: skip preflight/candidate-host logic entirely on that path).
+  if (config.rerankProvider === 'vllm' && !config.rerankHost) {
     logger.info('Reranking skipped', { reason: 'no host configured' });
     return skipped('no-host', results, { message: 'No rerank host is configured.' });
+  }
+  if (config.rerankProvider === 'openrouter' && !config.openRouterEnabled) {
+    logger.info('Reranking skipped', { reason: 'openrouter disabled' });
+    return skipped('disabled', results, { message: 'OpenRouter is not enabled in configuration.' });
   }
 
   const effectiveTopN = topN ?? config.rerankTopN ?? 10;
@@ -255,10 +263,13 @@ export async function rerank<T extends RerankableResult>(
   if (opts?.interactive) {
     logger.info('Reranking (interactive)', { timeoutMs });
   }
-  // Model context budget. Qwen3-Reranker-8B is started with --max-model-len 8192;
-  // any single (query, doc) pair over that is rejected with HTTP 400 and aborts
-  // the whole batch. Keep in sync with sideCar/src/lib/docker.ts buildVllmCmd.
-  const MAX_MODEL_TOKENS = 8192;
+  // Model context budget. Local vLLM (Qwen3-Reranker-8B) is started with
+  // --max-model-len 8192; any single (query, doc) pair over that is rejected
+  // with HTTP 400 and aborts the whole batch. Keep in sync with
+  // sideCar/src/lib/docker.ts buildVllmCmd. This is a PER-PROVIDER budget —
+  // OpenRouter's curated rerank model supports a much larger context (see
+  // openRouterMaxModelTokens below), so the two must not share one constant.
+  const LOCAL_MAX_MODEL_TOKENS = 8192;
   // Tightened from 256 — dense legal prose tokenizes worse than the 3 char/tok
   // estimate (Qwen tokenizer often produces 2.5–2.7 chars/tok). 512 gives a
   // proper buffer against estimate drift.
@@ -268,60 +279,90 @@ export async function rerank<T extends RerankableResult>(
   const CHARS_PER_TOKEN = 2.7;
   // Hard cap the query itself — without this, a long-form question (>3000
   // chars) eats the entire token budget and the doc gets clamped to nothing,
-  // OR if the estimate undercounts, the pair overflows 8192. 1500 chars ≈
-  // 555 tokens, leaving ~7100 tokens for the doc.
+  // OR if the estimate undercounts, the pair overflows the model's context.
+  // 1500 chars ≈ 555 tokens, leaving headroom for the doc on either provider.
   const QUERY_MAX_CHARS = 1500;
   const safeQuery = query && query.length > QUERY_MAX_CHARS
     ? query.slice(0, QUERY_MAX_CHARS - 4) + ' …'
     : (query ?? '');
   const queryTokensEstimate = Math.ceil(safeQuery.length / CHARS_PER_TOKEN);
-  const perDocTokenBudget = Math.max(
-    256,
-    MAX_MODEL_TOKENS - queryTokensEstimate - SAFETY_MARGIN_TOKENS,
-  );
-  const perDocCharBudget = Math.floor(perDocTokenBudget * CHARS_PER_TOKEN);
-  const maxDocChars = Math.min(config.rerankMaxDocChars ?? 18_000, perDocCharBudget);
 
-  // Configure lifecycle (idle timeout config)
-  rerankerLifecycle.setEnabled(config.rerankAutoManage);
-  rerankerLifecycle.setIdleTimeout(config.rerankIdleTimeoutMin * 60 * 1000);
+  const docBudgetChars = (maxModelTokens: number): number => {
+    const perDocTokenBudget = Math.max(
+      256,
+      maxModelTokens - queryTokensEstimate - SAFETY_MARGIN_TOKENS,
+    );
+    const perDocCharBudget = Math.floor(perDocTokenBudget * CHARS_PER_TOKEN);
+    return Math.min(config.rerankMaxDocChars ?? 18_000, perDocCharBudget);
+  };
+
+  // OpenRouter's curated rerank model (qwen3-reranker-8b via Fireworks) reports
+  // its measured context window in the model catalogue (40,960 as of writing).
+  // Falls back to 40_960 if the configured id somehow isn't in the curated list
+  // (shouldn't happen — the admin UI only offers curated ids).
+  const openRouterMaxModelTokens = config.openRouterRerankModel
+    ? findRerankModel(config.openRouterRerankModel)?.contextTokens ?? 40_960
+    : 40_960;
+
+  const maxDocChars = config.rerankProvider === 'openrouter'
+    ? docBudgetChars(openRouterMaxModelTokens)
+    : docBudgetChars(LOCAL_MAX_MODEL_TOKENS);
+
+  const isOpenRouter = config.rerankProvider === 'openrouter';
+  // Diagnostic label used everywhere the shared tail (score validation,
+  // completion log, outer catch) previously assumed a vLLM host string.
+  const rerankHostLabel = isOpenRouter
+    ? `openrouter:${config.openRouterRerankModel || '(no model configured)'}`
+    : config.rerankHost;
+
+  // vLLM-only setup: idle-timeout lifecycle management and multi-host
+  // failover. None of this applies to OpenRouter — there is no local
+  // container to keep warm or idle-unload, and no fleet of sidecars to fail
+  // over across (requirement: skip preflight/candidate-host loop/lifecycle
+  // entirely on the OpenRouter path).
+  if (!isOpenRouter) {
+    rerankerLifecycle.setEnabled(config.rerankAutoManage);
+    rerankerLifecycle.setIdleTimeout(config.rerankIdleTimeoutMin * 60 * 1000);
+  }
 
   // Build candidate host list: configured host first, then other reachable
   // sidecars from fleet-router. Cap at 2 attempts to avoid 90s × N stalls.
-  const candidates: string[] = [config.rerankHost];
-  try {
-    const { getFleetStatus } = await import('@/lib/gpu/fleet-router');
-    const fleet = await getFleetStatus();
-    const configHostname = (() => { try { return new URL(config.rerankHost).hostname; } catch { return ''; } })();
-    for (const s of fleet.sidecars) {
-      if (s.status !== 'connected') continue;
-      // Only sidecars that actually host a running vLLM reranker. Skip:
-      //  - synthetic images ('dmr', 'host-ollama'): the sidecar reports the
-      //    role as "running" for routing purposes but doesn't serve /v1/rerank
-      //    (e.g. Mac with host-Ollama for embedding doesn't run vLLM).
-      //  - status !== 'running': no container, exited, or in progress.
-      //  - missing reranker block: older sidecars or non-GPU hosts that don't
-      //    track the role at all.
-      // Without this guard, a Mac sidecar at host.docker.internal lands in
-      // the candidate list and the master burns 5-15 s waiting for preflight
-      // to fail before falling through to a real reranker host.
-      const rerCS = (s.sidecarStatus as { containers?: Record<string, { status?: string; image?: string }> } | undefined)?.containers?.reranker;
-      if (!rerCS) continue;
-      if (rerCS.status !== 'running') {
-        logger.info(`Rerank candidate skip: ${s.hostname} reranker.status=${rerCS.status}`);
-        continue;
+  const candidates: string[] = isOpenRouter ? [] : [config.rerankHost];
+  if (!isOpenRouter) {
+    try {
+      const { getFleetStatus } = await import('@/lib/gpu/fleet-router');
+      const fleet = await getFleetStatus();
+      const configHostname = (() => { try { return new URL(config.rerankHost).hostname; } catch { return ''; } })();
+      for (const s of fleet.sidecars) {
+        if (s.status !== 'connected') continue;
+        // Only sidecars that actually host a running vLLM reranker. Skip:
+        //  - synthetic images ('dmr', 'host-ollama'): the sidecar reports the
+        //    role as "running" for routing purposes but doesn't serve /v1/rerank
+        //    (e.g. Mac with host-Ollama for embedding doesn't run vLLM).
+        //  - status !== 'running': no container, exited, or in progress.
+        //  - missing reranker block: older sidecars or non-GPU hosts that don't
+        //    track the role at all.
+        // Without this guard, a Mac sidecar at host.docker.internal lands in
+        // the candidate list and the master burns 5-15 s waiting for preflight
+        // to fail before falling through to a real reranker host.
+        const rerCS = (s.sidecarStatus as { containers?: Record<string, { status?: string; image?: string }> } | undefined)?.containers?.reranker;
+        if (!rerCS) continue;
+        if (rerCS.status !== 'running') {
+          logger.info(`Rerank candidate skip: ${s.hostname} reranker.status=${rerCS.status}`);
+          continue;
+        }
+        if (rerCS.image === 'dmr' || rerCS.image === 'host-ollama') {
+          logger.info(`Rerank candidate skip: ${s.hostname} reranker.image=${rerCS.image} (synthetic — not a real vLLM endpoint)`);
+          continue;
+        }
+        try {
+          const h = new URL(s.url).hostname;
+          if (h === configHostname) continue;
+          candidates.push(`http://${h}:8099`);
+        } catch { /* skip */ }
       }
-      if (rerCS.image === 'dmr' || rerCS.image === 'host-ollama') {
-        logger.info(`Rerank candidate skip: ${s.hostname} reranker.image=${rerCS.image} (synthetic — not a real vLLM endpoint)`);
-        continue;
-      }
-      try {
-        const h = new URL(s.url).hostname;
-        if (h === configHostname) continue;
-        candidates.push(`http://${h}:8099`);
-      } catch { /* skip */ }
-    }
-  } catch { /* fleet-router unavailable, single-host only */ }
+    } catch { /* fleet-router unavailable, single-host only */ }
+  }
 
   // Lifecycle acquire happens ONCE for the primary host below — not per
   // candidate. Previously this ran inside tryHost, so every failed failover
@@ -329,23 +370,25 @@ export async function rerank<T extends RerankableResult>(
   // one /release. Net leak: +1 activeRequests per failed call, which kept
   // idle timers from ever starting and pinned VRAM at 99%.
   let lifecycleAcquired = false;
-  const lifecycleStart = Date.now();
-  try {
-    await rerankerLifecycle.ensureRunning(config.rerankHost);
-    lifecycleAcquired = true;
-    const lifecycleMs = Date.now() - lifecycleStart;
-    // A slow ensureRunning means the sidecar had to (re)start a stopped
-    // container — i.e. the reranker was idle-unloaded or restarted since the
-    // last search. That start cost is the leading edge of a cold start.
-    if (lifecycleMs > 1_000) {
-      logger.warn('Rerank lifecycle ensureRunning slow (container was not running)', { host: config.rerankHost, elapsedMs: lifecycleMs });
-    } else {
-      logger.info('Rerank lifecycle ensureRunning', { host: config.rerankHost, elapsedMs: lifecycleMs });
+  if (!isOpenRouter) {
+    const lifecycleStart = Date.now();
+    try {
+      await rerankerLifecycle.ensureRunning(config.rerankHost);
+      lifecycleAcquired = true;
+      const lifecycleMs = Date.now() - lifecycleStart;
+      // A slow ensureRunning means the sidecar had to (re)start a stopped
+      // container — i.e. the reranker was idle-unloaded or restarted since the
+      // last search. That start cost is the leading edge of a cold start.
+      if (lifecycleMs > 1_000) {
+        logger.warn('Rerank lifecycle ensureRunning slow (container was not running)', { host: config.rerankHost, elapsedMs: lifecycleMs });
+      } else {
+        logger.info('Rerank lifecycle ensureRunning', { host: config.rerankHost, elapsedMs: lifecycleMs });
+      }
+    } catch (err) {
+      warn('lifecycle', config.rerankHost, (err as Error).message);
+      logger.warn('Rerank lifecycle ensureRunning failed', { host: config.rerankHost, elapsedMs: Date.now() - lifecycleStart, error: (err as Error).message });
+      // Fall through — preflight on each candidate will catch unreachable hosts.
     }
-  } catch (err) {
-    warn('lifecycle', config.rerankHost, (err as Error).message);
-    logger.warn('Rerank lifecycle ensureRunning failed', { host: config.rerankHost, elapsedMs: Date.now() - lifecycleStart, error: (err as Error).message });
-    // Fall through — preflight on each candidate will catch unreachable hosts.
   }
 
   const tryHost = async (host: string): Promise<{ items: T[]; tokens: number; model: string } | { error: RerankWarning }> => {
@@ -378,34 +421,78 @@ export async function rerank<T extends RerankableResult>(
     const MAX_HOSTS_TO_TRY = 2;
     let reranked: T[] | null = null;
     let totalTokens = 0;
-    let usedModel = config.rerankModel;
+    let usedModel = isOpenRouter ? (config.openRouterRerankModel || '(unconfigured)') : config.rerankModel;
     let lastWarning: RerankWarning | null = null;
 
-    for (const host of candidates.slice(0, MAX_HOSTS_TO_TRY)) {
-      logger.info('Reranker attempt', {
-        host,
-        model: config.rerankModel,
-        candidates: candidates.length,
-        documentCount: results.length,
-      });
-      const result = await tryHost(host);
-      if ('items' in result) {
-        reranked = result.items;
-        totalTokens = result.tokens;
-        usedModel = result.model;
-        if (lastWarning) {
-          // Surface that we recovered on a fallback host
-          warn('fetch', host, `recovered after ${candidates.indexOf(host)} prior host failures`);
+    if (isOpenRouter) {
+      const modelId = config.openRouterRerankModel;
+      if (!modelId) {
+        warn('fetch', rerankHostLabel, 'No OpenRouter rerank model configured');
+        lastWarning = { source: 'reranker', host: rerankHostLabel, reason: 'fetch', message: 'No OpenRouter rerank model configured' };
+      } else {
+        logger.info('Reranking via OpenRouter', { model: modelId, docs: results.length, topN: effectiveTopN });
+        try {
+          const out = await rerankViaOpenRouter(safeQuery, results, modelId, effectiveTopN, timeoutMs, maxDocChars);
+          reranked = out.items;
+          totalTokens = out.totalTokens;
+          usedModel = modelId;
+          // Spend is recorded inside rerankDocuments() itself — see chargeTokens()
+          // in @/lib/openrouter/client. It lives there so embeddings and chat are
+          // charged too, rather than only the one call site that remembered.
+        } catch (err) {
+          // Duck-typed rather than `instanceof OpenRouterError` — safer across
+          // module boundaries (e.g. under jest.resetModules() in tests) and we
+          // only ever branch on `.kind` anyway.
+          const kind = (err as { kind?: string }).kind;
+          const message = err instanceof Error ? err.message : String(err);
+          if (kind === 'no-providers' || kind === 'rate-limit' || kind === 'auth') {
+            // All three are graceful-degrade cases, not exceptions to the caller.
+            // 'auth' is a config error (bad/missing key) so it's worth a distinct
+            // message, but the fallback behavior is identical.
+            logger.warn(
+              kind === 'auth'
+                ? 'OpenRouter rerank auth failed (check API key), falling back to first-stage order'
+                : `OpenRouter rerank unavailable (${kind}), falling back to first-stage order`,
+              { kind, model: modelId, message },
+            );
+            lastWarning = { source: 'reranker', host: rerankHostLabel, reason: 'fetch', message };
+          } else {
+            // unknown-model / server / network — also degrade gracefully rather
+            // than throwing; the outer catch exists for genuinely unexpected
+            // failures (e.g. a bug in rerankViaOpenRouter itself), not upstream
+            // provider errors.
+            logger.warn('OpenRouter rerank failed, falling back to first-stage order', { kind: kind ?? 'unknown', model: modelId, message });
+            lastWarning = { source: 'reranker', host: rerankHostLabel, reason: 'fetch', message };
+          }
         }
-        break;
       }
-      lastWarning = result.error;
-      logger.warn('Reranker host failed, trying next', {
-        host,
-        reason: result.error.reason,
-        message: result.error.message,
-      });
-      warn(result.error.reason, result.error.host, result.error.message);
+    } else {
+      for (const host of candidates.slice(0, MAX_HOSTS_TO_TRY)) {
+        logger.info('Reranker attempt', {
+          host,
+          model: config.rerankModel,
+          candidates: candidates.length,
+          documentCount: results.length,
+        });
+        const result = await tryHost(host);
+        if ('items' in result) {
+          reranked = result.items;
+          totalTokens = result.tokens;
+          usedModel = result.model;
+          if (lastWarning) {
+            // Surface that we recovered on a fallback host
+            warn('fetch', host, `recovered after ${candidates.indexOf(host)} prior host failures`);
+          }
+          break;
+        }
+        lastWarning = result.error;
+        logger.warn('Reranker host failed, trying next', {
+          host,
+          reason: result.error.reason,
+          message: result.error.message,
+        });
+        warn(result.error.reason, result.error.host, result.error.message);
+      }
     }
 
     if (!reranked) {
@@ -415,12 +502,13 @@ export async function rerank<T extends RerankableResult>(
       // container start; preflight warm-up timeout ⇒ model still loading;
       // fetch abortedOnTimeout ⇒ warm container but slow/evicted GPU.
       logger.warn('Rerank degraded — all hosts failed', {
+        provider: config.rerankProvider,
         interactive: !!opts?.interactive,
         totalElapsedMs: Date.now() - startMs,
         timeoutMs,
         docCount: results.length,
         lifecycleAcquired,
-        candidatesTried: candidates.slice(0, MAX_HOSTS_TO_TRY),
+        candidatesTried: isOpenRouter ? ['openrouter'] : candidates.slice(0, MAX_HOSTS_TO_TRY),
         lastReason: lastWarning?.reason,
         lastHost: lastWarning?.host,
         lastMessage: lastWarning?.message,
@@ -431,10 +519,10 @@ export async function rerank<T extends RerankableResult>(
       const degradedMessage = opts?.interactive
         ? 'Results not reranked — reranker unavailable within the interactive timeout; showing first-stage (hybrid) order.'
         : 'Results not reranked — reranker unavailable; showing first-stage (hybrid) order.';
-      warn('degraded', config.rerankHost, degradedMessage);
+      warn('degraded', rerankHostLabel, degradedMessage);
       return skipped('degraded', results.slice(0, effectiveTopN), {
         message: degradedMessage,
-        host: config.rerankHost,
+        host: rerankHostLabel,
       });
     }
 
@@ -443,20 +531,22 @@ export async function rerank<T extends RerankableResult>(
       const validation = validateRerankScores(reranked);
       if (!validation.valid) {
         logger.warn('Rerank score validation failed — returning original order', {
+          provider: config.rerankProvider,
           reason: validation.reason,
           model: usedModel,
           scores: reranked.slice(0, 5).map(r => r.score),
         });
         const validationMessage = `score validation failed: ${validation.reason}`;
-        warn('score-validation', config.rerankHost, validationMessage);
+        warn('score-validation', rerankHostLabel, validationMessage);
         return skipped('score-validation', results.slice(0, effectiveTopN), {
           message: validationMessage,
-          host: config.rerankHost,
+          host: rerankHostLabel,
         });
       }
     }
 
     logger.info('Reranking completed', {
+      provider: config.rerankProvider,
       durationMs: Date.now() - startMs,
       resultCount: reranked.length,
       topScore: reranked[0]?.score,
@@ -465,7 +555,7 @@ export async function rerank<T extends RerankableResult>(
     });
     opts?.onOutcome?.({
       applied: true,
-      host: config.rerankHost,
+      host: rerankHostLabel,
       model: usedModel,
       poolIn: results.length,
       poolOut: reranked.length,
@@ -476,17 +566,21 @@ export async function rerank<T extends RerankableResult>(
     // future incidents don't hide behind the opaque "TypeError: fetch failed".
     const cause = (err as { cause?: { code?: string; errno?: number; syscall?: string } })?.cause;
     const errMessage = err instanceof Error ? err.message : String(err);
-    logger.error('vLLM reranking failed, using original order', err instanceof Error ? err : new Error(String(err)), {
-      host: config.rerankHost,
-      model: config.rerankModel,
-      fallbackModel: config.rerankFallbackModel || 'none',
-      durationMs: Date.now() - startMs,
-      causeCode: cause?.code,
-      causeErrno: cause?.errno,
-      causeSyscall: cause?.syscall,
-    });
-    warn('fetch', config.rerankHost, errMessage);
-    return skipped('fetch', results, { message: errMessage, host: config.rerankHost });
+    logger.error(
+      isOpenRouter ? 'OpenRouter reranking failed, using original order' : 'vLLM reranking failed, using original order',
+      err instanceof Error ? err : new Error(String(err)),
+      {
+        host: rerankHostLabel,
+        model: isOpenRouter ? (config.openRouterRerankModel || '(unconfigured)') : config.rerankModel,
+        fallbackModel: isOpenRouter ? 'n/a' : (config.rerankFallbackModel || 'none'),
+        durationMs: Date.now() - startMs,
+        causeCode: cause?.code,
+        causeErrno: cause?.errno,
+        causeSyscall: cause?.syscall,
+      },
+    );
+    warn('fetch', rerankHostLabel, errMessage);
+    return skipped('fetch', results, { message: errMessage, host: rerankHostLabel });
   } finally {
     // Pair with the single ensureRunning() above. Only release if the
     // initial acquire actually succeeded — otherwise we'd decrement a
@@ -658,11 +752,91 @@ async function rerankViaVllm<T extends RerankableResult>(
   // Map back to original results with updated scores
   // vLLM results are already sorted by relevance (highest first)
   return {
-    items: data.results.map((rr) => ({
-      ...results[rr.index],
-      score: rr.relevance_score,
-    })),
+    items: mapRerankResults(results, data.results),
     totalTokens: data.usage?.total_tokens ?? 0,
+  };
+}
+
+/**
+ * Map a provider's rerank results back onto the original candidates, applying
+ * the new relevance score. Shared between the vLLM and OpenRouter paths — the
+ * two providers' response shapes are IDENTICAL on the fields that matter here
+ * (`index` + `relevance_score`), verified live for OpenRouter's
+ * qwen3-reranker-8b, so this mapping only needs to exist once.
+ */
+function mapRerankResults<T extends RerankableResult>(
+  results: T[],
+  rerankResults: Array<{ index: number; relevance_score: number }>,
+): T[] {
+  return rerankResults.map((rr) => ({
+    ...results[rr.index],
+    score: rr.relevance_score,
+  }));
+}
+
+interface OpenRouterRerankOutput<T> {
+  items: T[];
+  totalTokens: number;
+}
+
+/**
+ * Rerank via OpenRouter's hosted /rerank endpoint (frozen contract:
+ * `@/lib/openrouter/client`'s `rerankDocuments`). No host to probe, no
+ * container lifecycle to manage, no candidate-host failover — those exist in
+ * the vLLM path to babysit a local GPU, which doesn't apply to a cloud API.
+ *
+ * Deliberately NOT wrapped in `serializeRerank` — that serializer exists
+ * because a single local GPU batches one vLLM rerank at a time; OpenRouter has
+ * no such constraint, and serializing cloud calls would just add latency for
+ * no benefit.
+ */
+async function rerankViaOpenRouter<T extends RerankableResult>(
+  query: string,
+  results: T[],
+  model: string,
+  topN: number,
+  timeoutMs: number,
+  maxDocChars: number,
+): Promise<OpenRouterRerankOutput<T>> {
+  // Same truncation strategy as the vLLM path (beginning-keep), just against
+  // the per-provider budget computed by the caller.
+  let truncatedCount = 0;
+  const documents = results.map((r) => {
+    const text = r.text ?? '';
+    if (text.length <= maxDocChars) return text;
+    truncatedCount++;
+    return text.slice(0, maxDocChars - 4) + ' …';
+  });
+  if (truncatedCount > 0) {
+    logger.info('Rerank: truncated long documents to fit OpenRouter context window', {
+      truncated: truncatedCount,
+      total: documents.length,
+      maxChars: maxDocChars,
+      model,
+    });
+  }
+
+  const effectiveTopN = Math.min(topN, results.length);
+  const res = await rerankDocuments(query, documents, model, {
+    topN: effectiveTopN,
+    timeoutMs,
+    role: 'reranker',
+  });
+
+  if (!Array.isArray(res.results)) {
+    throw new Error('Unexpected OpenRouter response — no results array');
+  }
+
+  logger.info('Reranking via OpenRouter completed', {
+    model,
+    docs: documents.length,
+    topN: effectiveTopN,
+    totalTokens: res.usage?.total_tokens ?? 0,
+  });
+
+  return {
+    items: mapRerankResults(results, res.results),
+    totalTokens: res.usage?.total_tokens ?? 0,
   };
 }
 

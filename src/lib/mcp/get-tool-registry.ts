@@ -88,6 +88,15 @@ async function initRegistry(): Promise<ToolRegistry> {
         model: config.ollamaModel || 'all-minilm',
         useOrchestrator: !!config.embeddingUseOrchestrator,
       });
+    } else if (config.embeddingProvider === 'openrouter' && config.openRouterEnabled) {
+      // Query-side selection must match the model the corpus was embedded
+      // with — see OpenRouterEmbeddingProvider's module header. Gated on
+      // openRouterEnabled so an unconfigured install falls through to local.
+      const { OpenRouterEmbeddingProvider } = await import('../ingestion/openrouter-embedding-provider');
+      embeddingProvider = new OpenRouterEmbeddingProvider({
+        apiKey: config.openRouterApiKey,
+        model: config.openRouterEmbeddingModel || 'qwen/qwen3-embedding-4b',
+      });
     } else {
       // Default: local transformers provider
       const { TransformersEmbeddingProvider } = await import('../ingestion/transformers-embedding-provider');
@@ -150,6 +159,12 @@ async function ensureEmbeddingProvider(registry: ToolRegistry): Promise<void> {
         host: config.ollamaHost,
         model: config.ollamaModel || 'all-minilm',
         useOrchestrator: !!config.embeddingUseOrchestrator,
+      });
+    } else if (config.embeddingProvider === 'openrouter' && config.openRouterEnabled) {
+      const { OpenRouterEmbeddingProvider } = await import('../ingestion/openrouter-embedding-provider');
+      provider = new OpenRouterEmbeddingProvider({
+        apiKey: config.openRouterApiKey,
+        model: config.openRouterEmbeddingModel || 'qwen/qwen3-embedding-4b',
       });
     } else {
       const { TransformersEmbeddingProvider } = await import('../ingestion/transformers-embedding-provider');

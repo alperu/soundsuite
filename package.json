@@ -18,7 +18,8 @@
     "svc:health": "node scripts/manage.mjs health",
     "db:migrate": "node scripts/manage.mjs db:migrate",
     "db:backup": "node scripts/manage.mjs db:backup",
-    "db:restore": "node scripts/manage.mjs db:restore"
+    "db:restore": "node scripts/manage.mjs db:restore",
+    "probe:openrouter": "tsx scripts/probeOpenRouter.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.74.0",

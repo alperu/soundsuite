@@ -25,6 +25,9 @@ export { ClaudeEmbeddingProvider } from './claude-embedding-provider';
 
 export { OllamaEmbeddingProvider } from './ollama-embedding-provider';
 
+export { OpenRouterEmbeddingProvider } from './openrouter-embedding-provider';
+export type { OpenRouterEmbeddingConfig } from './openrouter-embedding-provider';
+
 export { LangChainTextChunker } from './langchain-text-chunker';
 
 export { DocumentSummarizer } from './document-summarizer';

@@ -20,7 +20,7 @@ import http from 'http';
 import https from 'https';
 import WebSocket from 'ws';
 import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, ensureSet, type MasterConnection } from './state';
-import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, handlePullModel, handleLoadModel, getTotalActiveRequests } from './handlers';
+import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, handlePullModel, handleLoadModel, getTotalActiveRequests, handleVirtualEmbed, handleVirtualRerank } from './handlers';
 import { switchMode, provisionContainers, getAllContainerStates, containersForMode } from './containers';
 import { discoverGpus } from './gpu';
 import { getContainerState, pullImage, createContainer, startContainer, dockerRequest, getDockerHostName } from './docker';
@@ -32,6 +32,7 @@ import { tasks } from './task-tracker';
 import { emitBootEvent } from './boot-events';
 import { processGlobal } from './process-global';
 import { closeLeasesForOwner, startSweeper } from './leases';
+import { clearOpenRouterConfig, setOpenRouterConfig } from './virtual-inference';
 import {
   AddressStabilityTracker,
   resolveAgentUrl,
@@ -367,6 +368,11 @@ async function executeCommand(
     case 'acquire': return handleAcquire(role, m.serverUrl);
     case 'release': return handleRelease(role, typeof payload.leaseId === 'string' ? payload.leaseId : undefined);
     case 'reset-counters': return handleResetCounters(role);
+    // Virtual inference: the master sends the actual texts/documents here so
+    // the sidecar can spend ITS OWN pushed OpenRouter key on this master's
+    // behalf — scoped to m.serverUrl the same way acquire/release are.
+    case 'virtual-embed': return handleVirtualEmbed(payload, m.serverUrl);
+    case 'virtual-rerank': return handleVirtualRerank(payload, m.serverUrl);
     case 'start': {
       if (role) {
         // Honor operator opt-out — symmetric with acquire/pullModel/loadModel.
@@ -458,6 +464,14 @@ async function executeCommand(
       }
       if (payload.containerName) state.CONTAINER_NAME = payload.containerName as string;
       state.lastConfigPushAt = Date.now();
+
+      // ─── OpenRouter virtual-inference config (per-master, in-memory only) ──
+      // Scoped to m.serverUrl — never touches another master's slot. See
+      // virtual-inference.ts for why this is NOT part of the state that
+      // saveConfig() persists below.
+      if (payload.openrouter && typeof payload.openrouter === 'object') {
+        setOpenRouterConfig(m.serverUrl, payload.openrouter);
+      }
 
       // ─── Master-pushed hostOs override ────────────────────────────────
       // Pinned by the operator via /admin/host-provisioning. Highest
@@ -1768,6 +1782,9 @@ export function retireMaster(m: MasterConnection): void {
   m.retired = true;
   disconnectMaster(m);
   if (state.masters.get(m.serverUrl) === m) removeMaster(m.serverUrl);
+  // A URL later reused by a different master process must not inherit this
+  // one's OpenRouter key or allow-list — see virtual-inference.ts.
+  clearOpenRouterConfig(m.serverUrl);
 }
 
 // ─── Fan-out wrappers ────────────────────────────────────────────────────

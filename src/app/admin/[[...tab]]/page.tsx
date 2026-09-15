@@ -5,7 +5,7 @@ import AdminDashboard from '@/components/admin-dashboard';
 import { getPublicConfig, getModelDownloadStatus } from '@/lib/db/config';
 import { getSessionUser, SESSION_COOKIE } from '@/lib/admin/auth';
 
-const VALID_TABS = ['general', 'health', 'embedding', 'reranking', 'gpu', 'roletypes', 'roleassign', 'hostprov', 'ocr', 'localai', 'rlm', 'aikeys', 'aiservices', 'workers', 'redis', 'cache', 'filings', 'jobs', 'actionlog', 'drafts', 'cloudflare', 'users', 'sessions'] as const;
+const VALID_TABS = ['general', 'health', 'embedding', 'reranking', 'gpu', 'roletypes', 'roleassign', 'hostprov', 'ocr', 'localai', 'rlm', 'aikeys', 'aiservices', 'openrouter', 'workers', 'redis', 'cache', 'filings', 'jobs', 'actionlog', 'drafts', 'cloudflare', 'users', 'sessions'] as const;
 
 type TabKey = (typeof VALID_TABS)[number];
 

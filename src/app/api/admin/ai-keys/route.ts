@@ -41,6 +41,7 @@ const PROVIDER_CONFIG_KEYS: Record<AIProviderKey, string> = {
   groq: 'ai.groqApiKey',
   grok: 'ai.grokApiKey',
   ollama: 'embedding.ollamaHost', // Ollama stores host URL, not API key
+  openrouter: 'openrouter.apiKey',
 };
 
 /**

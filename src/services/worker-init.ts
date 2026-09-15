@@ -105,6 +105,24 @@ async function buildProcessDocumentFn(): Promise<(documentId: string, filePath: 
       });
       break;
     }
+    case 'openrouter': {
+      // Respect openRouterEnabled: an install that has never turned OpenRouter
+      // on must behave exactly as before, even if embeddingProvider was left
+      // at 'openrouter' from a prior config edit — fall through to local.
+      if (!config.openRouterEnabled) {
+        logger.warn('embeddingProvider is "openrouter" but openRouterEnabled is false — falling back to local transformers');
+        const { TransformersEmbeddingProvider } = await import('@/lib/ingestion/transformers-embedding-provider');
+        embeddingProvider = new TransformersEmbeddingProvider(config.embeddingModel);
+        break;
+      }
+      const { OpenRouterEmbeddingProvider } = await import('@/lib/ingestion/openrouter-embedding-provider');
+      const openRouterModel = config.openRouterEmbeddingModel || 'qwen/qwen3-embedding-4b';
+      embeddingProvider = new OpenRouterEmbeddingProvider({
+        apiKey: config.openRouterApiKey,
+        model: openRouterModel,
+      });
+      break;
+    }
     default: {
       const { TransformersEmbeddingProvider } = await import('@/lib/ingestion/transformers-embedding-provider');
       embeddingProvider = new TransformersEmbeddingProvider(config.embeddingModel);
@@ -118,6 +136,7 @@ async function buildProcessDocumentFn(): Promise<(documentId: string, filePath: 
     dimensions: embeddingProvider.getDimensions(),
     modelName: embeddingProvider.getModelName(),
     ...(config.embeddingProvider === 'ollama' ? { ollamaHost: config.ollamaHost, ollamaModel: config.ollamaModel } : {}),
+    ...(config.embeddingProvider === 'openrouter' ? { openRouterEnabled: config.openRouterEnabled, openRouterEmbeddingModel: config.openRouterEmbeddingModel } : {}),
   });
   const vectorStore = new VectorStore({
     dbPath: process.env.LANCEDB_PATH || 'data/lancedb',

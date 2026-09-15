@@ -10,6 +10,7 @@ import { tasks } from './task-tracker';
 import { getBootEvents, getBootEpoch } from './boot-events';
 import { openLease, closeLease, closeAllLeases, touchRoleLeases, leaseSummary } from './leases';
 import { detectAdvertisableAddress, type InterfaceMap } from './agent-address';
+import { resolveRouting, isCloudOnly, getOpenRouterStatus, serveEmbedding, serveRerank } from './virtual-inference';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -585,6 +586,29 @@ async function recoverPortConflict(role: string, containerName: string, port: nu
   throw new Error(`Port ${port} in use by container "${holder}" (not managed by sidecar) — cannot auto-recover`);
 }
 
+/**
+ * Local acquisition failed for `role`. Ask virtual-inference whether this
+ * master (`owner` — the master's serverUrl, or 'http' for the unauthenticated
+ * legacy route, which never matches a real master and so is always
+ * local-only) wants a local-first cloud fallback. Returns the response to
+ * hand back to the caller either way: a `virtual-inference` action on
+ * fallback, or the original local error untouched.
+ */
+function virtualInferenceFallbackOrError(
+  role: string,
+  owner: string,
+  leaseId: string,
+  localErrorReason: string,
+  activeRequests: number,
+  originalError: string,
+): Record<string, unknown> {
+  const routing = resolveRouting({ role, serverUrl: owner, localAvailable: false, localErrorReason });
+  if (routing.source === 'openrouter') {
+    return { action: 'virtual-inference', role, leaseId, activeRequests, routing };
+  }
+  return { error: originalError };
+}
+
 export async function handleAcquire(role?: string, owner = 'http'): Promise<Record<string, unknown>> {
   if (role && state.registry[role]) {
     const def = state.registry[role];
@@ -614,6 +638,15 @@ export async function handleAcquire(role?: string, owner = 'http'): Promise<Reco
     recordDemandSample(role);
     log.info(`Acquire ${role} (active: ${r.activeRequests})${def.runtime === 'host' ? ' [host-runtime]' : def.runtime === 'docker-model-runner' ? ' [dmr]' : ''}`);
 
+    // Virtual inference: cloud-only roles skip local entirely — no container
+    // start, no host-Ollama probe, no DMR probe. This master has told us
+    // (via a pushed OpenRouter config) that this role always runs on
+    // OpenRouter, so attempting local first would only cost a doomed start.
+    if (isCloudOnly(role, owner)) {
+      const routing = resolveRouting({ role, serverUrl: owner });
+      return { action: 'virtual-inference', role, leaseId, activeRequests: r.activeRequests, routing };
+    }
+
     // Host-runtime: no container to start. ensureContainerForRole() probes
     // native Ollama reachability — the local docker-only ensureContainer()
     // would call pullImage(def.image='') and throw with
@@ -623,8 +656,9 @@ export async function handleAcquire(role?: string, owner = 'http'): Promise<Reco
       try {
         await ensureContainerForRole(role); // probes host Ollama; throws if unreachable
       } catch (err) {
+        const message = (err as Error).message;
         closeLease(role, leaseId);
-        return { error: (err as Error).message };
+        return virtualInferenceFallbackOrError(role, owner, leaseId, message, r.activeRequests, message);
       }
       ensureOllamaModel(role).catch((err) => log.error(`ensureOllamaModel fire-and-forget failed for ${role}: ${(err as Error).message}`));
       return { action: 'host-runtime', role, leaseId, activeRequests: r.activeRequests };
@@ -637,8 +671,9 @@ export async function handleAcquire(role?: string, owner = 'http'): Promise<Reco
       try {
         await ensureContainer(role);
       } catch (err) {
+        const message = (err as Error).message;
         closeLease(role, leaseId);
-        return { error: (err as Error).message };
+        return virtualInferenceFallbackOrError(role, owner, leaseId, message, r.activeRequests, message);
       }
       return { action: 'docker-model-runner', role, leaseId, activeRequests: r.activeRequests };
     }
@@ -651,7 +686,7 @@ export async function handleAcquire(role?: string, owner = 'http'): Promise<Reco
       if (pf) {
         closeLease(role, leaseId);
         log.error(`handleAcquire preflight: ${pf}`);
-        return { error: pf };
+        return virtualInferenceFallbackOrError(role, owner, leaseId, pf, r.activeRequests, pf);
       }
     }
 
@@ -1113,6 +1148,9 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
       // UNREPORTED is not down, and unreachable is not gone.
       unreachable: m.unreachable === true,
       consecutiveFailures: m.httpHeartbeatFailCount,
+      // Presence only — never the key or a prefix of it. /api/status and
+      // /api/config are unauthenticated on the LAN.
+      virtualInference: getOpenRouterStatus(m.serverUrl),
     })),
     savedAgentUrl: state.savedAgentUrl,
     dockerMode: getDockerMode(),
@@ -1141,4 +1179,67 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
       }
     })(),
   };
+}
+
+/**
+ * Serve (or route) an embedding request over OpenRouter using the requesting
+ * master's own virtual-inference config. Called from the WS `virtual-embed`
+ * command — the ONLY place the sidecar actually spends a pushed OpenRouter
+ * key. `serverUrl` scopes it: a master's key/allow-list never applies to a
+ * request that arrived under a different master's slot.
+ */
+export async function handleVirtualEmbed(
+  payload: Record<string, unknown>,
+  serverUrl: string,
+): Promise<Record<string, unknown>> {
+  const role = typeof payload.role === 'string' ? payload.role : undefined;
+  const texts = Array.isArray(payload.texts)
+    ? payload.texts.filter((t): t is string => typeof t === 'string')
+    : [];
+  if (!role || texts.length === 0) {
+    return { error: 'virtual-embed requires a "role" string and a non-empty "texts" string array' };
+  }
+  try {
+    const result = await serveEmbedding({
+      role,
+      serverUrl,
+      texts,
+      localAvailable: payload.localAvailable === false ? false : undefined,
+      localErrorReason: typeof payload.localErrorReason === 'string' ? payload.localErrorReason : undefined,
+      requestedModel: typeof payload.model === 'string' ? payload.model : undefined,
+    });
+    return result as unknown as Record<string, unknown>;
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+}
+
+/** Same contract as handleVirtualEmbed, for rerank — see its docs. */
+export async function handleVirtualRerank(
+  payload: Record<string, unknown>,
+  serverUrl: string,
+): Promise<Record<string, unknown>> {
+  const role = typeof payload.role === 'string' ? payload.role : undefined;
+  const query = typeof payload.query === 'string' ? payload.query : undefined;
+  const documents = Array.isArray(payload.documents)
+    ? payload.documents.filter((d): d is string => typeof d === 'string')
+    : [];
+  if (!role || !query || documents.length === 0) {
+    return { error: 'virtual-rerank requires "role", "query" strings and a non-empty "documents" string array' };
+  }
+  try {
+    const result = await serveRerank({
+      role,
+      serverUrl,
+      query,
+      documents,
+      topN: typeof payload.topN === 'number' ? payload.topN : undefined,
+      localAvailable: payload.localAvailable === false ? false : undefined,
+      localErrorReason: typeof payload.localErrorReason === 'string' ? payload.localErrorReason : undefined,
+      requestedModel: typeof payload.model === 'string' ? payload.model : undefined,
+    });
+    return result as unknown as Record<string, unknown>;
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
 }

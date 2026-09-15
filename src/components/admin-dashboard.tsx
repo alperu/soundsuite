@@ -15,6 +15,7 @@ import AdminRoleTypes from '@/components/admin-role-types';
 import AdminRoleAssignments from '@/components/admin-role-assignments';
 import AdminHostProvisioning from '@/components/admin-host-provisioning';
 import AdminAIServices from '@/components/admin-ai-services';
+import AdminOpenRouter from '@/components/admin-openrouter';
 import CacheManager from '@/components/admin/cache-manager';
 import UsersPanel from '@/components/admin/users-panel';
 import SessionsPanel from '@/components/admin/sessions-panel';
@@ -31,7 +32,7 @@ interface Props {
   initialTab?: TabKey;
 }
 
-type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'hostprov' | 'ocr' | 'localai' | 'rlm' | 'aikeys' | 'aiservices' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts' | 'cloudflare' | 'users' | 'sessions';
+type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'hostprov' | 'ocr' | 'localai' | 'rlm' | 'aikeys' | 'aiservices' | 'openrouter' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts' | 'cloudflare' | 'users' | 'sessions';
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'general', label: 'General', icon: '⊞' },
@@ -47,6 +48,7 @@ const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'rlm', label: 'RLM AI', icon: '∞' },
   { key: 'aikeys', label: 'AI Keys $', icon: '⚷' },
   { key: 'aiservices', label: 'AI Services', icon: '✦' },
+  { key: 'openrouter', label: 'OpenRouter', icon: '☯' },
   { key: 'workers', label: 'Workers', icon: '⚙' },
   { key: 'redis', label: 'Redis Cache', icon: '⧫' },
   { key: 'cache', label: 'Cache Manager', icon: '⟲' },
@@ -267,6 +269,17 @@ const TAB_DOCS: Record<TabKey, { title: string; description: string; details: st
       'Settings persist under ai.primaryProvider / ai.primaryModel / ai.fallback* config keys',
     ],
   },
+  openrouter: {
+    title: 'OpenRouter',
+    description: 'Optional cloud fallback via OpenRouter — virtual inference for embedding, reranking, and chat when local/GPU resources are unavailable.',
+    details: [
+      'Off by default — nothing calls OpenRouter until the Enable toggle is on',
+      'Browse the live catalogue of ~446 chat models (searchable, cached ~1h)',
+      'Embedding and rerank models are hand-curated: OpenRouter lists zero of either',
+      '"Check availability" distinguishes a transient no-provider state from a wrong model id',
+      'Per-role daily spend caps protect against runaway cost; credits/spend shown live',
+    ],
+  },
   workers: {
     title: 'Worker Pool & PID Controller',
     description: 'Monitor and tune the PID-controlled worker pool that dynamically allocates resources between UI and background tasks.',
@@ -422,6 +435,7 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
 {activeTab === 'rlm' && <RLMPanel />}
           {activeTab === 'aikeys' && <AIKeysPanel />}
           {activeTab === 'aiservices' && <AdminAIServices />}
+{activeTab === 'openrouter' && <AdminOpenRouter initialConfig={initialConfig} />}
           {activeTab === 'workers' && <WorkersPanel />}
           {activeTab === 'redis' && <RedisCachePanel />}
           {activeTab === 'cache' && <CacheManager />}

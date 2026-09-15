@@ -78,6 +78,7 @@ const ENV_KEYS: Record<AIProviderKey, string[]> = {
   gemini: ['GEMINI_API_KEY'],
   groq: ['GROQ_API_KEY'],
   grok: ['GROK_API_KEY', 'XAI_API_KEY'],
+  openrouter: ['OPENROUTER_API_KEY'],
 };
 
 /**

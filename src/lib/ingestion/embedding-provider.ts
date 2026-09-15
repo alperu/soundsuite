@@ -13,8 +13,10 @@ import { ChunkMetadata } from './text-chunker';
  * Configuration for embedding providers
  */
 export interface EmbeddingConfig {
-  /** The embedding provider type */
-  provider: 'transformers' | 'openai' | 'claude';
+  /** The embedding provider type. 'ollama' and 'openrouter' were previously
+   *  missing from this union even though both have working implementations
+   *  (OllamaEmbeddingProvider, OpenRouterEmbeddingProvider) — the type lied. */
+  provider: 'transformers' | 'openai' | 'claude' | 'ollama' | 'openrouter';
   /** The model name to use */
   model: string;
   /** API key for cloud providers (OpenAI, Claude) */

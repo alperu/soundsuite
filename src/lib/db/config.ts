@@ -10,9 +10,24 @@
 import { prisma } from './prisma';
 
 export interface AppConfig {
-  embeddingProvider: 'transformers' | 'openai' | 'claude' | 'ollama';
+  embeddingProvider: 'transformers' | 'openai' | 'claude' | 'ollama' | 'openrouter';
   embeddingModel: string;
   openaiApiKey?: string;
+
+  // --- OpenRouter (virtual inference) ---
+  /** SECRET. Masked by toPublicConfig() and isSecretConfigKey(). */
+  openRouterApiKey?: string;
+  /** Master kill switch — nothing reaches OpenRouter while this is false. */
+  openRouterEnabled: boolean;
+  /** Embedding model id used when embeddingProvider === 'openrouter'. */
+  openRouterEmbeddingModel?: string;
+  /** Rerank model id used when rerankProvider === 'openrouter'. */
+  openRouterRerankModel?: string;
+  /** Chat model id for search / completion via OpenRouter. */
+  openRouterChatModel?: string;
+  /** Per-role daily spend caps in USD, e.g. { reranker: 5, embedding: 10 }.
+   *  Exceeding a cap reverts that role to local for the rest of the UTC day. */
+  openRouterDailyCapUsd?: Record<string, number>;
   claudeApiKey?: string;
   geminiApiKey?: string;
   groqApiKey?: string;
@@ -78,7 +93,7 @@ export interface AppConfig {
   embeddingBatchSize: number;
   // Reranking settings
   rerankEnabled: boolean;
-  rerankProvider: 'vllm' | 'none';
+  rerankProvider: 'vllm' | 'openrouter' | 'none';
   rerankModel: string;
   rerankHost: string;
   rerankTopN: number;
@@ -207,6 +222,23 @@ export async function getConfig(): Promise<AppConfig> {
     embeddingProvider: (configMap.get('embedding.provider') as any) || 'transformers',
     embeddingModel: configMap.get('embedding.model') || 'Xenova/all-MiniLM-L6-v2',
     openaiApiKey: configMap.get('embedding.openaiApiKey'),
+
+    // OpenRouter — default OFF so an upgrade never starts spending on its own.
+    openRouterApiKey: configMap.get('openrouter.apiKey'),
+    openRouterEnabled: configMap.get('openrouter.enabled') === 'true',
+    openRouterEmbeddingModel: configMap.get('openrouter.embeddingModel') || 'qwen/qwen3-embedding-4b',
+    openRouterRerankModel: configMap.get('openrouter.rerankModel') || 'qwen/qwen3-reranker-8b',
+    openRouterChatModel: configMap.get('openrouter.chatModel') || 'deepseek/deepseek-v4-flash',
+    openRouterDailyCapUsd: (() => {
+      const raw = configMap.get('openrouter.dailyCapUsd');
+      if (!raw) return {};
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? (parsed as Record<string, number>) : {};
+      } catch {
+        return {};
+      }
+    })(),
     claudeApiKey: configMap.get('embedding.claudeApiKey'),
     geminiApiKey: configMap.get('ai.geminiApiKey'),
     groqApiKey: configMap.get('ai.groqApiKey'),
@@ -346,6 +378,7 @@ export async function getConfig(): Promise<AppConfig> {
  * read paths mask, via `toPublicConfig()`.
  */
 export const API_KEY_FIELDS = [
+  'openRouterApiKey',
   'openaiApiKey',
   'claudeApiKey',
   'geminiApiKey',
@@ -357,6 +390,7 @@ export type ApiKeyField = (typeof API_KEY_FIELDS)[number];
 
 /** Provider label each key field belongs to — mirrors `/api/admin/ai-keys`. */
 export const API_KEY_FIELD_PROVIDER: Record<ApiKeyField, string> = {
+  openRouterApiKey: 'openrouter',
   openaiApiKey: 'openai',
   claudeApiKey: 'anthropic',
   geminiApiKey: 'gemini',
@@ -417,6 +451,7 @@ export async function getPublicConfig(): Promise<PublicConfig> {
  * five provider rows; the explicit set is the belt to the pattern's braces.
  */
 const SECRET_CONFIG_KEYS = new Set([
+  'openrouter.apiKey',
   'embedding.openaiApiKey',
   'embedding.claudeApiKey',
   'ai.geminiApiKey',
@@ -526,6 +561,25 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   
   if (config.openaiApiKey !== undefined) {
     updates.push({ key: 'embedding.openaiApiKey', value: config.openaiApiKey });
+  }
+
+  if (config.openRouterApiKey !== undefined) {
+    updates.push({ key: 'openrouter.apiKey', value: config.openRouterApiKey });
+  }
+  if (config.openRouterEnabled !== undefined) {
+    updates.push({ key: 'openrouter.enabled', value: String(config.openRouterEnabled) });
+  }
+  if (config.openRouterEmbeddingModel !== undefined) {
+    updates.push({ key: 'openrouter.embeddingModel', value: config.openRouterEmbeddingModel });
+  }
+  if (config.openRouterRerankModel !== undefined) {
+    updates.push({ key: 'openrouter.rerankModel', value: config.openRouterRerankModel });
+  }
+  if (config.openRouterChatModel !== undefined) {
+    updates.push({ key: 'openrouter.chatModel', value: config.openRouterChatModel });
+  }
+  if (config.openRouterDailyCapUsd !== undefined) {
+    updates.push({ key: 'openrouter.dailyCapUsd', value: JSON.stringify(config.openRouterDailyCapUsd) });
   }
   
   if (config.claudeApiKey !== undefined) {

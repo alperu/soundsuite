@@ -31,6 +31,7 @@ export const DEFAULT_MODELS: Record<AIProviderKey, string> = {
   anthropic: 'claude-sonnet-5',
   gemini: 'gemini-3.5-flash',
   grok: 'grok-4.5',
+  openrouter: 'deepseek/deepseek-v4-flash',
 };
 
 /**

@@ -5,7 +5,9 @@
  * the corresponding AppConfig key that holds the API key.
  */
 
-export type AIProviderKey = 'openai' | 'anthropic' | 'gemini' | 'groq' | 'grok' | 'ollama';
+import { OPENROUTER_CHAT_MODELS } from '@/lib/openrouter/models';
+
+export type AIProviderKey = 'openai' | 'anthropic' | 'gemini' | 'groq' | 'grok' | 'ollama' | 'openrouter';
 
 /** UI effort levels, ascending. Not every model accepts every level. */
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -103,6 +105,13 @@ export interface AIProviderDef {
   models: AIModelDef[];
 }
 
+/**
+ * OpenRouter fans out to whichever upstream actually serves a model, so its
+ * request-shaping quirks (temperature/effort support, token param) are not
+ * knowable statically the way they are for a single vendor above — leave caps
+ * unset here and let callers fall back to DEFAULT_CAPS.
+ */
+
 export const AI_PROVIDERS: Record<AIProviderKey, AIProviderDef> = {
   openai: {
     name: 'OpenAI',
@@ -178,6 +187,18 @@ export const AI_PROVIDERS: Record<AIProviderKey, AIProviderDef> = {
       // Effort support undocumented for 4.3 — treat as no effort knob.
       { id: 'grok-4.3', label: 'Grok 4.3', caps: { ...DEFAULT_CAPS, thinking: false } },
     ],
+  },
+  openrouter: {
+    name: 'OpenRouter',
+    configKey: 'openRouterApiKey',
+    // This registry is STATIC and cannot hold OpenRouter's 445+ chat-model
+    // catalogue. Model list here is seeded from OPENROUTER_CHAT_MODELS
+    // (src/lib/openrouter/models.ts) — the hand-curated shortlist: DeepSeek
+    // for cheap long-context search/completion, Kimi K3 for 1M-token context.
+    // The FULL catalogue is browsed at /admin/openrouter and resolved at
+    // runtime via validateModel()/the live /models endpoint — deliberately
+    // not flattened into this static file.
+    models: OPENROUTER_CHAT_MODELS.map((m) => ({ id: m.id, label: m.label })),
   },
   ollama: {
     name: 'Ollama (Local)',

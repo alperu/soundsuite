@@ -124,7 +124,7 @@ export async function POST(request: NextRequest) {
     }
     
     // Validate provider
-    if (!['transformers', 'openai', 'claude', 'ollama'].includes(body.embeddingProvider)) {
+    if (!['transformers', 'openai', 'claude', 'ollama', 'openrouter'].includes(body.embeddingProvider)) {
       return NextResponse.json(
         { error: 'Invalid embedding provider' },
         { status: 400 }
