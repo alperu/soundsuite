@@ -122,7 +122,27 @@ export interface EmbedResult {
  * Authorization header and never appears in a return value or an error.
  */
 export async function keyInfo(apiKey: string, timeoutMs = 15_000): Promise<Record<string, unknown>> {
-  return get<Record<string, unknown>>(apiKey, '/key', timeoutMs);
+  // TWO endpoints, because they answer different questions:
+  //   /key     -> this KEY's rate limit, and its own spend cap (`limit`), which
+  //               is null when the key has no individual cap.
+  //   /credits -> the ACCOUNT's balance (total_credits / total_usage).
+  // Reading only /key reported "no credits" on an account holding $100: the
+  // key simply had no per-key cap, which is not the same as having no money.
+  const key = await get<Record<string, unknown>>(apiKey, '/key', timeoutMs);
+  const data = (key.data && typeof key.data === 'object'
+    ? { ...(key.data as Record<string, unknown>) }
+    : { ...key }) as Record<string, unknown>;
+  try {
+    const credits = await get<Record<string, unknown>>(apiKey, '/credits', timeoutMs);
+    const cd = (credits.data && typeof credits.data === 'object'
+      ? credits.data : credits) as Record<string, unknown>;
+    if (typeof cd.total_credits === 'number') data.total_credits = cd.total_credits;
+    if (typeof cd.total_usage === 'number') data.total_usage = cd.total_usage;
+  } catch {
+    // Balance is display-only; a failure here must not cost us the rate limit,
+    // which is what the budget is actually sized from.
+  }
+  return { data };
 }
 
 export async function embed(apiKey: string, texts: string[], model: string, opts: EmbedOptions = {}): Promise<EmbedResult> {
