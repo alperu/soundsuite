@@ -32,9 +32,14 @@ export async function GET() {
     // /acquire that auto-starts the completion container against operator policy.
     if (config.completionUseOrchestrator && (config.gpuMinCompletion ?? 0) > 0) {
       try {
-        const { resolveEndpoint } = await import('@/lib/gpu/fleet-router');
+        const { resolveEndpoint, releaseEndpoint } = await import('@/lib/gpu/fleet-router');
         const ep = await resolveEndpoint('completion');
         host = ep.host;
+        // resolveEndpoint() sends /acquire. Listing models is a read — release
+        // it straight back, or every load of the model dropdown permanently
+        // adds one to the sidecar's completion counter and keeps its idle
+        // timer disarmed.
+        if (ep.sidecarUrl) releaseEndpoint('completion', ep.sidecarUrl);
       } catch {
         // Fall back to direct host
       }

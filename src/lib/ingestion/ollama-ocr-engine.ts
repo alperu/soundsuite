@@ -121,8 +121,8 @@ export class OllamaOCREngine implements ITaskOCREngine {
    * (typically NoGpuReadyEndpointError) is propagated as OcrNotReadyError so
    * the worker pauses instead of degrading silently to the static host.
    */
-  private async resolveHost(): Promise<string> {
-    if (!this.useOrchestrator) return this.host;
+  private async resolveHost(): Promise<{ host: string; sidecarUrl?: string }> {
+    if (!this.useOrchestrator) return { host: this.host };
     try {
       const { resolveEndpoint } = await import('@/lib/gpu/fleet-router');
       const ep = await resolveEndpoint('ocr');
@@ -130,7 +130,10 @@ export class OllamaOCREngine implements ITaskOCREngine {
         logger.info('OCR host resolved via fleet-router', { host: ep.host, sidecar: ep.sidecarUrl });
         this.lastResolvedHost = ep.host;
       }
-      return ep.host;
+      // sidecarUrl travels with the host because resolveEndpoint() sends
+      // /acquire. Returning only the host is what leaked: every OCR call
+      // incremented the sidecar's ocr counter and nothing ever released it.
+      return { host: ep.host, sidecarUrl: ep.sidecarUrl };
     } catch (err) {
       if (err instanceof NoGpuReadyEndpointError) {
         logger.warn('OCR not GPU-ready — pausing', { reason: err.reason });
@@ -167,8 +170,12 @@ export class OllamaOCREngine implements ITaskOCREngine {
     const base64Image = imageBuffer.toString('base64');
     const imageSizeKB = Math.round(imageBuffer.length / 1024);
     let lastError: Error | undefined;
-    const host = await this.resolveHost();
-
+    const { host, sidecarUrl } = await this.resolveHost();
+    // resolveEndpoint() above sent /acquire; this must be balanced on EVERY
+    // exit from here — preflight failure, retry exhaustion, success — or the
+    // sidecar's ocr counter climbs for the life of the process and its idle
+    // timer never arms. Mirrors the finally in ollama-embedding-provider.
+    try {
     const pf = await this.preflight(host);
     if (!pf.ok) {
       logger.warn('Ollama OCR preflight failed — skipping request', {
@@ -280,6 +287,12 @@ export class OllamaOCREngine implements ITaskOCREngine {
     }
 
     throw new Error(`OllamaOCR failed after ${MAX_RETRIES} attempts (${host}, model=${this.model}): ${lastError!.message}`);
+    } finally {
+      if (sidecarUrl) {
+        const { releaseEndpoint } = await import('@/lib/gpu/fleet-router');
+        releaseEndpoint('ocr', sidecarUrl);
+      }
+    }
   }
 
   async terminate(): Promise<void> {
