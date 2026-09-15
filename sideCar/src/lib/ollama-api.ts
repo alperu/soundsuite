@@ -379,6 +379,25 @@ async function ollamaPost(
 }
 
 /**
+ * Does this role produce embeddings rather than completions?
+ *
+ * Endpoint choice depends on it. An embedding-only GGUF (qwen3-embedding,
+ * jina-code-embeddings) answers `/api/embed` and REJECTS `/api/generate` —
+ * Ollama returns a 400 "does not support generate". Calling generate first on
+ * such a model is wasted work on the load path and an outright failure on the
+ * unload path, where a non-200 meant the model was logged as "best-effort"
+ * unloaded and silently stayed resident in VRAM (three models pinned on the
+ * Mac mini, 2026-09-15).
+ *
+ * Keyed on the role name, which is the registry key the whole sidecar uses
+ * ('embedding', 'code-embedding'), not on the model string — operators can
+ * point a role at any model, including one whose name says nothing useful.
+ */
+export function isEmbeddingRole(role?: string): boolean {
+  return !!role && role.includes('embedding');
+}
+
+/**
  * Load a model into VRAM. Tries /api/generate first (works for chat/completion models),
  * falls back to /api/embed (works for embedding models like qwen3-embedding).
  */
@@ -396,13 +415,24 @@ export async function ollamaLoad(
     log.info(`ollamaLoad: loading ${model} on port ${port}${opts?.forceFullGpu ? ' (forceFullGpu)' : ''}...`);
 
     // Try endpoints in order until one succeeds at loading the model into VRAM.
-    // Different model types (chat, embedding, vision) support different endpoints.
-    const endpoints: Array<{ path: string; body: Record<string, unknown> }> = [
+    // Different model types (chat, embedding, vision) support different
+    // endpoints, and the FIRST one tried should be the one this role's model
+    // actually implements: an embedding role hitting /api/generate burns a
+    // round trip on a guaranteed 400 before falling through, and a generate
+    // call is what misleads capability detection on Ollama 0.3x. The full list
+    // is still tried in both orders, so an operator who points a role at an
+    // unexpected model still gets a load.
+    const genEndpoints: Array<{ path: string; body: Record<string, unknown> }> = [
       { path: '/api/generate', body: { model, prompt: '', keep_alive: '24h', stream: false, ...(gpuOptions ? { options: gpuOptions } : {}) } },
-      { path: '/api/embed', body: { model, input: 'warmup', keep_alive: '24h', ...(gpuOptions ? { options: gpuOptions } : {}) } },
-      { path: '/api/embeddings', body: { model, prompt: 'warmup', keep_alive: '24h', ...(gpuOptions ? { options: gpuOptions } : {}) } },
       { path: '/api/chat', body: { model, messages: [], keep_alive: '24h', stream: false, ...(gpuOptions ? { options: gpuOptions } : {}) } },
     ];
+    const embedEndpoints: Array<{ path: string; body: Record<string, unknown> }> = [
+      { path: '/api/embed', body: { model, input: 'warmup', keep_alive: '24h', ...(gpuOptions ? { options: gpuOptions } : {}) } },
+      { path: '/api/embeddings', body: { model, prompt: 'warmup', keep_alive: '24h', ...(gpuOptions ? { options: gpuOptions } : {}) } },
+    ];
+    const endpoints = isEmbeddingRole(role)
+      ? [...embedEndpoints, ...genEndpoints]
+      : [...genEndpoints, ...embedEndpoints];
 
     const results: string[] = [];
     let loaded = false;
@@ -468,35 +498,40 @@ export async function ollamaLoad(
  * unloads immediately. Best-effort: returns false on error but does not throw.
  */
 export async function ollamaUnload(port: number, model: string, role?: string): Promise<boolean> {
-  try {
-    const result = await ollamaPost(
-      port,
-      '/api/generate',
-      { model, prompt: '', keep_alive: 0, stream: false },
-      15_000,
-      undefined,
-      3,
-      role,
-    );
-    if (result.status === 200) {
-      log.info(`ollamaUnload: ${model} unloaded on port ${port}`);
-      invalidateOllamaCache(port, role);
-      return true;
+  // keep_alive: 0 evicts the model, but only on an endpoint the model supports.
+  // This used to be /api/generate unconditionally: an embedding-only model
+  // answers that with a 400, so the unload returned false, was logged as
+  // "best-effort", and the model stayed in VRAM — the idle timer appeared to
+  // run yet freed nothing. Try the role's native endpoint first, then the
+  // other, and only report failure when BOTH refuse.
+  const generate = { path: '/api/generate', body: { model, prompt: '', keep_alive: 0, stream: false } };
+  const embed = { path: '/api/embed', body: { model, input: '', keep_alive: 0 } };
+  const attempts = isEmbeddingRole(role) ? [embed, generate] : [generate, embed];
+
+  const seen: string[] = [];
+  for (const attempt of attempts) {
+    try {
+      const result = await ollamaPost(port, attempt.path, attempt.body, 15_000, undefined, 3, role);
+      seen.push(`${attempt.path}=${result.status}`);
+      if (result.status === 200) {
+        log.info(`ollamaUnload: ${model} unloaded on port ${port} via ${attempt.path}`);
+        invalidateOllamaCache(port, role);
+        return true;
+      }
+      // 404 = model not found / not pulled — treat as success (already unloaded,
+      // goal of stop is satisfied: no VRAM held by this model). Otherwise stop
+      // becomes non-idempotent when registry's model name doesn't match what's
+      // actually installed on the host.
+      if (result.status === 404) {
+        log.info(`ollamaUnload: ${model} not present on port ${port} (404) — treating as already unloaded`);
+        return true;
+      }
+    } catch (err) {
+      seen.push(`${attempt.path}=ERR:${(err as Error).message.slice(0, 60)}`);
     }
-    // 404 = model not found / not pulled — treat as success (already unloaded,
-    // goal of stop is satisfied: no VRAM held by this model). Otherwise stop
-    // becomes non-idempotent when registry's model name doesn't match what's
-    // actually installed on the host.
-    if (result.status === 404) {
-      log.info(`ollamaUnload: ${model} not present on port ${port} (404) — treating as already unloaded`);
-      return true;
-    }
-    log.warn(`ollamaUnload: ${model} on port ${port} returned ${result.status}: ${result.body.slice(0, 150)}`);
-    return false;
-  } catch (err) {
-    log.warn(`ollamaUnload: ${model} on port ${port} error: ${(err as Error).message}`);
-    return false;
   }
+  log.warn(`ollamaUnload: ${model} on port ${port} not unloaded — tried ${seen.join(', ')}`);
+  return false;
 }
 
 /** Check if Ollama API is reachable. GET /api/tags with 5s timeout → boolean. */

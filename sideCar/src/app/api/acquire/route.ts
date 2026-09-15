@@ -4,7 +4,7 @@ import { handleAcquire } from '@/lib/handlers';
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
-    const result = await handleAcquire(body.role);
+    const result = await handleAcquire(body.role, 'http');
     if (result.error) {
       return NextResponse.json(result, {
         status: 404,

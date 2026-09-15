@@ -264,7 +264,10 @@ export async function evictForRole(role: string): Promise<EvictionStep[]> {
         // Ollama: unload all models on this endpoint. Faster than docker stop.
         const ps = await ollamaPs(otherDef.port).catch(() => []);
         for (const m of ps) {
-          await ollamaUnload(otherDef.port, m.name);
+          // Pass the EVICTEE's role, not ours — it picks the endpoint the
+          // evicted model actually supports (an embedding model rejects
+          // /api/generate, which used to leave it resident).
+          await ollamaUnload(otherDef.port, m.name, step.role);
           log.info(`evict-for-${role}: unloaded ${m.name} on ${step.role} (~${step.expectedFreeMb}MB; ${step.reason})`);
         }
       } else if (step.action === 'stopContainer') {

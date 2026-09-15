@@ -8,6 +8,7 @@ import { createLogger } from './logger';
 import { recordDemandSample, getPeakDemand } from './demand-tracker';
 import { tasks } from './task-tracker';
 import { getBootEvents, getBootEpoch } from './boot-events';
+import { openLease, closeLease, closeAllLeases, touchRoleLeases, leaseSummary } from './leases';
 import { detectAdvertisableAddress, type InterfaceMap } from './agent-address';
 import fs from 'fs';
 import path from 'path';
@@ -134,9 +135,18 @@ async function ensureOllamaModel(role: string): Promise<void> {
     await waitForOllama(def.port, 30_000, role);
     log.info(`ensureOllamaModel: API ready, checking if ${def.model} is on disk...`);
     const diskModels = await ollamaList(def.port, role);
-    const modelBase = def.model.split(':')[0];
+    // Narrowed once here: `def.model` is a mutable registry field, so TS cannot
+    // keep the null-check above alive inside the closure below.
+    const wantModel = def.model;
+    const modelBase = wantModel.split(':')[0];
+    const wantIsTagged = wantModel.includes(':');
     log.info(`ensureOllamaModel: models on disk: ${diskModels.join(', ')}`);
-    let onDisk = diskModels.some(m => m === def.model || m.includes(modelBase));
+    // Exact tag match, and a base-name match ONLY when the configured model
+    // carries no tag. The old `m.includes(modelBase)` let "qwen3-embedding:0.6b"
+    // on disk satisfy a request for "qwen3-embedding:4b": the pull was skipped
+    // and the role then tried to load a model that had never been downloaded
+    // (BASWS35, 2026-09-14).
+    let onDisk = diskModels.some(m => m === wantModel || (!wantIsTagged && m.split(':')[0] === modelBase));
     log.info(`ensureOllamaModel: looking for "${def.model}" (base="${modelBase}") in /api/tags → found=${onDisk}`);
     // Authoritative tiebreaker: /api/tags can return an empty list right after
     // container start (Ollama scans the manifest store lazily) so a "not found"
@@ -575,7 +585,7 @@ async function recoverPortConflict(role: string, containerName: string, port: nu
   throw new Error(`Port ${port} in use by container "${holder}" (not managed by sidecar) — cannot auto-recover`);
 }
 
-export async function handleAcquire(role?: string): Promise<Record<string, unknown>> {
+export async function handleAcquire(role?: string, owner = 'http'): Promise<Record<string, unknown>> {
   if (role && state.registry[role]) {
     const def = state.registry[role];
     const r = state.perRole[role];
@@ -590,7 +600,12 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
       return { error: `Role "${role}" is disabled (minOnline=0). Set Minimum Online > 0 in admin to allow auto-start.` };
     }
 
-    r.activeRequests++;
+    // Open a lease rather than bumping a bare counter. `r.activeRequests` is
+    // derived from open leases (see leases.ts) so an unreleased acquire
+    // expires instead of leaking forever. `leaseId` comes back in every
+    // response below; a master that echoes it to /release gets exact
+    // accounting, one that doesn't still works (oldest-lease-first).
+    const leaseId = openLease(role, owner);
     clearIdleTimerForRole(role);
     // Manual Acquire clears any prior user-stopped intent — the operator
     // is asking us to use this role again, so the heartbeat may re-engage.
@@ -608,11 +623,11 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
       try {
         await ensureContainerForRole(role); // probes host Ollama; throws if unreachable
       } catch (err) {
-        r.activeRequests = Math.max(0, r.activeRequests - 1);
+        closeLease(role, leaseId);
         return { error: (err as Error).message };
       }
       ensureOllamaModel(role).catch((err) => log.error(`ensureOllamaModel fire-and-forget failed for ${role}: ${(err as Error).message}`));
-      return { action: 'host-runtime', role, activeRequests: r.activeRequests };
+      return { action: 'host-runtime', role, leaseId, activeRequests: r.activeRequests };
     }
 
     // Docker Model Runner: probe DMR's TCP endpoint. No image, no model
@@ -622,10 +637,10 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
       try {
         await ensureContainer(role);
       } catch (err) {
-        r.activeRequests = Math.max(0, r.activeRequests - 1);
+        closeLease(role, leaseId);
         return { error: (err as Error).message };
       }
-      return { action: 'docker-model-runner', role, activeRequests: r.activeRequests };
+      return { action: 'docker-model-runner', role, leaseId, activeRequests: r.activeRequests };
     }
 
     // Same docker-socket preflight as handleStart — return a clear error
@@ -634,7 +649,7 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
     {
       const pf = preflightDockerError(role);
       if (pf) {
-        r.activeRequests = Math.max(0, r.activeRequests - 1);
+        closeLease(role, leaseId);
         log.error(`handleAcquire preflight: ${pf}`);
         return { error: pf };
       }
@@ -642,7 +657,7 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
 
     const containerName = await ensureContainer(role);
     const cs = await getContainerState(containerName);
-    if (cs.status === 'running') return { action: 'already_running', role, activeRequests: r.activeRequests };
+    if (cs.status === 'running') return { action: 'already_running', role, leaseId, activeRequests: r.activeRequests };
 
     let result: string;
     try {
@@ -651,13 +666,16 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
       if (isPortConflict(err)) {
         result = await recoverPortConflict(role, containerName, def.port);
       } else {
+        // The lease outlives this frame otherwise: the throw escapes to the
+        // route handler and nothing would ever close it.
+        closeLease(role, leaseId);
         throw err;
       }
     }
 
     // Fire-and-forget: ensure Ollama model is pulled
     ensureOllamaModel(role).catch((err) => log.error(`ensureOllamaModel fire-and-forget failed for ${role}: ${(err as Error).message}`));
-    return { action: result, role, activeRequests: r.activeRequests };
+    return { action: result, role, leaseId, activeRequests: r.activeRequests };
   }
 
   // Legacy: no role specified
@@ -673,14 +691,16 @@ export async function handleAcquire(role?: string): Promise<Record<string, unkno
   return { action: result, activeRequests: state.activeRequests };
 }
 
-export async function handleRelease(role?: string): Promise<Record<string, unknown>> {
+export async function handleRelease(role?: string, leaseId?: string): Promise<Record<string, unknown>> {
   if (role && state.perRole[role]) {
     const r = state.perRole[role];
-    r.activeRequests = Math.max(0, r.activeRequests - 1);
+    // closeLease recomputes activeRequests from the open leases and arms the
+    // idle timer when the role reaches zero — the same thing the bare
+    // decrement used to do, minus the ability to drift.
+    const { closed, remaining } = closeLease(role, leaseId);
     r.lastRelease = new Date().toISOString();
-    log.info(`Release ${role} (active: ${r.activeRequests})`);
-    if (r.activeRequests === 0) startIdleTimerForRole(role);
-    return { role, activeRequests: r.activeRequests, idleTimerStarted: r.activeRequests === 0 };
+    log.info(`Release ${role} (active: ${remaining})${leaseId ? ` lease=${leaseId}` : ''}${closed ? '' : ' [no matching lease]'}`);
+    return { role, activeRequests: remaining, released: closed, idleTimerStarted: remaining === 0 };
   }
 
   // Legacy
@@ -706,11 +726,16 @@ export async function handleTouch(role?: string): Promise<Record<string, unknown
     return { ok: false, role: r, error: `unknown role` };
   }
   startIdleTimerForRole(r);
+  // Also push back the expiry on this role's open leases. A master that
+  // heartbeats is telling us its work is still live, so its leases must not
+  // age out from under a long job (an 8-hour re-embed outlives any sane TTL).
+  const extended = touchRoleLeases(r);
   state.perRole[r].lastRelease = new Date().toISOString();
   return {
     ok: true,
     role: r,
     activeRequests: state.perRole[r].activeRequests,
+    leasesExtended: extended,
     idleTimerArmed: true,
   };
 }
@@ -734,6 +759,9 @@ export async function handleResetCounters(role?: string): Promise<Record<string,
       continue;
     }
     const previous = perRole.activeRequests;
+    // Drop the leases FIRST. activeRequests is derived from them, so zeroing
+    // the field alone would be undone by the next syncRoleCounter().
+    closeAllLeases(r);
     perRole.activeRequests = 0;
     perRole.lastRelease = new Date().toISOString();
     let idleTimerStarted = false;
@@ -1049,6 +1077,10 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
     host,
     mode: state.currentMode,
     activeRequests: getTotalActiveRequests(),
+    // Lease accounting behind activeRequests — open count, TTL and the oldest
+    // lease per role. Makes "the counter is leaking" visible on this host
+    // instead of only from the master's fleet view.
+    leases: leaseSummary(),
     idleTimerActive: Object.values(state.perRole).some((r) => r.idleTimer !== null) || state.idleTimer !== null,
     idleTimeouts: state.idleTimeouts,
     minOnline: state.minOnline,

@@ -31,6 +31,7 @@ import { checkForUpdate, performUpdate } from './self-update';
 import { tasks } from './task-tracker';
 import { emitBootEvent } from './boot-events';
 import { processGlobal } from './process-global';
+import { closeLeasesForOwner, startSweeper } from './leases';
 import {
   AddressStabilityTracker,
   resolveAgentUrl,
@@ -360,8 +361,11 @@ async function executeCommand(
   log.info(`[${m.serverUrl}] Executing command: ${action} (id: ${cmd.id})`);
 
   switch (action) {
-    case 'acquire': return handleAcquire(role);
-    case 'release': return handleRelease(role);
+    // The master's serverUrl owns any lease this command opens, so a dropped
+    // socket can release exactly what that master still owed (see the close
+    // handler's closeLeasesForOwner call).
+    case 'acquire': return handleAcquire(role, m.serverUrl);
+    case 'release': return handleRelease(role, typeof payload.leaseId === 'string' ? payload.leaseId : undefined);
     case 'reset-counters': return handleResetCounters(role);
     case 'start': {
       if (role) {
@@ -1629,6 +1633,10 @@ export function connectMaster(m: MasterConnection): void {
       m.connectionMode = 'disconnected';
       m.connectionStatus = `WebSocket disconnected (${code === 1006 ? 'dropped, 1006' : `code ${code}`})`;
       if (m.heartbeatTimer) { clearInterval(m.heartbeatTimer); m.heartbeatTimer = null; }
+      // A master that is gone cannot send the releases it still owes, and when
+      // it reconnects it re-acquires from scratch. Holding its leases would
+      // only inflate activeRequests and keep the idle timer disarmed.
+      closeLeasesForOwner(m.serverUrl);
       // If no master is on WS, stop process-wide update checks.
       if (!anyWebSocketConnected()) stopUpdateChecks();
       startHttpHeartbeat(m);
@@ -1842,6 +1850,11 @@ export async function startGossipClient(): Promise<void> {
 
   // Connect FIRST so heartbeats flow during slow provisioning
   connectAllMasters();
+
+  // Expire abandoned leases even on a process that never sees an acquire of
+  // its own — openLease() also starts this, but a sidecar whose masters all
+  // went away still needs the sweep to drain what they left behind.
+  startSweeper();
 
   try {
     await autoProvision();
