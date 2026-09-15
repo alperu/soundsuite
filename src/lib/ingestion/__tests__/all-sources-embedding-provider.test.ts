@@ -185,3 +185,49 @@ describe('AllSourcesEmbeddingProvider.embed', () => {
     vectors.forEach((v) => expect(v).toHaveLength(2560));
   });
 });
+
+/**
+ * The ingestion pipeline calls embed() with batchSize 1 for the overwhelming
+ * majority of chunks. The old singleton shortcut sent every one of those to the
+ * local provider, so in practice almost nothing reached OpenRouter — the
+ * operator observed "a couple" of cloud calls and then nothing.
+ */
+describe('single-text calls alternate between sources', () => {
+  const { dispatchVirtualEmbed } = jest.requireMock('@/lib/gpu/virtual-embed-dispatch');
+
+  async function build() {
+    mockEmbed.mockResolvedValue({ vectors: fakeVectors(1, 2560), model: OPENROUTER_MODEL, dims: 2560 });
+    const local = new FakeLocalProvider(2560);
+    const localSpy = jest.spyOn(local, 'embed');
+    const provider = await AllSourcesEmbeddingProvider.createIfSafe({ local, openRouterModel: OPENROUTER_MODEL });
+    localSpy.mockClear();
+    (dispatchVirtualEmbed as jest.Mock).mockClear();
+    return { provider: provider!, localSpy };
+  }
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('does not send every singleton to the local provider', async () => {
+    const { provider, localSpy } = await build();
+    for (let i = 0; i < 6; i++) await provider.embed([`synthetic chunk ${i}`]);
+
+    const cloudSingletons = (dispatchVirtualEmbed as jest.Mock).mock.calls
+      .filter((c: any[]) => c[0].texts.length === 1).length;
+    const localSingletons = localSpy.mock.calls.filter((c) => c[0].length === 1).length;
+
+    expect(cloudSingletons).toBeGreaterThan(0);
+    expect(localSingletons).toBeGreaterThan(0);
+    expect(cloudSingletons + localSingletons).toBe(6);
+  });
+
+  it('falls back to local when a singleton cloud call fails', async () => {
+    const { provider, localSpy } = await build();
+    (dispatchVirtualEmbed as jest.Mock).mockRejectedValue(new Error('upstream down'));
+    // Two calls guarantees at least one takes the cloud branch.
+    const a = await provider.embed(['x']);
+    const b = await provider.embed(['y']);
+    expect(a[0]).toHaveLength(2560);
+    expect(b[0]).toHaveLength(2560);
+    expect(localSpy).toHaveBeenCalled();
+  });
+});

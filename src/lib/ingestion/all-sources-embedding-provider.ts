@@ -67,6 +67,9 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
     super();
   }
 
+  /** Alternates single-text calls between local and cloud — see embed(). */
+  private singletonTurn = 0;
+
   /**
    * Verify local + OpenRouter agree on model width before ever fanning real
    * ingestion work across them. Never throws — a failed/mismatched
@@ -148,9 +151,40 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
    */
   async embed(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
-    // Not worth splitting a singleton — send it local, avoid a network round
-    // trip and a spend-guard check for one chunk.
-    if (texts.length === 1) return this.local.embed(texts);
+
+    // A single text cannot be split, so this used to go local unconditionally.
+    // That quietly disabled the whole feature: the ingestion pipeline calls
+    // embed() with batchSize 1 for the overwhelming majority of chunks, so
+    // nearly everything went local and only the occasional multi-text batch
+    // ever reached OpenRouter.
+    //
+    // Instead of splitting WITHIN a call, alternate BETWEEN calls, so a stream
+    // of singletons still distributes across both sources. The counter is
+    // per-provider-instance and its exact parity does not matter — only that
+    // consecutive singletons do not all land on the same source.
+    //
+    // Note this trades a little latency per cloud-served chunk (a network round
+    // trip versus a local one) for actually using the capacity the operator
+    // asked to use. The larger win is upstream: embedding in real batches would
+    // let both sources work in parallel instead of alternating serially.
+    if (texts.length === 1) {
+      const useCloud = this.singletonTurn++ % 2 === 1;
+      if (!useCloud) return this.local.embed(texts);
+      try {
+        return await dispatchVirtualEmbed({
+          role: this.role,
+          model: this.openRouterModel,
+          texts,
+          expectedDims: this.dims,
+          directFallback: (t) => this.cloud.embed(t),
+        });
+      } catch (err) {
+        logger.warn('all-sources: singleton cloud embed failed — serving locally instead', {
+          error: (err as Error).message,
+        });
+        return this.local.embed(texts);
+      }
+    }
 
     const splitAt = Math.ceil(texts.length / 2);
     const localTexts = texts.slice(0, splitAt);
