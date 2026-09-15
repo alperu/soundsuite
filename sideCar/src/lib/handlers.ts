@@ -697,10 +697,12 @@ export async function handleRelease(role?: string, leaseId?: string): Promise<Re
     // closeLease recomputes activeRequests from the open leases and arms the
     // idle timer when the role reaches zero — the same thing the bare
     // decrement used to do, minus the ability to drift.
-    const { closed, remaining } = closeLease(role, leaseId);
+    const { closed, remaining, role: closedRole } = closeLease(role, leaseId);
     r.lastRelease = new Date().toISOString();
-    log.info(`Release ${role} (active: ${remaining})${leaseId ? ` lease=${leaseId}` : ''}${closed ? '' : ' [no matching lease]'}`);
-    return { role, activeRequests: remaining, released: closed, idleTimerStarted: remaining === 0 };
+    log.info(`Release ${closedRole} (active: ${remaining})${leaseId ? ` lease=${leaseId}` : ''}${closed ? '' : ' [no matching lease]'}`);
+    // closedRole is what the lease actually belonged to; it equals `role` for
+    // every caller that releases what it acquired.
+    return { role: closedRole, activeRequests: remaining, released: closed, idleTimerStarted: remaining === 0 };
   }
 
   // Legacy

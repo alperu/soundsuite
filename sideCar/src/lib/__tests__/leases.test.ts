@@ -49,10 +49,23 @@ describe('role leases', () => {
     const a = openLease(ROLE, 'master-a');
     openLease(ROLE, 'master-a');
 
-    expect(closeLease(ROLE, a)).toEqual({ closed: true, remaining: 1 });
+    expect(closeLease(ROLE, a)).toEqual({ closed: true, remaining: 1, role: ROLE });
     // The double-decrement the bare counter allowed: releasing the same lease
     // twice must not take the count below the work actually outstanding.
-    expect(closeLease(ROLE, a)).toEqual({ closed: false, remaining: 1 });
+    expect(closeLease(ROLE, a)).toEqual({ closed: false, remaining: 1, role: ROLE });
+    expect(state.perRole[ROLE].activeRequests).toBe(1);
+  });
+
+  it('honours the lease’s own role when a release names a different one', () => {
+    const embeddingLease = openLease('embedding', 'confused-master');
+    openLease(ROLE, 'confused-master');
+
+    // Release claims code-embedding but hands an embedding lease id. The lease
+    // wins, and the response says which role was actually closed.
+    const out = closeLease(ROLE, embeddingLease);
+    expect(out).toEqual({ closed: true, remaining: 0, role: 'embedding' });
+    expect(state.perRole.embedding.activeRequests).toBe(0);
+    // The role the caller named is resynced too, not left stale.
     expect(state.perRole[ROLE].activeRequests).toBe(1);
   });
 

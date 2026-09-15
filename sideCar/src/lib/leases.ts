@@ -132,24 +132,33 @@ export function openLease(role: string, owner: string): string {
  * an id we close that role's OLDEST open lease — the same net effect the bare
  * counter had, minus the ability to go negative.
  */
-export function closeLease(role: string, leaseId?: string): { closed: boolean; remaining: number } {
+export function closeLease(role: string, leaseId?: string): { closed: boolean; remaining: number; role: string } {
   if (leaseId) {
     const l = G.byId.get(leaseId);
     if (!l) {
       log.debug(`Release for unknown lease ${leaseId} (role=${role}) — already closed or expired`);
-      return { closed: false, remaining: syncRoleCounter(role) };
+      return { closed: false, remaining: syncRoleCounter(role), role };
     }
     G.byId.delete(leaseId);
-    return { closed: true, remaining: syncRoleCounter(l.role) };
+    // The lease's OWN role is authoritative, and it is reported back: a caller
+    // that pairs a leaseId with the wrong role would otherwise be told a count
+    // for a role it did not ask about, and that role's counter would never be
+    // resynced. Unreachable with today's masters, which always release the
+    // role they acquired — but the response should not be able to lie.
+    if (l.role !== role) {
+      log.warn(`Release sent role="${role}" with a lease belonging to "${l.role}" — honouring the lease`);
+      syncRoleCounter(role);
+    }
+    return { closed: true, remaining: syncRoleCounter(l.role), role: l.role };
   }
   let oldest: Lease | undefined;
   for (const l of G.byId.values()) {
     if (l.role !== role) continue;
     if (!oldest || l.at < oldest.at) oldest = l;
   }
-  if (!oldest) return { closed: false, remaining: syncRoleCounter(role) };
+  if (!oldest) return { closed: false, remaining: syncRoleCounter(role), role };
   G.byId.delete(oldest.id);
-  return { closed: true, remaining: syncRoleCounter(role) };
+  return { closed: true, remaining: syncRoleCounter(role), role };
 }
 
 /**
