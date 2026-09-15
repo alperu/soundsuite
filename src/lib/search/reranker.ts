@@ -495,14 +495,20 @@ export async function rerank<T extends RerankableResult>(
       }
     }
 
-    // POLICY — reranker cloud fallback (docs/SPEC-openrouter-virtual-inference.md §3;
-    // reranker is the one role where `local-first` needs no explicit mode config,
-    // because local reranking is CUDA-vLLM-only and Macs have no local reranker at
-    // all). Engages ONLY after every local vLLM candidate above has been exhausted,
-    // and ONLY when the operator has opted in via `openRouterEnabled` with a rerank
+    // POLICY — reranker cloud fallback (docs/SPEC-openrouter-virtual-inference.md §3).
+    // Engages ONLY after every local vLLM candidate above has been exhausted, and
+    // ONLY when the operator has opted in via `openRouterEnabled` with a rerank
     // model configured — an unconfigured install keeps today's behaviour exactly:
     // first-stage order, never throw.
-    if (!reranked && !isOpenRouter && config.openRouterEnabled && config.openRouterRerankModel) {
+    //
+    // `virtualInference.mode.reranker` is what makes that opt-in declinable. The
+    // fallback used to fire whenever a key happened to exist, so an operator who
+    // wanted the GPUs and nothing else had no way to say so — enabling OpenRouter
+    // for embedding silently enrolled reranking too. 'local-only' now means it:
+    // local is exhausted, and the answer is first-stage order rather than a cloud
+    // call. Default is 'local-first', so behaviour is unchanged unless chosen.
+    const rerankCloudAllowed = config.virtualInferenceModeReranker !== 'local-only';
+    if (!reranked && !isOpenRouter && rerankCloudAllowed && config.openRouterEnabled && config.openRouterRerankModel) {
       const fallbackModel = config.openRouterRerankModel;
       const triedHosts = candidates.slice(0, MAX_HOSTS_TO_TRY).length;
       logger.info('Reranker: local exhausted, falling back to OpenRouter', {

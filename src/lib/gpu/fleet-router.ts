@@ -1030,10 +1030,12 @@ export function buildOpenRouterPush(cfg: AppConfig): {
   }
   if (allowedModels['reranker']) {
     // Reranking has no mode key: Policy 1 gates on openRouterEnabled plus a
-    // configured model, and both already hold by the time we push this block.
-    // local-first matches what reranker.ts actually does — exhaust local hosts,
-    // then fall back.
-    modeByRole['reranker'] = 'local-first';
+    // Reranking now has its own policy key, so this is no longer hardcoded:
+    // an operator choosing "SideCar Only" must actually stop the sidecar
+    // serving it, not merely stop reranker.ts from asking. Both sides enforce
+    // it — either alone would do, but a stale discovery row cannot then quietly
+    // route around the choice.
+    modeByRole['reranker'] = sidecarMode(cfg.virtualInferenceModeReranker);
   }
   if (allowedModels['rlm-sandbox']) {
     modeByRole['rlm-sandbox'] = sidecarMode(cfg.virtualInferenceModeRlm);

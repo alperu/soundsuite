@@ -36,6 +36,21 @@ function pickWritableKey(raw: unknown): string | undefined {
 const EMBEDDING_MODES = ['local-only', 'local-first', 'all-sources', 'cloud-only'] as const;
 type EmbeddingMode = (typeof EMBEDDING_MODES)[number];
 
+/**
+ * Completion's union predates this control and spells the combined mode
+ * 'hybrid' rather than 'all-sources'. Mapped here rather than renamed, so an
+ * existing stored value keeps working.
+ */
+const COMPLETION_MODES = ['local-only', 'local-first', 'hybrid', 'cloud-only'] as const;
+type CompletionMode = (typeof COMPLETION_MODES)[number];
+
+function pickCompletionMode(raw: unknown): CompletionMode | undefined {
+  const v = raw === 'all-sources' ? 'hybrid' : raw;
+  return typeof v === 'string' && (COMPLETION_MODES as readonly string[]).includes(v)
+    ? (v as CompletionMode)
+    : undefined;
+}
+
 function pickEmbeddingMode(raw: unknown): EmbeddingMode | undefined {
   return typeof raw === 'string' && (EMBEDDING_MODES as readonly string[]).includes(raw)
     ? (raw as EmbeddingMode)
@@ -69,6 +84,8 @@ export async function GET(request: NextRequest) {
       // that can disagree.
       virtualInferenceModeEmbedding: config.virtualInferenceModeEmbedding,
       virtualInferenceModeCodeEmbedding: config.virtualInferenceModeCodeEmbedding,
+      virtualInferenceModeReranker: config.virtualInferenceModeReranker,
+      virtualInferenceModeCompletion: config.virtualInferenceModeCompletion,
       dailyCapUsd: config.openRouterDailyCapUsd ?? {},
     });
   } catch (error) {
@@ -95,6 +112,8 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    const rerankerMode = pickEmbeddingMode(body.virtualInferenceModeReranker);
+
     await updateConfig({
       openRouterApiKey: apiKeyWrite,
       openRouterEnabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
@@ -109,6 +128,16 @@ export async function POST(request: NextRequest) {
           : undefined,
       virtualInferenceModeEmbedding: pickEmbeddingMode(body.virtualInferenceModeEmbedding),
       virtualInferenceModeCodeEmbedding: pickEmbeddingMode(body.virtualInferenceModeCodeEmbedding),
+      virtualInferenceModeReranker: rerankerMode,
+      // Keep `rerankProvider` in step with the policy. These answer the same
+      // question, and reranker.ts reads the provider — so leaving it stale
+      // would let the page show one policy while search used another. Only
+      // cloud-only makes OpenRouter the primary; every other policy keeps vLLM
+      // primary and differs in whether a fallback is allowed.
+      rerankProvider: rerankerMode
+        ? rerankerMode === 'cloud-only' ? 'openrouter' : 'vllm'
+        : undefined,
+      virtualInferenceModeCompletion: pickCompletionMode(body.virtualInferenceModeCompletion),
       openRouterDailyCapUsd: dailyCapUsd,
     });
 

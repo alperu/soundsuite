@@ -80,6 +80,20 @@ const ROUTING_POLICY_HINT: Record<EmbeddingRoutingMode, string> = {
     'Only OpenRouter serves this role; the sidecar GPUs sit out. Every vector comes from one source, which is the answer when local quantisation does not match the cloud.',
 };
 
+/**
+ * Hint for a role with no fan-out. Rerank and chat are each a single call whose
+ * result cannot be split between providers, so "SideCar + OpenRouter" has
+ * nothing to parallelise and behaves exactly as backup. Saying so beats
+ * offering a choice that silently does nothing.
+ */
+function noFanOutHint(mode: EmbeddingRoutingMode, suffix: string): string {
+  const base =
+    mode === 'all-sources'
+      ? 'This role is a single call, so there is no fan-out to spread across providers — it behaves exactly like Backup here.'
+      : ROUTING_POLICY_HINT[mode] ?? '';
+  return `${base} ${suffix}`.trim();
+}
+
 const ACTIVITY_ROLES = ['embedding', 'code-embedding', 'completion', 'reranker'] as const;
 const ACTIVITY_ROLE_LABELS: Record<(typeof ACTIVITY_ROLES)[number], string> = {
   embedding: 'Embedding',
@@ -146,6 +160,16 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
   const [codeEmbeddingMode, setCodeEmbeddingMode] = useState<EmbeddingRoutingMode>(
     (initialConfig.virtualInferenceModeCodeEmbedding as EmbeddingRoutingMode) || 'local-only',
   );
+  const [rerankerMode, setRerankerMode] = useState<EmbeddingRoutingMode>(
+    (initialConfig.virtualInferenceModeReranker as EmbeddingRoutingMode) || 'local-first',
+  );
+  // Completion's stored union spells the combined mode 'hybrid'; the UI shows
+  // one vocabulary, so it is mapped at the boundary rather than renamed.
+  const [completionMode, setCompletionMode] = useState<EmbeddingRoutingMode>(
+    initialConfig.virtualInferenceModeCompletion === 'hybrid'
+      ? 'all-sources'
+      : ((initialConfig.virtualInferenceModeCompletion as EmbeddingRoutingMode) || 'local-only'),
+  );
   const [rerankModel, setRerankModel] = useState(
     initialConfig.openRouterRerankModel || OPENROUTER_RERANK_MODELS[0]?.id || '',
   );
@@ -195,6 +219,8 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           virtualInferenceModeRlm,
           virtualInferenceModeEmbedding: embeddingMode,
           virtualInferenceModeCodeEmbedding: codeEmbeddingMode,
+          virtualInferenceModeReranker: rerankerMode,
+          virtualInferenceModeCompletion: completionMode,
           dailyCapUsd,
         }),
       });
@@ -530,6 +556,25 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
             hint={ROUTING_POLICY_HINT[codeEmbeddingMode] ?? ''}
             value={codeEmbeddingMode}
             onChange={(v) => setCodeEmbeddingMode(v as EmbeddingRoutingMode)}
+            options={ROUTING_POLICIES.map((p) => ({ id: p.id, label: p.label }))}
+          />
+          {/* Reranking and chat are each ONE call over one input — there is no
+              fan-out to divide between providers, so the combined mode cannot
+              add capacity the way it does for embedding. It is offered for a
+              uniform control, and noFanOutHint says plainly that it behaves as
+              backup rather than quietly pretending otherwise. */}
+          <Picker
+            label="Reranker"
+            hint={noFanOutHint(rerankerMode, 'Reranking is stateless — changing it never requires a re-index.')}
+            value={rerankerMode}
+            onChange={(v) => setRerankerMode(v as EmbeddingRoutingMode)}
+            options={ROUTING_POLICIES.map((p) => ({ id: p.id, label: p.label }))}
+          />
+          <Picker
+            label="Chat / Completion"
+            hint={noFanOutHint(completionMode, 'Chat writes nothing to the index, so switching is free.')}
+            value={completionMode}
+            onChange={(v) => setCompletionMode(v as EmbeddingRoutingMode)}
             options={ROUTING_POLICIES.map((p) => ({ id: p.id, label: p.label }))}
           />
         </div>

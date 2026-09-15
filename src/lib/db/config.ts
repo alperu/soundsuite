@@ -54,6 +54,19 @@ export interface AppConfig {
    *  until an operator opts in. */
   virtualInferenceModeCompletion: 'local-only' | 'local-first' | 'hybrid' | 'cloud-only';
   /**
+   * Routing policy for reranking. Reranking already had `rerankProvider`, but
+   * that answers "which provider" and cannot express "local, and fall back to
+   * cloud" — the fallback was previously implicit whenever a key existed, with
+   * no way to decline it. This field is the operator-facing control; the
+   * settings route keeps `rerankProvider` in step with it so the two cannot
+   * disagree about the same question.
+   *
+   * Rerank is ONE call over one document set, so there is no fan-out to divide:
+   * 'all-sources' is accepted for a uniform UI but behaves exactly as
+   * 'local-first', and the admin page says so rather than implying otherwise.
+   */
+  virtualInferenceModeReranker: 'local-only' | 'local-first' | 'all-sources' | 'cloud-only';
+  /**
    * Governs whether resolveRlmEndpoint() (stream-rlm.ts) may fall back to
    * ss-rlm-sandbox when no sidecar has ss-rlm running. `local-only`
    * (default) preserves today's behaviour — no sidecar means no RLM, full
@@ -289,6 +302,7 @@ export async function getConfig(): Promise<AppConfig> {
     virtualInferenceModeEmbedding: (configMap.get('virtualInference.mode.embedding') as AppConfig['virtualInferenceModeEmbedding']) || 'local-only',
     virtualInferenceModeCodeEmbedding: (configMap.get('virtualInference.mode.code-embedding') as AppConfig['virtualInferenceModeCodeEmbedding']) || 'local-only',
     virtualInferenceModeCompletion: (configMap.get('virtualInference.mode.completion') as AppConfig['virtualInferenceModeCompletion']) || 'local-only',
+    virtualInferenceModeReranker: (configMap.get('virtualInference.mode.reranker') as AppConfig['virtualInferenceModeReranker']) || 'local-first',
     virtualInferenceModeRlm: (configMap.get('virtualInference.mode.rlm') as AppConfig['virtualInferenceModeRlm']) || 'local-only',
     claudeApiKey: configMap.get('embedding.claudeApiKey'),
     geminiApiKey: configMap.get('ai.geminiApiKey'),
@@ -641,6 +655,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.virtualInferenceModeCodeEmbedding !== undefined) {
     updates.push({ key: 'virtualInference.mode.code-embedding', value: config.virtualInferenceModeCodeEmbedding });
+  }
+  if (config.virtualInferenceModeReranker !== undefined) {
+    updates.push({ key: 'virtualInference.mode.reranker', value: config.virtualInferenceModeReranker });
   }
   if (config.virtualInferenceModeCompletion !== undefined) {
     updates.push({ key: 'virtualInference.mode.completion', value: config.virtualInferenceModeCompletion });
