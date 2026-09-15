@@ -336,7 +336,7 @@ export interface ContainerState {
   // HostConfig fields used by drift detection. Populated by getContainerState
   // from /containers/{id}/json. Used to detect containers created BEFORE the
   // sidecar started adding GPU DeviceRequests or Init=true (e.g. stale
-  // pre-rename containers on BASWS34 that exit immediately on start because
+  // pre-rename containers on a Linux GPU host that exit immediately on start because
   // Ollama can't find a GPU). detectConfigDrift compares these against the
   // ExpectedConfig and triggers a remove+recreate.
   hasGpuDeviceRequest?: boolean;
@@ -753,7 +753,7 @@ export interface ExpectedConfig {
   // GPU flag was added get recreated instead of silently exiting on start.
   RequiresGpu?: boolean;
   // True when the container should have HostConfig.Init=true (tini as PID-1).
-  // Added 2026-05-11 after BASWS34 needed manual `docker rm -f` to recover
+  // Added 2026-05-11 after a fleet host needed manual `docker rm -f` to recover
   // from a wedged vLLM worker. Drift-detected to upgrade older containers.
   RequiresInit?: boolean;
 }
@@ -900,7 +900,7 @@ export async function createContainer(role: string): Promise<{ Id?: string; exis
       // SIGTERM is forwarded to the Python worker tree. Without it, vLLM
       // C-extension worker threads can deadlock on a kernel call and PID-1
       // (uvicorn) becomes a zombie that `docker stop` cannot kill. Seen on
-      // BASWS34 (2026-05-11) — required manual `docker rm -f` on the host.
+      // Observed 2026-05-11 — required manual `docker rm -f` on the host.
       // Only affects newly-created containers; existing ones must be
       // recreated to pick this up.
       Init: true,

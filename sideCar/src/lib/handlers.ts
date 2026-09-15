@@ -24,7 +24,7 @@ const log = createLogger('handlers');
  *
  * Without this guard a docker-runtime start would bubble up "connect ENOENT
  * /var/run/docker.sock" or similar, which the master forwards as an opaque
- * 502 to the dashboard. Operators on BASWS34 saw this when the sidecar
+ * 502 to the dashboard. Operators saw this on a Linux GPU host when the sidecar
  * container was run without `-v /var/run/docker.sock:/var/run/docker.sock`.
  */
 function preflightDockerError(role: string | undefined): string | null {
@@ -146,7 +146,7 @@ async function ensureOllamaModel(role: string): Promise<void> {
     // carries no tag. The old `m.includes(modelBase)` let "qwen3-embedding:0.6b"
     // on disk satisfy a request for "qwen3-embedding:4b": the pull was skipped
     // and the role then tried to load a model that had never been downloaded
-    // (BASWS35, 2026-09-14).
+    // (a Linux GPU host, 2026-09-14).
     let onDisk = diskModels.some(m => m === wantModel || (!wantIsTagged && m.split(':')[0] === modelBase));
     log.info(`ensureOllamaModel: looking for "${def.model}" (base="${modelBase}") in /api/tags → found=${onDisk}`);
     // Authoritative tiebreaker: /api/tags can return an empty list right after
@@ -221,15 +221,35 @@ async function ensureOllamaModel(role: string): Promise<void> {
   }
 }
 
-/** Fire-and-forget load a model into VRAM with duplicate-prevention guard and VRAM check. */
-function fireAndForgetLoad(role: string, port: number, model: string, attempt = 1): void {
-  if (ensureSet('modelLoading').has(role)) {
-    log.info(`fireAndForgetLoad: ${role} already loading, skipping`);
-    return;
-  }
+const LOAD_MAX_ATTEMPTS = 3;
+const LOAD_RETRY_DELAY = 30_000; // 30s between retries
 
-  const MAX_ATTEMPTS = 3;
-  const RETRY_DELAY = 30_000; // 30s between retries
+/**
+ * Fire-and-forget load a model into VRAM with duplicate-prevention guard and
+ * VRAM check.
+ *
+ * The `modelLoading` guard is held for the lifetime of the whole retry
+ * CHAIN, not a single attempt. It used to be released via a blanket
+ * `.finally()` the instant each attempt's promise settled — including a
+ * FAILED attempt, which schedules its retry 30s later via `setTimeout`.
+ * `.finally` runs immediately, before that timer fires, so for the entire
+ * 30s gap the role read as free: the heartbeat auto-loader (containers.ts,
+ * its own separate `state.modelLoading` guard) or another `/acquire` calling
+ * `ensureOllamaModel` again were both free to start a second load, and then
+ * the scheduled retry started a third — three identical "Load X into VRAM"
+ * tasks stuck "In progress" (observed on a fleet host, 2026-09-15). Guard is added ONLY on
+ * the first attempt and removed ONLY on a terminal outcome — success, or
+ * exhausting `LOAD_MAX_ATTEMPTS` — never on an attempt that's about to retry.
+ */
+function fireAndForgetLoad(role: string, port: number, model: string, attempt = 1): void {
+  if (attempt === 1) {
+    if (ensureSet('modelLoading').has(role)) {
+      log.info(`fireAndForgetLoad: ${role} already loading, skipping`);
+      return;
+    }
+    ensureSet('modelLoading').add(role);
+  }
+  const releaseGuard = () => ensureSet('modelLoading').delete(role);
 
   // Check available VRAM before attempting load. Skip for host-runtime roles:
   // state.gpuCache is from nvidia-smi inside the sidecar container, which is
@@ -239,18 +259,18 @@ function fireAndForgetLoad(role: string, port: number, model: string, attempt = 
   if (def && def.runtime !== 'host' && def.vram > 0 && state.gpuCache) {
     const freeVram = state.gpuCache.reduce((sum: number, g: any) => sum + (g.memoryFree || 0), 0);
     if (freeVram < def.vram * 0.5) {
-      log.warn(`fireAndForgetLoad: ${role} needs ~${def.vram}MB VRAM but only ${freeVram}MB free — deferring load (attempt ${attempt}/${MAX_ATTEMPTS})`);
-      if (attempt < MAX_ATTEMPTS) {
-        setTimeout(() => fireAndForgetLoad(role, port, model, attempt + 1), RETRY_DELAY);
+      log.warn(`fireAndForgetLoad: ${role} needs ~${def.vram}MB VRAM but only ${freeVram}MB free — deferring load (attempt ${attempt}/${LOAD_MAX_ATTEMPTS})`);
+      if (attempt < LOAD_MAX_ATTEMPTS) {
+        setTimeout(() => fireAndForgetLoad(role, port, model, attempt + 1), LOAD_RETRY_DELAY);
       } else {
-        log.error(`fireAndForgetLoad: ${role} — gave up after ${MAX_ATTEMPTS} attempts, insufficient VRAM`);
+        log.error(`fireAndForgetLoad: ${role} — gave up after ${LOAD_MAX_ATTEMPTS} attempts, insufficient VRAM`);
+        releaseGuard();
       }
       return;
     }
   }
 
-  log.info(`fireAndForgetLoad: loading ${model} for ${role} on port ${port} (attempt ${attempt}/${MAX_ATTEMPTS})${def?.gpuOnly ? ' [gpuOnly: evict + force GPU]' : ''}${def?.runtime === 'host' ? ' [host-runtime]' : ''}`);
-  ensureSet('modelLoading').add(role);
+  log.info(`fireAndForgetLoad: loading ${model} for ${role} on port ${port} (attempt ${attempt}/${LOAD_MAX_ATTEMPTS})${def?.gpuOnly ? ' [gpuOnly: evict + force GPU]' : ''}${def?.runtime === 'host' ? ' [host-runtime]' : ''}`);
   const loadTaskId = tasks.start('model-load', `Load ${model} into VRAM`, role);
   const loadPromise = def?.gpuOnly
     ? loadGpuOnly(role)
@@ -267,24 +287,29 @@ function fireAndForgetLoad(role: string, port: number, model: string, attempt = 
     if (ok) {
       tasks.complete(loadTaskId);
       log.info(`fireAndForgetLoad: ${role} loaded successfully`);
+      releaseGuard();
     } else {
       tasks.fail(loadTaskId, 'Load returned false');
-      log.warn(`fireAndForgetLoad: ${role} load failed (attempt ${attempt}/${MAX_ATTEMPTS})`);
-      // Retry after delay
-      if (attempt < MAX_ATTEMPTS) {
-        log.info(`fireAndForgetLoad: will retry ${role} in ${RETRY_DELAY / 1000}s`);
-        setTimeout(() => fireAndForgetLoad(role, port, model, attempt + 1), RETRY_DELAY);
+      log.warn(`fireAndForgetLoad: ${role} load failed (attempt ${attempt}/${LOAD_MAX_ATTEMPTS})`);
+      // Retry after delay — guard stays held across the wait; see the
+      // function header for why it must not be released here.
+      if (attempt < LOAD_MAX_ATTEMPTS) {
+        log.info(`fireAndForgetLoad: will retry ${role} in ${LOAD_RETRY_DELAY / 1000}s`);
+        setTimeout(() => fireAndForgetLoad(role, port, model, attempt + 1), LOAD_RETRY_DELAY);
       } else {
-        log.error(`fireAndForgetLoad: ${role} — all ${MAX_ATTEMPTS} load attempts failed`);
+        log.error(`fireAndForgetLoad: ${role} — all ${LOAD_MAX_ATTEMPTS} load attempts failed`);
+        releaseGuard();
       }
     }
   }).catch((err) => {
     tasks.fail(loadTaskId, (err as Error).message);
-    if (attempt < MAX_ATTEMPTS) {
-      setTimeout(() => fireAndForgetLoad(role, port, model, attempt + 1), RETRY_DELAY);
+    if (attempt < LOAD_MAX_ATTEMPTS) {
+      log.warn(`fireAndForgetLoad: ${role} load errored (attempt ${attempt}/${LOAD_MAX_ATTEMPTS}): ${(err as Error).message} — will retry in ${LOAD_RETRY_DELAY / 1000}s`);
+      setTimeout(() => fireAndForgetLoad(role, port, model, attempt + 1), LOAD_RETRY_DELAY);
+    } else {
+      log.error(`fireAndForgetLoad: ${role} — all ${LOAD_MAX_ATTEMPTS} load attempts errored, last: ${(err as Error).message}`);
+      releaseGuard();
     }
-  }).finally(() => {
-    ensureSet('modelLoading').delete(role);
   });
 }
 
@@ -293,6 +318,9 @@ function getTotalActiveRequests(): number {
 }
 
 export { getTotalActiveRequests };
+
+/** Test seam — fireAndForgetLoad is otherwise module-private. */
+export { fireAndForgetLoad as __fireAndForgetLoadForTest };
 
 /**
  * Pull an Ollama model (force pull even if already present).
