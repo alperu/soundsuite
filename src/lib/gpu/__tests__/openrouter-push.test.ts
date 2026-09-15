@@ -175,8 +175,24 @@ describe('buildOpenRouterPush — modes come from config', () => {
     expect(out.modeByRole['embedding']).toBe('local-first');
   });
 
-  it('always marks reranker local-first — it has no mode key of its own', () => {
-    const out = buildOpenRouterPush(cfg({ virtualInferenceModeEmbedding: 'cloud-only' } as Partial<AppConfig>))!;
+  // Reranking gained its own policy key, so this is no longer hardcoded. The
+  // point of the key is that "SideCar Only" reaches the sidecar: telling
+  // reranker.ts to stop asking is not enough on its own, because a stale
+  // discovery row could still route around it.
+  it('pushes the configured reranker mode rather than a fixed one', () => {
+    const out = buildOpenRouterPush(
+      cfg({ virtualInferenceModeReranker: 'local-only' } as Partial<AppConfig>),
+    )!;
+    expect(out.modeByRole['reranker']).toBe('local-only');
+  });
+
+  it('maps the reranker all-sources choice to local-first for the sidecar', () => {
+    // Rerank is one call with no fan-out, so the sidecar has no distinct
+    // behaviour to implement for it — and its RoutingMode union has no
+    // 'all-sources' member to receive anyway.
+    const out = buildOpenRouterPush(
+      cfg({ virtualInferenceModeReranker: 'all-sources' } as Partial<AppConfig>),
+    )!;
     expect(out.modeByRole['reranker']).toBe('local-first');
   });
 });
