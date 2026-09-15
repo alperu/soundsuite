@@ -203,7 +203,26 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
     return this.local.getAvailableModels();
   }
 
+  /**
+   * The LOCAL model's name, not a composite describing the fan-out.
+   *
+   * This value is stamped on every Document as `embeddingModel`, and the
+   * "indexed with a different model" banner compares it against the configured
+   * model. A composite like `all-sources(ollama/x + openrouter/y)` can never
+   * equal the configured `x`, so every document embedded here was flagged stale
+   * — and the banner's Re-index button would re-stamp the same composite, so
+   * the warning could never clear and the re-index would repeat forever.
+   *
+   * Returning the local name is not a workaround for that display bug, it is
+   * the honest answer. This provider only engages after `createIfSafe()` has
+   * verified both sources return the same width for the same model, so every
+   * vector it produces belongs to ONE vector space, and that space's identity
+   * is the model — not which host happened to compute a given row.
+   *
+   * Which source served a row remains observable: the master logs it and the
+   * sidecar's Virtual Containers panel counts it.
+   */
   getModelName(): string {
-    return `all-sources(${this.local.getModelName()} + ${this.cloud.getModelName()})`;
+    return this.local.getModelName();
   }
 }
