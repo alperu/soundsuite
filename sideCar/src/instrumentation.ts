@@ -75,6 +75,17 @@ export async function register() {
     }
 
     loadSavedConfig();
+
+    // Restore OpenRouter config (key, allow-list, modes) from the encrypted
+    // store. Without this a self-update de-configures cloud routing on every
+    // release, and the master cannot repair it — it never stores the key.
+    try {
+      const { restoreOpenRouterConfig } = await import('./lib/virtual-inference');
+      const n = restoreOpenRouterConfig();
+      if (n > 0) console.log(`[instrumentation] OpenRouter config restored for ${n} master(s)`);
+    } catch (err) {
+      console.warn('[instrumentation] OpenRouter restore skipped:', (err as Error).message);
+    }
     emitBootEvent(
       `Registry resolved: roles=[${Object.keys(state.registry).join(', ')}]`,
       {

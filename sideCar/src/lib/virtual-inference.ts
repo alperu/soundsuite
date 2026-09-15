@@ -38,6 +38,7 @@
 import { createLogger } from './logger';
 import { processGlobal } from './process-global';
 import { embed as orEmbed, rerank as orRerank, keyInfo as orKeyInfo } from './openrouter-client';
+import { loadOpenRouterStore, saveOpenRouterStore } from './openrouter-store';
 
 const log = createLogger('virtual-inference');
 
@@ -203,6 +204,9 @@ export function setOpenRouterConfig(serverUrl: string, payload: unknown): void {
     : existing?.modeByRole ?? {};
 
   G.byMaster.set(serverUrl, { apiKey, allowedModels, modeByRole });
+  // Survive restarts. A self-update restarts this process, and without this
+  // the whole fleet silently de-configures itself on every release.
+  saveOpenRouterStore(G.byMaster as Map<string, { apiKey: string; allowedModels: Record<string, unknown>; modeByRole: Record<string, string> }>);
 
   const roleModes = Object.entries(modeByRole).map(([r, m]) => `${r}=${m}`).join(', ') || '(none set — all local-only)';
   const modeledRoles = Object.keys(allowedModels).join(', ') || '(none)';
@@ -215,8 +219,23 @@ export function setOpenRouterConfig(serverUrl: string, payload: unknown): void {
 export function clearOpenRouterConfig(serverUrl: string): void {
   if (G.byMaster.delete(serverUrl)) {
     log.info(`[${serverUrl}] OpenRouter config cleared (master retired)`);
+    // Persist the removal too, or a retired master's key would come back on
+    // the next boot and a reused URL could inherit a stranger's credentials.
+    saveOpenRouterStore(G.byMaster as Map<string, { apiKey: string; allowedModels: Record<string, unknown>; modeByRole: Record<string, string> }>);
   }
   G.statsByMaster.delete(serverUrl);
+}
+
+/** Restore persisted config at boot. Idempotent: an entry already in memory
+ *  (a master that pushed before this ran) always wins over the stored copy. */
+export function restoreOpenRouterConfig(): number {
+  let restored = 0;
+  for (const [url, cfg] of loadOpenRouterStore()) {
+    if (G.byMaster.has(url)) continue;
+    G.byMaster.set(url, cfg as never);
+    restored++;
+  }
+  return restored;
 }
 
 /** Presence-only status for unauthenticated surfaces (/api/status, /api/config).
