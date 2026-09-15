@@ -15,7 +15,10 @@ async function getData() {
   });
 
   const documents = await prisma.document.findMany({
-    where: { status: 'INDEXED' },
+    // FIXING_PARTIAL is included: a page repair does not remove the document's
+    // chunks, and this is the screen the repair is launched from — dropping it
+    // mid-repair breaks the /vectors/pagereport/doc-<id> deep link.
+    where: { status: { in: ['INDEXED', 'FIXING_PARTIAL'] } },
     select: { id: true, fileName: true, caseId: true, filingId: true, readinessScore: true, readinessBand: true },
     orderBy: { fileName: 'asc' },
   });

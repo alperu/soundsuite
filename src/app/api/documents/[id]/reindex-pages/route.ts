@@ -60,6 +60,13 @@ export async function POST(
       body.progress && Number.isFinite(body.progress.done) && Number.isFinite(body.progress.total)
         ? { done: Number(body.progress.done), total: Number(body.progress.total) }
         : null;
+    // Status overrides — used by the "Fix Partial" flow (fix-partial/route.ts)
+    // so the document card reads "FIXING PARTIAL" instead of generic
+    // "PROCESSING" for the whole repair, not just the instant before this
+    // request lands. Default preserves the original hardcoded behavior for
+    // every existing caller (vector-viewer.tsx, draft-chat-panel.tsx).
+    const processingStatus: string = typeof body.processingStatus === 'string' ? body.processingStatus : 'PROCESSING';
+    const statusAfterSuccess: string = typeof body.statusAfterSuccess === 'string' ? body.statusAfterSuccess : 'INDEXED';
 
     if (!Array.isArray(pages) || pages.length === 0) {
       return NextResponse.json({ error: 'pages must be a non-empty array of page numbers' }, { status: 400 });
@@ -79,11 +86,11 @@ export async function POST(
     // Save previous status for restoration on error
     previousStatus = doc.status;
 
-    // Set status to PROCESSING so home page reflects reindexing
-    logger.info(`Starting reindex of ${pages.length} pages for document ${id}`, { pages });
+    // Set status so home page reflects reindexing (defaults to PROCESSING)
+    logger.info(`Starting reindex of ${pages.length} pages for document ${id}`, { pages, processingStatus });
     await prisma.document.update({
       where: { id },
-      data: { status: 'PROCESSING' },
+      data: { status: processingStatus },
     });
 
     // Publish SSE event so UI updates immediately
@@ -93,7 +100,7 @@ export async function POST(
         type: 'document_status_changed',
         caseId: doc.caseId,
         documentId: id,
-        status: 'PROCESSING',
+        status: processingStatus,
       });
     } catch {}
 
@@ -461,10 +468,10 @@ export async function POST(
       await exhibitExtractor.terminate();
       textChunker.dispose();
 
-      // Restore status to INDEXED
+      // Restore status (defaults to INDEXED)
       await prisma.document.update({
         where: { id },
-        data: { status: 'INDEXED' },
+        data: { status: statusAfterSuccess },
       });
 
       // Publish SSE event for status restoration
@@ -474,7 +481,7 @@ export async function POST(
           type: 'document_status_changed',
           caseId: doc.caseId,
           documentId: id,
-          status: 'INDEXED',
+          status: statusAfterSuccess,
         });
       } catch {}
 

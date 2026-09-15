@@ -6,6 +6,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { getCachedCases, setCachedCases, getCachedFilings, setCachedFilings, setPreference, getPreference } from '@/lib/indexed-db';
 import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { getSharedDocumentMenuItems, FilingDialog, type DocumentTarget, FILING_TYPES as SHARED_FILING_TYPES } from '@/components/document-context-menu';
+import { isBusyStatus } from '@/lib/document-status';
 
 // Import pdfjs text layer CSS for selectable text overlay
 import 'pdfjs-dist/web/pdf_viewer.css';
@@ -1130,10 +1131,16 @@ export default function CaseExplorerPage() {
       onAddToExistingFiling: handleAddToExistingFiling,
       onIndex: handleIndexDocument,
     };
-    const isProcessingOrIndexed = doc.status === 'PROCESSING' || doc.status === 'INDEXED';
+    // FIXING_PARTIAL counts as busy: a full re-ingest started during a page
+    // repair races it over the same LanceDB rows for the same document.
+    const indexDisabled = isBusyStatus(doc.status) || doc.status === 'INDEXED';
     return getSharedDocumentMenuItems(target, actions, {
-      indexDisabled: isProcessingOrIndexed,
-      indexLabel: isProcessingOrIndexed ? 'Index (already indexed)' : 'Index',
+      indexDisabled,
+      indexLabel: doc.status === 'INDEXED'
+        ? 'Index (already indexed)'
+        : doc.status === 'FIXING_PARTIAL'
+          ? 'Index (repair in progress)'
+          : 'Index',
     });
   }, [handleAddNewFiling, handleAddToExistingFiling, handleIndexDocument]);
 

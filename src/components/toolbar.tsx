@@ -64,9 +64,16 @@ export default function Toolbar({ caseName, totalDocuments, documents }: Toolbar
         ).length
       : 0;
 
-  // Count documents currently queued or processing
+  // Count documents currently queued, processing, or under page repair.
+  // FIXING_PARTIAL is included so the Clear queue button is reachable when a
+  // repair has crashed and left a document stuck in that state.
+  // CAVEAT: /api/queue/clear only moves QUEUED->DISCOVERED and
+  // PROCESSING->STOPPED today, so pressing the button will NOT actually free a
+  // stuck FIXING_PARTIAL document until that route includes it as well.
   const queuedCount = documents
-    ? documents.filter((d) => d.status === 'QUEUED' || d.status === 'PROCESSING').length
+    ? documents.filter(
+        (d) => d.status === 'QUEUED' || d.status === 'PROCESSING' || d.status === 'FIXING_PARTIAL',
+      ).length
     : 0;
 
   const handleClearQueue = async () => {

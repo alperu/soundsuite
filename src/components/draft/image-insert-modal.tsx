@@ -370,7 +370,12 @@ export default function ImageInsertModal({
       if (res.ok) {
         const data = await res.json();
         const list = (data.documents || data || []).filter(
-          (d: any) => d.status === 'INDEXED' && d.pageCount && d.pageCount > 0
+          // Page images come from the PDF, not the vector index, so a document
+          // under page repair stays pickable.
+          (d: any) =>
+            (d.status === 'INDEXED' || d.status === 'FIXING_PARTIAL') &&
+            d.pageCount &&
+            d.pageCount > 0
         );
         setDocs(list);
       }

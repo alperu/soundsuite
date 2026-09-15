@@ -116,9 +116,16 @@ export async function GET(request: NextRequest) {
       const chunks = chunkCountMap.get(pageNum);
       const chunkCount = chunks?.count || 0;
       const hasExhibit = chunks?.hasExhibit || false;
+      const ps = pageScoreMap.get(pageNum);
 
-      // Determine status: empty pages are explicitly marked, not counted as unindexed
-      const isEmptyPage = cache?.source === 'empty';
+      // Determine status: empty pages are explicitly marked, not counted as
+      // unindexed. PageCache wins when present (fresher); PageCache is wiped
+      // after successful ingestion though (see ingestion-pipeline.ts), so for
+      // an INDEXED document with no PageCache rows left, fall back to the
+      // PageScore snapshot — it's the only place blank-by-design provenance
+      // survives the wipe. Without this fallback, a legitimately blank page
+      // on an older document reads as an unindexed gap forever.
+      const isEmptyPage = cache ? cache.source === 'empty' : ps?.source === 'empty';
       const status = isEmptyPage ? 'empty' : (chunkCount > 0 ? 'indexed' : 'unindexed');
 
       if (status === 'indexed') indexedPages++;
@@ -138,7 +145,6 @@ export async function GET(request: NextRequest) {
         textPreview = chunks.firstText.substring(0, 200);
       }
 
-      const ps = pageScoreMap.get(pageNum);
       let flags: string[] = [];
       try { flags = ps ? JSON.parse(ps.flags) : []; } catch { /* keep [] */ }
       pages.push({

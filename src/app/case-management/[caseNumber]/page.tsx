@@ -6,6 +6,7 @@ import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { getSharedDocumentMenuItems, type DocumentTarget, type DocumentContextMenuActions } from '@/components/document-context-menu';
 import { getFiles, setFiles as idbSetFiles, getCachedFilings, setCachedFilings, getCachedTrackedFiles, setCachedTrackedFiles, setPreference, getPreference } from '@/lib/indexed-db';
 import { persistActionLog } from '@/lib/action-log';
+import { isBusyStatus } from '@/lib/document-status';
 import { SelectedEntityProvider } from '@/components/case/selected-entity-context';
 import { TagFillReviewPanel } from '@/components/case/tag-fill-review-panel';
 import type {
@@ -122,12 +123,13 @@ function getStatusDotColor(status: string): string {
     case 'INDEXED': return 'bg-green-500';
     case 'PROCESSING': return 'bg-yellow-400 animate-pulse';
     case 'QUEUED': return 'bg-yellow-300';
+    case 'FIXING_PARTIAL': return 'bg-blue-500 animate-pulse';
     case 'ERROR': return 'bg-red-500';
     default: return 'bg-gray-300';
   }
 }
 
-type StatusFilter = 'all' | 'active' | 'INDEXED' | 'QUEUED' | 'PROCESSING' | 'ERROR';
+type StatusFilter = 'all' | 'active' | 'INDEXED' | 'QUEUED' | 'PROCESSING' | 'FIXING_PARTIAL' | 'ERROR';
 
 export default function CaseDetailPage() {
   const params = useParams();
@@ -693,14 +695,19 @@ export default function CaseDetailPage() {
 
   // Compute status counts from tracked files
   const statusCounts = useMemo(() => {
-    const counts = { total: 0, indexed: 0, queued: 0, processing: 0, error: 0 };
+    const counts = { total: 0, indexed: 0, queued: 0, processing: 0, fixing: 0, error: 0, other: 0 };
     for (const info of Object.values(trackedFiles)) {
       counts.total++;
       switch (info.status) {
         case 'INDEXED': counts.indexed++; break;
         case 'QUEUED': counts.queued++; break;
         case 'PROCESSING': counts.processing++; break;
+        case 'FIXING_PARTIAL': counts.fixing++; break;
         case 'ERROR': counts.error++; break;
+        // `counts.total` is incremented for every tracked file, so a status
+        // with no case of its own (e.g. DISCOVERED) would make the chips stop
+        // summing to the Active count. Bucket it rather than drop it.
+        default: counts.other++; break;
       }
     }
     return counts;
@@ -1432,7 +1439,7 @@ export default function CaseDetailPage() {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
   const getStatusBadge = (status: string) => {
-    const c: Record<string, string> = { QUEUED: 'bg-gray-200 text-gray-700', PROCESSING: 'bg-yellow-100 text-yellow-800', INDEXED: 'bg-green-100 text-green-800', ERROR: 'bg-red-100 text-red-800' };
+    const c: Record<string, string> = { QUEUED: 'bg-gray-200 text-gray-700', PROCESSING: 'bg-yellow-100 text-yellow-800', INDEXED: 'bg-green-100 text-green-800', FIXING_PARTIAL: 'bg-blue-100 text-blue-800', ERROR: 'bg-red-100 text-red-800' };
     return c[status] || 'bg-gray-100 text-gray-600';
   };
 
@@ -1601,7 +1608,9 @@ export default function CaseDetailPage() {
       onAddToExistingFiling: () => { setDialogFilePath(filePath); setDialogError(''); setSelectedFilingId(''); setCreateNewFiling(false); loadFilings().then(() => setShowFilingDialog(true)); },
       onIndex: () => handleRunParser(filePath),
     };
-    const cmShared = getSharedDocumentMenuItems(cmTarget, cmActions, { indexDisabled: status === 'PROCESSING' || status === 'INDEXED', indexLabel: status === 'INDEXED' ? 'Index (already indexed)' : 'Index' });
+    // A full re-ingest started during a page repair races it over the same
+    // LanceDB rows for the same document, so FIXING_PARTIAL disables Index too.
+    const cmShared = getSharedDocumentMenuItems(cmTarget, cmActions, { indexDisabled: isBusyStatus(status) || status === 'INDEXED', indexLabel: status === 'INDEXED' ? 'Index (already indexed)' : status === 'FIXING_PARTIAL' ? 'Index (repair in progress)' : 'Index' });
     return [
       ...cmShared,
       { label: '', onClick: () => {}, separator: true },
@@ -1609,19 +1618,19 @@ export default function CaseDetailPage() {
         label: isMulti ? `Run Parser (${multiCount})` : 'Run Parser',
         icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>,
         onClick: () => handleRunParser(filePath),
-        disabled: status === 'PROCESSING' || status === 'INDEXED',
+        disabled: isBusyStatus(status) || status === 'INDEXED',
       },
       {
         label: isMulti ? `Parse Again (${multiCount})` : 'Parse Again',
         icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>,
         onClick: () => handleReparseDocument(filePath),
-        disabled: !tracked || status === 'QUEUED',
+        disabled: !tracked || status === 'QUEUED' || status === 'FIXING_PARTIAL',
       },
       {
         label: isMulti ? `Cancel Parsing (${multiCount})` : 'Cancel Parsing',
         icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>,
         onClick: () => handleCancelParsing(filePath),
-        disabled: !tracked || (status !== 'PROCESSING' && status !== 'QUEUED'),
+        disabled: !tracked || !isBusyStatus(status),
         danger: true,
       },
       { label: '', onClick: () => {}, separator: true },
@@ -1784,7 +1793,7 @@ export default function CaseDetailPage() {
           {status && (
             <div className="flex items-center gap-1 flex-shrink-0">
               <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${getStatusBadge(status)}`}>{status.toLowerCase()}</span>
-              {(status === 'PROCESSING' || status === 'QUEUED') && (
+              {isBusyStatus(status) && (
                 <button onClick={(e) => { e.stopPropagation(); handleCancelParsing(entry.path); }}
                   className="p-0.5 text-gray-300 hover:text-red-500 transition-colors opacity-0 group-hover/file:opacity-100" title="Cancel Parsing">
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
@@ -1936,6 +1945,7 @@ export default function CaseDetailPage() {
             <button onClick={() => setStatusFilter('INDEXED')} className={`px-2.5 py-1 text-xs rounded-full transition-colors flex items-center gap-1 ${statusFilter === 'INDEXED' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}><span className={`w-1.5 h-1.5 rounded-full ${statusFilter === 'INDEXED' ? 'bg-white' : 'bg-green-500'}`} />Indexed {statusCounts.indexed > 0 && <span className="opacity-75">{statusCounts.indexed}</span>}</button>
             <button onClick={() => setStatusFilter('QUEUED')} className={`px-2.5 py-1 text-xs rounded-full transition-colors flex items-center gap-1 ${statusFilter === 'QUEUED' ? 'bg-yellow-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}><span className={`w-1.5 h-1.5 rounded-full ${statusFilter === 'QUEUED' ? 'bg-white' : 'bg-yellow-400'}`} />Queued {statusCounts.queued > 0 && <span className="opacity-75">{statusCounts.queued}</span>}</button>
             {statusCounts.processing > 0 && <button onClick={() => setStatusFilter('PROCESSING')} className={`px-2.5 py-1 text-xs rounded-full transition-colors flex items-center gap-1 ${statusFilter === 'PROCESSING' ? 'bg-yellow-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}><span className={`w-1.5 h-1.5 rounded-full animate-pulse ${statusFilter === 'PROCESSING' ? 'bg-white' : 'bg-yellow-500'}`} />Processing {statusCounts.processing}</button>}
+            {statusCounts.fixing > 0 && <button onClick={() => setStatusFilter('FIXING_PARTIAL')} className={`px-2.5 py-1 text-xs rounded-full transition-colors flex items-center gap-1 ${statusFilter === 'FIXING_PARTIAL' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}><span className={`w-1.5 h-1.5 rounded-full animate-pulse ${statusFilter === 'FIXING_PARTIAL' ? 'bg-white' : 'bg-blue-500'}`} />Fixing {statusCounts.fixing}</button>}
             {statusCounts.error > 0 && <button onClick={() => setStatusFilter('ERROR')} className={`px-2.5 py-1 text-xs rounded-full transition-colors flex items-center gap-1 ${statusFilter === 'ERROR' ? 'bg-red-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}><span className={`w-1.5 h-1.5 rounded-full ${statusFilter === 'ERROR' ? 'bg-white' : 'bg-red-500'}`} />Errors {statusCounts.error}</button>}
           </div>
           {/* Search bar */}

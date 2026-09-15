@@ -859,7 +859,7 @@ export default function FilingDetailPage() {
                 {doc.status === 'INDEXED' && doc.documentSummary && (
                   <p className="mt-2 text-xs text-gray-500 line-clamp-3">{doc.documentSummary}</p>
                 )}
-                {doc.status === 'INDEXED' && (
+                {(doc.status === 'INDEXED' || doc.status === 'FIXING_PARTIAL') && (
                   <div className="mt-2 flex items-center gap-2">
                     <button
                       onClick={() => router.push(`/case-explorer?doc=${encodeURIComponent(doc.filePath)}`)}
@@ -900,7 +900,7 @@ export default function FilingDetailPage() {
                 {doc.status === 'INDEXED' && doc.documentSummary && (
                   <p className="mt-2 text-xs text-gray-500 line-clamp-3">{doc.documentSummary}</p>
                 )}
-                {doc.status === 'INDEXED' && (
+                {(doc.status === 'INDEXED' || doc.status === 'FIXING_PARTIAL') && (
                   <button
                     onClick={() => router.push(`/case-explorer?doc=${encodeURIComponent(doc.filePath)}`)}
                     className="mt-2 text-xs text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1"

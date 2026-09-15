@@ -11,6 +11,9 @@ interface CaseWithStats {
     INDEXED: number;
     ERROR: number;
     PARTIAL: number;
+    FIXING_PARTIAL: number;
+    /** Catch-all so the chips always sum to totalDocuments. */
+    OTHER: number;
   };
 }
 
@@ -71,6 +74,12 @@ export default function CaseList({ cases, onCaseSelect, selectedCaseId }: CaseLi
                     {caseItem.statusCounts.PARTIAL} partial
                   </span>
                 )}
+                {caseItem.statusCounts.FIXING_PARTIAL > 0 && (
+                  <span className="inline-flex items-center text-xs font-medium text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse mr-1" />
+                    {caseItem.statusCounts.FIXING_PARTIAL} fixing
+                  </span>
+                )}
                 {caseItem.statusCounts.QUEUED > 0 && (
                   <span className="inline-flex items-center text-xs font-medium text-gray-700 bg-gray-200 px-2 py-0.5 rounded-full">
                     {caseItem.statusCounts.QUEUED} queued
@@ -84,6 +93,14 @@ export default function CaseList({ cases, onCaseSelect, selectedCaseId }: CaseLi
                 {caseItem.statusCounts.ERROR > 0 && (
                   <span className="inline-flex items-center text-xs font-medium text-red-700 bg-red-100 px-2 py-0.5 rounded-full">
                     {caseItem.statusCounts.ERROR} errors
+                  </span>
+                )}
+                {caseItem.statusCounts.OTHER > 0 && (
+                  <span
+                    className="inline-flex items-center text-xs font-medium text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full"
+                    title="Documents with a status this view has no chip for (e.g. stopped, discovered)"
+                  >
+                    {caseItem.statusCounts.OTHER} other
                   </span>
                 )}
               </div>

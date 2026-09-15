@@ -1,6 +1,11 @@
 import { prisma } from '@/lib/db/prisma';
 import CaseViewWrapper from '@/components/case-view-wrapper';
 import * as lancedb from '@lancedb/lancedb';
+import {
+  computePartialDocumentIds,
+  type PartialDetectionPrisma,
+} from '@/lib/ingestion/partial-detection';
+import type { DocumentStatus } from '@/lib/document-status';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,13 +23,16 @@ interface CaseWithStats {
     INDEXED: number;
     ERROR: number;
     PARTIAL: number;
+    FIXING_PARTIAL: number;
+    /** Any status this file has not been taught about (e.g. DISCOVERED, STOPPED). */
+    OTHER: number;
   };
 }
 
 interface Document {
   id: string;
   fileName: string;
-  status: 'QUEUED' | 'PROCESSING' | 'INDEXED' | 'ERROR' | 'STOPPED';
+  status: DocumentStatus;
   pageCount: number | null;
   detectedExhibits: number;
   errorMessage: string | null;
@@ -33,61 +41,54 @@ interface Document {
   updatedAt: string;
 }
 
+/**
+ * Which documents are partially indexed.
+ *
+ * This used to compare DISTINCT indexed page numbers against pageCount, which
+ * counts a blank-by-design page as a gap: such a document is badged PARTIAL
+ * forever and re-embedding can never clear it. computePartialDocumentIds applies
+ * the same rule /api/vectors/page-report uses — a page that is blank by design
+ * (PageCache/PageScore `source === 'empty'`) counts as covered — so the badge
+ * and the Fix Partial button are only offered where a repair could actually help.
+ *
+ * FIXING_PARTIAL documents are included: a repair in flight does not remove the
+ * good chunks, and excluding them would make the badge flicker off mid-repair,
+ * which reads as the fix having failed.
+ */
 async function getPartialDocumentIds(): Promise<Set<string>> {
-  const partialIds = new Set<string>();
-
   try {
-    // Get all INDEXED documents with a known pageCount
     const indexedDocs = await prisma.document.findMany({
-      where: { status: 'INDEXED', pageCount: { gt: 0 } },
+      where: { status: { in: ['INDEXED', 'FIXING_PARTIAL'] }, pageCount: { gt: 0 } },
       select: { id: true, pageCount: true },
     });
 
-    if (indexedDocs.length === 0) return partialIds;
+    if (indexedDocs.length === 0) return new Set();
 
+    // computePartialDocumentIds returns EVERY input document as partial when the
+    // chunks table is absent (fresh install, moved LANCEDB_PATH). That would badge
+    // the whole corpus PARTIAL and offer a repair that cannot work, so probe first
+    // and fail open — which is what this page has always done.
     const db = await lancedb.connect(LANCEDB_PATH);
     const tableNames = await db.tableNames();
-    if (!tableNames.includes(TABLE_NAME)) return partialIds;
+    if (!tableNames.includes(TABLE_NAME)) return new Set();
 
-    const table = await db.openTable(TABLE_NAME);
-
-    // Build a lookup of expected page counts
-    const expectedPages = new Map<string, number>();
-    for (const doc of indexedDocs) {
-      expectedPages.set(doc.id, doc.pageCount!);
-    }
-
-    // Batch query: get all rows for INDEXED documents, selecting only document_id and page_number
-    const docIds = indexedDocs.map(d => d.id);
-    const rows = await table.query()
-      .select(['document_id', 'page_number'])
-      .where(`document_id IN (${docIds.map(id => `'${id.replace(/'/g, "''")}'`).join(',')})`)
-      .toArray();
-
-    // Group distinct page numbers per document
-    const indexedPagesMap = new Map<string, Set<number>>();
-    for (const row of rows) {
-      const docId = row.document_id as string;
-      const pageNum = row.page_number as number;
-      if (!indexedPagesMap.has(docId)) {
-        indexedPagesMap.set(docId, new Set());
-      }
-      indexedPagesMap.get(docId)!.add(pageNum);
-    }
-
-    // Compare indexed page count vs expected page count
-    for (const [docId, expected] of expectedPages) {
-      const indexedPages = indexedPagesMap.get(docId);
-      const indexedCount = indexedPages ? indexedPages.size : 0;
-      if (indexedCount < expected) {
-        partialIds.add(docId);
-      }
-    }
+    // The real Prisma client is not structurally assignable to the narrow port
+    // the module declares (its findMany args are generic `Exact<…>`); the cast is
+    // required and is checked by the module's own runtime usage.
+    return await computePartialDocumentIds(
+      indexedDocs.map((d) => ({ id: d.id, pageCount: d.pageCount ?? 0 })),
+      {
+        prisma: prisma as unknown as PartialDetectionPrisma,
+        lancedb,
+        lancedbPath: LANCEDB_PATH,
+        tableName: TABLE_NAME,
+      },
+    );
   } catch {
-    // LanceDB may not be available — return empty set
+    // computePartialDocumentIds does not catch, and this is a `force-dynamic`
+    // server component — an unavailable LanceDB must not break the whole page.
+    return new Set();
   }
-
-  return partialIds;
 }
 
 async function getCasesWithStats(partialIds: Set<string>): Promise<CaseWithStats[]> {
@@ -113,6 +114,8 @@ async function getCasesWithStats(partialIds: Set<string>): Promise<CaseWithStats
       INDEXED: 0,
       ERROR: 0,
       PARTIAL: 0,
+      FIXING_PARTIAL: 0,
+      OTHER: 0,
     };
 
     caseItem.documents.forEach((doc: any) => {
@@ -121,6 +124,11 @@ async function getCasesWithStats(partialIds: Set<string>): Promise<CaseWithStats
         statusCounts.PARTIAL++;
       } else if (status in statusCounts) {
         statusCounts[status]++;
+      } else {
+        // Never drop a document silently: an unrecognised status (STOPPED,
+        // DISCOVERED, anything added later) still counts towards the total, so
+        // the chips must sum to it.
+        statusCounts.OTHER++;
       }
     });
 
@@ -160,7 +168,7 @@ async function getInitialDocuments(): Promise<Record<string, Document[]>> {
     documentsMap[doc.caseId].push({
       id: doc.id,
       fileName: doc.fileName,
-      status: doc.status as 'QUEUED' | 'PROCESSING' | 'INDEXED' | 'ERROR' | 'STOPPED',
+      status: doc.status as DocumentStatus,
       pageCount: doc.pageCount,
       detectedExhibits: doc.detectedExhibits,
       errorMessage: doc.errorMessage,

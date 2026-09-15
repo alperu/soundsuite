@@ -2,6 +2,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 import PipelineStageIndicator from './pipeline-stage-indicator';
+import FixPartialPanel, { type FixPartialResult } from './fix-partial-panel';
+import {
+  STATUS_BG,
+  STATUS_DOT,
+  STATUS_TEXT,
+  statusLabel,
+  type DocumentStatus,
+} from '@/lib/document-status';
 
 interface StageProgress {
   stage: string;
@@ -14,7 +22,7 @@ interface StageProgress {
 interface Document {
   id: string;
   fileName: string;
-  status: 'QUEUED' | 'PROCESSING' | 'INDEXED' | 'ERROR' | 'STOPPED';
+  status: DocumentStatus;
   pageCount: number | null;
   detectedExhibits: number;
   errorMessage: string | null;
@@ -80,6 +88,8 @@ function DocumentCard({
   isSelected,
   isPartial,
   onRetry,
+  onFixPartial,
+  fixResult,
 }: {
   doc: Document;
   onClick: (e: React.MouseEvent) => void;
@@ -88,40 +98,34 @@ function DocumentCard({
   isSelected: boolean;
   isPartial?: boolean;
   onRetry?: () => void;
+  /** Opens the Fix Partial triage panel (owned by the grid, not the card). */
+  onFixPartial?: () => void;
+  /** Last repair outcome for this document, if one ran this session. */
+  fixResult?: FixPartialResult;
 }) {
-  const bgColors = {
-    QUEUED: 'bg-gray-50',
-    PROCESSING: 'bg-yellow-50',
-    INDEXED: isPartial ? 'bg-amber-50' : 'bg-green-50',
-    ERROR: 'bg-red-50',
-    STOPPED: 'bg-gray-100',
-  } as const;
-
-  const dotColors = {
-    QUEUED: 'bg-gray-400',
-    PROCESSING: 'bg-yellow-400',
-    INDEXED: isPartial ? 'bg-amber-400' : 'bg-green-500',
-    ERROR: 'bg-red-500',
-    STOPPED: 'bg-gray-500',
-  } as const;
-
-  const textColors = {
-    QUEUED: 'text-gray-700',
-    PROCESSING: 'text-yellow-700',
-    INDEXED: isPartial ? 'text-amber-700' : 'text-green-700',
-    ERROR: 'text-red-700',
-    STOPPED: 'text-gray-700',
-  } as const;
+  const isRepairing = doc.status === 'FIXING_PARTIAL';
+  // Open-ended lookups: Document.status is a bare String in the DB, so an
+  // unfamiliar value must still render rather than interpolate `undefined`.
+  const partialAccent = isPartial && doc.status === 'INDEXED';
+  const bg = partialAccent ? 'bg-amber-50' : (STATUS_BG[doc.status] ?? 'bg-gray-50');
+  const dot = partialAccent ? 'bg-amber-400' : (STATUS_DOT[doc.status] ?? 'bg-gray-400');
+  const text = partialAccent ? 'text-amber-700' : (STATUS_TEXT[doc.status] ?? 'text-gray-700');
 
   return (
     <div
       onClick={onClick}
       onContextMenu={onContextMenu}
       className={`
-        ${bgColors[doc.status]}
+        ${bg}
         border-2 rounded-lg p-4 cursor-pointer
         hover:shadow-lg transition-all duration-200
-        ${isSelected ? 'border-blue-500 ring-2 ring-blue-200' : doc.status === 'PROCESSING' ? 'border-yellow-300 animate-pulse' : 'border-gray-200'}
+        ${isSelected
+          ? 'border-blue-500 ring-2 ring-blue-200'
+          : doc.status === 'PROCESSING'
+            ? 'border-yellow-300 animate-pulse'
+            : isRepairing
+              ? 'border-blue-300 animate-pulse'
+              : 'border-gray-200'}
       `}
     >
       {/* Status indicator */}
@@ -134,10 +138,10 @@ function DocumentCard({
               </svg>
             </span>
           ) : (
-            <span className={`w-2.5 h-2.5 rounded-full ${dotColors[doc.status]} mr-2`}></span>
+            <span className={`w-2.5 h-2.5 rounded-full ${dot} mr-2`}></span>
           )}
-          <span className={`text-xs font-semibold uppercase ${textColors[doc.status]}`}>
-            {isPartial && doc.status === 'INDEXED' ? 'PARTIAL' : doc.status}
+          <span className={`text-xs font-semibold uppercase ${text}`}>
+            {statusLabel(doc.status, isPartial)}
           </span>
           {doc.readinessScore != null && doc.readinessBand && doc.status === 'INDEXED' && (
             <span
@@ -176,8 +180,8 @@ function DocumentCard({
         )}
       </div>
 
-      {/* Processing stage detail */}
-      {doc.status === 'PROCESSING' && doc.stageProgress && (
+      {/* Processing / repair stage detail */}
+      {(doc.status === 'PROCESSING' || isRepairing) && doc.stageProgress && (
         <PipelineStageIndicator
           stage={doc.stageProgress.stage}
           detail={doc.stageProgress.detail}
@@ -190,6 +194,54 @@ function DocumentCard({
       {doc.status === 'PROCESSING' && !doc.stageProgress && (
         <div className="mt-2">
           <div className="text-xs text-yellow-600">Starting...</div>
+        </div>
+      )}
+
+      {isRepairing && !doc.stageProgress && (
+        <div className="mt-2">
+          <div className="text-xs text-blue-600">Repairing missing pages…</div>
+        </div>
+      )}
+
+      {/* Partial index — offer the repair, and report what it could not fix. */}
+      {partialAccent && onFixPartial && (
+        <div className="mt-2">
+          <button
+            onClick={(e) => { e.stopPropagation(); onFixPartial(); }}
+            className="text-xs px-2.5 py-1 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded transition-colors"
+            title="Show which pages are missing from the index and repair the ones that can be repaired"
+          >
+            Fix Partial
+          </button>
+        </div>
+      )}
+
+      {fixResult && (
+        <div className="mt-2 text-xs">
+          {fixResult.error ? (
+            <p className="text-red-600 truncate" title={fixResult.error}>{fixResult.error}</p>
+          ) : (
+            <>
+              <p className="text-gray-600">
+                Repair: {fixResult.repaired} fixed, {fixResult.stillFailing} still failing
+              </p>
+              {fixResult.terminal > 0 && (
+                <p
+                  className="text-red-600 truncate"
+                  title={
+                    fixResult.terminalPages.length > 0
+                      ? fixResult.terminalPages
+                          .map((p) => `Page ${p.page}: ${p.attempts ?? '?'} attempts — ${p.reason ?? 'no reason given'}`)
+                          .join('\n')
+                      : undefined
+                  }
+                >
+                  {fixResult.terminal} page{fixResult.terminal === 1 ? '' : 's'} cannot be repaired
+                  {fixResult.terminalPages[0]?.reason ? ` — ${fixResult.terminalPages[0].reason}` : ''}
+                </p>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -241,6 +293,13 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
   const [refreshingPathIds, setRefreshingPathIds] = useState<Set<string>>(new Set());
   const lastClickedRef = useRef<string | null>(null);
   const partialSet = new Set(partialDocumentIds || []);
+  // Fix Partial panel + results live here, not in DocumentCard: a successful
+  // repair flips the document to FIXING_PARTIAL, which moves the card to
+  // another column and remounts it, discarding any card-local state. The 2s
+  // poll replacing `documents` would do the same.
+  const [fixPanelDocId, setFixPanelDocId] = useState<string | null>(null);
+  const [fixResults, setFixResults] = useState<Record<string, FixPartialResult>>({});
+  const fixPanelDoc = fixPanelDocId ? documents.find((d) => d.id === fixPanelDocId) : undefined;
 
   // Close context menu on any document click
   useEffect(() => {
@@ -290,11 +349,23 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
     return () => { cancelled = true; clearInterval(pollInterval); };
   }, [caseId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Partition documents into groups
+  // Partition documents into groups.
+  //
+  // Only three buckets are matched by value; `pending` is their COMPLEMENT, so
+  // every document lands in exactly one column no matter what its status
+  // string is. Matching `pending` by value instead is how 'DISCOVERED' (written
+  // by file-watcher.ts) came to disappear from this grid entirely — no column,
+  // no count, and excluded from shift-click range selection — and it would have
+  // swallowed FIXING_PARTIAL the same way. A page repair and a freshly
+  // discovered file are both legitimately "not yet indexed", which is what this
+  // column means.
   const indexed = documents.filter((d) => d.status === 'INDEXED');
-  const pending = documents.filter((d) => d.status === 'QUEUED' || d.status === 'PROCESSING');
   const stopped = documents.filter((d) => d.status === 'STOPPED');
   const errored = documents.filter((d) => d.status === 'ERROR');
+  const repairing = documents.filter((d) => d.status === 'FIXING_PARTIAL');
+  const pending = documents.filter(
+    (d) => d.status !== 'INDEXED' && d.status !== 'STOPPED' && d.status !== 'ERROR',
+  );
 
   // All documents in flat order for shift-click range selection
   const allDocs = [...indexed, ...pending, ...stopped, ...errored];
@@ -574,6 +645,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
     indexed: selectedDocs.filter((d) => d.status === 'INDEXED').length,
     queued: selectedDocs.filter((d) => d.status === 'QUEUED').length,
     stopped: selectedDocs.filter((d) => d.status === 'STOPPED').length,
+    fixing: selectedDocs.filter((d) => d.status === 'FIXING_PARTIAL').length,
   };
 
   if (documents.length === 0) {
@@ -613,7 +685,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
             <span className="text-sm font-medium text-blue-800">
               {selectedIds.size} selected
             </span>
-            {(selectedStatuses.processing > 0 || selectedStatuses.error > 0 || selectedStatuses.indexed > 0 || selectedStatuses.stopped > 0) && (
+            {(selectedStatuses.processing > 0 || selectedStatuses.error > 0 || selectedStatuses.indexed > 0 || selectedStatuses.stopped > 0 || selectedStatuses.fixing > 0) && (
               <span className="text-xs text-blue-600">
                 {[
                   selectedStatuses.processing > 0 && `${selectedStatuses.processing} processing`,
@@ -621,6 +693,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
                   selectedStatuses.indexed > 0 && `${selectedStatuses.indexed} indexed`,
                   selectedStatuses.queued > 0 && `${selectedStatuses.queued} queued`,
                   selectedStatuses.stopped > 0 && `${selectedStatuses.stopped} stopped`,
+                  selectedStatuses.fixing > 0 && `${selectedStatuses.fixing} repairing`,
                 ].filter(Boolean).join(', ')}
               </span>
             )}
@@ -728,6 +801,8 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
                     isRetrying={false}
                     isSelected={selectedIds.has(doc.id)}
                     isPartial={partialSet.has(doc.id)}
+                    onFixPartial={() => setFixPanelDocId(doc.id)}
+                    fixResult={fixResults[doc.id]}
                   />
                 ))
               )}
@@ -741,9 +816,16 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
                 <span className="w-3 h-3 rounded-full bg-yellow-400 mr-2"></span>
                 <h3 className="text-sm font-semibold text-yellow-800">Queued / Processing</h3>
               </div>
-              <span className="text-xs font-semibold text-yellow-700 bg-yellow-100 px-2 py-0.5 rounded-full">
-                {pending.length}
-              </span>
+              <div className="flex items-center gap-2">
+                {repairing.length > 0 && (
+                  <span className="text-xs font-semibold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">
+                    {repairing.length} repairing
+                  </span>
+                )}
+                <span className="text-xs font-semibold text-yellow-700 bg-yellow-100 px-2 py-0.5 rounded-full">
+                  {pending.length}
+                </span>
+              </div>
             </div>
             <div className="flex-1 overflow-y-auto space-y-3 pr-1">
               {pending.length === 0 ? (
@@ -762,6 +844,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
                     onContextMenu={(e) => handleCardContextMenu(doc, e)}
                     isRetrying={false}
                     isSelected={selectedIds.has(doc.id)}
+                    fixResult={fixResults[doc.id]}
                   />
                 ))
               )}
@@ -880,6 +963,18 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
             {refreshingPathIds.has(contextMenu.docId) ? 'Updating...' : 'Update file path'}
           </button>
         </div>
+      )}
+
+      {/* Fix Partial triage + repair panel */}
+      {fixPanelDocId && (
+        <FixPartialPanel
+          documentId={fixPanelDocId}
+          fileName={fixPanelDoc?.fileName ?? ''}
+          onClose={() => setFixPanelDocId(null)}
+          onStarted={(result) =>
+            setFixResults((prev) => ({ ...prev, [fixPanelDocId]: result }))
+          }
+        />
       )}
     </div>
   );

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getPreference, setPreference } from '@/lib/indexed-db';
+import type { DocumentStatus } from '@/lib/document-status';
 import CaseList from './case-list';
 import DocumentGrid from './document-grid';
 import Toolbar from './toolbar';
@@ -19,13 +20,15 @@ interface CaseWithStats {
     INDEXED: number;
     ERROR: number;
     PARTIAL: number;
+    FIXING_PARTIAL: number;
+    OTHER: number;
   };
 }
 
 interface Document {
   id: string;
   fileName: string;
-  status: 'QUEUED' | 'PROCESSING' | 'INDEXED' | 'ERROR' | 'STOPPED';
+  status: DocumentStatus;
   pageCount: number | null;
   detectedExhibits: number;
   errorMessage: string | null;
