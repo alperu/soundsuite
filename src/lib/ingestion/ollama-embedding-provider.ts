@@ -75,6 +75,12 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
   private host: string;
   private model: string;
   private dimensions: number;
+  /**
+   * The width this model is KNOWN to produce, or undefined when we have no
+   * entry for it. Kept apart from `dimensions` (which falls back to 384) so
+   * only a width we can vouch for is ever enforced.
+   */
+  private expectedDimensions: number | undefined;
   private useOrchestrator: boolean;
   private ollamaClient: any = null;
   private lastPreflight: { host: string; ok: boolean; at: number; error?: string } | null = null;
@@ -136,7 +142,8 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
     super();
     this.host = config.host.replace(/\/+$/, ''); // strip trailing slash
     this.model = config.model;
-    this.dimensions = dimensionsForOllamaModel(config.model) ?? 384;
+    this.expectedDimensions = dimensionsForOllamaModel(config.model);
+    this.dimensions = this.expectedDimensions ?? 384;
     this.useOrchestrator = config.useOrchestrator ?? false;
   }
 
@@ -275,6 +282,42 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
       }
 
       const dims = response.embeddings[0]?.length ?? 0;
+
+      // Refuse a width this model is not supposed to produce.
+      //
+      // This width was already computed and logged here, and never checked —
+      // which is how a whole index got built wrong without anyone noticing.
+      // Requesting `qwen3-embedding:4b` (2560) returned 1024 from a fleet host,
+      // ~31k chunks were written at 1024, and every one of them was stamped
+      // `ollama/qwen3-embedding:4b` because getModelName() reports the
+      // CONFIGURED model. The corpus then looked correctly labelled while
+      // being a different model's vectors, and search failed with
+      // "query=2560, stored=1024" long after the cause was gone.
+      //
+      // Preflight only checks the tag is present on the host, which cannot
+      // catch a mis-tagged pull or a host serving something else under that
+      // name. The returned width can. Throwing lets the caller's existing
+      // host-exclusion retry move to another host, whereas returning these
+      // vectors silently corrupts the index — so failing is the safer default.
+      //
+      // Only enforced when we actually know the model's width; an unrecognised
+      // model still passes through untouched.
+      if (this.expectedDimensions !== undefined && dims !== this.expectedDimensions) {
+        logger.error('Ollama returned an unexpected embedding width — refusing the batch', null, {
+          host: activeHost,
+          model: this.model,
+          expectedDimensions: this.expectedDimensions,
+          actualDimensions: dims,
+        });
+        const err = new Error(
+          `Ollama host ${activeHost} returned ${dims}-dim vectors for model "${this.model}", ` +
+            `which is defined as ${this.expectedDimensions}-dim. Refusing to index mislabelled ` +
+            `vectors — the host is serving a different model under this tag.`,
+        );
+        (err as unknown as { failedHost: string }).failedHost = activeHost;
+        throw err;
+      }
+
       logger.info('Ollama embed success', {
         host: activeHost,
         model: this.model,
