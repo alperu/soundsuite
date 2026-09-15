@@ -547,6 +547,62 @@ export interface RerankResponse {
   usage?: { total_tokens: number };
 }
 
+/**
+ * Which OpenRouterError kinds are worth trying again.
+ *
+ * 'server' covers the 503 "service overloaded, please try again later" that
+ * Fireworks returns under load — a message that literally asks you to retry and
+ * was, until this existed, treated as terminal on the first attempt.
+ *
+ * Everything else is permanent within the life of one request: a bad key, a
+ * model that does not exist, or a model nobody serves will not fix itself in
+ * 400 ms, and retrying them just burns the caller's latency budget.
+ */
+const RETRYABLE_KINDS = new Set<OpenRouterError['kind']>(['rate-limit', 'server', 'network']);
+
+/**
+ * `post()` with bounded retry on transient failures.
+ *
+ * Why this exists at all, and only here for now: `qwen/qwen3-reranker-8b` is
+ * served by exactly ONE provider (Fireworks — verified 2026-09-16; the 4b and
+ * 0.6b variants have zero), and OpenRouter's catalogue lists no alternative
+ * rerank model to fail over to. So a single transient 503 took rerank out
+ * entirely and search silently degraded to first-stage order. With no second
+ * provider to try, retrying the first one is the only fallback available.
+ *
+ * Bounded deliberately: the reranker runs inside a 40 s interactive budget, so
+ * three attempts with 400 ms / 1200 ms backoff costs at most ~1.6 s of waiting
+ * on top of the attempts themselves. Do not turn this into an unbounded retry —
+ * a rerank that arrives after the answer has been rendered is worthless.
+ */
+async function postWithRetry<T>(
+  path: string,
+  body: unknown,
+  timeoutMs: number,
+  label: string,
+  attempts = 3,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await post<T>(path, body, timeoutMs);
+    } catch (err) {
+      lastErr = err;
+      const kind = err instanceof OpenRouterError ? err.kind : 'network';
+      if (!RETRYABLE_KINDS.has(kind) || attempt === attempts) throw err;
+      // 400ms, 1200ms — plus jitter so several concurrent rerank calls do not
+      // retry in lockstep and re-overload the one provider that just failed.
+      const backoff = 400 * Math.pow(3, attempt - 1) + Math.floor(Math.random() * 200);
+      console.warn(
+        `[OpenRouter] ${label} attempt ${attempt}/${attempts} failed (${kind}) — retrying in ${backoff}ms: ` +
+        `${(err as Error).message.slice(0, 140)}`,
+      );
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
+  throw lastErr;
+}
+
 export async function rerankDocuments(
   query: string,
   documents: string[],
@@ -561,7 +617,9 @@ export async function rerankDocuments(
   const startedAt = Date.now();
   beginCall(role);
   try {
-    const out = await post<RerankResponse>('/rerank', body, opts.timeoutMs ?? 60_000);
+    const out = await postWithRetry<RerankResponse>(
+      '/rerank', body, opts.timeoutMs ?? 60_000, `rerank(${model})`,
+    );
     chargeTokens(role, out.usage?.total_tokens, findRerankModel(model)?.pricePerMTokens);
     endCall(role, {
       durationMs: Date.now() - startedAt,
