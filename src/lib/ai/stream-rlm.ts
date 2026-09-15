@@ -88,6 +88,45 @@ const RLM_PORT = 8100;
 // carries the hosted model's own window — see hostedContextBudget() below.
 // The HTTP-contract assumption above is still outstanding.
 const RLM_SANDBOX_PORT = 8101;
+
+/**
+ * Header naming the calling master, sent only on the ss-rlm-sandbox path.
+ *
+ * The sandbox makes sub-model calls back through its sidecar, and `apiKey`,
+ * `allowedModels` and the spend are all **per master** so Sound Suite and
+ * Fantom cannot charge each other. Over a WebSocket the sidecar gets the
+ * caller's identity for free; over HTTP it has none, so it refuses with 409
+ * rather than guess whose budget to spend.
+ *
+ * That refusal is not theoretical: as of 2026-09-16 every sidecar has keys from
+ * BOTH masters (:3000 Sound Suite and :3848 Fantom), so without this header the
+ * sandbox path returns 409 on every host.
+ *
+ * Matches `x-soundsuite-master` in
+ * sideCar/src/app/api/v1/chat/completions/route.ts. Distinct from
+ * MASTER_URL_HEADER in master-identity.ts, which identifies the master to a
+ * sidecar's own endpoints; this one is forwarded *through* the sandbox.
+ */
+const SANDBOX_MASTER_HEADER = 'X-SoundSuite-Master';
+
+/**
+ * Headers for a request to an RLM endpoint. Adds the caller identity only for
+ * the sandbox — the self-hosted ss-rlm vLLM server has no use for it and would
+ * just log an unknown header.
+ */
+async function rlmHeaders(resolved: ResolvedRlmEndpoint): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (!resolved.sandbox) return headers;
+  try {
+    const { getCanonicalMasterUrl } = await import('@/lib/gpu/master-identity');
+    const self = await getCanonicalMasterUrl();
+    if (self) headers[SANDBOX_MASTER_HEADER] = self;
+    else console.warn('[RLM] sandbox call without a canonical master URL — the sidecar will 409 if more than one master has a key');
+  } catch (err) {
+    console.warn(`[RLM] could not resolve this master's URL for the sandbox header: ${(err as Error).message}`);
+  }
+  return headers;
+}
 export const RLM_MODEL_ID = 'mit-oasys/rlm-qwen3-8b-v0.1';
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -429,7 +468,7 @@ export async function* streamRlm(opts: {
   try {
     res = await fetch(`${endpoint}/v1/chat/completions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await rlmHeaders(resolved),
       body: JSON.stringify({
         model,
         messages: opts.messages,
@@ -636,7 +675,7 @@ export async function* runRlmWithTools(opts: {
     try {
       res = await fetch(`${endpoint}/v1/chat/completions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await rlmHeaders(resolved),
         body: JSON.stringify({
           model,
           messages,
@@ -764,7 +803,7 @@ export async function* runRlmWithTools(opts: {
     try {
       stream = await fetch(`${endpoint}/v1/chat/completions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await rlmHeaders(resolved),
         body: JSON.stringify({
           model,
           messages,

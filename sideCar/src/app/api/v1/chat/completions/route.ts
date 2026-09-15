@@ -120,8 +120,12 @@ export async function POST(req: NextRequest) {
  * paths, and a 404 here reads as "endpoint is wrong" rather than
  * "model not configured".
  */
-export async function GET() {
-  const resolved = resolveSandboxMaster();
+export async function GET(req: NextRequest) {
+  // Must honor the same identity header as POST. Taking no argument here meant
+  // a caller that correctly identified itself still got a 409 from this probe,
+  // which reads as "the header does not work" rather than "this handler ignores
+  // it" — and the probe is the first thing anyone tries.
+  const resolved = resolveSandboxMaster(req.headers.get('x-soundsuite-master') || undefined);
   if (!resolved.ok) return err(resolved.status, resolved.error);
   const model = sandboxModelFor(resolved.config, ROLE);
   return NextResponse.json({

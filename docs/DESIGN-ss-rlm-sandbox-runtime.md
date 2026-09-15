@@ -311,6 +311,43 @@ failure is never debugged through two layers of container.
 | 4 | Checksum verification **fails closed** on a wrong sha | ✅ `sha256sum: WARNING: 1 computed checksum did NOT match`, no image produced |
 | 5 | Container boots and serves | ✅ `/health` and `/v1/models` both 200 |
 | 6 | `/admin/openrouter` can no longer blank the sandbox model | ✅ 6 tests; mutation-checked (4 fail against the old guard) |
+| 7 | Image published, multi-arch, anonymously pullable | ✅ `ghcr.io/project-sandstar/rlm-sandbox:0.1.0`, `linux/amd64` + `linux/arm64`, 200 on an anonymous manifest fetch |
+| 8 | Container actually boots on a fleet host | ✅ 2026-09-16 on a Mac sidecar — boot banner, `/health` 200 |
+
+### Two defects the fleet found that no test could have
+
+Both were invisible until a container really ran, and both came from the same
+root: **`type: 'vllm'` is a lie told for the container lifecycle**, and nobody
+traced what else reads it.
+
+**1. The sidecar handed the image a vLLM command line.** `createContainer` keys
+`buildVllmCmd(def.model, ...)` off `def.type === 'vllm'`, producing
+`[model, '--host', ...]` — the model id as argv[0]. Right for
+`vllm/vllm-openai`, whose ENTRYPOINT is `vllm serve`; fatal for any other image.
+Every host died instantly with
+
+```
+[FATAL tini (7)] exec deepseek/deepseek-v4-flash failed: No such file or directory
+```
+
+Fixed by `ContainerDef.usesImageCmd` (2.4.10). Note the symptom reads as a
+broken *image*, not as a command the sidecar invented — which is why the
+container logs, not the pull path, were where the answer was.
+
+**2. The fix did not reach three hosts, because containers are immutable.** A
+container keeps the Cmd it was created with for life; pulling a corrected image
+changes nothing. With `RestartPolicy: unless-stopped` the stale ones looped
+forever. `ensureContainerForRole` *does* remove and recreate on drift
+(`containers.ts:191`) and checks whenever the container exists regardless of
+status — but the Cmd comparison was gated on `expected.Cmd` being truthy, so for
+a `usesImageCmd` role "I expect no Cmd" was indistinguishable from "I have no
+expectation" and the check was skipped. Fixed by `ExpectedConfig.ExpectsNoCmd`
+(2.4.11), so no operator has to SSH in and `docker rm`.
+
+The general lesson, worth keeping: **a drift check that only fires when it
+expects *something* cannot detect a leftover.** `buildExpectedConfig` also held
+a second copy of the vLLM Cmd builder, which had to be gated too or drift would
+be computed against a config that would never be created.
 
 ### Not done — and what each needs
 
