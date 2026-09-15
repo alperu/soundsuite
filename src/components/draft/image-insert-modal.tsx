@@ -366,7 +366,11 @@ export default function ImageInsertModal({
     if (!caseId) return;
     setDocsLoading(true);
     try {
-      const res = await fetch(`/api/documents?caseId=${caseId}`);
+      // includeUnfiled: page images are read from the PDF itself, so any
+      // indexed document is a valid source whether or not a filing references
+      // it. /api/documents defaults to filed-only for the case document list;
+      // this picker is the deliberate exception.
+      const res = await fetch(`/api/documents?caseId=${caseId}&includeUnfiled=1`);
       if (res.ok) {
         const data = await res.json();
         const list = (data.documents || data || []).filter(

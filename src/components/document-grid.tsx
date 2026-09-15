@@ -270,6 +270,13 @@ function DocumentCard({
 
 export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpdate, partialDocumentIds, initialSelectedIds, onSelectionChange }: DocumentGridProps) {
   const [documents, setDocuments] = useState<Document[]>(initialDocuments);
+  /**
+   * How many documents this case has that no filing references. The grid shows
+   * filed documents only (see the header comment on /api/documents), and this
+   * count is what keeps that from being a silent omission — the same reason
+   * `document-status.ts` refuses to drop an unrecognised status from a list.
+   */
+  const [unfiledHidden, setUnfiledHidden] = useState(0);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(
     () => new Set(initialSelectedIds ?? [])
   );
@@ -328,6 +335,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
       .then(data => {
         if (!cancelled && data?.documents) {
           setDocuments(data.documents);
+          setUnfiledHidden(data.unfiledHidden ?? 0);
           onDocumentsUpdate?.(data.documents);
         }
       })
@@ -339,6 +347,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
         if (response.ok) {
           const data = await response.json();
           setDocuments(data.documents);
+          setUnfiledHidden(data.unfiledHidden ?? 0);
           onDocumentsUpdate?.(data.documents);
         }
       } catch (error) {
@@ -588,6 +597,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
         if (r.ok) {
           const d = await r.json();
           setDocuments(d.documents);
+          setUnfiledHidden(d.unfiledHidden ?? 0);
           onDocumentsUpdate?.(d.documents);
         }
       } catch {}
@@ -617,6 +627,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
         if (r.ok) {
           const d = await r.json();
           setDocuments(d.documents);
+          setUnfiledHidden(d.unfiledHidden ?? 0);
           onDocumentsUpdate?.(d.documents);
         }
       } catch {}
@@ -653,9 +664,19 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
           <p className="text-gray-500 text-lg">No documents found</p>
-          <p className="text-gray-400 text-sm mt-2">
-            Documents will appear here once they are detected
-          </p>
+          {unfiledHidden > 0 ? (
+            // Without this the page reads as "nothing here" while the case in
+            // fact holds hundreds of swept-up PDFs that simply have no filing.
+            <p className="text-gray-400 text-sm mt-2">
+              {unfiledHidden.toLocaleString()} file{unfiledHidden === 1 ? '' : 's'} in this
+              folder {unfiledHidden === 1 ? 'is' : 'are'} not attached to a filing, so
+              {unfiledHidden === 1 ? ' it is' : ' they are'} not shown here.
+            </p>
+          ) : (
+            <p className="text-gray-400 text-sm mt-2">
+              Documents will appear here once they are detected
+            </p>
+          )}
         </div>
       </div>
     );
@@ -665,6 +686,17 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
     <div className="flex-1 h-full flex flex-col overflow-hidden">
       {/* Always-visible toolbar */}
       <div className="flex-none bg-white border-b border-gray-200 px-6 py-2 flex items-center justify-end gap-2">
+        {unfiledHidden > 0 && (
+          <span
+            className="mr-auto text-xs text-gray-500"
+            title="Only documents attached to a filing are listed. The rest are PDFs the folder watcher found in this case's directory tree."
+          >
+            {documents.length.toLocaleString()} filed ·{' '}
+            <span className="text-gray-400">
+              {unfiledHidden.toLocaleString()} not attached to a filing
+            </span>
+          </span>
+        )}
         <button
           onClick={handleRefreshFolder}
           disabled={refreshFolderInProgress}

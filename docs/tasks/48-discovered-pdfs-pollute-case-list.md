@@ -1,125 +1,158 @@
-# DISCOVERED PDFs pollute the case document list
+# Case document list showed every swept-up PDF, not the case's filed documents
 
-**Status:** Open — needs a scoping decision before implementation · **Effort:** S (display) / M (ingestion scope) · **Priority:** P2
+**Status:** Part 1 fixed (list predicate) · Part 2 open (deletion does not stick) · Part 3 flagged only
+**Effort:** S (done) / M (tombstone) · **Priority:** P2
 **Created:** 2026-09-15
-**Reported as:** a case view listing "a bunch of files that are discovered that I don't need … we don't know why they are there"
-**Related:** [task 35 bulk promotion](./35-bulk-promotion.md) · `src/lib/document-status.ts`
+**Related:** [task 35 bulk promotion](./35-bulk-promotion.md) · `src/lib/document-status.ts` · `src/lib/ingestion/promotion.ts`
 
-No case data. Paths below are generic.
+Counts only — no case names, cause numbers or file names.
 
 ## The complaint
 
-Opening a case at `/?case=<id>` lists a large number of documents in
-`DISCOVERED` state that the operator never added and cannot account for. They
-carry no meaning for the work being done in that view, and they bury the
-documents that do.
+A case view listed hundreds of documents the operator never added: "we don't
+need discovered PDFs in the list, they have no meaning for us, we don't know why
+they are there." Deleting them did not help — "I delete it, they come back."
 
-## Why they are there
+The measurement that defined the fix: one case rendered **488 documents against
+24 filings**. The operator's own statement of intent was "we only need PDFs that
+have filings."
 
-`DISCOVERED` is not junk and not an error state. It is the deliberate resting
-state of the watcher (`src/services/file-watcher.ts:202`):
+## What was actually wrong
 
-> Create Document record with DISCOVERED status — documents are **NOT**
-> automatically queued for indexing. They only transition to QUEUED when a user
-> explicitly files them through the UI.
+Two surfaces disagreed about what a case's document list means.
 
-So every PDF the watcher can attribute to a case becomes a row. What decides
-attribution is `findCaseForFile` (`src/services/file-watcher.ts:459`):
+`src/app/page.tsx` has always been right. Both its queries — the grid's initial
+documents and the per-case status chips — filter `filingId: { not: null }`.
+
+`src/app/api/documents/route.ts` did not filter at all. And
+`document-grid.tsx` re-fetches from that route on mount **and then every two
+seconds**. So the server rendered 24 documents and the first poll, a few hundred
+milliseconds later, replaced them with all 488. The list was correct for exactly
+one frame.
+
+That is also why it looked like a data problem rather than a display one: the
+number was never stable, and nothing the operator deleted changed the shape of
+it.
+
+## The predicate, and the one that would have failed
+
+The filter is **`filingId != null`**. It is not a status filter, and reaching
+for `status === 'DISCOVERED'` — the obvious reading of the complaint, and the
+first design attempted here — would have hidden **nothing**.
+
+Measured breakdown of the reported case:
+
+| status | filed | unfiled |
+|---|---|---|
+| QUEUED | — | 455 |
+| INDEXED | 23 | 5 |
+| PROCESSING | 1 | 4 |
+| **DISCOVERED** | — | **0** |
+
+Zero DISCOVERED rows. The cause is `PROMOTION_MODE_RATIONALE` in
+`src/lib/ingestion/promotion.ts`: bulk promotion is *deliberately unfiled* — it
+moves documents DISCOVERED → QUEUED → INDEXED and sets `status` and nothing
+else. The unwanted rows had therefore already been promoted out of DISCOVERED
+long before anyone looked at the list.
+
+`23 INDEXED-filed + 1 PROCESSING-filed = 24`, reproducing the filing count
+exactly. That arithmetic is what confirmed the predicate.
+
+## Fix applied (part 1)
+
+`src/app/api/documents/route.ts` now defaults to `filingId: { not: null }`,
+matching `page.tsx`. Verified live: **488 → 24**.
+
+Two things deliberately included:
+
+- **`?includeUnfiled=1`** for callers that legitimately browse the whole corpus.
+  `image-insert-modal.tsx` is the one real case — page images are read from the
+  PDF itself, so any indexed document is a valid source whether or not a filing
+  references it. It passes the flag and is unchanged.
+- **`unfiledHidden`** in the response, rendered by `document-grid.tsx` as
+  "24 filed · 464 not attached to a filing", and as an explanatory line in the
+  empty state. The count must stay on screen: `document-status.ts` exists
+  because DISCOVERED rows once dropped out of the grid with nothing to show they
+  existed, and hiding 464 files with no trace would be the same defect in a new
+  place.
+
+The default is filtered rather than the grid passing an opt-in flag, so that a
+future caller which forgets the parameter gets the case's real documents instead
+of the disk sweep. That was the operator's actual question — "what can we do so
+this does not happen again."
+
+Guard: `src/app/api/documents/__tests__/filed-only-listing.test.ts`, which pins
+the predicate, pins that it is *not* a status filter, and pins that only the
+exact opt-in string disables it.
+
+## Part 2 — open: deletion does not stick
+
+Still unfixed, and it is the other half of the complaint.
+
+`DELETE /api/documents/[id]` hard-deletes the row. The file remains on disk, and
+`findCaseForFile` re-attributes it on the next `add` event — which
+`POST /api/cases/[id]/rescan` triggers deliberately by **restarting the
+FileWatcher so chokidar re-walks every path**. `onFileAdded` guards against
+duplicates by `hash` and by `filePath`, but only against *rows that still
+exist*; once deleted there is nothing left to match, so it is recreated.
+
+Proposed: an `IgnoredFile` tombstone table — a new model rather than a
+soft-delete flag on `Document`, so that every existing counting query
+(corpus-status, corpus-denominator, page.tsx chips, promotion planning) stays
+correct with no changes, because the rows are genuinely gone.
+
+Design constraints established:
+
+- **Key on path OR hash.** Path alone resurrects on rename; hash alone
+  resurrects on any re-save.
+- **Both watcher write paths need the check.** `onFileAdded` creates, and
+  `onFileChanged` upserts with an unconditional `update: { status: 'DISCOVERED' }`.
+- **Migration:** back up `prisma/data/sound-suite.db` (not `data/`), hand-write
+  the SQL, apply with `migrate deploy`. Never `migrate dev`, never `db push` —
+  23 tracked migrations already exist.
+
+Note that part 1 lowers the urgency of this considerably: with the list showing
+only filed documents, there is no longer a reason to delete anything just to
+clean up the view. The tombstone becomes the answer for genuinely unwanted
+files, not the workaround for a broken list.
+
+## Part 3 — flagged, not fixed: unfiled documents are being ingested
+
+Across the corpus: **1,374 documents, 92 with filings.** Of the remainder,
+**537 are QUEUED** — sitting in the ingestion queue, consuming OCR and embedding
+work, for documents no filing references.
+
+This is plausibly a large share of the pipeline load. It is out of scope for the
+list fix and needs an explicit decision, because draining that queue is a
+destructive-ish operation on 537 rows.
+
+Related: **174 documents are INDEXED but unfiled.** They keep their vectors and
+still surface in search results. Hiding them from the case list does not remove
+them from the corpus — that is a consequence of the requested change, not a
+defect in it.
+
+## Separate latent defect found while diagnosing
+
+`findCaseForFile` (`src/services/file-watcher.ts:459`) attributes a file with a
+raw string prefix and no path boundary:
 
 ```ts
-for (const watchPath of this.config.watchPaths) {
-  if (filePath.startsWith(watchPath)) {
-    return await this.prisma.case.findUnique({ where: { path: watchPath } });
-  }
-}
+if (filePath.startsWith(watchPath)) { … }
 ```
 
-That is **unbounded recursive containment**. Any PDF at any depth beneath a
-case's directory becomes a `DISCOVERED` document for that case — scratch
-folders, export dumps, downloaded copies, vendor productions staged for later,
-duplicates saved beside the original. Nothing about the operator's intent is
-consulted, only the path prefix. That fully answers "we don't know why they are
-there": nobody put them there for this case; the directory tree did.
-
-The list then shows them by deliberate choice
-(`src/app/api/cases/[id]/documents/route.ts:19`):
-
-> No status filter is applied — including DISCOVERED rows so the user can […]
-
-## Two constraints any fix must respect
-
-**1. `document-status.ts` exists because DISCOVERED once vanished, and that fix
-must stand.** Its header records the original defect: `DISCOVERED` "appeared in
-none of the four hand-copied status unions", so those rows silently dropped out
-of the grid, counted toward no badge, and rendered with `undefined` class names.
-The lesson taken was "treat an unknown status as *displayable*, never as a
-reason to drop a row."
-
-That is **not** in conflict with this task, and the distinction is the whole
-design point: the old defect was **silence** — rows disappearing because four
-copies of a union drifted apart. What is wanted here is **deliberate,
-labelled exclusion from one surface**, with the count still visible and one
-click away. An explicit named filter does not reintroduce a copy-paste drift
-bug. Do not implement this by removing `DISCOVERED` from a status union.
-
-**2. The promotion planner reads live DISCOVERED counts.**
-`src/lib/ingestion/promotion.ts` orders promotion waves by re-reading the
-current per-case `DISCOVERED` backlog on every call — deliberately computed,
-never stored, because a stored table went stale within hours. Therefore:
-
-- **do not delete these rows**, and
-- **do not stop the watcher creating them**
-
-without redesigning bulk promotion at the same time. Either would silently
-break wave ordering. This constraint is what pushes the fix toward the **list**
-rather than toward ingestion.
-
-## Separate latent defect found while diagnosing this
-
-`filePath.startsWith(watchPath)` is a raw string prefix test with no path
-boundary. A case rooted at `/corpus/alpha` therefore also swallows
-`/corpus/alpha-archive/scan.pdf` and `/corpus/alphaXX/…` — a *different*
-directory whose name merely extends the first. Combined with first-match-wins
-over `watchPaths` order, a nested case path can also be shadowed by an ancestor
-watch path depending on array order.
-
-This is worth fixing regardless of which option below is chosen:
+A case rooted at `/corpus/alpha` therefore also swallows
+`/corpus/alpha-archive/scan.pdf` — a different directory whose name merely
+extends the first. Combined with first-match-wins over `watchPaths`, a nested
+case path can also be shadowed by an ancestor. Fix:
 
 ```ts
 const rel = path.relative(watchPath, filePath);
 if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) { /* contained */ }
 ```
 
-Matching the longest watch path rather than the first would fix the shadowing.
+…and match the longest watch path rather than the first.
 
-## Options
-
-**A — filter the list (recommended).** Default the case document list to hide
-`DISCOVERED`, with an explicit `Show discovered (N)` control that reveals them.
-The count stays on screen, so nothing goes silent; the rows stay in the
-database, so promotion is untouched. Cheapest, reversible, and the only option
-that satisfies both constraints above as written.
-
-**B — scope ingestion.** Give a case an opt-in depth limit or an exclude-glob
-so the watcher stops attributing unrelated subtrees at all. Addresses the root
-cause rather than the symptom, but changes what promotion sees and needs its
-own decision about existing rows.
-
-**C — both.** A now, B as a follow-up once the operator can say which
-subdirectories were never meant to be case content.
-
-## Open question for the operator
-
-Are the unwanted files in **subdirectories** that should never have been case
-content (→ B is the real fix, A is a stopgap), or are they scattered through
-the case directory proper and simply not yet filed (→ A is the whole fix)?
-The answer decides whether B is worth building, and it cannot be determined
-from the code.
-
-## Acceptance
-
-- Opening a case shows only filed/queued/indexed work by default.
-- The discovered count remains visible and one interaction away.
-- `DISCOVERED` stays in `DOCUMENT_STATUSES` and stays rendered by
-  `document-status.ts` helpers — no status union loses a member.
-- `planPromotion` still returns the same wave order for the same corpus.
+Also noted while reading that file: `onFileChanged`'s upsert sets
+`status: 'DISCOVERED'` unconditionally, so touching a filed, indexed document's
+file on disk demotes it back to DISCOVERED. Untested and unfixed — recorded
+here because it is adjacent, not because it is in scope.
