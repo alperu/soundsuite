@@ -202,12 +202,40 @@ Registry entry is already correct and needs no change: `port: 8101`, `vram: 0`,
 `type: 'vllm'`, `requiresGpu: false`, runtime `docker-cpu`
 (`sideCar/src/lib/state.ts:220`, `mode-templates.ts:rlmSandboxDef`).
 
-**Registry: Docker Hub `soundsuite/rlm-sandbox`** (decided 2026-09-15). Keeping
-the name already in the registry means **no change to `state.ts` or
-`mode-templates.ts`**, and therefore no sidecar release needed on account of the
-image. (Had the name changed, it would have had to change in *both* files — the
+**Registry: `ghcr.io/project-sandstar/rlm-sandbox`**, published 2026-09-15.
+
+Docker Hub `soundsuite/` was chosen first, on the reasoning that keeping the
+existing name avoided a code change. It was abandoned for a practical reason,
+not a principled one: the org 404s (so it does not exist), and `docker login` is
+interactive — it cannot be driven from a non-TTY session. GHCR was reachable
+immediately because `gh` was already authenticated; it needed only
+`gh auth refresh -s write:packages`, after which
+`gh auth token | docker login ghcr.io -u <user> --password-stdin` is fully
+non-interactive.
+
+The image name therefore changed, which means **both** `state.ts:defaultRegistry
+['rlm-sandbox'].image` and `mode-templates.ts:rlmSandboxDef()` — the
 registry-overwrite trap, where editing only `defaultRegistry` is silently
-dropped at runtime.)
+dropped at runtime because the master's `/config` push replaces
+`state.registry[role]` wholesale. A test now pins the two together.
+
+**Pinned to `:0.1.0`, not `:latest`.** `pullImage` (`docker.ts:1139`) inspects
+locally and skips the pull when the image is already present, so `:latest` would
+freeze every host on whatever it first pulled, with no way to tell which build
+that was — an unpinned tag that behaves like a pinned one, differently per host.
+Same reasoning as `VLLM_IMAGE`. Bumping the image is therefore a sidecar
+release, deliberately.
+
+**GHCR packages are private by default**, and the sidecars hold no registry
+credentials. The package must be made public or every host needs a credential
+and a rotation story. GitHub exposes **no REST endpoint** for this — `PATCH
+/orgs/{org}/packages/container/{name}` returns 404 — so it is a one-time manual
+step at
+`https://github.com/orgs/Project-SandStar/packages/container/package/rlm-sandbox`
+→ Package settings → Danger Zone → Change visibility.
+
+A private package fails the pull with a 401, which surfaces as a container that
+will not start — indistinguishable at a glance from the image not existing.
 
 ### 6.1 The image MUST be multi-arch
 
@@ -236,12 +264,12 @@ docker buildx build --builder ssmulti \
   --platform linux/amd64,linux/arm64 \
   --build-arg MASTER_URL=http://<master>:3000 \
   --build-arg RLMS_SHA256=$(node -p "require('./public/rlm/manifest.json').sha256") \
-  -t soundsuite/rlm-sandbox:0.1.0 -t soundsuite/rlm-sandbox:latest \
+  -t ghcr.io/project-sandstar/rlm-sandbox:0.1.0 \
   --push docker/rlm-sandbox
 ```
 
 Verify the manifest list really carries both before trusting it —
-`docker buildx imagetools inspect soundsuite/rlm-sandbox:latest` must list
+`docker buildx imagetools inspect ghcr.io/project-sandstar/rlm-sandbox:0.1.0` must list
 `linux/amd64` **and** `linux/arm64`. (Two `unknown/unknown` entries alongside
 them are buildx attestation manifests and are expected.)
 

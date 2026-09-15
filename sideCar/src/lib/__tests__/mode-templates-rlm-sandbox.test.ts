@@ -12,7 +12,7 @@ import {
   resolveMode, roleToMode, modeToRole, isModeName, isRuntimeChoice,
   ALL_MODES, ALL_RUNTIME_CHOICES,
 } from '../mode-templates';
-import { state, dockerSupportsGpu } from '../state';
+import { state, dockerSupportsGpu, defaultRegistry } from '../state';
 
 describe('ss-rlm-sandbox — sidecar mode-templates', () => {
   it('is a recognized ModeName', () => {
@@ -118,6 +118,34 @@ describe('ss-rlm-sandbox — explicit runtime (the path the master actually uses
     for (const mode of ['ss-embedding', 'ss-code-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker', 'ss-rlm'] as const) {
       expect(resolveMode(mode, 'linux', 'docker-cpu')).toBeNull();
     }
+  });
+});
+
+/**
+ * The image string lives in two files, and the master's /config push replaces
+ * state.registry[role] wholesale — so a host can end up running whichever copy
+ * won, depending on whether a master had pushed yet. Editing only
+ * defaultRegistry is silently dropped at runtime; that is the documented
+ * registry-overwrite trap.
+ */
+describe('the sandbox image string cannot drift between its two definitions', () => {
+  it('mode-templates and state.ts agree', () => {
+    const fromTemplates = resolveMode('ss-rlm-sandbox', 'linux', 'docker-cpu')!.image;
+    expect(fromTemplates).toBe(defaultRegistry['rlm-sandbox'].image);
+  });
+
+  it('is version-pinned, not :latest', () => {
+    // pullImage skips when the image is already present locally, so :latest
+    // freezes each host on whatever it first pulled with no way to tell which.
+    const image = defaultRegistry['rlm-sandbox'].image;
+    expect(image).not.toMatch(/:latest$/);
+    expect(image).toMatch(/:\d+\.\d+\.\d+$/);
+  });
+
+  it('points at the published registry', () => {
+    expect(defaultRegistry['rlm-sandbox'].image).toMatch(
+      /^ghcr\.io\/project-sandstar\/rlm-sandbox:/,
+    );
   });
 });
 

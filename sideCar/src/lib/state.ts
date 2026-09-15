@@ -213,12 +213,27 @@ export const defaultRegistry: Record<string, ContainerDef> = {
   // sandbox call back into the sidecar (and the Fantom HTTP tool exposure)
   // is NOT built yet — see docs referenced in the design note, steps 3-4.
   //
-  // image: not yet published — this name is a placeholder for the operator
-  // task of building/publishing the sandbox image (python:3.11-slim + the
-  // rlm library, no Docker socket, no API key baked in, network-restricted).
-  // Building/pushing that image is explicitly out of scope here.
+  // image: PUBLISHED 2026-09-15 to ghcr.io/project-sandstar/rlm-sandbox.
+  // Built from docker/rlm-sandbox/ — python:3.11-slim + the vendored `rlms`
+  // library (public/rlm/, pinned at 854e688f) + an OpenAI-compatible shim.
+  // No Docker socket, no API key baked in, no egress required.
+  //
+  // MULTI-ARCH, and it has to be: this fleet is 3x windows-docker-wsl2 (amd64)
+  // and 2x mac-docker-ollama (arm64). A single-arch image fails on the other
+  // half as a container that will not start, which reads like a bug in this
+  // role rather than a packaging mistake.
+  //
+  // Pinned to an explicit version, NOT :latest. `pullImage` (docker.ts:1139)
+  // skips the pull when the image is already present locally, so `:latest`
+  // would leave every host frozen on whatever it first pulled with no way to
+  // tell which build that was. Same reasoning as VLLM_IMAGE above. Bumping
+  // this is a sidecar release, deliberately.
+  //
+  // KEEP IN SYNC with mode-templates.ts:rlmSandboxDef — the master's /config
+  // push replaces state.registry[role] wholesale, so editing only this file is
+  // silently dropped at runtime.
   'rlm-sandbox': {
-    image: 'soundsuite/rlm-sandbox:latest',
+    image: 'ghcr.io/project-sandstar/rlm-sandbox:0.1.0',
     model: null,
     port: 8101,
     vram: 0,
