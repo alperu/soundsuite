@@ -750,7 +750,37 @@ export async function handleAcquire(role?: string, owner = 'http'): Promise<Reco
     return { action: result, role, leaseId, activeRequests: r.activeRequests };
   }
 
-  // Legacy: no role specified
+  // A role was asked for, but this host has no such role assigned.
+  //
+  // This used to fall into the legacy branch below, whose comment claims "no
+  // role specified" — true for `!role`, but the condition also catches a role
+  // that simply is not in this sidecar's registry. The legacy branch operates
+  // on state.CONTAINER_NAME, whose default is the historical 'vllm-reranker',
+  // so asking a host for a role it does not run reported
+  //
+  //   Container "vllm-reranker" not found
+  //
+  // — a container nobody configured, on a host that was never meant to have it.
+  // Observed on 2026-09-16 when something asked an ocr+rlm-sandbox host to
+  // acquire `reranker`. Harmless (the caller failed over) but it sent the
+  // reader hunting a container that should not exist.
+  //
+  // Name the actual condition instead. The caller's bug is asking the wrong
+  // host; this error should say so.
+  if (role) {
+    const assigned = Object.keys(state.registry).sort();
+    log.warn(`Acquire ${role} REJECTED — not assigned on this host (has: ${assigned.join(', ') || 'none'})`);
+    return {
+      error:
+        `Role "${role}" is not assigned on this sidecar. ` +
+        `Assigned roles: ${assigned.join(', ') || '(none)'}. ` +
+        `Check /admin/roleassign, or route this role to a host that has it.`,
+      role,
+      assignedRoles: assigned,
+    };
+  }
+
+  // Legacy: genuinely no role specified — a pre-role-registry master.
   state.activeRequests++;
   if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; }
   state.lastAcquire = new Date().toISOString();
