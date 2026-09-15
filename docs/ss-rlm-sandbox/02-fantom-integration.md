@@ -26,42 +26,125 @@ Item 3 is the one that will bite first. Do it first.
 
 ---
 
-## 1. Declare `domain: 'code'`
+## 0.1 Two separate channels — do not conflate them
 
-The `openrouter` block you already push gains one field:
+The header and the domain are different mechanisms answering different
+questions, travelling over different transports at different times. Getting one
+right does nothing for the other.
+
+| | **`X-SoundSuite-Master`** | **`domain: 'code'`** |
+|---|---|---|
+| answers | **Who** is calling? | **What kind** of retrieval does this master drive? |
+| transport | HTTP header | field in the WebSocket `/config` push |
+| frequency | **every request** | once per config push |
+| value | your canonical master URL | the literal string `'code'` |
+| controls | which key, which model, whose budget | which tools get injected into the REPL |
+| sent to | the sandbox on `:8101` (which forwards it) | the sidecar, over your existing master socket |
+| if missing | **409 on every call** | no tool injection; treated as undeclared |
+| built today? | **yes — required now** | stored and validated; **not yet consumed** (§5) |
+
+Mnemonic: the **header is per-call and about money**; the **domain is per-master
+and about tools**.
+
+---
+
+## 1. Declare `domain: 'code'` — telling the sandbox it is for coding
+
+### Where it goes
+
+The `openrouter` block you **already push** over your existing master WebSocket
+gains one field. This is not a new message or a new endpoint:
 
 ```ts
+// your equivalent of Sound Suite's buildOpenRouterPush()
 {
   apiKey: string;
   allowedModels: Record<string, { model: string; provider?: string; dims?: number }>;
   modeByRole: Record<string, 'local-only' | 'local-first' | 'cloud-only'>;
-  domain: 'code';        // <- NEW
+  domain: 'code',        // <- THE ONLY ADDITION
 }
 ```
 
-**Hardcode it.** Sound Suite hardcodes `'legal'` in `buildOpenRouterPush()`
-rather than exposing a toggle, for the same reason you should hardcode `'code'`:
-which retrieval domain a codebase operates over is a fact about the software,
-not an operator preference. A toggle only creates a way to misclick legal tools
-onto a code caller.
+Sound Suite's equivalent line, for reference — `src/lib/gpu/fleet-router.ts:1044`:
+
+```ts
+return { apiKey: cfg.openRouterApiKey, allowedModels, modeByRole, domain: 'legal' };
+```
+
+### Exactly what happens to it
+
+1. Arrives in the `/config` push payload, keyed by your `serverUrl`.
+2. `sideCar/src/lib/virtual-inference.ts:243` runs it through `sanitizeDomain()`:
+
+   ```ts
+   function sanitizeDomain(raw: unknown): SandboxDomain | undefined {
+     return typeof raw === 'string' && (VALID_DOMAINS as string[]).includes(raw)
+       ? (raw as SandboxDomain)
+       : undefined;
+   }
+   ```
+
+   **Exact string match against `'legal' | 'code'`.** `'Code'`, `'coding'`,
+   `'code '` all sanitize to `undefined` — silently, with no error returned to
+   you. There is no fuzzy matching and no error surface; check
+   `/api/status` to confirm it landed (§6).
+3. Stored per master and persisted (`openrouter-store.ts`), so it survives a
+   sidecar restart without you re-pushing.
+4. Surfaced in `getOpenRouterStatus()` → visible on the sidecar's `/api/status`.
+
+### Merge-on-partial-push — important
+
+`virtual-inference.ts:239-243`: a push that **omits** `domain` keeps whatever you
+declared last. Only an explicitly present value replaces it.
+
+```ts
+const domain = obj.domain !== undefined
+  ? (sanitizeDomain(obj.domain) ?? existing?.domain)
+  : existing?.domain;
+```
+
+This is deliberate — a partial config push must not silently un-declare a domain
+that was working. Two consequences for you:
+
+- You do **not** have to include `domain` in every push, only the ones that set it.
+- You **cannot clear it** by sending `undefined`; and sending an invalid string
+  falls back to the previous value rather than clearing it either.
+
+### Hardcode it
+
+Sound Suite hardcodes `'legal'` rather than exposing a toggle, and you should
+hardcode `'code'`, for the same reason: which retrieval domain a codebase
+operates over is a fact about the software, not an operator preference. A toggle
+only creates a way to misclick legal tools onto a code caller.
 
 **Never infer it from the port.** `:3000` and `:3848` are a deployment detail. A
 master that declares no domain gets no tool injection and is treated as
-unconfigured — it must not default to either side, because the failure mode is
+undeclared — it must not default to either side, because the failure mode is
 confidently wrong answers rather than an error.
 
-Sidecar side, already built: `sideCar/src/lib/virtual-inference.ts` has
-`SandboxDomain = 'legal' | 'code'` and stores it per master. Its doc comment is
-explicit that absent means *not declared*, not *legal by default*.
+### Honest status: stored, validated, not yet acted on
 
-### Your model lives on the per-master channel
+Declaring `domain` today is **necessary but not sufficient**. The plumbing is
+built end to end — pushed, sanitized, stored, persisted, surfaced — but **nothing
+reads it to select tools yet**, because `custom_tools` is stubbed on both sides
+(§5). `server.py` passes `custom_tools=None`.
+
+So: send it now so the wiring is correct and verifiable, but do not expect
+behaviour to change until §2 and §5 land. If you are debugging "the sandbox
+isn't using my tools", the domain is not the reason — the tools do not exist yet.
+
+### Your model lives on the same per-master channel
 
 Set `allowedModels['rlm-sandbox'] = { model: '<your choice>' }`.
 
 This is deliberately **not** the sidecar-global `modelOverrides`, which holds one
 value per sidecar and would let one master clobber the other's choice. The
 sidecar resolves the model from *your* `allowedModels` when *you* are the
-identified caller.
+identified caller (§3). Sound Suite currently uses
+`deepseek/deepseek-v4.1-flash`; yours is independent.
+
+Without this entry the sidecar returns **503** with
+`master <url> has not configured a model for rlm-sandbox`.
 
 ---
 
@@ -141,35 +224,91 @@ HTTP there is no such context, so the sidecar **refuses**:
 It refuses rather than picking the first because picking would spend one
 master's budget on the other's model, silently and unprovably.
 
-### What you must do
+### What you must send
 
-Send your own canonical URL when you dial `:8101`:
+One header, on every request to the sandbox:
 
-```
+```http
 POST http://<sidecar-host>:8101/v1/chat/completions
+Content-Type: application/json
 X-SoundSuite-Master: http://<your-master-host>:3848
+
+{"messages":[{"role":"user","content":"..."}],"max_tokens":256}
 ```
 
-The sandbox forwards it on every sub-model call. It must be **per request** —
-one container serves both masters, so a container-wide value would bill your
-traffic to us.
+**Header name:** `X-SoundSuite-Master`. Read case-insensitively on both hops, so
+casing does not matter — but match this spelling so it greps.
 
-Sound Suite does this in `src/lib/ai/stream-rlm.ts` (`rlmHeaders()`), resolving
-from `getCanonicalMasterUrl()` and attaching it only on the sandbox path.
+**Value:** your canonical master URL. It must be **byte-identical** to the
+`serverUrl` you use in your `/config` push, because that string is the map key
+the sidecar files your config under. A trailing slash, `localhost` vs an IP, or
+`https` vs `http` all resolve to a different key and return **404**, not a
+fallback.
 
-**The URL must match exactly** what you sent as `serverUrl` in your `/config`
-push — that is the key the sidecar stores your config under. A trailing slash or
-a different host spelling resolves to 404 (`master … has pushed no OpenRouter
-config`), not to a fallback.
+### What it travels through
+
+Two hops read it, and both are already built:
+
+| hop | code | what it does |
+|---|---|---|
+| sandbox `:8101` | `docker/rlm-sandbox/server.py` | reads it off your request, forwards it on every sub-model call it makes |
+| sidecar `:8098` | `sideCar/src/app/api/v1/chat/completions/route.ts` | `req.headers.get('x-soundsuite-master')` → `resolveSandboxMaster(explicit)` → picks **your** key, **your** model, **your** budget |
+
+It must be **per request**, not per container: one sandbox container serves both
+masters, so a container-wide value would bill your traffic to us. This is why
+`server.py` takes it off the incoming request rather than from an env var — an
+earlier build used `SS_MASTER_URL` from the environment and every call 409'd.
+
+Sound Suite's sender, for reference: `src/lib/ai/stream-rlm.ts` → `rlmHeaders()`,
+resolving from `getCanonicalMasterUrl()` and attaching it **only** on the sandbox
+path (the self-hosted vLLM server has no use for it).
+
+### Concrete: what you write
+
+```ts
+const SANDBOX_MASTER_HEADER = 'X-SoundSuite-Master';
+
+async function callSandbox(endpoint: string, body: unknown) {
+  return fetch(`${endpoint}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      // MUST equal the serverUrl you push in /config.
+      [SANDBOX_MASTER_HEADER]: MY_CANONICAL_MASTER_URL,
+    },
+    body: JSON.stringify(body),
+  });
+}
+```
+
+That is the whole of item 3. There is no token, no signature, no handshake —
+this is **identity, not authentication**. The fleet is VPN-only and
+single-tenant, so the sidecar route is currently unauthenticated within the
+Docker network; the header exists to route spend correctly, not to prove who you
+are. Treat it as a known gap on our side rather than a pattern to copy into your
+tool endpoints (§2).
 
 ### Errors you will see
 
 | status | meaning | fix |
 |---|---|---|
-| 409 | Two+ masters have keys, you sent no header | Send `X-SoundSuite-Master` |
-| 404 | The URL you sent matches no stored config | Match your `/config` `serverUrl` exactly |
-| 503 | You are known but have no key, or no model for `rlm-sandbox` | Push a key; set `allowedModels['rlm-sandbox']` |
-| 502 | Upstream OpenRouter failure | Read the message — it is passed through |
+| **409** | Two+ masters have keys, you sent no header | Send `X-SoundSuite-Master`. The message names every candidate master. |
+| **404** | The URL you sent matches no stored config | Match your `/config` `serverUrl` **exactly** — check for a trailing slash |
+| **503** | Known master, but no key on file, **or** no `allowedModels['rlm-sandbox']` | Push a key; set your model (§1) |
+| **502** | Upstream OpenRouter failure | Read the message — it is passed through verbatim |
+| **400** | `stream: true` | Not supported; request a non-streaming completion |
+
+The 409 body looks like this, and names both masters so it is actionable:
+
+```json
+{"error":{"message":"2 masters have OpenRouter keys on this sidecar
+ (http://100.114.170.238:3000, http://100.114.170.238:3848). The caller must
+ identify itself with the X-SoundSuite-Master header — refusing to guess whose
+ key and budget to spend.","type":"sidecar_error","code":409}}
+```
+
+It refuses rather than picking the first, because picking would spend one
+master's budget on the other's model — silently, and unprovably after the fact.
 
 ---
 
@@ -222,25 +361,91 @@ environments, which we do not use. If you read that note, prefer this file.
 In order — each step is provable before the next, so a failure is never debugged
 through two layers.
 
-1. **Your push carries the new fields.** Sidecar `/api/status` shows your slot
-   `configured`; `allowedModels` has an `rlm-sandbox` entry.
-2. **Identity resolves.** With your header:
-   ```bash
-   curl -H 'X-SoundSuite-Master: http://<you>:3848' \
-        http://<sidecar>:8098/api/v1/chat/completions
-   # -> 200 {"object":"list","data":[{"id":"<your model>",...}]}
-   ```
-   A 409 means the header is missing or mismatched; `data: []` means no model.
-3. **A sub-model call works.** POST the same URL with `{"messages":[…]}` and get
-   a completion billed to *your* key.
-4. **The sandbox answers you.** POST `:8101/v1/chat/completions` with your header
-   and a needle-in-haystack prompt. Sound Suite's equivalent returns in ~7 s.
-5. **Your tools are reachable from the container's namespace** — not just from
-   your laptop. The container resolves the host via
-   `host.docker.internal:host-gateway`.
-6. **Tool injection**, once §5 ships.
+Set these once:
 
-Steps 1–4 need nothing from us.
+```bash
+SIDECAR=http://10.10.20.5:8098          # any host with rlm-sandbox running
+SANDBOX=http://10.10.20.5:8101
+ME=http://100.114.170.238:3848          # YOUR canonical master URL
+```
+
+**1. Your `domain` landed.** This is the only way to confirm it — an invalid
+value returns no error, it is just silently dropped:
+
+```bash
+curl -s $SIDECAR/api/status \
+  | jq '.masters[] | select(.serverUrl=="'"$ME"'") | .virtualInference'
+```
+
+Verified live shape (this is Sound Suite's slot; yours should mirror it with
+`"code"`):
+
+```json
+{
+  "openrouter": "configured",
+  "modeByRole": { "rlm-sandbox": "cloud-only", ... },
+  "rolesWithModel": [ "embedding", "rlm-sandbox", ... ],
+  "domain": "legal"
+}
+```
+
+Three things to check in that one blob:
+
+- `domain` is `"code"` — if **absent**, `sanitizeDomain()` rejected your string.
+  It matches `'legal' | 'code'` exactly; check for capitals or whitespace.
+- `openrouter` is `"configured"` — otherwise your key never arrived.
+- `rolesWithModel` contains `"rlm-sandbox"` — otherwise you set no
+  `allowedModels['rlm-sandbox']` and step 2 will return `data: []`.
+
+Note the path is `.masters[].virtualInference.domain`, **not**
+`.masters[].domain`.
+
+**2. Identity resolves, and picks YOUR model.**
+
+```bash
+curl -s -H "X-SoundSuite-Master: $ME" $SIDECAR/api/v1/chat/completions
+# 200 {"object":"list","data":[{"id":"<your model>","object":"model",...}]}
+```
+
+- `409` → header missing or the URL does not match your `/config` `serverUrl`
+- `data: []` → identity is fine, but you set no `allowedModels['rlm-sandbox']`
+- `404` → the URL matches no stored config at all
+
+Run it **without** the header too. You should get a 409 naming both masters —
+that proves the sidecar is distinguishing you from us rather than defaulting.
+
+**3. A sub-model call is billed to your key.**
+
+```bash
+curl -s -X POST -H 'Content-Type: application/json' -H "X-SoundSuite-Master: $ME" \
+  -d '{"messages":[{"role":"user","content":"Reply with exactly: pong"}],"max_tokens":16}' \
+  $SIDECAR/api/v1/chat/completions | jq '.choices[0].message.content, .model, .usage.cost'
+# "pong"   "<your model>"   0.00001…
+```
+
+`.model` echoing **your** model rather than ours is the real proof of isolation.
+
+**4. The sandbox answers you end to end.**
+
+```bash
+curl -s -X POST -H 'Content-Type: application/json' -H "X-SoundSuite-Master: $ME" \
+  -d '{"messages":[{"role":"user","content":"...SECRET=418293 buried in filler..."}],"max_tokens":256}' \
+  $SANDBOX/v1/chat/completions | jq '.choices[0].message.content'
+# "418293" — Sound Suite's equivalent returns in ~7s
+```
+
+**5. Your tools are reachable from the container's namespace** — not just from
+your laptop. The container reaches the host via
+`host.docker.internal:host-gateway`, which the sidecar sets on creation.
+
+**6. Tool injection**, once §5 ships.
+
+Steps 1–4 need nothing from us and can be done today. If any fails, the
+container logs are one call away and require no SSH:
+
+```bash
+curl -s "$SIDECAR/api/logs?role=rlm-sandbox&tail=50" | jq -r .logs
+```
 
 ---
 
