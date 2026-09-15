@@ -765,6 +765,23 @@ export interface ExpectedConfig {
   // Added 2026-05-11 after a fleet host needed manual `docker rm -f` to recover
   // from a wedged vLLM worker. Drift-detected to upgrade older containers.
   RequiresInit?: boolean;
+  /**
+   * The container must carry NO Cmd — the image's own ENTRYPOINT/CMD starts it.
+   *
+   * A separate flag because the Cmd drift check below is gated on
+   * `expected.Cmd` being truthy, so "I expect nothing here" is indistinguishable
+   * from "I have no expectation" and the comparison is skipped entirely.
+   *
+   * That gap is not hypothetical. Containers created by 2.4.8/2.4.9 for
+   * ss-rlm-sandbox had a vLLM command line baked in at creation
+   * (`[deepseek/deepseek-v4-flash, --host, ...]`). A container keeps its Cmd
+   * forever — pulling a fixed image does not change it — so with
+   * RestartPolicy `unless-stopped` they restart-looped indefinitely, and drift
+   * detection stayed silent because the new expected config had no Cmd to
+   * compare. Three of five hosts sat in that loop until the container was
+   * removed by hand.
+   */
+  ExpectsNoCmd?: boolean;
 }
 
 export function buildExpectedConfig(role: string): ExpectedConfig {
@@ -777,8 +794,15 @@ export function buildExpectedConfig(role: string): ExpectedConfig {
     config.Env = [`OLLAMA_HOST=0.0.0.0:${def.port}`];
   }
 
-  if (def.type === 'vllm' && def.model) {
+  // Must mirror createContainer exactly, or drift is computed against a config
+  // we would never actually create.
+  if (def.type === 'vllm' && def.model && !def.usesImageCmd) {
     config.Cmd = buildVllmCmd(def.model, def.port, def.vllmArgs);
+  }
+  // For a usesImageCmd role the expectation is the ABSENCE of a Cmd. That is
+  // not the same as having no expectation — see ExpectsNoCmd.
+  if (def.usesImageCmd) {
+    config.ExpectsNoCmd = true;
   }
 
   // Only docker-runtime roles need GPU/Init drift checks. host and
@@ -867,6 +891,10 @@ export function detectConfigDrift(
     if (JSON.stringify(actual.cmd) !== JSON.stringify(expected.Cmd)) {
       drifts.push(`cmd: ${JSON.stringify(actual.cmd)} -> ${JSON.stringify(expected.Cmd)}`);
     }
+  } else if (expected.ExpectsNoCmd && actual.cmd && actual.cmd.length > 0) {
+    // A leftover Cmd on a role whose image starts itself. The container will
+    // exec argv[0] and die on every start; recreate it. See ExpectsNoCmd.
+    drifts.push(`cmd: ${JSON.stringify(actual.cmd)} -> (none; image provides it)`);
   }
 
   // Env comparison (subset check — every expected var must be present)
