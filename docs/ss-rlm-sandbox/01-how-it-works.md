@@ -68,14 +68,23 @@ running model-written Python.
 
 ### From the master (normal path)
 
-Nothing to do. `resolveRlmEndpoint()` picks the sandbox automatically when:
+Nothing to do. `resolveRlmEndpoint()` picks the sandbox based on
+`virtualInference.mode.rlm`:
 
-1. no sidecar has `ss-rlm` running, **and**
-2. `virtualInference.mode.rlm` is `local-first` (not the default `local-only`), **and**
-3. `rlm.sandboxModel` is set on `/admin/openrouter`
+| mode | when the sandbox is used |
+|---|---|
+| `local-only` *(default)* | never |
+| `local-first` | only when no sidecar has `ss-rlm` running |
+| `cloud-only` | **always** — ss-rlm is never probed for |
 
-A run that falls back emits a `notice` event, so a degraded answer is visible in
-the progress channel rather than silent.
+`rlm.sandboxModel` must be set in every case; without it the sandbox is skipped
+and, under `cloud-only`, RLM is off entirely rather than silently reverting to
+ss-rlm.
+
+Under `local-first` a run that falls back logs `DEGRADED` and emits a `notice`
+event, so a degraded answer is visible in the progress channel rather than
+silent. Under `cloud-only` it logs at INFO — it is the configuration, not a
+degradation.
 
 ### Directly (testing)
 

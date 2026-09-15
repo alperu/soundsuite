@@ -12,7 +12,31 @@ Three settings, all required. Miss any one and it fails in a different place.
 |---|---|---|---|
 | 1 | `/admin/roleassign` | `ss-rlm-sandbox` → **Docker (no GPU)** on a host | no container at all |
 | 2 | `/admin/openrouter` | **RLM Sandbox fallback** = a tools+reasoning model | sidecar 503s; `resolveRlmEndpoint()` skips the fallback entirely |
-| 3 | `/admin/openrouter` | **RLM fallback mode** = `local-first` | master never routes to it (default `local-only`) |
+| 3 | `/admin/openrouter` | **RLM mode** = `local-first` or `cloud-only` | master never routes to it (default `local-only`) |
+
+### The three RLM modes
+
+| mode | behaviour | use when |
+|---|---|---|
+| `local-only` *(default)* | ss-rlm or nothing | you self-host the fine-tune and want no silent substitution |
+| `local-first` | try ss-rlm, fall back to the sandbox | both are deployed; the sandbox is insurance |
+| **`cloud-only`** | **straight to the sandbox, never probe for ss-rlm** | ss-rlm is not deployed — this is the "we don't need a fallback" setting |
+
+`cloud-only` is not just cosmetic. Probing for an ss-rlm that was deliberately
+never deployed costs a live HTTP probe per transitional sidecar **on every
+call**, and then logs `DEGRADED` for what is actually the chosen configuration.
+Under `cloud-only` the sandbox logs at INFO instead — `DEGRADED` stays reserved
+for a real degradation, so the word keeps its meaning.
+
+The name is a slight abuse of the one shared with other roles: the sandbox
+still runs in a container on a sidecar, so this is not "no local
+infrastructure" the way it is for embedding or rerank. It means *do not use the
+self-hosted RLM model*.
+
+**`cloud-only` with no sandbox model returns null** — RLM is simply off. It does
+not quietly fall back to ss-rlm, because ignoring an explicit operator
+instruction is worse than no RLM. The admin page warns inline for that
+combination.
 
 (2) is the one that hides: with it blank the role looks healthy — container
 running, `/health` 200 — and the master silently never routes there, logging
