@@ -192,6 +192,14 @@ export class FileWatcher {
         return;
       }
 
+      // The operator deleted/rejected this file. Checked AFTER the dedupe
+      // lookups above — those are cheaper — but BEFORE any case attribution or
+      // create, so a rejected file costs one indexed query and nothing else.
+      if (await this.isIgnored(filePath, hash)) {
+        this.logger.info(`Skipping file (operator ignored it — see IgnoredFile)`, { filePath });
+        return;
+      }
+
       // Find the case this file belongs to
       const caseRecord = await this.findCaseForFile(filePath);
       if (!caseRecord) {
@@ -317,6 +325,15 @@ export class FileWatcher {
         if (!healed) {
           this.logger.info(`Skipping modified file (hash unchanged)`, { filePath, hash });
         }
+        return;
+      }
+
+      // Same tombstone check as onFileAdded. It matters MORE here: the upsert
+      // below writes `status: 'DISCOVERED'` unconditionally on its update
+      // branch, so without this, touching a rejected file on disk would
+      // re-materialise it even if a row somehow still existed.
+      if (await this.isIgnored(filePath, hash)) {
+        this.logger.info(`Skipping modified file (operator ignored it — see IgnoredFile)`, { filePath });
         return;
       }
 
@@ -451,6 +468,36 @@ export class FileWatcher {
       stream.on('end', () => resolve(hash.digest('hex')));
       stream.on('error', reject);
     });
+  }
+
+  /**
+   * True when the operator has rejected this file, so it must not be
+   * (re-)created as a Document.
+   *
+   * Deleting a Document does not stop it coming back — the PDF is still on
+   * disk, and `rescan` deliberately restarts this watcher so chokidar re-walks
+   * every path. The `onFileAdded`/`onFileChanged` dedupe checks only look at
+   * Document rows, so once the row is gone there is nothing left to match.
+   * IgnoredFile is that memory.
+   *
+   * Matched on path OR hash, because either alone leaks: path-only resurrects
+   * the file when it is renamed or moved, hash-only when it is re-saved with
+   * any edit at all.
+   */
+  private async isIgnored(filePath: string, hash: string): Promise<boolean> {
+    try {
+      const tombstone = await this.prisma.ignoredFile.findFirst({
+        where: { OR: [{ filePath }, { hash }] },
+        select: { id: true },
+      });
+      return tombstone !== null;
+    } catch (err) {
+      // Never let a lookup failure block ingestion — the cost of a missed
+      // tombstone is one unwanted row, the cost of throwing here is a watcher
+      // that stops discovering anything.
+      this.logger.warn('IgnoredFile lookup failed — treating file as not ignored', { filePath, err });
+      return false;
+    }
   }
 
   /**

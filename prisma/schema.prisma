@@ -30,6 +30,7 @@ model Case {
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
   documents         Document[]
+  ignoredFiles      IgnoredFile[]
   filings           Filing[]
   drafts            Draft[]
   draftCases        DraftCase[]
@@ -116,6 +117,44 @@ model Document {
   @@index([documentType])
   @@index([embeddingModel])
   @@index([readinessBand])
+}
+
+/// A file the operator has rejected, so the watcher stops re-creating it.
+///
+/// Deleting a Document does not stop it coming back: the PDF is still on disk,
+/// `findCaseForFile` re-attributes it on the next `add` event, and
+/// POST /api/cases/[id]/rescan deliberately restarts the FileWatcher so
+/// chokidar re-walks every path. `onFileAdded` dedupes against existing rows by
+/// hash and filePath — but once the row is deleted there is nothing left to
+/// match, so it is recreated as DISCOVERED. This table is that missing memory.
+///
+/// A separate table rather than a soft-delete flag on Document, so every
+/// existing query that counts documents (corpus-status, corpus-denominator,
+/// the dashboard chips, promotion planning) stays correct with no changes —
+/// the rows really are gone. A flag would need every one of those call sites
+/// found and updated, which is how DISCOVERED went missing from four
+/// hand-copied status unions in the first place (see src/lib/document-status.ts).
+///
+/// Keyed on BOTH path and hash because either alone leaks: match only on
+/// filePath and a rename resurrects the file; match only on hash and re-saving
+/// it with any edit does.
+model IgnoredFile {
+  id        String   @id @default(uuid())
+  caseId    String?
+  case      Case?    @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  /// Absolute path as the watcher saw it. Unique: one tombstone per location.
+  filePath  String   @unique
+  /// SHA-256 of the contents when rejected. NOT unique — the same bytes can
+  /// legitimately sit at two paths, and both may be rejected independently.
+  hash      String
+  fileName  String
+  /// Why it was ignored, for the admin list. Free-form; 'deleted' is what the
+  /// document DELETE route writes.
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([hash])
+  @@index([caseId])
 }
 
 model JobLog {

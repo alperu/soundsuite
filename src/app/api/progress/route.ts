@@ -5,7 +5,11 @@ export const dynamic = 'force-dynamic';
 
 interface ProgressStats {
   total: number;
+  /** indexed + error — everything the pipeline is finished with. */
   processed: number;
+  /** Successfully indexed only. Reported separately so a failure is never
+   *  presented as an indexed document. */
+  indexed: number;
   queued: number;
   processing: number;
   error: number;
@@ -19,8 +23,21 @@ const processingHistory: Array<{ timestamp: number; processed: number }> = [];
 const HISTORY_WINDOW_MS = 60000; // 1 minute window for rate calculation
 
 async function calculateProgressStats(caseId?: string): Promise<ProgressStats> {
-  // Build query filter
-  const whereClause = caseId ? { caseId } : {};
+  // Count only documents a filing references — the same predicate
+  // `src/app/page.tsx` and `/api/documents` use for the case document list.
+  //
+  // Without it this banner is the one surface still reporting the folder sweep:
+  // a case whose list showed 6 documents reported "195 of 258 documents
+  // indexed", because every unfiled PDF the watcher found under the case
+  // directory counted towards the denominator. Two numbers for the same case,
+  // differing by 40×, with nothing on screen to explain the gap.
+  //
+  // `filingId` rather than a status filter, for the reason recorded on
+  // /api/documents: bulk promotion is deliberately unfiled, so the unwanted
+  // rows span every status.
+  const whereClause = caseId
+    ? { caseId, filingId: { not: null } }
+    : { filingId: { not: null } };
 
   // Get document counts by status
   const [total, queued, processing, indexed, error] = await Promise.all([
@@ -71,6 +88,7 @@ async function calculateProgressStats(caseId?: string): Promise<ProgressStats> {
   return {
     total,
     processed,
+    indexed,
     queued,
     processing,
     error,

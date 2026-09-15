@@ -32,10 +32,36 @@ export async function DELETE(
       // Vector table may not exist — not fatal
     }
 
+    // Record the rejection BEFORE deleting, so the file cannot come back.
+    //
+    // The PDF is still on disk, and `POST /api/cases/[id]/rescan` deliberately
+    // restarts the FileWatcher so chokidar re-walks every path. `onFileAdded`
+    // dedupes against Document rows by hash and filePath — but this delete
+    // removes the only row it could match, so without a tombstone the file is
+    // re-created as DISCOVERED on the next scan. That is the "I delete it and
+    // it comes back" loop.
+    //
+    // `?forget=1` skips the tombstone, for deleting a document to force a
+    // clean re-ingest rather than to reject it.
+    const forget = request.nextUrl.searchParams.get('forget') === '1';
+    if (!forget) {
+      await prisma.ignoredFile.upsert({
+        where: { filePath: doc.filePath },
+        update: { hash: doc.hash, fileName: doc.fileName, caseId: doc.caseId, reason: 'deleted' },
+        create: {
+          caseId: doc.caseId,
+          filePath: doc.filePath,
+          hash: doc.hash,
+          fileName: doc.fileName,
+          reason: 'deleted',
+        },
+      });
+    }
+
     // Delete the document record
     await prisma.document.delete({ where: { id } });
 
-    return NextResponse.json({ success: true, deletedDocument: doc.fileName });
+    return NextResponse.json({ success: true, deletedDocument: doc.fileName, ignored: !forget });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to delete document' },

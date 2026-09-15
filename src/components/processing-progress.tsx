@@ -5,6 +5,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 interface ProgressStats {
   total: number;
   processed: number;
+  /** Successfully indexed only — excludes failures. */
+  indexed: number;
   queued: number;
   processing: number;
   error: number;
@@ -21,6 +23,7 @@ export default function ProcessingProgress({ caseId }: ProcessingProgressProps) 
   const [stats, setStats] = useState<ProgressStats>({
     total: 0,
     processed: 0,
+    indexed: 0,
     queued: 0,
     processing: 0,
     error: 0,
@@ -152,8 +155,20 @@ export default function ProcessingProgress({ caseId }: ProcessingProgressProps) 
               All documents processed
             </span>
           </div>
+          {/*
+            "195 of 258 documents indexed" was the confusing form: the
+            denominator counted every PDF the watcher swept out of the case
+            folder, while the document list beside it showed only the filed
+            ones. Name what is being counted instead of implying a shortfall —
+            with the counts now filed-only, "6 filed · 6 indexed" reads as the
+            complete state it is. Failures are called out separately rather
+            than folded into `processed`.
+          */}
           <div className="text-sm text-gray-500">
-            {stats.processed} of {stats.total} documents indexed
+            {stats.total} filed · {stats.indexed} indexed
+            {stats.error > 0 && (
+              <span className="text-red-600"> · {stats.error} failed</span>
+            )}
           </div>
         </div>
       ) : (
