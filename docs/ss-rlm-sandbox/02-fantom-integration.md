@@ -16,35 +16,69 @@ holding context as a REPL variable, chunking, grepping, recursively sub-querying
 
 **It costs you three things**, in dependency order:
 
-| # | item | size | blocks |
+| # | item | size | status |
 |---|---|---|---|
-| 1 | Declare `domain: 'code'` in your config push | ~1 line | tool injection |
-| 2 | Expose `search_code` / `search_symbols` / `search_files` over HTTP | medium | the sandbox retrieving anything |
-| 3 | Send `X-SoundSuite-Master` when you dial `:8101` | ~5 lines | **every call** — without it you get a 409 |
+| 1 | Declare `domain: 'code'` in your config push | ~1 line | **check it landed** (§6) |
+| 2 | Expose `search_code` / `search_symbols` / `search_files` over HTTP | medium | **not started — the only real work left** |
+| 3 | Send the identity + domain headers when you dial `:8101` | ~5 lines | **done — Fantom already ships these** |
 
-Item 3 is the one that will bite first. Do it first.
+Item 3 is complete on both sides as of sidecar 2.4.14 / image 0.1.2. Item 1 is
+one line you may already have. **Item 2 is the remaining work**, and nothing
+retrieves until it lands.
 
 ---
 
-## 0.1 Two separate channels — do not conflate them
+## 0.1 The headers say who you are AND where the request is headed
 
-The header and the domain are different mechanisms answering different
-questions, travelling over different transports at different times. Getting one
-right does nothing for the other.
+**Status: implemented both sides as of sidecar 2.4.14 / image 0.1.2.** Fantom's
+three headers are read and acted on.
 
-| | **`X-SoundSuite-Master`** | **`domain: 'code'`** |
+A request to the sandbox carries two independent facts, and they control
+different things:
+
+| | **identity** | **domain** |
 |---|---|---|
-| answers | **Who** is calling? | **What kind** of retrieval does this master drive? |
-| transport | HTTP header | field in the WebSocket `/config` push |
-| frequency | **every request** | once per config push |
-| value | your canonical master URL | the literal string `'code'` |
-| controls | which key, which model, whose budget | which tools get injected into the REPL |
-| sent to | the sandbox on `:8101` (which forwards it) | the sidecar, over your existing master socket |
-| if missing | **409 on every call** | no tool injection; treated as undeclared |
-| built today? | **yes — required now** | stored and validated; **not yet consumed** (§5) |
+| answers | **Who** is calling? | **Where** is this headed — which retrieval world? |
+| canonical header | `X-SoundSuite-Master` | `X-SoundSuite-Domain` |
+| Fantom alias (also accepted) | `X-FantomMCP-Master` | `X-FantomMCP-Domain` |
+| value | your canonical master URL | `code` (or `legal`) |
+| controls | which key, which model, **whose budget** | which **tools** get injected into the REPL |
+| if missing | **409 on every call** | no tools injected — silently |
 
-Mnemonic: the **header is per-call and about money**; the **domain is per-master
-and about tools**.
+Mnemonic: **identity is about money, domain is about tools.** Both are
+per-request, because one container serves both masters — neither can be a
+container-wide setting.
+
+### Why both spellings work
+
+Fantom shipped `X-FantomMCP-*` before this side read either, and sends the
+`X-SoundSuite-*` spellings alongside. Both are accepted, at every hop, so
+neither master has to redeploy in lockstep with the other. That is why these are
+**aliases rather than a rename**. Send both, or either — first present wins.
+
+### The domain header is not the whole story
+
+`domain: 'code'` in the **config push** remains the authoritative declaration
+(§1). The header restates it on the unit that actually selects tools: the
+container picks its REPL tool set per request, and the container can only see
+headers — the stored config lives on the sidecar, which the container never
+queries.
+
+So send **both**:
+
+- **config push** → authoritative, survives a caller that forgets the header,
+  visible in `/api/status`
+- **header** → what the container actually acts on
+
+The sidecar is the one place that sees both, and **warns when they disagree**:
+
+```
+<master> claims domain "code" per-request but its config push declared "legal".
+The config push is authoritative; the container will act on the header. Fix one.
+```
+
+Everywhere else that disagreement is silent, which is exactly the
+confidently-wrong failure the contract exists to prevent.
 
 ---
 
@@ -122,16 +156,39 @@ master that declares no domain gets no tool injection and is treated as
 undeclared — it must not default to either side, because the failure mode is
 confidently wrong answers rather than an error.
 
-### Honest status: stored, validated, not yet acted on
+### Honest status: the domain now reaches the injection point, but the tools are empty
 
-Declaring `domain` today is **necessary but not sufficient**. The plumbing is
-built end to end — pushed, sanitized, stored, persisted, surfaced — but **nothing
-reads it to select tools yet**, because `custom_tools` is stubbed on both sides
-(§5). `server.py` passes `custom_tools=None`.
+Updated for sidecar 2.4.14 / image 0.1.2.
 
-So: send it now so the wiring is correct and verifiable, but do not expect
-behaviour to change until §2 and §5 land. If you are debugging "the sandbox
-isn't using my tools", the domain is not the reason — the tools do not exist yet.
+**What now works:** the domain travels end to end. Fantom's header is read by
+the container, validated against `legal | code`, and handed to
+`tools_for_domain()` — the single function that decides the REPL tool set. The
+config push is stored, persisted and cross-checked against the header.
+
+**What still does nothing:** both branches of `tools_for_domain()` return
+`None`, because neither master exposes its retrieval over HTTP yet (§2).
+
+```python
+def tools_for_domain(domain):
+    if domain == "legal":
+        return None   # TODO: query_case_knowledge, query_case_graph
+    if domain == "code":
+        return None   # TODO: search_code, search_symbols, search_files
+    return None       # unknown/absent: NO tools, never a default
+```
+
+So wiring your tools is now a change to **one function**, and everything feeding
+it is verified. But until §2 lands the loop still reasons over the prompt it is
+handed and cannot retrieve.
+
+If you are debugging "the sandbox isn't using my tools": the domain is no longer
+a plausible cause — check `/api/status` per §6, then look at whether the tools
+exist at all.
+
+Note the third branch. An unrecognised domain yields **no tools, never a
+default**. Handing a code caller legal retrieval would answer confidently and
+wrongly, which is worse than answering with no retrieval. The container logs
+loudly when it drops a domain it does not recognise.
 
 ### Your model lives on the same per-master channel
 
@@ -226,15 +283,21 @@ master's budget on the other's model, silently and unprovably.
 
 ### What you must send
 
-One header, on every request to the sandbox:
+Headers on every request to the sandbox — identity, and where it is headed:
 
 ```http
 POST http://<sidecar-host>:8101/v1/chat/completions
 Content-Type: application/json
+X-FantomMCP-Master: http://<your-master-host>:3848
 X-SoundSuite-Master: http://<your-master-host>:3848
+X-FantomMCP-Domain: code
 
 {"messages":[{"role":"user","content":"..."}],"max_tokens":256}
 ```
+
+This is exactly what Fantom already ships. Nothing to change — it is now read
+on both hops (sidecar 2.4.14, image 0.1.2). Adding `X-SoundSuite-Domain: code`
+alongside would be harmless and marginally more portable, but is not required.
 
 **Header name:** `X-SoundSuite-Master`. Read case-insensitively on both hops, so
 casing does not matter — but match this spelling so it greps.
