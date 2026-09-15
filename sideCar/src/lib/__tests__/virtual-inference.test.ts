@@ -13,6 +13,7 @@ import {
   isCloudOnly,
   serveEmbedding,
   serveRerank,
+  getVirtualContainerStats,
   __resetVirtualInferenceForTest,
 } from '@/lib/virtual-inference';
 
@@ -392,6 +393,159 @@ describe('virtual-inference', () => {
         expect(JSON.stringify(call)).not.toMatch(/sk-or-v1-must-not-leak/);
       }
       logSpy.mockRestore();
+    });
+  });
+
+  describe('virtual container stats (the sidecar UI data)', () => {
+    it('starts idle with zeroed counters once a model is mapped, even before anything is served', () => {
+      setOpenRouterConfig(MASTER_A, {
+        apiKey: 'sk-or-v1-x',
+        modeByRole: { embedding: 'local-first' },
+        allowedModels: { embedding: { model: 'qwen/qwen3-embedding-4b' } },
+      });
+      const stats = getVirtualContainerStats(MASTER_A);
+      expect(stats).toHaveLength(1);
+      expect(stats[0]).toMatchObject({
+        role: 'embedding',
+        model: 'qwen/qwen3-embedding-4b',
+        provider: 'DeepInfra',
+        dims: 2560,
+        mode: 'local-first',
+        served: 0,
+        failures: 0,
+        lastServedAt: null,
+        lastError: null,
+        state: 'idle',
+      });
+    });
+
+    it('returns an empty array for a master with no OpenRouter config pushed', () => {
+      expect(getVirtualContainerStats(MASTER_A)).toEqual([]);
+    });
+
+    it('increments served, records duration and tokens, and flips state to idle after a successful call', async () => {
+      setOpenRouterConfig(MASTER_A, {
+        apiKey: 'sk-or-v1-x',
+        modeByRole: { embedding: 'cloud-only' },
+        allowedModels: { embedding: { model: 'qwen/qwen3-embedding-4b' } },
+      });
+      mockFetch({ data: [{ index: 0, embedding: new Array(2560).fill(0) }], usage: { total_tokens: 77 } });
+
+      await serveEmbedding({ role: 'embedding', serverUrl: MASTER_A, texts: ['a', 'b'] });
+
+      const [row] = getVirtualContainerStats(MASTER_A);
+      expect(row.served).toBe(1);
+      expect(row.failures).toBe(0);
+      expect(row.totalTokens).toBe(77);
+      expect(row.lastServedAt).not.toBeNull();
+      expect(row.lastDurationMs).not.toBeNull();
+      expect(row.state).toBe('idle'); // not in flight anymore
+      expect(row.lastReason).toBe('cloud-only');
+
+      // A second successful call accumulates rather than resetting.
+      mockFetch({ data: [{ index: 0, embedding: new Array(2560).fill(0) }], usage: { total_tokens: 3 } });
+      await serveEmbedding({ role: 'embedding', serverUrl: MASTER_A, texts: ['c'] });
+      const [row2] = getVirtualContainerStats(MASTER_A);
+      expect(row2.served).toBe(2);
+      expect(row2.totalTokens).toBe(80);
+    });
+
+    it('records a failure and the error message (never the key) when the OpenRouter call errors', async () => {
+      setOpenRouterConfig(MASTER_A, {
+        apiKey: 'sk-or-v1-must-not-leak',
+        modeByRole: { rerank: 'cloud-only' },
+        allowedModels: { rerank: { model: 'qwen/qwen3-reranker-8b' } },
+      });
+      mockFetch({ error: 'upstream exploded' }, 500);
+
+      await expect(
+        serveRerank({ role: 'rerank', serverUrl: MASTER_A, query: 'q', documents: ['d1', 'd2'] }),
+      ).rejects.toThrow();
+
+      const [row] = getVirtualContainerStats(MASTER_A);
+      expect(row.failures).toBe(1);
+      expect(row.served).toBe(0);
+      expect(row.state).toBe('failed');
+      expect(row.lastError).toBeTruthy();
+      expect(row.lastError).not.toMatch(/sk-or-v1-must-not-leak/);
+    });
+
+    it('records a failure for a refused (not-allow-listed) request without ever calling fetch', async () => {
+      setOpenRouterConfig(MASTER_A, {
+        apiKey: 'sk-or-v1-x',
+        modeByRole: { embedding: 'cloud-only' },
+        allowedModels: { embedding: { model: 'qwen/qwen3-embedding-4b' } },
+      });
+      const spy = mockFetch({ data: [] });
+
+      await expect(
+        serveEmbedding({ role: 'embedding', serverUrl: MASTER_A, texts: ['a'], requestedModel: 'nope/not-allowed' }),
+      ).rejects.toThrow(/not allow-listed/);
+
+      expect(spy).not.toHaveBeenCalled();
+      const [row] = getVirtualContainerStats(MASTER_A);
+      expect(row.failures).toBe(1);
+      expect(row.state).toBe('failed');
+    });
+
+    it('keeps stats fully isolated per master — A serving heavily never touches B\'s counters', async () => {
+      setOpenRouterConfig(MASTER_A, {
+        apiKey: 'sk-or-v1-a',
+        modeByRole: { embedding: 'cloud-only' },
+        allowedModels: { embedding: { model: 'qwen/qwen3-embedding-4b' } },
+      });
+      setOpenRouterConfig(MASTER_B, {
+        apiKey: 'sk-or-v1-b',
+        modeByRole: { embedding: 'cloud-only' },
+        allowedModels: { embedding: { model: 'qwen/qwen3-embedding-8b' } },
+      });
+      mockFetch({ data: [{ index: 0, embedding: new Array(2560).fill(0) }], usage: { total_tokens: 10 } });
+
+      await serveEmbedding({ role: 'embedding', serverUrl: MASTER_A, texts: ['a'] });
+      await serveEmbedding({ role: 'embedding', serverUrl: MASTER_A, texts: ['a'] });
+      await serveEmbedding({ role: 'embedding', serverUrl: MASTER_A, texts: ['a'] });
+
+      const [rowA] = getVirtualContainerStats(MASTER_A);
+      const [rowB] = getVirtualContainerStats(MASTER_B);
+      expect(rowA.served).toBe(3);
+      expect(rowB.served).toBe(0);
+      expect(rowB.model).toBe('qwen/qwen3-embedding-8b'); // B's own mapping, untouched by A's traffic
+    });
+
+    it('clears stats when the master is retired (config cleared) so a reused URL starts fresh', async () => {
+      setOpenRouterConfig(MASTER_A, {
+        apiKey: 'sk-or-v1-x',
+        modeByRole: { embedding: 'cloud-only' },
+        allowedModels: { embedding: { model: 'qwen/qwen3-embedding-4b' } },
+      });
+      mockFetch({ data: [{ index: 0, embedding: new Array(2560).fill(0) }], usage: { total_tokens: 1 } });
+      await serveEmbedding({ role: 'embedding', serverUrl: MASTER_A, texts: ['a'] });
+      expect(getVirtualContainerStats(MASTER_A)[0].served).toBe(1);
+
+      clearOpenRouterConfig(MASTER_A);
+      expect(getVirtualContainerStats(MASTER_A)).toEqual([]);
+
+      // A fresh config push for the same URL (a different master process
+      // reusing it) starts with zeroed counters, not the old master's history.
+      setOpenRouterConfig(MASTER_A, {
+        apiKey: 'sk-or-v1-new-master',
+        modeByRole: { embedding: 'cloud-only' },
+        allowedModels: { embedding: { model: 'qwen/qwen3-embedding-4b' } },
+      });
+      expect(getVirtualContainerStats(MASTER_A)[0].served).toBe(0);
+    });
+
+    it('never includes the apiKey or any key-derived value in the stats payload', async () => {
+      setOpenRouterConfig(MASTER_A, {
+        apiKey: 'sk-or-v1-super-secret-stats-key',
+        modeByRole: { embedding: 'cloud-only' },
+        allowedModels: { embedding: { model: 'qwen/qwen3-embedding-4b' } },
+      });
+      mockFetch({ data: [{ index: 0, embedding: new Array(2560).fill(0) }], usage: { total_tokens: 1 } });
+      await serveEmbedding({ role: 'embedding', serverUrl: MASTER_A, texts: ['a'] });
+
+      const stats = getVirtualContainerStats(MASTER_A);
+      expect(JSON.stringify(stats)).not.toMatch(/sk-or-v1-super-secret-stats-key/);
     });
   });
 });

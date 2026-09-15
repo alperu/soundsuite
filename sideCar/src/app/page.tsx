@@ -8,6 +8,8 @@ import ContainerTable from '@/components/container-table';
 import StatsGrid from '@/components/stats-grid';
 import ActivityLog from '@/components/activity-log';
 import VramPanel, { type VramSnapshot } from '@/components/vram-panel';
+import VirtualContainerTable from '@/components/virtual-container-table';
+import type { VirtualContainerInfo } from '@/lib/virtual-inference';
 
 interface ContainerInfo {
   name: string;
@@ -42,6 +44,14 @@ interface MasterStatus {
   lastHeartbeatAt?: number | null;
   lastSeenServerVersion?: string | null;
   pendingCommandCount?: number;
+  /** Presence-only OpenRouter config status for this master — never the key. */
+  virtualInference?: {
+    openrouter: 'configured' | 'unset';
+    modeByRole: Record<string, string>;
+    rolesWithModel: string[];
+  };
+  /** Per-role OpenRouter activity for this master — the "Virtual Containers" data. */
+  virtualContainers?: VirtualContainerInfo[];
 }
 
 interface StatusData {
@@ -697,6 +707,8 @@ export default function Home() {
         onPull={handleContainerPull}
         onPullAndLoad={handleContainerPullAndLoad}
       />
+
+      <VirtualContainerTable masters={status?.masters} />
 
       {/* Active Tasks */}
       {status?.tasks && status.tasks.filter(t => t.status === 'running').length > 0 && (

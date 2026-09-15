@@ -89,10 +89,58 @@ export interface RoutingDecision {
   reason: string;
 }
 
+/** Per-(master, role) activity counters — what the sidecar's own UI renders
+ *  as a "virtual container" row. Keyed the same way as `byMaster`: never
+ *  merged or read across a different `serverUrl`. Holds no key material. */
+interface StatsRecord {
+  served: number;
+  lastServedAt: number | null;
+  lastDurationMs: number | null;
+  totalTokens: number;
+  failures: number;
+  /** Message only — never anything key-derived. */
+  lastError: string | null;
+  /** Why the last attempt went cloud, e.g. the local-unavailable reason. */
+  lastReason: string | null;
+  /** >0 while a call is in flight — drives the 'serving' live state. */
+  inFlight: number;
+  lastOutcome: 'success' | 'failure' | null;
+}
+
+function emptyStats(): StatsRecord {
+  return {
+    served: 0,
+    lastServedAt: null,
+    lastDurationMs: null,
+    totalTokens: 0,
+    failures: 0,
+    lastError: null,
+    lastReason: null,
+    inFlight: 0,
+    lastOutcome: null,
+  };
+}
+
 const G = processGlobal('virtual-inference', () => ({
   /** serverUrl -> config. Absent entry === local-only for every role. */
   byMaster: new Map<string, OpenRouterMasterConfig>(),
+  /** serverUrl -> role -> activity counters. */
+  statsByMaster: new Map<string, Map<string, StatsRecord>>(),
 }));
+
+function getOrCreateStats(serverUrl: string, role: string): StatsRecord {
+  let byRole = G.statsByMaster.get(serverUrl);
+  if (!byRole) {
+    byRole = new Map();
+    G.statsByMaster.set(serverUrl, byRole);
+  }
+  let rec = byRole.get(role);
+  if (!rec) {
+    rec = emptyStats();
+    byRole.set(role, rec);
+  }
+  return rec;
+}
 
 function sanitizeAllowedModels(raw: unknown): Record<string, OpenRouterModelConfig> {
   const out: Record<string, OpenRouterModelConfig> = {};
@@ -168,6 +216,7 @@ export function clearOpenRouterConfig(serverUrl: string): void {
   if (G.byMaster.delete(serverUrl)) {
     log.info(`[${serverUrl}] OpenRouter config cleared (master retired)`);
   }
+  G.statsByMaster.delete(serverUrl);
 }
 
 /** Presence-only status for unauthenticated surfaces (/api/status, /api/config).
@@ -187,6 +236,58 @@ export function getOpenRouterStatus(serverUrl: string): {
 
 function modeFor(cfg: OpenRouterMasterConfig | undefined, role: string): RoutingMode {
   return cfg?.modeByRole?.[role] ?? 'local-only';
+}
+
+/** One row of the sidecar's own "Virtual Containers" UI — a (master, role)
+ *  pair that has a model mapped, whether or not it has ever been served.
+ *  Key hygiene unchanged: no field here is or derives from the API key. */
+export interface VirtualContainerInfo {
+  serverUrl: string;
+  role: string;
+  model: string;
+  provider?: string;
+  dims?: number;
+  mode: RoutingMode;
+  served: number;
+  lastServedAt: number | null;
+  lastDurationMs: number | null;
+  totalTokens: number;
+  failures: number;
+  lastError: string | null;
+  lastReason: string | null;
+  state: 'idle' | 'serving' | 'failed';
+}
+
+/** Activity for every role this master has mapped a model for — the data
+ *  behind the sidecar UI's "Virtual Containers" section. Empty array when
+ *  the master hasn't pushed an OpenRouter config, or has pushed one with no
+ *  models mapped. Scoped to `serverUrl` like everything else in this module. */
+export function getVirtualContainerStats(serverUrl: string): VirtualContainerInfo[] {
+  const cfg = G.byMaster.get(serverUrl);
+  if (!cfg) return [];
+  const byRole = G.statsByMaster.get(serverUrl);
+  const out: VirtualContainerInfo[] = [];
+  for (const [role, modelCfg] of Object.entries(cfg.allowedModels)) {
+    const rec = byRole?.get(role);
+    const { provider, dims } = resolveModelDetails(modelCfg);
+    out.push({
+      serverUrl,
+      role,
+      model: modelCfg.model,
+      provider,
+      dims,
+      mode: modeFor(cfg, role),
+      served: rec?.served ?? 0,
+      lastServedAt: rec?.lastServedAt ?? null,
+      lastDurationMs: rec?.lastDurationMs ?? null,
+      totalTokens: rec?.totalTokens ?? 0,
+      failures: rec?.failures ?? 0,
+      lastError: rec?.lastError ?? null,
+      lastReason: rec?.lastReason ?? null,
+      state: rec && rec.inFlight > 0 ? 'serving' : rec?.lastOutcome === 'failure' ? 'failed' : 'idle',
+    });
+  }
+  return out;
 }
 
 /**
@@ -318,14 +419,21 @@ export async function serveEmbedding(params: ServeEmbeddingParams): Promise<Serv
   // these exist, so this is unreachable in practice, not a real fallback.
   if (!cfg || !modelCfg) return { source: 'local' };
 
+  const rec = getOrCreateStats(serverUrl, role);
+  rec.lastReason = decision.reason;
+
   if (params.requestedModel && params.requestedModel !== modelCfg.model) {
+    const message = `Model "${params.requestedModel}" is not allow-listed for role "${role}" on this master`;
+    rec.failures++;
+    rec.lastError = message;
+    rec.lastOutcome = 'failure';
     log.error(
       `[${serverUrl}] REFUSED embedding request for role "${role}": caller asked for model ` +
       `"${params.requestedModel}" but this master's allow-list maps "${role}" to "${modelCfg.model}" — ` +
       `a model outside the requesting master's own allow-list is never served, even when another ` +
       `master's allow-list would permit it`,
     );
-    throw new Error(`Model "${params.requestedModel}" is not allow-listed for role "${role}" on this master`);
+    throw new Error(message);
   }
 
   const { provider, dims } = resolveModelDetails(modelCfg);
@@ -335,11 +443,14 @@ export async function serveEmbedding(params: ServeEmbeddingParams): Promise<Serv
       `pin known or configured for this model; an unpinned embedding call can silently split the vector ` +
       `space across providers, so this always fails closed to local rather than guessing`,
     );
+    // Fails closed to local, not a served failure — no counter bump; the
+    // request still completes (locally), it's a misconfiguration to fix.
     return { source: 'local' };
   }
 
   const label = formatModelLabel(modelCfg, dims);
   const startedAt = Date.now();
+  rec.inFlight++;
   try {
     const result = await orEmbed(cfg.apiKey, texts, modelCfg.model, { pinProvider: provider, expectedDims: dims });
     const ms = Date.now() - startedAt;
@@ -347,6 +458,11 @@ export async function serveEmbedding(params: ServeEmbeddingParams): Promise<Serv
       `[virtual-inference] [${serverUrl}] embedding via OpenRouter ${label} completed in ${ms}ms ` +
       `(${result.totalTokens ?? '?'} tokens, ${result.vectors.length} vector${result.vectors.length === 1 ? '' : 's'})`,
     );
+    rec.served++;
+    rec.lastServedAt = Date.now();
+    rec.lastDurationMs = ms;
+    rec.totalTokens += result.totalTokens ?? 0;
+    rec.lastOutcome = 'success';
     return {
       source: 'openrouter',
       embeddings: result.vectors,
@@ -356,8 +472,15 @@ export async function serveEmbedding(params: ServeEmbeddingParams): Promise<Serv
     };
   } catch (err) {
     const ms = Date.now() - startedAt;
-    log.error(`[virtual-inference] [${serverUrl}] embedding via OpenRouter ${label} FAILED after ${ms}ms: ${(err as Error).message}`);
+    const message = (err as Error).message;
+    log.error(`[virtual-inference] [${serverUrl}] embedding via OpenRouter ${label} FAILED after ${ms}ms: ${message}`);
+    rec.failures++;
+    rec.lastDurationMs = ms;
+    rec.lastError = message;
+    rec.lastOutcome = 'failure';
     throw err;
+  } finally {
+    rec.inFlight--;
   }
 }
 
@@ -393,18 +516,26 @@ export async function serveRerank(params: ServeRerankParams): Promise<ServeReran
   const modelCfg = cfg?.allowedModels?.[role];
   if (!cfg || !modelCfg) return { source: 'local' };
 
+  const rec = getOrCreateStats(serverUrl, role);
+  rec.lastReason = decision.reason;
+
   if (params.requestedModel && params.requestedModel !== modelCfg.model) {
+    const message = `Model "${params.requestedModel}" is not allow-listed for role "${role}" on this master`;
+    rec.failures++;
+    rec.lastError = message;
+    rec.lastOutcome = 'failure';
     log.error(
       `[${serverUrl}] REFUSED rerank request for role "${role}": caller asked for model ` +
       `"${params.requestedModel}" but this master's allow-list maps "${role}" to "${modelCfg.model}" — ` +
       `a model outside the requesting master's own allow-list is never served, even when another ` +
       `master's allow-list would permit it`,
     );
-    throw new Error(`Model "${params.requestedModel}" is not allow-listed for role "${role}" on this master`);
+    throw new Error(message);
   }
 
   const label = modelCfg.note ? `${modelCfg.model} (${modelCfg.note})` : modelCfg.model;
   const startedAt = Date.now();
+  rec.inFlight++;
   try {
     const result = await orRerank(cfg.apiKey, query, documents, modelCfg.model, { topN: params.topN });
     const ms = Date.now() - startedAt;
@@ -412,15 +543,28 @@ export async function serveRerank(params: ServeRerankParams): Promise<ServeReran
       `[virtual-inference] [${serverUrl}] rerank via OpenRouter ${label} completed in ${ms}ms ` +
       `(${result.totalTokens ?? '?'} tokens, ${result.results.length} scored)`,
     );
+    rec.served++;
+    rec.lastServedAt = Date.now();
+    rec.lastDurationMs = ms;
+    rec.totalTokens += result.totalTokens ?? 0;
+    rec.lastOutcome = 'success';
     return { source: 'openrouter', results: result.results, model: modelCfg.model, totalTokens: result.totalTokens };
   } catch (err) {
     const ms = Date.now() - startedAt;
-    log.error(`[virtual-inference] [${serverUrl}] rerank via OpenRouter ${label} FAILED after ${ms}ms: ${(err as Error).message}`);
+    const message = (err as Error).message;
+    log.error(`[virtual-inference] [${serverUrl}] rerank via OpenRouter ${label} FAILED after ${ms}ms: ${message}`);
+    rec.failures++;
+    rec.lastDurationMs = ms;
+    rec.lastError = message;
+    rec.lastOutcome = 'failure';
     throw err;
+  } finally {
+    rec.inFlight--;
   }
 }
 
 /** Test seam. */
 export function __resetVirtualInferenceForTest(): void {
   G.byMaster.clear();
+  G.statsByMaster.clear();
 }

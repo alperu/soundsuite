@@ -10,7 +10,7 @@ import { tasks } from './task-tracker';
 import { getBootEvents, getBootEpoch } from './boot-events';
 import { openLease, closeLease, closeAllLeases, touchRoleLeases, leaseSummary } from './leases';
 import { detectAdvertisableAddress, type InterfaceMap } from './agent-address';
-import { resolveRouting, isCloudOnly, getOpenRouterStatus, serveEmbedding, serveRerank } from './virtual-inference';
+import { resolveRouting, isCloudOnly, getOpenRouterStatus, getVirtualContainerStats, serveEmbedding, serveRerank } from './virtual-inference';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -1151,6 +1151,10 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
       // Presence only — never the key or a prefix of it. /api/status and
       // /api/config are unauthenticated on the LAN.
       virtualInference: getOpenRouterStatus(m.serverUrl),
+      // Per-role activity — what the sidecar's own UI renders as "virtual
+      // containers". Same key hygiene as virtualInference above: model,
+      // provider, counters and error MESSAGES only, never the key.
+      virtualContainers: getVirtualContainerStats(m.serverUrl),
     })),
     savedAgentUrl: state.savedAgentUrl,
     dockerMode: getDockerMode(),
