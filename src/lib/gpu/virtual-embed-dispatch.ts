@@ -33,6 +33,7 @@
 import { sendToSidecar, getFleetStatus } from './fleet-router';
 import { getCanonicalMasterUrl } from './master-identity';
 import { beginCall, endCall, chargeEmbeddingTokens } from '@/lib/openrouter/client';
+import { getConfig } from '@/lib/db/config';
 import { createLogger } from '../logger';
 
 const logger = createLogger('VirtualEmbedDispatch');
@@ -40,6 +41,15 @@ const logger = createLogger('VirtualEmbedDispatch');
 // Embedding batches can be large (many chunks); give the sidecar's own
 // OpenRouter round trip more room than sendToSidecar's generic 15s POST
 // default before we give up on it and try the next sidecar / fall back.
+/**
+ * Fewest texts worth giving a share of its own.
+ *
+ * Below this the batch goes as ONE request: /embeddings accepts an array, so
+ * splitting small work only multiplies round trips. Above it, each additional
+ * share is a genuine parallel request rather than an extra handshake.
+ */
+const MIN_SHARE_TEXTS = 8;
+
 const VIRTUAL_EMBED_TIMEOUT_MS = 45_000;
 
 export interface DispatchVirtualEmbedOptions {
@@ -225,24 +235,65 @@ export async function dispatchVirtualEmbed(opts: DispatchVirtualEmbedOptions): P
   if (texts.length === 0) return [];
 
   const eligible = await getEligibleSidecars(role);
-  if (eligible.length === 0) {
-    logger.info('virtual-embed: no eligible sidecars for role, calling OpenRouter directly from master', { role });
-    return directFallback(texts);
-  }
 
-  // Round-robin by text index — deterministic, and matches the operator's
-  // "each file to a separate sidecar" framing when called per-file/per-batch
-  // upstream. Not load-aware by design (explicitly out of scope).
-  const shareTextIdx: number[][] = eligible.map(() => []);
-  texts.forEach((_, i) => shareTextIdx[i % eligible.length].push(i));
+  // How many requests run at once is a property of the CLOUD, not of the fleet.
+  //
+  // This used to create exactly one share per eligible sidecar, so three hosts
+  // meant three concurrent calls and zero hosts meant the entire batch went as
+  // a single serial request. That bound throughput to however many hosts
+  // happened to have the role enabled — which is backwards for cloud work: a
+  // sidecar in this path is a proxy holding an API key, not a GPU doing the
+  // embedding, and one host can carry many in-flight HTTPS calls at once.
+  //
+  // Shares are now sized by the configured concurrency and capped by the batch
+  // (never more shares than texts, so no empty request). Targets are cycled
+  // independently, so several shares may land on one sidecar, and with no
+  // sidecar at all the batch still parallelises master-direct instead of
+  // collapsing to one call.
+  //
+  // The real ceiling is OpenRouter's per-key rate limit, shared by every
+  // sidecar and the master since they all present the same key — hence a
+  // configured limit rather than "as many as possible".
+  // Concurrency is also bounded from BELOW by a minimum share size. Splitting a
+  // 3-text batch into 3 single-text calls would be three round trips to do work
+  // one request already batches — /embeddings takes an array, so a small batch
+  // is cheaper whole. Parallelism only pays once there is enough to divide.
+  const cfg = await getConfig();
+  const maxConcurrency = Math.max(1, cfg.openRouterMaxConcurrency ?? 8);
+  const shareCount = Math.max(1, Math.min(maxConcurrency, Math.ceil(texts.length / MIN_SHARE_TEXTS)));
+
+  const shareTextIdx: number[][] = Array.from({ length: shareCount }, () => []);
+  texts.forEach((_, i) => shareTextIdx[i % shareCount].push(i));
+  const limit = shareCount;
+
+  if (eligible.length === 0) {
+    logger.info('virtual-embed: no eligible sidecars — calling OpenRouter directly from master', {
+      role,
+      texts: texts.length,
+      concurrency: limit,
+    });
+  } else {
+    logger.info('virtual-embed: dispatching across sidecars', {
+      role,
+      texts: texts.length,
+      sidecars: eligible.length,
+      concurrency: limit,
+    });
+  }
 
   const results: number[][] = new Array(texts.length);
 
-  await Promise.all(eligible.map(async (sc, shareIdx) => {
-    const idxs = shareTextIdx[shareIdx];
+  await Promise.all(shareTextIdx.map(async (idxs, shareIdx) => {
     if (idxs.length === 0) return;
     const shareTexts = idxs.map(i => texts[i]);
-    const vectors = await dispatchShareWithFallback(sc, eligible, role, model, shareTexts, expectedDims, directFallback);
+    // Cycle targets independently of share count: with 2 sidecars and 8 shares
+    // each host takes 4, rather than the batch being limited to 2 in flight.
+    const vectors = eligible.length === 0
+      ? await directFallback(shareTexts)
+      : await dispatchShareWithFallback(
+          eligible[shareIdx % eligible.length],
+          eligible, role, model, shareTexts, expectedDims, directFallback,
+        );
     idxs.forEach((origIdx, j) => { results[origIdx] = vectors[j]; });
   }));
 

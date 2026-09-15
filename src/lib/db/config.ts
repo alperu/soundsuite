@@ -35,6 +35,19 @@ export interface AppConfig {
    *  Exceeding a cap reverts that role to local for the rest of the UTC day. */
   openRouterDailyCapUsd?: Record<string, number>;
   /**
+   * Maximum concurrent cloud embedding requests.
+   *
+   * Cloud throughput has no reason to be bounded by how many sidecars happen to
+   * hold the role — in cloud-only a sidecar is a proxy holding a key, not a GPU
+   * doing work, and one host can carry many in-flight HTTPS calls. The real
+   * ceiling is OpenRouter's per-key rate limit, which is shared across every
+   * sidecar and the master because they all present the same key.
+   *
+   * Default 8: enough to make a re-embed meaningfully parallel, low enough to
+   * leave headroom for the other master on the same key.
+   */
+  openRouterMaxConcurrency: number;
+  /**
    * Routing mode for the two embedding roles — see
    * docs/SPEC-openrouter-virtual-inference.md §3.
    *
@@ -289,6 +302,10 @@ export async function getConfig(): Promise<AppConfig> {
     openRouterCodeEmbeddingModel: configMap.get('openrouter.codeEmbeddingModel') || 'qwen/qwen3-embedding-4b',
     openRouterRerankModel: configMap.get('openrouter.rerankModel') || 'qwen/qwen3-reranker-8b',
     openRouterChatModel: configMap.get('openrouter.chatModel') || 'deepseek/deepseek-v4-flash',
+    openRouterMaxConcurrency: (() => {
+      const n = parseInt(configMap.get('openrouter.maxConcurrency') || '', 10);
+      return Number.isFinite(n) && n > 0 ? Math.min(n, 64) : 8;
+    })(),
     openRouterDailyCapUsd: (() => {
       const raw = configMap.get('openrouter.dailyCapUsd');
       if (!raw) return {};
@@ -646,6 +663,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.openRouterChatModel !== undefined) {
     updates.push({ key: 'openrouter.chatModel', value: config.openRouterChatModel });
+  }
+  if (config.openRouterMaxConcurrency !== undefined) {
+    updates.push({ key: 'openrouter.maxConcurrency', value: String(config.openRouterMaxConcurrency) });
   }
   if (config.openRouterDailyCapUsd !== undefined) {
     updates.push({ key: 'openrouter.dailyCapUsd', value: JSON.stringify(config.openRouterDailyCapUsd) });

@@ -157,16 +157,48 @@ describe('dispatchVirtualEmbed', () => {
       }
       throw new Error(`unexpected call ${path}`);
     });
-    const texts = ['t0', 't1', 't2', 't3'];
+    // Big enough to actually divide: shares are sized by concurrency and a
+    // MIN_SHARE_TEXTS floor, NOT by sidecar count, so a batch below that floor
+    // deliberately travels as one request (see the next test).
+    const texts = Array.from({ length: 16 }, (_, i) => `t${i}`);
     const directFallback = jest.fn();
 
     const result = await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts, expectedDims: DIMS, directFallback });
 
-    expect(result).toHaveLength(4);
+    expect(result).toHaveLength(16);
     expect(directFallback).not.toHaveBeenCalled();
-    // Deterministic round-robin: index % 2 — sc1 gets t0/t2, sc2 gets t1/t3.
-    expect(seenBySidecar['http://sc1:8098']).toEqual(['t0', 't2']);
-    expect(seenBySidecar['http://sc2:8098']).toEqual(['t1', 't3']);
+    // Both sidecars were used, and between them they carried every text exactly
+    // once. Which host got which share is an implementation detail; that the
+    // work was divided and nothing was dropped is the contract.
+    const carried = Object.values(seenBySidecar).flat().sort();
+    expect(Object.keys(seenBySidecar).length).toBeGreaterThan(1);
+    expect(carried).toEqual([...texts].sort());
+  });
+
+  it('keeps a small batch as ONE request rather than splitting it per sidecar', async () => {
+    // /embeddings takes an array, so splitting 4 texts into 4 calls would be
+    // three extra round trips to do work one request already batches.
+    mockGetFleetStatus.mockResolvedValue(fleetOf(['http://sc1:8098', 'http://sc2:8098']));
+    const calls: string[][] = [];
+    mockSendToSidecar.mockImplementation(async (url, path, body) => {
+      if (path === '/status') return statusEligible('embedding');
+      if (path === '/virtual-embed') {
+        const texts = (body as any).texts as string[];
+        calls.push(texts);
+        return { source: 'openrouter', embeddings: fakeVectors(texts.length), model: MODEL, dims: DIMS };
+      }
+      throw new Error(`unexpected call ${path}`);
+    });
+
+    const result = await dispatchVirtualEmbed({
+      role: 'embedding', model: MODEL,
+      texts: ['t0', 't1', 't2', 't3'],
+      expectedDims: DIMS, directFallback: jest.fn(),
+    });
+
+    expect(result).toHaveLength(4);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(['t0', 't1', 't2', 't3']);
   });
 
   it('re-dispatches a failing sidecar share to another eligible sidecar', async () => {
@@ -182,8 +214,9 @@ describe('dispatchVirtualEmbed', () => {
       }
       throw new Error(`unexpected call ${path}`);
     });
-    // 4 texts, round-robin over 2 sidecars: bad gets ['t0','t2'], good gets ['t1','t3'].
-    // bad's share must be RE-dispatched to good, not dropped.
+    // 4 texts is below MIN_SHARE_TEXTS, so this is ONE share. It is offered to
+    // the first eligible sidecar (bad), which fails — the share must then be
+    // RE-dispatched to good rather than dropped or silently shortened.
     const texts = ['t0', 't1', 't2', 't3'];
     const directFallback = jest.fn();
 
@@ -192,9 +225,9 @@ describe('dispatchVirtualEmbed', () => {
     expect(result).toHaveLength(4);
     result.forEach((v) => expect(v).toHaveLength(DIMS));
     expect(directFallback).not.toHaveBeenCalled();
-    // The good sidecar must have actually received BOTH its own share and the
-    // re-dispatched share from bad — not just "something" of the right length.
-    expect(seenByGood.sort()).toEqual([['t1', 't3'], ['t0', 't2']].sort());
+    // good must have received the FULL share bad dropped — not a truncated one,
+    // and not merely "a call of the right length".
+    expect(seenByGood).toEqual([['t0', 't1', 't2', 't3']]);
   });
 
   it('attributes tokens and activity to the serving sidecar on success', async () => {
