@@ -53,6 +53,33 @@ interface RoleActivity {
   callsByServedBy: Record<string, number>;
 }
 
+/**
+ * The four routing policies, in operator language, mapped to the values the
+ * sidecar already speaks (virtualInference.mode.<role>). One value is stored,
+ * not a label plus an encoding that can drift apart.
+ *
+ * Order is deliberate: most local at the top, most cloud at the bottom, so the
+ * list reads as a dial rather than an unordered menu.
+ */
+export type EmbeddingRoutingMode = 'local-only' | 'local-first' | 'all-sources' | 'cloud-only';
+
+const ROUTING_POLICIES: Array<{ id: EmbeddingRoutingMode; label: string }> = [
+  { id: 'local-only', label: 'SideCar Only' },
+  { id: 'local-first', label: 'SideCar + OpenRouter Backup' },
+  { id: 'all-sources', label: 'SideCar + OpenRouter' },
+  { id: 'cloud-only', label: 'OpenRouter Only' },
+];
+
+const ROUTING_POLICY_HINT: Record<EmbeddingRoutingMode, string> = {
+  'local-only': 'Only the sidecar GPUs serve this role. Nothing calls out, and no cloud spend.',
+  'local-first':
+    'The sidecar GPUs serve. OpenRouter is used only when no healthy local provider exists or the local call fails, so a GPU coming back takes the traffic again.',
+  'all-sources':
+    'Both work at once and capacity adds up. Only safe while local and cloud agree numerically — a quantised local GGUF and the hosted weights can differ at the same width.',
+  'cloud-only':
+    'Only OpenRouter serves this role; the sidecar GPUs sit out. Every vector comes from one source, which is the answer when local quantisation does not match the cloud.',
+};
+
 const ACTIVITY_ROLES = ['embedding', 'code-embedding', 'completion', 'reranker'] as const;
 const ACTIVITY_ROLE_LABELS: Record<(typeof ACTIVITY_ROLES)[number], string> = {
   embedding: 'Embedding',
@@ -111,6 +138,14 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
   const [codeEmbeddingModel, setCodeEmbeddingModel] = useState(
     initialConfig.openRouterCodeEmbeddingModel || 'qwen/qwen3-embedding-4b',
   );
+  // Routing policy per embedding role. Defaults to the AppConfig default
+  // ('local-only') so an install that has never chosen keeps serving locally.
+  const [embeddingMode, setEmbeddingMode] = useState<EmbeddingRoutingMode>(
+    (initialConfig.virtualInferenceModeEmbedding as EmbeddingRoutingMode) || 'local-only',
+  );
+  const [codeEmbeddingMode, setCodeEmbeddingMode] = useState<EmbeddingRoutingMode>(
+    (initialConfig.virtualInferenceModeCodeEmbedding as EmbeddingRoutingMode) || 'local-only',
+  );
   const [rerankModel, setRerankModel] = useState(
     initialConfig.openRouterRerankModel || OPENROUTER_RERANK_MODELS[0]?.id || '',
   );
@@ -151,10 +186,15 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           apiKey: apiKeyInput.trim() ? apiKeyInput.trim() : undefined,
           enabled,
           embeddingModel,
+          // Was omitted here while being rendered and stored in state, so
+          // choosing a code-embedding model silently did nothing on save.
+          codeEmbeddingModel,
           rerankModel,
           chatModel,
           rlmSandboxModel,
           virtualInferenceModeRlm,
+          virtualInferenceModeEmbedding: embeddingMode,
+          virtualInferenceModeCodeEmbedding: codeEmbeddingMode,
           dailyCapUsd,
         }),
       });
@@ -452,6 +492,63 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
             ))}
           </div>
         </div>
+      </section>
+
+      {/* --- Routing policy ---
+          How each embedding role divides work between the sidecar GPUs and
+          OpenRouter. Mirrors the Fantom MCP dashboard's control so an operator
+          running both sees the same vocabulary, with one deliberate addition:
+          Fantom offers three policies and says outright that there is no
+          cloud-only option, because there OpenRouter is only ever extra
+          capacity beside the GPUs.
+
+          We offer a fourth. Local Ollama serves a QUANTISED GGUF while the
+          cloud serves the full-precision weights, so the two do not
+          necessarily agree numerically even at identical width — Fantom gates
+          on cosine >= 0.99 and a measurement here came back 0.985. When the
+          two sources disagree, mixing them writes one logical vector space in
+          two different geometries, and the only coherent answers are to use
+          one side or the other. OpenRouter Only is how you pick the cloud side
+          without also re-indexing everything locally. */}
+      <section className="bg-white border border-gray-200 rounded-lg p-6 space-y-4">
+        <h3 className="text-lg font-semibold text-gray-900">Routing Policy</h3>
+        <p className="text-xs text-gray-500">
+          How each role splits work between the sidecar GPUs and OpenRouter. Embedding is the
+          sensitive one: a vector written by one source is searched against vectors written by the
+          other, so the two must agree numerically — not merely share a width.
+        </p>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <Picker
+            label="Text embedding (ss-embedding)"
+            hint={ROUTING_POLICY_HINT[embeddingMode] ?? ''}
+            value={embeddingMode}
+            onChange={(v) => setEmbeddingMode(v as EmbeddingRoutingMode)}
+            options={ROUTING_POLICIES.map((p) => ({ id: p.id, label: p.label }))}
+          />
+          <Picker
+            label="Code embedding (ss-code-embedding)"
+            hint={ROUTING_POLICY_HINT[codeEmbeddingMode] ?? ''}
+            value={codeEmbeddingMode}
+            onChange={(v) => setCodeEmbeddingMode(v as EmbeddingRoutingMode)}
+            options={ROUTING_POLICIES.map((p) => ({ id: p.id, label: p.label }))}
+          />
+        </div>
+        {(embeddingMode === 'all-sources' || codeEmbeddingMode === 'all-sources') && (
+          <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
+            <strong>Mixing two sources into one index.</strong> This is only safe while local and
+            cloud produce comparable vectors for the same text. A local GGUF is quantised and the
+            hosted copy is not, so identical width is not sufficient — if search quality looks off,
+            switch the role to a single source rather than tuning around it.
+          </p>
+        )}
+        {(embeddingMode === 'cloud-only' || codeEmbeddingMode === 'cloud-only') && (
+          <p className="text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded p-2">
+            <strong>OpenRouter only.</strong> The sidecar GPUs stop serving this role, so every
+            vector comes from one source and the quantisation mismatch cannot arise. Existing
+            vectors written locally stay as they are — if they came from a different model or width,
+            they still need a re-index.
+          </p>
+        )}
       </section>
 
       {/* --- Model pickers --- */}

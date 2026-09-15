@@ -23,6 +23,25 @@ function pickWritableKey(raw: unknown): string | undefined {
   return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : undefined;
 }
 
+/**
+ * The four routing policies an operator can pick for an embedding role, in the
+ * sidecar's own vocabulary.
+ *
+ * An unrecognised value yields `undefined` — which `updateConfig` reads as
+ * "leave it alone" — rather than falling back to a default. Silently rewriting
+ * a mode the caller did not ask for is how a role ends up routing somewhere
+ * nobody chose, and for embedding that means vectors landing in the wrong
+ * space.
+ */
+const EMBEDDING_MODES = ['local-only', 'local-first', 'all-sources', 'cloud-only'] as const;
+type EmbeddingMode = (typeof EMBEDDING_MODES)[number];
+
+function pickEmbeddingMode(raw: unknown): EmbeddingMode | undefined {
+  return typeof raw === 'string' && (EMBEDDING_MODES as readonly string[]).includes(raw)
+    ? (raw as EmbeddingMode)
+    : undefined;
+}
+
 export async function GET(request: NextRequest) {
   const denied = await requireAdminApiAccess(request, 'openrouter/settings');
   if (denied) return denied;
@@ -43,6 +62,13 @@ export async function GET(request: NextRequest) {
       // resolveRlmEndpoint() in stream-rlm.ts).
       rlmSandboxModel: config.rlmSandboxModel,
       virtualInferenceModeRlm: config.virtualInferenceModeRlm,
+      // Routing policy per embedding role — the four-way choice rendered on
+      // /admin/openrouter. Stored as the sidecar's own vocabulary
+      // (virtualInference.mode.<role>) rather than a separate policy enum, so
+      // there is one value to reason about rather than a label and an encoding
+      // that can disagree.
+      virtualInferenceModeEmbedding: config.virtualInferenceModeEmbedding,
+      virtualInferenceModeCodeEmbedding: config.virtualInferenceModeCodeEmbedding,
       dailyCapUsd: config.openRouterDailyCapUsd ?? {},
     });
   } catch (error) {
@@ -81,6 +107,8 @@ export async function POST(request: NextRequest) {
         body.virtualInferenceModeRlm === 'local-only' || body.virtualInferenceModeRlm === 'local-first'
           ? body.virtualInferenceModeRlm
           : undefined,
+      virtualInferenceModeEmbedding: pickEmbeddingMode(body.virtualInferenceModeEmbedding),
+      virtualInferenceModeCodeEmbedding: pickEmbeddingMode(body.virtualInferenceModeCodeEmbedding),
       openRouterDailyCapUsd: dailyCapUsd,
     });
 
