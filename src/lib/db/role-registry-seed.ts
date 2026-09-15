@@ -48,22 +48,52 @@ function modesForOs(os: SidecarEntry['hostOs']): string[] {
   return [...COMMON_MODES];
 }
 
+/** Marks a host as having been seeded once, so it is never auto-seeded again. */
+function seededMarkerKey(sidecarUrl: string): string {
+  return `roleRegistry.seeded.${sidecarUrl.replace(/^https?:\/\//, '').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+}
+
 /**
- * Seed default assignments for a single host on demand. Idempotent: a no-op
- * when the host already has at least one HostRoleAssignment row.
+ * Seed default assignments for a single host, ONCE EVER.
  *
- * Used by fleet-router.pushModelRegistry so the first config push for a
- * freshly-registered sidecar populates the expected mode set based on its
- * detected OS — operators do not have to click around the admin UI before
- * a sidecar's containers appear.
+ * Called from `pushModelRegistry` and `pushFullConfig` so a freshly-registered
+ * sidecar comes up with a sensible mode set for its OS and an operator does not
+ * have to click around before containers appear.
+ *
+ * Why a persistent marker and not just "are there zero rows":
+ *
+ * Both callers run on EVERY push, and "zero rows" is also what an operator who
+ * has deliberately turned every role off looks like. So the old row-count check
+ * re-seeded those hosts — enabled — on the very next push, making it impossible
+ * to disable a host at all. That got sharply worse once config pushes started
+ * firing on settings-save and on heartbeat self-heal rather than only at
+ * registration: the roles came back within seconds.
+ *
+ * The marker distinguishes "never configured" from "deliberately emptied",
+ * which a row count cannot. It is also set for hosts that already have rows, so
+ * existing fleets are grandfathered and cannot be re-seeded after being cleared.
  */
 export async function seedAssignmentsForHost(
   sidecarUrl: string,
   hostOs: SidecarEntry['hostOs'],
 ): Promise<number> {
   const url = sidecarUrl.replace(/\/+$/, '');
+  const markerKey = seededMarkerKey(url);
+
+  const marker = await prisma.config.findUnique({ where: { key: markerKey } });
+  if (marker) return 0;
+
   const existing = await prisma.hostRoleAssignment.count({ where: { sidecarUrl: url } });
-  if (existing > 0) return 0;
+  if (existing > 0) {
+    // Already configured before markers existed — record that, so clearing its
+    // roles later is respected rather than undone.
+    await prisma.config.upsert({
+      where: { key: markerKey },
+      create: { key: markerKey, value: new Date().toISOString() },
+      update: {},
+    });
+    return 0;
+  }
   const modes = modesForOs(hostOs);
   log.info(
     `Seeding ${modes.length} default assignments for ${url} on demand (hostOs=${hostOs ?? 'unknown'})`,
@@ -80,6 +110,14 @@ export async function seedAssignmentsForHost(
       },
     });
   }
+  // Written only after a successful seed, so a failure part-way through is
+  // retried on the next push rather than leaving the host half-configured and
+  // permanently marked.
+  await prisma.config.upsert({
+    where: { key: markerKey },
+    create: { key: markerKey, value: new Date().toISOString() },
+    update: { value: new Date().toISOString() },
+  });
   return modes.length;
 }
 
