@@ -21,10 +21,18 @@
  * an existing table. A share that fails on every eligible sidecar falls back
  * to the caller-supplied `directFallback` (the master calling OpenRouter
  * itself) rather than ever returning a partial or under-width result.
+ *
+ * Spend/activity attribution: every share dispatched to a sidecar here is
+ * recorded against the master's own OpenRouter counters
+ * (`src/lib/openrouter/client.ts` — `beginCall`/`endCall`/
+ * `chargeEmbeddingTokens`), tagged `servedBy: 'sidecar:<url>'`. See
+ * `sendShare()` below for why this is necessary at all: the sidecar spends
+ * its own key, so the master's `embed()` never runs for these tokens.
  */
 
 import { sendToSidecar, getFleetStatus } from './fleet-router';
 import { getCanonicalMasterUrl } from './master-identity';
+import { beginCall, endCall, chargeEmbeddingTokens } from '@/lib/openrouter/client';
 import { createLogger } from '../logger';
 
 const logger = createLogger('VirtualEmbedDispatch');
@@ -103,6 +111,18 @@ async function getEligibleSidecars(role: string): Promise<EligibleSidecar[]> {
  * quietly answering "use local" for a request the master already decided is
  * this share's cloud half.
  */
+/**
+ * Send one share to one sidecar and, on success, attribute its spend/activity
+ * to the master's own OpenRouter counters (`src/lib/openrouter/client.ts`).
+ *
+ * This is the fix for the attribution gap: the sidecar makes the actual HTTPS
+ * call to OpenRouter with its own key (see `openrouter-client.ts` there), so
+ * nothing in the master's `embed()` ever runs for a sidecar-served share —
+ * without this, `getSpendToday('embedding')` stayed at 0 while the account
+ * was genuinely being billed. `handleVirtualEmbed` (sideCar/src/lib/handlers.ts)
+ * already returns `totalTokens` on its `ServeEmbeddingResult`, so this needed
+ * no sidecar-side change — only reading the field here and charging it.
+ */
 async function sendShare(
   sidecarUrl: string,
   role: string,
@@ -110,39 +130,51 @@ async function sendShare(
   texts: string[],
   expectedDims: number,
 ): Promise<number[][]> {
-  const result = await sendToSidecar(
-    sidecarUrl,
-    '/virtual-embed',
-    { role, model, texts, localAvailable: false },
-    'POST',
-    VIRTUAL_EMBED_TIMEOUT_MS,
-  );
-
-  if (result?.error) {
-    throw new Error(`sidecar ${sidecarUrl} refused virtual-embed: ${result.error}`);
-  }
-  if (result?.source === 'local') {
-    // Should not happen given localAvailable:false, but never trust a
-    // mislabeled/absent field over the actual payload shape.
-    throw new Error(`sidecar ${sidecarUrl} routed virtual-embed to local instead of OpenRouter`);
-  }
-
-  const vectors = result?.embeddings;
-  if (!Array.isArray(vectors) || vectors.length !== texts.length) {
-    throw new Error(
-      `sidecar ${sidecarUrl} returned ${Array.isArray(vectors) ? vectors.length : 'no'} vectors for ` +
-        `${texts.length} texts`,
+  const startedAt = Date.now();
+  const servedBy = `sidecar:${sidecarUrl}` as const;
+  beginCall(role);
+  try {
+    const result = await sendToSidecar(
+      sidecarUrl,
+      '/virtual-embed',
+      { role, model, texts, localAvailable: false },
+      'POST',
+      VIRTUAL_EMBED_TIMEOUT_MS,
     );
-  }
-  for (const v of vectors) {
-    if (!Array.isArray(v) || v.length !== expectedDims) {
+
+    if (result?.error) {
+      throw new Error(`sidecar ${sidecarUrl} refused virtual-embed: ${result.error}`);
+    }
+    if (result?.source === 'local') {
+      // Should not happen given localAvailable:false, but never trust a
+      // mislabeled/absent field over the actual payload shape.
+      throw new Error(`sidecar ${sidecarUrl} routed virtual-embed to local instead of OpenRouter`);
+    }
+
+    const vectors = result?.embeddings;
+    if (!Array.isArray(vectors) || vectors.length !== texts.length) {
       throw new Error(
-        `sidecar ${sidecarUrl} returned a ${Array.isArray(v) ? v.length : 'invalid'}-dim vector, expected ` +
-          `${expectedDims} — refusing rather than return a mixed-width batch`,
+        `sidecar ${sidecarUrl} returned ${Array.isArray(vectors) ? vectors.length : 'no'} vectors for ` +
+          `${texts.length} texts`,
       );
     }
+    for (const v of vectors) {
+      if (!Array.isArray(v) || v.length !== expectedDims) {
+        throw new Error(
+          `sidecar ${sidecarUrl} returned a ${Array.isArray(v) ? v.length : 'invalid'}-dim vector, expected ` +
+            `${expectedDims} — refusing rather than return a mixed-width batch`,
+        );
+      }
+    }
+
+    const totalTokens = typeof result?.totalTokens === 'number' ? result.totalTokens : undefined;
+    chargeEmbeddingTokens(role, model, totalTokens);
+    endCall(role, { durationMs: Date.now() - startedAt, success: true, servedBy, tokens: totalTokens });
+    return vectors;
+  } catch (err) {
+    endCall(role, { durationMs: Date.now() - startedAt, success: false, servedBy });
+    throw err;
   }
-  return vectors;
 }
 
 /** Try `primary`, then every other eligible sidecar in order, then fall back

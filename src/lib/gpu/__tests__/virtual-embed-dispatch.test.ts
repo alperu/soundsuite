@@ -17,6 +17,7 @@
 import { dispatchVirtualEmbed } from '../virtual-embed-dispatch';
 import { sendToSidecar, getFleetStatus } from '@/lib/gpu/fleet-router';
 import { getCanonicalMasterUrl } from '@/lib/gpu/master-identity';
+import { beginCall as mockBeginCall, endCall as mockEndCall, chargeEmbeddingTokens as mockChargeEmbeddingTokens } from '@/lib/openrouter/client';
 
 jest.mock('@/lib/logger', () => ({
   createLogger: () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }),
@@ -29,6 +30,16 @@ jest.mock('@/lib/gpu/fleet-router', () => ({
 
 jest.mock('@/lib/gpu/master-identity', () => ({
   getCanonicalMasterUrl: jest.fn(),
+}));
+
+// `@/lib/openrouter/client` pulls in `@/lib/db/config` -> `@/lib/db/prisma`,
+// which eagerly constructs a real PrismaClient at import time (see
+// prisma.ts) — never something a unit test should drag in. Mock the three
+// activity/spend functions this module actually calls instead.
+jest.mock('@/lib/openrouter/client', () => ({
+  beginCall: jest.fn(),
+  endCall: jest.fn(),
+  chargeEmbeddingTokens: jest.fn(),
 }));
 
 const mockSendToSidecar = sendToSidecar as jest.MockedFunction<typeof sendToSidecar>;
@@ -184,6 +195,50 @@ describe('dispatchVirtualEmbed', () => {
     // The good sidecar must have actually received BOTH its own share and the
     // re-dispatched share from bad — not just "something" of the right length.
     expect(seenByGood.sort()).toEqual([['t1', 't3'], ['t0', 't2']].sort());
+  });
+
+  it('attributes tokens and activity to the serving sidecar on success', async () => {
+    mockGetFleetStatus.mockResolvedValue(fleetOf(['http://sc1:8098']));
+    mockSendToSidecar.mockImplementation(async (url, path, body) => {
+      if (path === '/status') return statusEligible('embedding');
+      if (path === '/virtual-embed') {
+        const texts = (body as any).texts as string[];
+        return { source: 'openrouter', embeddings: fakeVectors(texts.length), model: MODEL, dims: DIMS, totalTokens: 42 };
+      }
+      throw new Error(`unexpected call ${path}`);
+    });
+    const texts = ['a', 'b'];
+    const directFallback = jest.fn();
+
+    await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts, expectedDims: DIMS, directFallback });
+
+    // Attribution must happen for the sidecar-served share — this is the
+    // fix for `getSpendToday('embedding')` staying at 0 while the sidecar
+    // spends its own OpenRouter key.
+    expect(mockChargeEmbeddingTokens).toHaveBeenCalledWith('embedding', MODEL, 42);
+    expect(mockBeginCall).toHaveBeenCalledWith('embedding');
+    expect(mockEndCall).toHaveBeenCalledWith(
+      'embedding',
+      expect.objectContaining({ success: true, servedBy: 'sidecar:http://sc1:8098', tokens: 42 }),
+    );
+  });
+
+  it('attributes a failed call to the sidecar without charging tokens', async () => {
+    mockGetFleetStatus.mockResolvedValue(fleetOf(['http://sc1:8098']));
+    mockSendToSidecar.mockImplementation(async (url, path) => {
+      if (path === '/status') return statusEligible('embedding');
+      if (path === '/virtual-embed') throw new Error('boom');
+      throw new Error(`unexpected call ${path}`);
+    });
+    const directFallback = jest.fn().mockResolvedValue(fakeVectors(1));
+
+    await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts: ['t0'], expectedDims: DIMS, directFallback });
+
+    expect(mockEndCall).toHaveBeenCalledWith(
+      'embedding',
+      expect.objectContaining({ success: false, servedBy: 'sidecar:http://sc1:8098' }),
+    );
+    expect(mockChargeEmbeddingTokens).not.toHaveBeenCalled();
   });
 
   it('falls back to directFallback (not silently dropped) even when directFallback itself is the last resort after every sidecar fails', async () => {

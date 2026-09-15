@@ -36,6 +36,52 @@ interface ModelAvailability {
   reason?: 'no-providers' | 'unknown-model';
 }
 
+interface LastCallInfo {
+  at: number;
+  durationMs: number;
+  servedBy: string;
+  success: boolean;
+}
+
+interface RoleActivity {
+  role: string;
+  inFlight: number;
+  callsToday: number;
+  tokensToday: number;
+  spendTodayUsd: number;
+  lastCall: LastCallInfo | null;
+  callsByServedBy: Record<string, number>;
+}
+
+const ACTIVITY_ROLES = ['embedding', 'code-embedding', 'completion', 'reranker'] as const;
+const ACTIVITY_ROLE_LABELS: Record<(typeof ACTIVITY_ROLES)[number], string> = {
+  embedding: 'Embedding',
+  'code-embedding': 'Code embedding',
+  completion: 'Chat / Completion',
+  reranker: 'Reranker',
+};
+const ACTIVITY_POLL_MS = 4000;
+/** A call finished within this window still reads as "active", not just
+ *  "idle with a recent history" — gives the "is it working?" glance a beat
+ *  to actually catch a fast embedding round trip. */
+const RECENT_MS = 5000;
+
+function fmtServedBy(servedBy: string): string {
+  if (servedBy === 'master-direct') return 'master (direct)';
+  if (servedBy.startsWith('sidecar:')) return `sidecar ${servedBy.slice('sidecar:'.length)}`;
+  return servedBy;
+}
+
+function fmtAgo(ms: number, nowMs: number): string {
+  const s = Math.max(0, Math.round((nowMs - ms) / 1000));
+  if (s < 5) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  return `${h}h ago`;
+}
+
 const PAGE_SIZE = 25;
 
 type SortKey = 'id' | 'contextLength' | 'pricePromptPerMTokens' | 'priceCompletionPerMTokens';
@@ -107,6 +153,35 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
       setSaving(false);
     }
   };
+
+  // --- Live activity (top-of-page "is it working?" panel) ---
+  const [activity, setActivity] = useState<Record<string, RoleActivity> | null>(null);
+  // `Date.now()` may not be called during render (react-hooks/purity) — the
+  // "active"/"Xs ago" reads are computed against this ticking clock instead,
+  // sourced from an effect, not from render itself.
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/openrouter/activity');
+        const body = await res.json();
+        if (!cancelled && body?.byRole) setActivity(body.byRole);
+      } catch {
+        // Transient — the next poll tries again; don't blank out a good
+        // last-known state over one dropped request.
+      }
+    };
+    poll();
+    const pollId = setInterval(poll, ACTIVITY_POLL_MS);
+    const clockId = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(pollId);
+      clearInterval(clockId);
+    };
+  }, []);
 
   // --- Credits / spend ---
   const [credits, setCredits] = useState<{
@@ -225,6 +300,24 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           {saveMessage.text}
         </div>
       )}
+
+      {/* --- Live activity: "is it working?" at a glance, per role --- */}
+      <section className="bg-white border border-gray-200 rounded-lg p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold text-gray-900">Live Activity</h3>
+          <span className="text-xs text-gray-400">refreshes every {ACTIVITY_POLL_MS / 1000}s</span>
+        </div>
+
+        {!activity ? (
+          <p className="text-sm text-gray-500">Loading…</p>
+        ) : (
+          <div className="grid sm:grid-cols-2 gap-4">
+            {ACTIVITY_ROLES.map((role) => (
+              <ActivityCard key={role} label={ACTIVITY_ROLE_LABELS[role]} data={activity[role]} nowMs={nowMs} />
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* --- API key + enable toggle --- */}
       <section className="bg-white border border-gray-200 rounded-lg p-6 space-y-4">
@@ -491,6 +584,86 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           </>
         )}
       </section>
+    </div>
+  );
+}
+
+function ActivityCard({ label, data, nowMs }: { label: string; data: RoleActivity | undefined; nowMs: number }) {
+  if (!data) {
+    return (
+      <div className="border border-gray-200 rounded-md p-4">
+        <div className="text-sm font-medium text-gray-700">{label}</div>
+        <p className="text-xs text-gray-400 mt-2">no data yet</p>
+      </div>
+    );
+  }
+
+  const active = data.inFlight > 0 || (data.lastCall != null && nowMs - data.lastCall.at < RECENT_MS);
+  const everCalled = data.callsToday > 0 || data.lastCall != null;
+  const sourceEntries = Object.entries(data.callsByServedBy).sort((a, b) => b[1] - a[1]);
+
+  return (
+    <div
+      className={`border rounded-md p-4 space-y-3 ${
+        active ? 'border-green-300 bg-green-50' : 'border-gray-200 bg-white'
+      }`}
+    >
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-medium text-gray-800">{label}</div>
+        <span
+          className={`text-xs px-2 py-0.5 rounded-full ${
+            active
+              ? 'bg-green-100 text-green-800'
+              : everCalled
+                ? 'bg-gray-100 text-gray-600'
+                : 'bg-gray-50 text-gray-400'
+          }`}
+        >
+          {active ? `active${data.inFlight > 0 ? ` · ${data.inFlight} in flight` : ''}` : everCalled ? 'idle' : 'never called'}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <div>
+          <div className="text-gray-400">Calls today</div>
+          <div className="text-gray-900 font-semibold">{data.callsToday}</div>
+        </div>
+        <div>
+          <div className="text-gray-400">Tokens today</div>
+          <div className="text-gray-900 font-semibold">{data.tokensToday.toLocaleString()}</div>
+        </div>
+        <div>
+          <div className="text-gray-400">Spent today</div>
+          <div className="text-gray-900 font-semibold">${data.spendTodayUsd.toFixed(4)}</div>
+        </div>
+      </div>
+
+      <div className="text-xs text-gray-500">
+        {data.lastCall ? (
+          <>
+            Last call: {fmtAgo(data.lastCall.at, nowMs)} · {data.lastCall.durationMs}ms ·{' '}
+            <span className={data.lastCall.success ? 'text-gray-700' : 'text-red-600'}>
+              {data.lastCall.success ? fmtServedBy(data.lastCall.servedBy) : 'failed'}
+            </span>
+          </>
+        ) : (
+          'No calls yet'
+        )}
+      </div>
+
+      {sourceEntries.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {sourceEntries.map(([servedBy, count]) => (
+            <span
+              key={servedBy}
+              className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-100"
+              title={servedBy}
+            >
+              {fmtServedBy(servedBy)}: {count}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -82,6 +82,19 @@ function classify(status: number, body: string): OpenRouterError['kind'] {
 // Spend guard
 // ---------------------------------------------------------------------------
 
+/** Who actually made the HTTP call to OpenRouter for a given completed call —
+ *  the master process itself, or a named sidecar spending its own key via
+ *  the `virtual-embed` WS command (see virtual-embed-dispatch.ts). This is
+ *  the "fleet vs direct" distinction the admin panel surfaces. */
+export type ServedBy = 'master-direct' | `sidecar:${string}`;
+
+export interface LastCallInfo {
+  at: number;
+  durationMs: number;
+  servedBy: ServedBy;
+  success: boolean;
+}
+
 interface SpendState {
   /** UTC day key, e.g. '2026-09-15'. Resets the running total. */
   day: string;
@@ -89,12 +102,62 @@ interface SpendState {
   /** Consecutive upstream failures; opens the circuit at the threshold. */
   consecutiveFailures: number;
   openedAt: number | null;
+  // --- Live activity, for the admin panel. Not the spend guard's concern —
+  // these counters are read-only display state, never consulted by
+  // assertSpendAllowed(). ---
+  /** >0 while a call for that role is in flight right now. */
+  inFlight: Record<string, number>;
+  /** Successful calls today, per role. Resets with usdByRole at UTC midnight. */
+  callsToday: Record<string, number>;
+  /** Tokens billed today, per role. Resets with usdByRole at UTC midnight. */
+  tokensToday: Record<string, number>;
+  /** Most recent completed call per role (success or failure). Deliberately
+   *  NOT reset on day roll — "last call: 11:58pm" should stay visible after
+   *  midnight rather than disappear, since it's a point-in-time fact, not a
+   *  running total. */
+  lastCall: Record<string, LastCallInfo | undefined>;
+  /** Successful calls today, per role, broken down by who served them
+   *  ('master-direct' or 'sidecar:<url>') — the fleet-vs-direct split the
+   *  admin panel shows. Resets with callsToday at UTC midnight. */
+  callsByServedBy: Record<string, Record<string, number>>;
 }
 
 const CIRCUIT_THRESHOLD = 5;
 const CIRCUIT_COOLDOWN_MS = 60_000;
 
-const spend: SpendState = { day: utcDay(), usdByRole: {}, consecutiveFailures: 0, openedAt: null };
+/**
+ * Held on `globalThis`, NOT as a plain module const.
+ *
+ * Next.js compiles instrumentation (where the ingestion worker runs) and route
+ * handlers as SEPARATE webpack layers, so a module-level object is instantiated
+ * once per layer. The worker would then increment its own copy while
+ * `/api/openrouter/activity` read a different one that never moves — the panel
+ * showing zeros while the account is being billed.
+ *
+ * That is not hypothetical: the identical mistake in the sidecar's `state`
+ * module made two masters report "disconnected / never" while actively
+ * heartbeating, and is why `sideCar/src/lib/process-global.ts` exists. The
+ * master's own `ws-relay.ts` keeps its maps on `globalThis` for the same
+ * reason.
+ *
+ * It matters beyond display: `assertSpendAllowed()` reads `usdByRole`, so a
+ * split store means the guard and the reported total disagree about how much
+ * has been spent.
+ */
+const spendGlobal = globalThis as unknown as { __ss_openrouter_spend__?: SpendState };
+const spend: SpendState =
+  spendGlobal.__ss_openrouter_spend__ ??
+  (spendGlobal.__ss_openrouter_spend__ = {
+    day: utcDay(),
+    usdByRole: {},
+    consecutiveFailures: 0,
+    openedAt: null,
+    inFlight: {},
+    callsToday: {},
+    tokensToday: {},
+    lastCall: {},
+    callsByServedBy: {},
+  });
 
 function utcDay(): string {
   return new Date().toISOString().slice(0, 10);
@@ -105,8 +168,75 @@ function rollDayIfNeeded(): void {
   if (spend.day !== today) {
     spend.day = today;
     spend.usdByRole = {};
+    spend.callsToday = {};
+    spend.tokensToday = {};
+    spend.callsByServedBy = {};
     logger.info('OpenRouter daily spend counters reset', { day: today });
   }
+}
+
+/** Mark a call as started for `role`. Always pair with `endCall()` in a
+ *  finally/catch — an unmatched `beginCall()` leaves the panel showing a
+ *  call "in flight" forever. */
+export function beginCall(role: string): void {
+  spend.inFlight[role] = (spend.inFlight[role] || 0) + 1;
+}
+
+/** Mark the most recently started call for `role` as finished. `tokens`,
+ *  when given and `success`, is added to today's per-role token counter —
+ *  separate from `recordSpend`/`chargeTokens`, which track USD; this tracks
+ *  volume so the panel can show "1,204 tokens today" even for a role with no
+ *  priced catalogue entry. */
+export function endCall(
+  role: string,
+  info: { durationMs: number; success: boolean; servedBy: ServedBy; tokens?: number },
+): void {
+  rollDayIfNeeded();
+  spend.inFlight[role] = Math.max(0, (spend.inFlight[role] || 0) - 1);
+  if (info.success) {
+    spend.callsToday[role] = (spend.callsToday[role] || 0) + 1;
+    if (info.tokens) spend.tokensToday[role] = (spend.tokensToday[role] || 0) + info.tokens;
+    const bySource = (spend.callsByServedBy[role] ??= {});
+    bySource[info.servedBy] = (bySource[info.servedBy] || 0) + 1;
+  }
+  spend.lastCall[role] = {
+    at: Date.now(),
+    durationMs: info.durationMs,
+    servedBy: info.servedBy,
+    success: info.success,
+  };
+}
+
+export interface RoleActivity {
+  role: string;
+  inFlight: number;
+  callsToday: number;
+  tokensToday: number;
+  spendTodayUsd: number;
+  lastCall: LastCallInfo | null;
+  /** Today's successful calls for this role, split by who served them —
+   *  `{'master-direct': 3, 'sidecar:http://sc1:8098': 12}`. The fleet-vs-direct
+   *  proof: a role served entirely by sidecars has no 'master-direct' key. */
+  callsByServedBy: Record<string, number>;
+}
+
+/** Snapshot of live activity for one role — the data behind each row of the
+ *  admin panel's activity section. */
+export function getActivity(role: string): RoleActivity {
+  rollDayIfNeeded();
+  return {
+    role,
+    inFlight: spend.inFlight[role] || 0,
+    callsToday: spend.callsToday[role] || 0,
+    tokensToday: spend.tokensToday[role] || 0,
+    spendTodayUsd: getSpendToday(role),
+    lastCall: spend.lastCall[role] ?? null,
+    callsByServedBy: { ...(spend.callsByServedBy[role] || {}) },
+  };
+}
+
+export function getAllActivity(roles: string[]): RoleActivity[] {
+  return roles.map((role) => getActivity(role));
 }
 
 export function recordSpend(role: string, usd: number): void {
@@ -129,6 +259,21 @@ export function recordSpend(role: string, usd: number): void {
 function chargeTokens(role: string, tokens: number | undefined, pricePerMTokens: number | undefined): void {
   if (!tokens || !pricePerMTokens) return;
   recordSpend(role, (tokens / 1_000_000) * pricePerMTokens);
+}
+
+/**
+ * Price and record an embedding call's tokens against `role`, by looking up
+ * `model` in the curated catalogue — the same pricing `embed()` uses below.
+ *
+ * Exported for `virtual-embed-dispatch.ts`: when a sidecar serves a share of
+ * an embedding batch, the HTTPS call to OpenRouter happens on the sidecar
+ * (it spends its own key), so nothing in `embed()` below ever runs for that
+ * share. Without this, sidecar-served embedding tokens were priced nowhere
+ * and `getSpendToday('embedding')` stayed at 0 while the account was
+ * actually being billed — see the module header's spend-guard note.
+ */
+export function chargeEmbeddingTokens(role: string, model: string, tokens: number | undefined): void {
+  chargeTokens(role, tokens, findEmbeddingModel(model)?.pricePerMTokens);
 }
 
 export function getSpendToday(role?: string): number {
@@ -169,6 +314,11 @@ export function __resetSpendForTest(): void {
   spend.usdByRole = {};
   spend.consecutiveFailures = 0;
   spend.openedAt = null;
+  spend.inFlight = {};
+  spend.callsToday = {};
+  spend.tokensToday = {};
+  spend.lastCall = {};
+  spend.callsByServedBy = {};
 }
 
 /** Throws when the role's daily cap is exceeded or the circuit is open. */
@@ -349,26 +499,41 @@ export async function embed(
     body.provider = { order: [opts.pinProvider], allow_fallbacks: false };
   }
 
-  const json = await post<{
-    data: Array<{ embedding: number[]; index: number }>;
-    usage?: { total_tokens?: number };
-  }>('/embeddings', body, opts.timeoutMs ?? 60_000);
+  const startedAt = Date.now();
+  beginCall(role);
+  let ended = false;
+  const finishCall = (success: boolean, tokens?: number) => {
+    if (ended) return;
+    ended = true;
+    endCall(role, { durationMs: Date.now() - startedAt, success, servedBy: 'master-direct', tokens });
+  };
+  try {
+    const json = await post<{
+      data: Array<{ embedding: number[]; index: number }>;
+      usage?: { total_tokens?: number };
+    }>('/embeddings', body, opts.timeoutMs ?? 60_000);
 
-  const sorted = [...json.data].sort((a, b) => a.index - b.index);
-  const vectors = sorted.map((d) => d.embedding);
-  const dims = vectors[0]?.length ?? 0;
+    const sorted = [...json.data].sort((a, b) => a.index - b.index);
+    const vectors = sorted.map((d) => d.embedding);
+    const dims = vectors[0]?.length ?? 0;
 
-  chargeTokens(role, json.usage?.total_tokens, findEmbeddingModel(model)?.pricePerMTokens);
+    chargeTokens(role, json.usage?.total_tokens, findEmbeddingModel(model)?.pricePerMTokens);
 
-  if (opts.expectedDims && dims !== opts.expectedDims) {
-    throw new OpenRouterError(
-      `OpenRouter model ${model} returned ${dims}-dim vectors but ${opts.expectedDims} was expected. ` +
-        `Refusing to continue — writing these would corrupt or destroy the target vector table.`,
-      500,
-      'server',
-    );
+    if (opts.expectedDims && dims !== opts.expectedDims) {
+      finishCall(false);
+      throw new OpenRouterError(
+        `OpenRouter model ${model} returned ${dims}-dim vectors but ${opts.expectedDims} was expected. ` +
+          `Refusing to continue — writing these would corrupt or destroy the target vector table.`,
+        500,
+        'server',
+      );
+    }
+    finishCall(true, json.usage?.total_tokens);
+    return { vectors, model, dims, totalTokens: json.usage?.total_tokens };
+  } catch (err) {
+    finishCall(false);
+    throw err;
   }
-  return { vectors, model, dims, totalTokens: json.usage?.total_tokens };
 }
 
 // ---------------------------------------------------------------------------
@@ -392,9 +557,23 @@ export async function rerankDocuments(
   await assertSpendAllowed(role);
   const body: Record<string, unknown> = { model, query, documents };
   if (opts.topN) body.top_n = opts.topN;
-  const out = await post<RerankResponse>('/rerank', body, opts.timeoutMs ?? 60_000);
-  chargeTokens(role, out.usage?.total_tokens, findRerankModel(model)?.pricePerMTokens);
-  return out;
+
+  const startedAt = Date.now();
+  beginCall(role);
+  try {
+    const out = await post<RerankResponse>('/rerank', body, opts.timeoutMs ?? 60_000);
+    chargeTokens(role, out.usage?.total_tokens, findRerankModel(model)?.pricePerMTokens);
+    endCall(role, {
+      durationMs: Date.now() - startedAt,
+      success: true,
+      servedBy: 'master-direct',
+      tokens: out.usage?.total_tokens,
+    });
+    return out;
+  } catch (err) {
+    endCall(role, { durationMs: Date.now() - startedAt, success: false, servedBy: 'master-direct' });
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -418,26 +597,39 @@ export async function chat(
   if (opts.temperature != null) body.temperature = opts.temperature;
   if (opts.maxTokens != null) body.max_tokens = opts.maxTokens;
 
-  const json = await post<{
-    choices: Array<{ message?: { content?: string } }>;
-    model?: string;
-    usage?: ChatResult['usage'];
-  }>('/chat/completions', body, opts.timeoutMs ?? 120_000);
+  const startedAt = Date.now();
+  beginCall(guardRole);
+  try {
+    const json = await post<{
+      choices: Array<{ message?: { content?: string } }>;
+      model?: string;
+      usage?: ChatResult['usage'];
+    }>('/chat/completions', body, opts.timeoutMs ?? 120_000);
 
-  // Chat is priced asymmetrically, so in/out tokens are charged separately
-  // rather than against a single per-M rate.
-  const def = findChatModel(model);
-  if (def) {
-    const inUsd = ((json.usage?.prompt_tokens ?? 0) / 1_000_000) * def.priceInPerM;
-    const outUsd = ((json.usage?.completion_tokens ?? 0) / 1_000_000) * def.priceOutPerM;
-    if (inUsd + outUsd > 0) recordSpend(guardRole, inUsd + outUsd);
+    // Chat is priced asymmetrically, so in/out tokens are charged separately
+    // rather than against a single per-M rate.
+    const def = findChatModel(model);
+    if (def) {
+      const inUsd = ((json.usage?.prompt_tokens ?? 0) / 1_000_000) * def.priceInPerM;
+      const outUsd = ((json.usage?.completion_tokens ?? 0) / 1_000_000) * def.priceOutPerM;
+      if (inUsd + outUsd > 0) recordSpend(guardRole, inUsd + outUsd);
+    }
+
+    endCall(guardRole, {
+      durationMs: Date.now() - startedAt,
+      success: true,
+      servedBy: 'master-direct',
+      tokens: json.usage?.total_tokens,
+    });
+    return {
+      content: json.choices?.[0]?.message?.content ?? '',
+      model: json.model ?? model,
+      usage: json.usage,
+    };
+  } catch (err) {
+    endCall(guardRole, { durationMs: Date.now() - startedAt, success: false, servedBy: 'master-direct' });
+    throw err;
   }
-
-  return {
-    content: json.choices?.[0]?.message?.content ?? '',
-    model: json.model ?? model,
-    usage: json.usage,
-  };
 }
 
 // ---------------------------------------------------------------------------
