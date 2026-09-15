@@ -80,14 +80,24 @@ export interface AppConfig {
    */
   virtualInferenceModeReranker: 'local-only' | 'local-first' | 'all-sources' | 'cloud-only';
   /**
-   * Governs whether resolveRlmEndpoint() (stream-rlm.ts) may fall back to
-   * ss-rlm-sandbox when no sidecar has ss-rlm running. `local-only`
-   * (default) preserves today's behaviour — no sidecar means no RLM, full
-   * stop. `local-first` allows the sandbox fallback. There is no
-   * `cloud-only` here: the sandbox still needs a sidecar to run the
-   * container in, it's just a different container than ss-rlm.
+   * How resolveRlmEndpoint() (stream-rlm.ts) chooses between the self-hosted
+   * ss-rlm fine-tune and the ss-rlm-sandbox hosted pattern.
+   *
+   *   'local-only'  (default) — ss-rlm or nothing. No sidecar running it means
+   *                 no RLM, full stop. Preserves pre-sandbox behaviour.
+   *   'local-first' — try ss-rlm, fall back to the sandbox. A run that falls
+   *                 back logs DEGRADED and emits a `notice`.
+   *   'cloud-only'  — go straight to the sandbox; never probe for ss-rlm.
+   *
+   * `cloud-only` is a slight abuse of the name shared with the other roles:
+   * the sandbox still runs in a *container on a sidecar*, so this is not
+   * "no local infrastructure" the way it is for embedding or rerank. It means
+   * "do not use the self-hosted RLM model" — which is the operator intent
+   * worth having, because probing for an ss-rlm that is deliberately not
+   * deployed costs a fleet round-trip on every single call and logs a
+   * DEGRADED warning for what is actually the chosen configuration.
    */
-  virtualInferenceModeRlm: 'local-only' | 'local-first';
+  virtualInferenceModeRlm: 'local-only' | 'local-first' | 'cloud-only';
   claudeApiKey?: string;
   geminiApiKey?: string;
   groqApiKey?: string;

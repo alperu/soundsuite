@@ -673,16 +673,28 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           />
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              RLM fallback mode — this master&apos;s setting
+              RLM mode — this master&apos;s setting
             </label>
             <select
               value={virtualInferenceModeRlm}
-              onChange={(e) => setVirtualInferenceModeRlm(e.target.value as 'local-only' | 'local-first')}
+              onChange={(e) =>
+                setVirtualInferenceModeRlm(e.target.value as 'local-only' | 'local-first' | 'cloud-only')
+              }
               className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
             >
               <option value="local-only">Local only (default) — no ss-rlm sidecar means no RLM</option>
-              <option value="local-first">Allow sandbox fallback — use ss-rlm-sandbox when ss-rlm is unavailable</option>
+              <option value="local-first">Local first — use ss-rlm-sandbox only when ss-rlm is unavailable</option>
+              <option value="cloud-only">OpenRouter only — always use ss-rlm-sandbox, never probe for ss-rlm</option>
             </select>
+            {virtualInferenceModeRlm === 'cloud-only' && !rlmSandboxModel && (
+              // cloud-only with no model is a dead end: resolveRlmEndpoint has
+              // nothing to fall back TO, so RLM is simply off. Say so here
+              // rather than let it look configured and fail at query time.
+              <p className="text-xs text-amber-700 mt-1">
+                Pick a model above — <strong>OpenRouter only</strong> with no sandbox model
+                configured disables RLM entirely.
+              </p>
+            )}
             <p className="text-xs text-gray-500 mt-1">
               Governs <code>virtualInference.mode.rlm</code> — same switch every other role
               (embedding/completion/reranker) uses to opt into a cloud/hosted fallback. This

@@ -297,10 +297,83 @@ export function trimMessagesToFit(
   return { removed, truncatedChars };
 }
 
+/** Minimal shape of what resolveRlmEndpoint needs from a fleet status. */
+interface FleetLike {
+  sidecars: Array<{ status: string; url: string; hostname?: string; sidecarStatus?: unknown }>;
+}
+
+/**
+ * Find a sidecar running ss-rlm-sandbox.
+ *
+ * Shared by both entry paths so they cannot drift:
+ *   `primary === true`  — cloud-only. The sandbox IS the configuration; a
+ *                         normal INFO, not a degradation.
+ *   `primary === false` — local-first. ss-rlm was wanted and is unavailable,
+ *                         so the answer is genuinely degraded and says so.
+ *
+ * The distinction matters operationally: logging DEGRADED for a deliberately
+ * chosen configuration trains people to ignore the word, and then it fails to
+ * warn on the day something really did degrade.
+ */
+function resolveSandboxEndpoint(
+  fleet: FleetLike,
+  sandboxModel: string | undefined,
+  primary: boolean,
+): ResolvedRlmEndpoint | null {
+  if (!sandboxModel) {
+    console.warn('[RLM] sandbox skipped — no rlm.sandboxModel configured on /admin/openrouter.');
+    return null;
+  }
+  for (const s of fleet.sidecars) {
+    if (s.status !== 'connected') continue;
+    const sandboxCS = (s.sidecarStatus as { containers?: Record<string, { status?: string }> } | undefined)
+      ?.containers?.['rlm-sandbox'];
+    if (!sandboxCS || sandboxCS.status !== 'running') continue;
+    try {
+      const host = new URL(s.url).hostname;
+      const budget = hostedContextBudget(sandboxModel);
+      const ctxNote = budget === RLM_CONTEXT_TOKENS
+        ? ' — model not in catalogue, using the self-hosted ceiling'
+        : '';
+      const where = `ss-rlm-sandbox on ${s.hostname ?? s.url} → http://${host}:${RLM_SANDBOX_PORT} (model=${sandboxModel}, ctx=${budget}${ctxNote})`;
+      if (primary) {
+        console.log(`[RLM] using ${where} — virtualInference.mode.rlm=cloud-only`);
+      } else {
+        console.warn(`[RLM] DEGRADED: falling back to ${where} — ss-rlm is unavailable`);
+      }
+      return { endpoint: `http://${host}:${RLM_SANDBOX_PORT}`, host, sandbox: true, model: sandboxModel, contextTokens: budget };
+    } catch { /* skip */ }
+  }
+  console.warn(`[RLM] no sidecar has rlm-sandbox running${primary ? ' (mode=cloud-only, so there is no ss-rlm to fall back to)' : ' either'}.`);
+  return null;
+}
+
 export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> {
   try {
     const { getFleetStatus } = await import('@/lib/gpu/fleet-router');
     const fleet = await getFleetStatus();
+
+    // ── Phase 0: cloud-only short-circuit ────────────────────────────────
+    // The operator has declared the sandbox to be the RLM. Probing for an
+    // ss-rlm that is deliberately not deployed costs a fleet round-trip on
+    // every call and then logs DEGRADED for what is actually the chosen
+    // configuration. Skip straight to the sandbox.
+    //
+    // Deliberately AFTER getFleetStatus() — the sandbox lives on a sidecar
+    // too, so we need the fleet either way; only the ss-rlm discovery below
+    // is skipped.
+    try {
+      const { getConfig } = await import('@/lib/db/config');
+      const cfg = await getConfig();
+      if (cfg.virtualInferenceModeRlm === 'cloud-only') {
+        return resolveSandboxEndpoint(fleet, cfg.rlmSandboxModel, true);
+      }
+    } catch (err) {
+      // A config read failure must not disable RLM — fall through to the
+      // normal discovery path, which is what an unconfigured install does.
+      console.warn(`[RLM] mode check failed, continuing with local discovery: ${(err as Error).message}`);
+    }
+
     const probed: string[] = [];
     // Track candidates whose cached rlm status is transitional ('not_found',
     // 'created', 'starting') so we can re-probe their live /api/status if
@@ -409,24 +482,7 @@ export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> 
         console.warn('[RLM] sandbox fallback skipped — virtualInference.mode.rlm=local-only (default). Set it on /admin/openrouter to allow.');
         return null;
       }
-      const sandboxModel = cfg.rlmSandboxModel;
-      if (!sandboxModel) {
-        console.warn('[RLM] sandbox fallback skipped — no rlm.sandboxModel configured on /admin/openrouter.');
-        return null;
-      }
-      for (const s of fleet.sidecars) {
-        if (s.status !== 'connected') continue;
-        const sandboxCS = (s.sidecarStatus as { containers?: Record<string, { status?: string }> } | undefined)
-          ?.containers?.['rlm-sandbox'];
-        if (!sandboxCS || sandboxCS.status !== 'running') continue;
-        try {
-          const host = new URL(s.url).hostname;
-          const budget = hostedContextBudget(sandboxModel);
-          console.warn(`[RLM] DEGRADED: falling back to ss-rlm-sandbox on ${s.hostname ?? s.url} → http://${host}:${RLM_SANDBOX_PORT} (model=${sandboxModel}, ctx=${budget}${budget === RLM_CONTEXT_TOKENS ? ' — model not in catalogue, using the self-hosted ceiling' : ''}) — ss-rlm is unavailable`);
-          return { endpoint: `http://${host}:${RLM_SANDBOX_PORT}`, host, sandbox: true, model: sandboxModel, contextTokens: budget };
-        } catch { /* skip */ }
-      }
-      console.warn('[RLM] sandbox fallback found no sidecar with rlm-sandbox=running either.');
+      return resolveSandboxEndpoint(fleet, cfg.rlmSandboxModel, false);
     } catch (err) {
       console.warn(`[RLM] sandbox fallback check failed: ${(err as Error).message}`);
     }

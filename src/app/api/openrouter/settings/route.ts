@@ -149,7 +149,9 @@ export async function POST(request: NextRequest) {
           ? body.rlmSandboxModel.trim()
           : undefined,
       virtualInferenceModeRlm:
-        body.virtualInferenceModeRlm === 'local-only' || body.virtualInferenceModeRlm === 'local-first'
+        body.virtualInferenceModeRlm === 'local-only' ||
+        body.virtualInferenceModeRlm === 'local-first' ||
+        body.virtualInferenceModeRlm === 'cloud-only'
           ? body.virtualInferenceModeRlm
           : undefined,
       virtualInferenceModeEmbedding: pickEmbeddingMode(body.virtualInferenceModeEmbedding),

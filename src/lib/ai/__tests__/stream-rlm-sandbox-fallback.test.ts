@@ -48,7 +48,13 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
     jest.clearAllMocks();
   });
 
-  it('resolves ss-rlm directly when running, without consulting sandbox config at all', async () => {
+  it('resolves ss-rlm directly when running, whatever the sandbox model says', async () => {
+    // This used to assert getConfig() was never called. That stopped being
+    // true when 'cloud-only' landed: the mode has to be read BEFORE ss-rlm
+    // discovery, because its entire purpose is to skip that discovery. The
+    // property worth pinning was never "no config read" — it is that in
+    // local-only/local-first a running ss-rlm wins regardless of what the
+    // sandbox is configured with. That is what this asserts now.
     mockGetFleetStatus.mockResolvedValue({
       sidecars: [
         sidecar({
@@ -56,11 +62,28 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
         }),
       ],
     });
+    mockGetConfig.mockResolvedValue({
+      virtualInferenceModeRlm: 'local-first',
+      rlmSandboxModel: 'deepseek/deepseek-v4.1-flash',
+    });
 
     const resolved = await resolveRlmEndpoint();
 
     expect(resolved).toEqual({ endpoint: 'http://sidecar-a:8100', host: 'sidecar-a', contextTokens: RLM_CONTEXT_TOKENS });
-    expect(mockGetConfig).not.toHaveBeenCalled();
+  });
+
+  it('still resolves ss-rlm when the config read throws — a config failure must not disable RLM', async () => {
+    mockGetFleetStatus.mockResolvedValue({
+      sidecars: [
+        sidecar({
+          sidecarStatus: { containers: { rlm: { status: 'running', image: 'vllm/vllm-openai:v0.21.0' } } },
+        }),
+      ],
+    });
+    mockGetConfig.mockRejectedValue(new Error('db unavailable'));
+
+    const resolved = await resolveRlmEndpoint();
+    expect(resolved?.endpoint).toBe('http://sidecar-a:8100');
   });
 
   it('returns null — no fallback — when ss-rlm is absent and virtualInference.mode.rlm is local-only (default)', async () => {
@@ -144,8 +167,11 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
 
     const resolved = await resolveRlmEndpoint();
 
+    // 8100, not 8101 — in local-first the self-hosted role wins. The mode IS
+    // read first now (cloud-only needs it before discovery), so this no longer
+    // asserts getConfig went uncalled; it asserts the outcome, which is the
+    // part that matters. The cloud-only suite below covers the inverse.
     expect(resolved).toEqual({ endpoint: 'http://sidecar-a:8100', host: 'sidecar-a', contextTokens: RLM_CONTEXT_TOKENS });
-    expect(mockGetConfig).not.toHaveBeenCalled();
   });
 
   it('skips a disconnected sidecar for the sandbox fallback', async () => {
@@ -167,5 +193,70 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
     const resolved = await resolveRlmEndpoint();
 
     expect(resolved).toBeNull();
+  });
+});
+
+/**
+ * `cloud-only` — the sandbox IS the RLM, not a fallback.
+ *
+ * Added because probing for an ss-rlm that is deliberately not deployed costs
+ * a live HTTP probe per transitional sidecar on every single call, and then
+ * logs DEGRADED for what is actually the chosen configuration. Logging
+ * DEGRADED for a deliberate setting trains people to ignore the word.
+ */
+describe('resolveRlmEndpoint — virtualInference.mode.rlm=cloud-only', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('uses the sandbox even when ss-rlm IS running — never probes for it', async () => {
+    mockGetFleetStatus.mockResolvedValue({
+      sidecars: [
+        sidecar({
+          sidecarStatus: {
+            containers: {
+              rlm: { status: 'running', image: 'vllm/vllm-openai:v0.21.0' },
+              'rlm-sandbox': { status: 'running' },
+            },
+          },
+        }),
+      ],
+    });
+    mockGetConfig.mockResolvedValue({
+      virtualInferenceModeRlm: 'cloud-only',
+      rlmSandboxModel: 'deepseek/deepseek-v4.1-flash',
+    });
+
+    const resolved = await resolveRlmEndpoint();
+
+    // 8101, not 8100 — the self-hosted role was available and deliberately ignored.
+    expect(resolved?.endpoint).toBe('http://sidecar-a:8101');
+    expect(resolved?.sandbox).toBe(true);
+    expect(resolved?.model).toBe('deepseek/deepseek-v4.1-flash');
+  });
+
+  it('returns null when no sandbox is running — there is nothing to fall back to', async () => {
+    mockGetFleetStatus.mockResolvedValue({
+      sidecars: [
+        sidecar({
+          sidecarStatus: { containers: { rlm: { status: 'running' }, 'rlm-sandbox': { status: 'exited' } } },
+        }),
+      ],
+    });
+    mockGetConfig.mockResolvedValue({
+      virtualInferenceModeRlm: 'cloud-only',
+      rlmSandboxModel: 'deepseek/deepseek-v4.1-flash',
+    });
+
+    // Deliberate: cloud-only means "do not use ss-rlm". Quietly serving the
+    // self-hosted model here would ignore an explicit operator instruction.
+    expect(await resolveRlmEndpoint()).toBeNull();
+  });
+
+  it('returns null when cloud-only is set but no sandbox model is configured', async () => {
+    mockGetFleetStatus.mockResolvedValue({
+      sidecars: [sidecar({ sidecarStatus: { containers: { 'rlm-sandbox': { status: 'running' } } } })],
+    });
+    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'cloud-only', rlmSandboxModel: '' });
+
+    expect(await resolveRlmEndpoint()).toBeNull();
   });
 });
