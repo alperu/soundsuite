@@ -103,11 +103,21 @@ MAX_TOKENS = _int_env("SS_MAX_TOKENS", 0) or None
 MAX_BUDGET_USD = _float_env("SS_MAX_BUDGET_USD", 0.0) or None
 
 
-def build_rlm():
+def build_rlm(master_url=None):
     """A fresh RLM per request: completion() spawns and tears down its own
     environment and LM handler, and sharing one across concurrent requests would
-    share REPL state between unrelated callers."""
-    default_headers = {"X-SoundSuite-Master": MASTER_URL} if MASTER_URL else None
+    share REPL state between unrelated callers.
+
+    `master_url` is the caller's identity, taken from the incoming request's
+    X-SoundSuite-Master header and forwarded on every sub-model call. It has to
+    be per-request rather than per-container: two masters register on the same
+    sidecar and each has its own key, model and budget, so a container-wide
+    value would make one master's traffic spend the other's money. The sidecar
+    refuses with 409 rather than guess, which is what surfaces here if the
+    header is missing.
+    """
+    effective_master = (master_url or MASTER_URL or "").strip()
+    default_headers = {"X-SoundSuite-Master": effective_master} if effective_master else None
     return RLM(
         backend="openai",
         backend_kwargs={
@@ -252,9 +262,17 @@ class Handler(BaseHTTPRequestHandler):
             self._error(400, "messages contained no text content")
             return
 
+        # Forward the caller's identity, so sub-model calls are billed to the
+        # master that asked. Case-insensitive: BaseHTTPRequestHandler's headers
+        # are, but be explicit rather than rely on it.
+        caller = self.headers.get("X-SoundSuite-Master") or self.headers.get("x-soundsuite-master")
+        if not caller and not MASTER_URL:
+            print("[rlm] no X-SoundSuite-Master on request and no SS_MASTER_URL — "
+                  "the sidecar will 409 if more than one master has a key", file=sys.stderr)
+
         started = time.time()
         try:
-            result = build_rlm().completion(prompt)
+            result = build_rlm(caller).completion(prompt)
         except Exception as e:
             took = time.time() - started
             print(f"[rlm] failed after {took:.1f}s: {type(e).__name__}: {e}", file=sys.stderr)

@@ -399,7 +399,7 @@ function rlmSandboxDef(containerName: string): ContainerDef {
     // Multi-arch, version-pinned. MUST match state.ts:defaultRegistry
     // ['rlm-sandbox'].image — see the comment there for why :latest is wrong
     // here and why both files have to change together.
-    image: 'ghcr.io/project-sandstar/rlm-sandbox:0.1.0',
+    image: 'ghcr.io/project-sandstar/rlm-sandbox:0.1.1',
     model: null,
     port: 8101,
     vram: 0,

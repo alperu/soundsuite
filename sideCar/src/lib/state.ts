@@ -254,7 +254,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
   // push replaces state.registry[role] wholesale, so editing only this file is
   // silently dropped at runtime.
   'rlm-sandbox': {
-    image: 'ghcr.io/project-sandstar/rlm-sandbox:0.1.0',
+    image: 'ghcr.io/project-sandstar/rlm-sandbox:0.1.1',
     model: null,
     port: 8101,
     vram: 0,
