@@ -72,7 +72,38 @@ export async function POST(request: NextRequest) {
       openRouterDailyCapUsd: dailyCapUsd,
     });
 
-    return NextResponse.json({ success: true });
+    // Push the new settings to every connected sidecar straight away.
+    //
+    // Without this the openrouter block only reaches a host when it REGISTERS —
+    // ws-relay.ts calls pushFullConfig on registration and nowhere else — so
+    // saving a key here appears to do nothing until each sidecar happens to
+    // reconnect, its Virtual Containers panel staying empty the whole time with
+    // no sign that anything is pending.
+    //
+    // Fire-and-forget per sidecar, matching how /api/config fans out
+    // pushModelRegistry: a host that is down must not fail the save, and the
+    // registration push stays as the backstop that catches it later.
+    let pushed = 0;
+    try {
+      const { getFleetStatus, pushFullConfig } = await import('@/lib/gpu/fleet-router');
+      const cfg = await getConfig();
+      const timeouts = {
+        embedding: cfg.gpuIdleEmbeddingMin,
+        completion: cfg.gpuIdleCompletionMin,
+        ocr: cfg.gpuIdleOcrMin,
+        reranker: cfg.gpuIdleRerankerMin,
+      };
+      const fleet = await getFleetStatus();
+      for (const sidecar of fleet.sidecars) {
+        pushed++;
+        pushFullConfig(sidecar.url, timeouts).catch(() => {});
+      }
+    } catch {
+      // Orchestration unavailable — settings are still saved, and the next
+      // sidecar registration will carry them.
+    }
+
+    return NextResponse.json({ success: true, pushedToSidecars: pushed });
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Failed to save OpenRouter settings';
     return NextResponse.json({ error: msg }, { status: 500 });
