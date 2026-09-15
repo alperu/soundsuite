@@ -10,7 +10,7 @@ import { tasks } from './task-tracker';
 import { getBootEvents, getBootEpoch } from './boot-events';
 import { openLease, closeLease, closeAllLeases, touchRoleLeases, leaseSummary } from './leases';
 import { detectAdvertisableAddress, type InterfaceMap } from './agent-address';
-import { resolveRouting, isCloudOnly, getOpenRouterStatus, getVirtualContainerStats, serveEmbedding, serveRerank } from './virtual-inference';
+import { resolveRouting, isCloudOnly, getOpenRouterStatus, getVirtualContainerStats, serveEmbedding, serveRerank, serveKeyInfo } from './virtual-inference';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -1220,6 +1220,23 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
  * key. `serverUrl` scopes it: a master's key/allow-list never applies to a
  * request that arrived under a different master's slot.
  */
+/**
+ * `virtual-key-info` — report the OpenRouter key's own rate limit and spend
+ * metadata to the master that pushed it.
+ *
+ * Takes no payload: it is scoped to the calling master's slot, and answers
+ * only with that slot's key metadata. Never gated on routing mode — the master
+ * needs the ceiling before it decides how hard to push the cloud, and a master
+ * running every role locally still has a balance worth showing.
+ */
+export async function handleVirtualKeyInfo(serverUrl: string): Promise<Record<string, unknown>> {
+  try {
+    return await serveKeyInfo(serverUrl);
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+}
+
 export async function handleVirtualEmbed(
   payload: Record<string, unknown>,
   serverUrl: string,

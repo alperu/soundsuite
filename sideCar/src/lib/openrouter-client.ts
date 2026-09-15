@@ -38,6 +38,33 @@ function authHeaders(apiKey: string): Record<string, string> {
   };
 }
 
+async function get<T>(apiKey: string, path: string, timeoutMs: number): Promise<T> {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(`${OPENROUTER_BASE_URL}${path}`, {
+      method: 'GET',
+      headers: authHeaders(apiKey),
+      signal: ctl.signal,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new OpenRouterClientError(`OpenRouter ${path} network error: ${msg}`, 0);
+  } finally {
+    clearTimeout(timer);
+  }
+  const text = await res.text();
+  if (!res.ok) {
+    throw new OpenRouterClientError(`OpenRouter ${path} failed (${res.status})`, res.status);
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new OpenRouterClientError(`OpenRouter ${path} returned non-JSON`, res.status);
+  }
+}
+
 async function post<T>(apiKey: string, path: string, body: unknown, timeoutMs: number): Promise<T> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
@@ -80,6 +107,22 @@ export interface EmbedResult {
   model: string;
   dims: number;
   totalTokens?: number;
+}
+
+/**
+ * GET the key's own metadata: rate limit, spend limit and usage.
+ *
+ * The master needs this to size its cloud budget BEFORE spending against it —
+ * every sidecar shares one OpenRouter key and the limit is per key, not per
+ * caller, so guessing means either wasting headroom or collecting 429s. The
+ * upstream envelope ({ data: { rate_limit: { requests, interval }, limit,
+ * usage, is_free_tier } }) is returned unchanged; the master parses it.
+ *
+ * Key hygiene is the same as everywhere else here: the key goes out in the
+ * Authorization header and never appears in a return value or an error.
+ */
+export async function keyInfo(apiKey: string, timeoutMs = 15_000): Promise<Record<string, unknown>> {
+  return get<Record<string, unknown>>(apiKey, '/key', timeoutMs);
 }
 
 export async function embed(apiKey: string, texts: string[], model: string, opts: EmbedOptions = {}): Promise<EmbedResult> {

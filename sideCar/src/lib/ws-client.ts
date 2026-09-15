@@ -20,7 +20,7 @@ import http from 'http';
 import https from 'https';
 import WebSocket from 'ws';
 import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, ensureSet, type MasterConnection } from './state';
-import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, handlePullModel, handleLoadModel, getTotalActiveRequests, handleVirtualEmbed, handleVirtualRerank } from './handlers';
+import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, handlePullModel, handleLoadModel, getTotalActiveRequests, handleVirtualEmbed, handleVirtualRerank, handleVirtualKeyInfo } from './handlers';
 import { switchMode, provisionContainers, getAllContainerStates, containersForMode } from './containers';
 import { discoverGpus } from './gpu';
 import { getContainerState, pullImage, createContainer, startContainer, dockerRequest, getDockerHostName } from './docker';
@@ -373,6 +373,7 @@ async function executeCommand(
     // behalf — scoped to m.serverUrl the same way acquire/release are.
     case 'virtual-embed': return handleVirtualEmbed(payload, m.serverUrl);
     case 'virtual-rerank': return handleVirtualRerank(payload, m.serverUrl);
+    case 'virtual-key-info': return handleVirtualKeyInfo(m.serverUrl);
     case 'start': {
       if (role) {
         // Honor operator opt-out — symmetric with acquire/pullModel/loadModel.

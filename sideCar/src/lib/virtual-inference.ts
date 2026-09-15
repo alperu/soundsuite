@@ -37,7 +37,7 @@
  */
 import { createLogger } from './logger';
 import { processGlobal } from './process-global';
-import { embed as orEmbed, rerank as orRerank } from './openrouter-client';
+import { embed as orEmbed, rerank as orRerank, keyInfo as orKeyInfo } from './openrouter-client';
 
 const log = createLogger('virtual-inference');
 
@@ -564,6 +564,31 @@ export async function serveRerank(params: ServeRerankParams): Promise<ServeReran
 }
 
 /** Test seam. */
+/**
+ * Return the OpenRouter key's own rate limit / spend metadata for this master.
+ *
+ * Deliberately NOT gated on any role's routing mode. Credits and the account
+ * rate limit are properties of the KEY, not of a role: a master running every
+ * role local still has a balance worth reading, and it needs the ceiling
+ * BEFORE it decides how hard to push the cloud. Gating this on mode is what
+ * made the master report "no virtual containers registered" while showing
+ * fifteen of them.
+ *
+ * Only requires that this master has pushed a key. The upstream envelope is
+ * passed through untouched; the key never appears in the result.
+ */
+export async function serveKeyInfo(serverUrl: string): Promise<Record<string, unknown>> {
+  const cfg = G.byMaster.get(serverUrl);
+  if (!cfg?.apiKey) {
+    return { error: `no OpenRouter key configured for master ${serverUrl}` };
+  }
+  try {
+    return await orKeyInfo(cfg.apiKey);
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+}
+
 export function __resetVirtualInferenceForTest(): void {
   G.byMaster.clear();
   G.statsByMaster.clear();
