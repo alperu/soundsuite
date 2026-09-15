@@ -76,3 +76,8 @@ tmp-*.mjs
 
 # Local project embedding/runtime cache
 .cache/
+
+# Sidecar runtime config — holds the AES-256-GCM encrypted OpenRouter store
+# (openrouter.enc.json). Encrypted at rest, but a usable credential must never
+# reach git regardless.
+sideCar/config/
