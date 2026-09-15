@@ -6,6 +6,17 @@ selecting OpenRouter as the single cloud aggregator.
 
 ---
 
+> **Operator policy, 2026-09-15.** Three rules drive the routing design below:
+> 1. **No reranker available locally → use OpenRouter.** Local reranking is
+>    CUDA-vLLM-only, so this is what gives Macs a reranker at all.
+> 2. **Local GPU unavailable for search/completion → use OpenRouter.**
+> 3. **Embedding uses ALL available sources — local and OpenRouter together.**
+>    Validated by measurement (§2.4), and legal only across sources serving the
+>    same model at the same width.
+>
+> Rule 3 overturns an earlier prohibition in §3 that was written before the
+> equivalence question had been measured.
+
 ## 0. What we are building, in one paragraph
 
 Every sidecar gains a **`virtualInference` capability**: when a role's local
@@ -338,11 +349,44 @@ vectors from a different provider into a table that already has one provider's
 vectors. That is the case the mode matrix forbids for embedding roles, and the
 reason the provider must be pinned per ingestion run.
 
-If you *do* later want one logical index served interchangeably by both
-providers, that needs the equivalence check: embed a synthetic fixture both
-ways, cosine-compare against a stored vector, require **≥ 0.99**. It is not on
-the critical path for the per-document design and is recorded here only so the
-distinction is not lost.
+### MEASURED 2026-09-15 — the equivalence question is now answered
+
+The check described above was run against the live fleet. **Local
+`qwen3-embedding:4b` and OpenRouter `qwen/qwen3-embedding-4b` (DeepInfra, pinned)
+are close enough to share one index.**
+
+Per-text cosine between the two providers' vectors, both 2560d:
+
+| Fixture | Cosine |
+|---|---|
+| synthetic legal sentence | 0.985940 |
+| a line of source code | 0.984510 |
+| synthetic testimony sentence | 0.988858 |
+
+That is **below the 0.99 bar** this document originally set — but the bar was the
+wrong test. What matters is not vector identity, it is whether **retrieval
+ranking** survives. So a second experiment embedded 8 documents two ways (all
+local, vs. alternating local/cloud) and ranked both against the same
+locally-embedded query:
+
+- **Ranking order: identical.** Top-3 identical.
+- Per-document score shift from using a cloud vector: **max 0.0164, mean 0.0076**
+- Inter-rank gaps in the same result set: **0.05 – 0.14**
+
+The perturbation is roughly an order of magnitude smaller than the gaps it would
+have to cross, which is why the ordering held. Documents separated by less than
+about 0.01 cosine *can* reorder between sources — acceptable, and the reranker
+re-scores the merged set downstream anyway.
+
+**Conclusion: mixing local and cloud within one index is safe, and only under one
+condition — the same model at the same width.** Mixing `:4b` (2560d) with `:8b`
+(4096d) is not merely degraded but unstorable, and would hit the drop-and-recreate
+path in §2.1. The `all-sources` mode in §3 therefore verifies model and dimension
+agreement across sources before engaging, and falls back to local-only otherwise.
+
+The 0.99 threshold is retained as a **re-test trigger**: if a provider changes,
+or a second provider starts serving a model, re-run both experiments rather than
+assuming this result carries over.
 
 Reranking and RLM have no such constraint at all — stateless, scored at query
 time, nothing persists. They may use every mode.
