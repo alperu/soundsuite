@@ -1176,7 +1176,77 @@ const ROLE_PORTS: Record<GpuRole, number> = {
  * 2. If none running, pick any reachable sidecar → send /acquire {role}
  * 3. Return host:port derived from sidecar IP + role port mapping
  */
+/**
+ * Ask each cloud provider to serve this role. Returns null when none can.
+ *
+ * Shared by Phase 0 (cloud-only: the operator's chosen path) and Phase 4
+ * (cloud fallback: every local phase failed). One implementation so the two
+ * cannot drift — the only difference is the phase number in the log line, and
+ * that a Phase 0 result is not a degradation.
+ */
+async function resolveCloudEndpoint(
+  role: GpuRole,
+  config: Awaited<ReturnType<typeof getConfig>>,
+  phase: 0 | 4,
+): Promise<ResolvedEndpoint | null> {
+  const { getCloudProviders } = await import('@/lib/gpu/cloud-provider');
+  for (const provider of getCloudProviders()) {
+    let endpoint: Awaited<ReturnType<typeof provider.resolve>> = null;
+    try {
+      endpoint = await provider.resolve(role, { config });
+    } catch (err) {
+      logger.warn(`Route phase ${phase}: cloud provider ${provider.id} threw`, { role, error: (err as Error).message });
+      continue;
+    }
+    if (!endpoint) continue;
+    logger.info(`Route resolved: ${role} → cloud:${provider.id} (${endpoint.model})`, {
+      phase,
+      role,
+      provider: provider.id,
+      model: endpoint.model,
+    });
+    return {
+      host: `cloud:${provider.id}`,
+      sidecarUrl: `cloud:${provider.id}`,
+      role,
+      source: 'cloud',
+      cloudProviderId: provider.id,
+      cloudModel: endpoint.model,
+    };
+  }
+  return null;
+}
+
 export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: string[] }): Promise<ResolvedEndpoint> {
+  // ── Phase 0: cloud-only ───────────────────────────────────────────────────
+  // The operator declared this role cloud-served. Go straight there.
+  //
+  // Until this existed, `cloud-only` was indistinguishable from `local-first`:
+  // the only mode gate in this function tested for `local-only` and treated
+  // every other value alike, so Phases 1-3 ran first and cloud was reached only
+  // when they ALL failed. Two consequences, both the opposite of the setting:
+  // a role set to "OpenRouter Only" kept using a local GPU whenever one
+  // happened to be running, and on a fleet with no such GPU every call paid the
+  // full local-probe cost — including live HTTP probes in Phase 3 — before
+  // falling through.
+  //
+  // Placed before getFleetStatus(): a cloud endpoint has no sidecar, no lease
+  // and no port, so the fleet is not needed on this path at all.
+  //
+  // Falls THROUGH rather than throwing when no provider can serve the role —
+  // a missing model or a tripped spend cap should degrade to local if local is
+  // there, not take the role down.
+  const phase0Config = await getConfig();
+  if (virtualInferenceModeFor(role, phase0Config) === 'cloud-only') {
+    const cloud = await resolveCloudEndpoint(role, phase0Config, 0);
+    if (cloud) return cloud;
+    logger.warn(
+      `Route phase 0: ${role} is cloud-only but no cloud provider could serve it — ` +
+      `falling through to local discovery`,
+      { role },
+    );
+  }
+
   const fleet = await getFleetStatus();
   const port = ROLE_PORTS[role];
   // Per-sidecar port lookup: the role catalog (buildRoleCatalog) advertises
@@ -1558,31 +1628,8 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
   // so an unconfigured install throws exactly as before.
   const cloudConfig = await getConfig();
   if (virtualInferenceModeFor(role, cloudConfig) !== 'local-only') {
-    const { getCloudProviders } = await import('@/lib/gpu/cloud-provider');
-    for (const provider of getCloudProviders()) {
-      let endpoint: Awaited<ReturnType<typeof provider.resolve>> = null;
-      try {
-        endpoint = await provider.resolve(role, { config: cloudConfig });
-      } catch (err) {
-        logger.warn(`Route phase 4: cloud provider ${provider.id} threw`, { role, error: (err as Error).message });
-        continue;
-      }
-      if (!endpoint) continue;
-      logger.info(`Route resolved: ${role} → cloud:${provider.id} (${endpoint.model})`, {
-        phase: 4,
-        role,
-        provider: provider.id,
-        model: endpoint.model,
-      });
-      return {
-        host: `cloud:${provider.id}`,
-        sidecarUrl: `cloud:${provider.id}`,
-        role,
-        source: 'cloud',
-        cloudProviderId: provider.id,
-        cloudModel: endpoint.model,
-      };
-    }
+    const cloud = await resolveCloudEndpoint(role, cloudConfig, 4);
+    if (cloud) return cloud;
   }
 
   const sidecarSummary = fleet.sidecars.map(s => {
