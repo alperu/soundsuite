@@ -313,9 +313,17 @@ export interface FleetSidecar extends SidecarEntry {
 export type GpuRole = 'embedding' | 'completion' | 'ocr' | 'reranker';
 
 export interface ResolvedEndpoint {
-  host: string;       // e.g. "http://10.10.20.5:11434"
-  sidecarUrl: string; // e.g. "http://10.10.20.5:8098"
+  host: string;       // e.g. "http://<sidecar-host>:11434", or "cloud:openrouter" for a Phase 4 result
+  sidecarUrl: string; // e.g. "http://<sidecar-host>:8098", or "cloud:openrouter" for a Phase 4 result
   role: GpuRole;
+  /** 'cloud' when this endpoint came from Phase 4 (a CloudProvider) rather
+   *  than a sidecar. Absent/'sidecar' for every existing caller — this is
+   *  additive, not a breaking change to today's contract. */
+  source?: 'sidecar' | 'cloud';
+  /** Set only when source === 'cloud'. Which CloudProvider resolved it, and
+   *  which model to call it with. */
+  cloudProviderId?: string;
+  cloudModel?: string;
 }
 
 export interface GpuInfo {
@@ -1488,6 +1496,40 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
     }
   }
 
+  // Phase 4: cloud fallback (docs/SPEC-openrouter-virtual-inference.md §9.2 —
+  // POLICY 2: "if local GPU is not available, use OpenRouter"). Every local
+  // phase above has failed. Only engages when the operator has opted the role
+  // OUT of `local-only` (the default, everywhere, until explicitly changed) —
+  // so an unconfigured install throws exactly as before.
+  const cloudConfig = await getConfig();
+  if (virtualInferenceModeFor(role, cloudConfig) !== 'local-only') {
+    const { getCloudProviders } = await import('@/lib/gpu/cloud-provider');
+    for (const provider of getCloudProviders()) {
+      let endpoint: Awaited<ReturnType<typeof provider.resolve>> = null;
+      try {
+        endpoint = await provider.resolve(role, { config: cloudConfig });
+      } catch (err) {
+        logger.warn(`Route phase 4: cloud provider ${provider.id} threw`, { role, error: (err as Error).message });
+        continue;
+      }
+      if (!endpoint) continue;
+      logger.info(`Route resolved: ${role} → cloud:${provider.id} (${endpoint.model})`, {
+        phase: 4,
+        role,
+        provider: provider.id,
+        model: endpoint.model,
+      });
+      return {
+        host: `cloud:${provider.id}`,
+        sidecarUrl: `cloud:${provider.id}`,
+        role,
+        source: 'cloud',
+        cloudProviderId: provider.id,
+        cloudModel: endpoint.model,
+      };
+    }
+  }
+
   const sidecarSummary = fleet.sidecars.map(s => {
     const cached = statusCache.getSidecarStatus(s.url);
     const containerStatus = cached?.containers?.[role]?.status ?? 'unknown';
@@ -1499,9 +1541,26 @@ export async function resolveEndpoint(role: GpuRole, options?: { excludeHosts?: 
 }
 
 /**
+ * Which `virtualInference.mode.<role>` governs Phase 4 for this role.
+ *
+ * Only `completion` is wired to a cloud-fallback mode today (§3 permission
+ * matrix — embedding/code-embedding deliberately do NOT flow through this
+ * generic phase; see AllSourcesEmbeddingProvider for their cloud story, and
+ * the reranker's own local-exhausted fallback in ./search/reranker.ts, which
+ * predates this abstraction). Every other role stays 'local-only' here,
+ * i.e. Phase 4 never engages for it, until a spec extends the matrix.
+ */
+function virtualInferenceModeFor(role: GpuRole, config: AppConfig): string {
+  if (role === 'completion') return config.virtualInferenceModeCompletion;
+  return 'local-only';
+}
+
+/**
  * Release an endpoint after use. Fire-and-forget.
  */
 export function releaseEndpoint(role: GpuRole, sidecarUrl: string): void {
+  // A cloud (Phase 4) endpoint has no sidecar lease to release.
+  if (sidecarUrl.startsWith('cloud:')) return;
   sendToSidecar(sidecarUrl, '/release', { role }).catch((err) => {
     logger.warn(`Failed to release ${role} on ${sidecarUrl}`, { error: (err as Error).message });
   });

@@ -495,6 +495,49 @@ export async function rerank<T extends RerankableResult>(
       }
     }
 
+    // POLICY — reranker cloud fallback (docs/SPEC-openrouter-virtual-inference.md §3;
+    // reranker is the one role where `local-first` needs no explicit mode config,
+    // because local reranking is CUDA-vLLM-only and Macs have no local reranker at
+    // all). Engages ONLY after every local vLLM candidate above has been exhausted,
+    // and ONLY when the operator has opted in via `openRouterEnabled` with a rerank
+    // model configured — an unconfigured install keeps today's behaviour exactly:
+    // first-stage order, never throw.
+    if (!reranked && !isOpenRouter && config.openRouterEnabled && config.openRouterRerankModel) {
+      const fallbackModel = config.openRouterRerankModel;
+      const triedHosts = candidates.slice(0, MAX_HOSTS_TO_TRY).length;
+      logger.info('Reranker: local exhausted, falling back to OpenRouter', {
+        model: fallbackModel,
+        docs: results.length,
+        triedHosts,
+      });
+      try {
+        // Recompute the per-provider doc budget for OpenRouter's (larger) context
+        // window — reusing the local vLLM budget here would truncate documents
+        // for no reason (see the openRouterMaxModelTokens comment above).
+        const fallbackMaxDocChars = docBudgetChars(
+          findRerankModel(fallbackModel)?.contextTokens ?? 40_960,
+        );
+        const out = await rerankViaOpenRouter(safeQuery, results, fallbackModel, effectiveTopN, timeoutMs, fallbackMaxDocChars);
+        reranked = out.items;
+        totalTokens = out.totalTokens;
+        usedModel = fallbackModel;
+        warn('fetch', `openrouter:${fallbackModel}`, `recovered via OpenRouter fallback after ${triedHosts} local host failure(s)`);
+        logger.info('Reranker: OpenRouter fallback succeeded', { model: fallbackModel, docs: results.length });
+      } catch (err) {
+        // Same graceful-degrade contract as the primary OpenRouter path above —
+        // if the cloud fallback also fails, fall through to first-stage order
+        // rather than throwing (docs/tasks/22 §3: this function never throws).
+        const kind = (err as { kind?: string }).kind;
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn('Reranker: OpenRouter fallback failed too, using first-stage order', {
+          kind: kind ?? 'unknown',
+          model: fallbackModel,
+          message,
+        });
+        lastWarning = { source: 'reranker', host: `openrouter:${fallbackModel}`, reason: 'fetch', message };
+      }
+    }
+
     if (!reranked) {
       // Structured post-mortem for the recurring degrade. Correlate this with
       // the per-phase logs above (lifecycle / preflight / fetch) on the same

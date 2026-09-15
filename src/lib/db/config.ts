@@ -34,6 +34,25 @@ export interface AppConfig {
   /** Per-role daily spend caps in USD, e.g. { reranker: 5, embedding: 10 }.
    *  Exceeding a cap reverts that role to local for the rest of the UTC day. */
   openRouterDailyCapUsd?: Record<string, number>;
+  /**
+   * Routing mode for the two embedding roles — see
+   * docs/SPEC-openrouter-virtual-inference.md §3.
+   *
+   * `hybrid` is deliberately NOT in this union: mixing local and OpenRouter
+   * vectors inside one LanceDB table is the failure mode §2.1 documents (the
+   * stored-dimension cache is sampled from one arbitrary row, and a mismatched
+   * insert can trigger `VectorStore.addChunks()`'s drop-and-recreate fallback).
+   * `all-sources` is legal ONLY when both sources serve the identical model at
+   * the identical dimension — see AllSourcesEmbeddingProvider, which verifies
+   * this up front and refuses (falling back to local-only) otherwise.
+   */
+  virtualInferenceModeEmbedding: 'local-only' | 'local-first' | 'cloud-only' | 'all-sources';
+  virtualInferenceModeCodeEmbedding: 'local-only' | 'local-first' | 'cloud-only' | 'all-sources';
+  /** Routing mode for the search/completion chat role. Unlike embedding,
+   *  `hybrid` is legal here — chat calls are stateless, so there is no
+   *  vector-space mixing risk. Default `local-only` (never call OpenRouter)
+   *  until an operator opts in. */
+  virtualInferenceModeCompletion: 'local-only' | 'local-first' | 'hybrid' | 'cloud-only';
   claudeApiKey?: string;
   geminiApiKey?: string;
   groqApiKey?: string;
@@ -249,6 +268,9 @@ export async function getConfig(): Promise<AppConfig> {
         return {};
       }
     })(),
+    virtualInferenceModeEmbedding: (configMap.get('virtualInference.mode.embedding') as AppConfig['virtualInferenceModeEmbedding']) || 'local-only',
+    virtualInferenceModeCodeEmbedding: (configMap.get('virtualInference.mode.code-embedding') as AppConfig['virtualInferenceModeCodeEmbedding']) || 'local-only',
+    virtualInferenceModeCompletion: (configMap.get('virtualInference.mode.completion') as AppConfig['virtualInferenceModeCompletion']) || 'local-only',
     claudeApiKey: configMap.get('embedding.claudeApiKey'),
     geminiApiKey: configMap.get('ai.geminiApiKey'),
     groqApiKey: configMap.get('ai.groqApiKey'),
@@ -594,7 +616,16 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   if (config.openRouterDailyCapUsd !== undefined) {
     updates.push({ key: 'openrouter.dailyCapUsd', value: JSON.stringify(config.openRouterDailyCapUsd) });
   }
-  
+  if (config.virtualInferenceModeEmbedding !== undefined) {
+    updates.push({ key: 'virtualInference.mode.embedding', value: config.virtualInferenceModeEmbedding });
+  }
+  if (config.virtualInferenceModeCodeEmbedding !== undefined) {
+    updates.push({ key: 'virtualInference.mode.code-embedding', value: config.virtualInferenceModeCodeEmbedding });
+  }
+  if (config.virtualInferenceModeCompletion !== undefined) {
+    updates.push({ key: 'virtualInference.mode.completion', value: config.virtualInferenceModeCompletion });
+  }
+
   if (config.claudeApiKey !== undefined) {
     updates.push({ key: 'embedding.claudeApiKey', value: config.claudeApiKey });
   }

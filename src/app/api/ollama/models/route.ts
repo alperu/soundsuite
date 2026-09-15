@@ -34,12 +34,17 @@ export async function GET() {
       try {
         const { resolveEndpoint, releaseEndpoint } = await import('@/lib/gpu/fleet-router');
         const ep = await resolveEndpoint('completion');
-        host = ep.host;
-        // resolveEndpoint() sends /acquire. Listing models is a read — release
-        // it straight back, or every load of the model dropdown permanently
-        // adds one to the sidecar's completion counter and keeps its idle
-        // timer disarmed.
-        if (ep.sidecarUrl) releaseEndpoint('completion', ep.sidecarUrl);
+        // A cloud (Phase 4) result has no Ollama /api/tags to list — OpenRouter's
+        // model space is the curated catalogue in @/lib/openrouter/models, a
+        // different UI concern. Fall back to the direct host below.
+        if (ep.source !== 'cloud') {
+          host = ep.host;
+          // resolveEndpoint() sends /acquire. Listing models is a read — release
+          // it straight back, or every load of the model dropdown permanently
+          // adds one to the sidecar's completion counter and keeps its idle
+          // timer disarmed.
+          if (ep.sidecarUrl) releaseEndpoint('completion', ep.sidecarUrl);
+        }
       } catch {
         // Fall back to direct host
       }

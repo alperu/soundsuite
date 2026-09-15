@@ -29,8 +29,17 @@ const OLLAMA_MODEL_DIMENSIONS: Record<string, number> = {
   'bge-m3': 1024,
   'bge-m3:latest': 1024,
   'qwen3-embedding:0.6b': 1024,
-  'qwen3-embedding:4b': 1024,
-  'qwen3-embedding:8b': 1024,
+  // 4b and 8b were both listed as 1024, which is wrong — the size suffix changes
+  // the width. Measured directly against a fleet host's Ollama on 2026-09-15
+  // (POST /api/embed, counting the returned vector): 4b returns 2560, 8b returns
+  // 4096, matching the widths OpenRouter reports for the same models. Only 0.6b
+  // is 1024.
+  //
+  // This mattered beyond cosmetics: getDimensions() feeds width checks, and a
+  // guard fed the wrong expected width is worse than no guard — it looks like it
+  // is protecting something.
+  'qwen3-embedding:4b': 2560,
+  'qwen3-embedding:8b': 4096,
   'qwen3-embedding': 1024,
   'qwen3-embedding:latest': 1024,
 };

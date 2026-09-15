@@ -436,6 +436,31 @@ async function* streamWithOllama(
     try {
       const { resolveEndpoint, releaseEndpoint } = await import('@/lib/gpu/fleet-router');
       const ep = await resolveEndpoint('completion');
+      if (ep.source === 'cloud') {
+        // POLICY 2 — no local GPU available. fleet-router's Phase 4 already
+        // confirmed OpenRouter is enabled/configured/within budget; call it
+        // directly and yield a synthetic stream (the client is non-streaming) —
+        // there is no sidecar host/lease involved.
+        console.log(`[streamWithOllama] Route: completion → cloud:${ep.cloudProviderId} (${ep.cloudModel})`);
+        const { chat } = await import('@/lib/openrouter/client');
+        const out = await chat(
+          messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+          ep.cloudModel!,
+          { temperature, maxTokens, role: 'completion' },
+        );
+        yield { type: 'token', text: out.content };
+        yield {
+          type: 'done',
+          content: out.content,
+          model: out.model,
+          provider: 'ollama', // transparent fallback — caller requested the ollama role
+          usage: {
+            inputTokens: out.usage?.prompt_tokens ?? 0,
+            outputTokens: out.usage?.completion_tokens ?? 0,
+          },
+        };
+        return;
+      }
       host = ep.host;
       releaseEndpointFn = () => releaseEndpoint('completion', ep.sidecarUrl);
     } catch (err) {
@@ -945,6 +970,26 @@ export async function completeAI(req: AICompletionRequest): Promise<AICompletion
       try {
         const { resolveEndpoint, releaseEndpoint } = await import('@/lib/gpu/fleet-router');
         const ep = await resolveEndpoint('completion');
+        if (ep.source === 'cloud') {
+          // POLICY 2 — no local GPU available; call OpenRouter directly.
+          // fleet-router's Phase 4 already checked openRouterEnabled/model/spend.
+          console.log(`[completeAI] Route: completion → cloud:${ep.cloudProviderId} (${ep.cloudModel}), orchestrator=true`);
+          const { chat } = await import('@/lib/openrouter/client');
+          const out = await chat(
+            req.messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+            ep.cloudModel!,
+            { temperature, maxTokens, role: 'completion' },
+          );
+          return {
+            content: out.content,
+            model: out.model,
+            provider: 'ollama', // transparent fallback — caller requested the ollama role
+            usage: {
+              inputTokens: out.usage?.prompt_tokens ?? 0,
+              outputTokens: out.usage?.completion_tokens ?? 0,
+            },
+          };
+        }
         host = ep.host;
          console.log(`[completeAI] Route: completion → ${ep.host} (sidecar=${ep.sidecarUrl}), model=${req.model}, messages=${req.messages.length}, orchestrator=true`);
         // Release after completion (fire-and-forget)

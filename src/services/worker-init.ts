@@ -103,6 +103,27 @@ async function buildProcessDocumentFn(): Promise<(documentId: string, filePath: 
         model: config.ollamaModel || config.embeddingModel || 'all-minilm',
         useOrchestrator: config.embeddingUseOrchestrator,
       });
+
+      // POLICY 3 — 'all-sources': fan ingestion across local AND OpenRouter
+      // for throughput (docs/SPEC-openrouter-virtual-inference.md §3, the
+      // embedding-legal form of hybrid). Opt-in only, and re-verified live on
+      // every startup — see AllSourcesEmbeddingProvider's module header for
+      // why a static dims table isn't trusted here. Any verification failure
+      // falls back to the local-only provider constructed above, silently.
+      if (config.virtualInferenceModeEmbedding === 'all-sources' && config.openRouterEnabled) {
+        const { AllSourcesEmbeddingProvider } = await import('@/lib/ingestion/all-sources-embedding-provider');
+        const allSources = await AllSourcesEmbeddingProvider.createIfSafe({
+          local: embeddingProvider,
+          openRouterModel: config.openRouterEmbeddingModel || 'qwen/qwen3-embedding-4b',
+        });
+        if (allSources) {
+          embeddingProvider = allSources;
+        } else {
+          logger.warn('all-sources mode requested but verification failed — continuing local-only', {
+            openRouterEmbeddingModel: config.openRouterEmbeddingModel,
+          });
+        }
+      }
       break;
     }
     case 'openrouter': {

@@ -395,8 +395,9 @@ time, nothing persists. They may use every mode.
 
 ## 3. Routing modes
 
-The request was three modes. We need **four**, because `local-only` is today's
-behaviour and must remain expressible (OCR requires it — §7).
+The request was three modes. We need **five**, because `local-only` is today's
+behaviour and must remain expressible (OCR requires it — §7), and embedding
+roles get their own hybrid-shaped mode instead of the generic one (below).
 
 | Mode | Meaning |
 |---|---|
@@ -404,21 +405,58 @@ behaviour and must remain expressible (OCR requires it — §7).
 | `local-first` | Try local; on unavailability fall back to OpenRouter. **This is the mode the request describes** — "if `ss-codeEmbedding` or `ss-embed` is not available, route demand to virtualInference." |
 | `hybrid` | Local and OpenRouter both eligible; router picks per-request on load/latency. |
 | `cloud-only` | Never touch local GPU. For hosts with no GPU at all. |
+| `all-sources` | **Embedding roles only.** Local AND OpenRouter both serve every ingestion batch, fanned out for throughput — not a failover mode. See below. |
+
+### Implementation status (2026-09-15)
+
+- **`reranker` `local-first`** — implemented. `rerank()` in `src/lib/search/reranker.ts`
+  falls back to OpenRouter only after every local vLLM candidate host has been
+  exhausted, and only when `openRouterEnabled` + a rerank model are configured;
+  otherwise unchanged (first-stage order, never throws). No explicit
+  `virtualInference.mode.reranker` config key was needed — the existing
+  `rerankProvider`/`openRouterEnabled` pair already expresses the choice, and
+  reranking has no vector-space risk to gate.
+- **`completion` `local-first` / `hybrid` / `cloud-only`** — implemented via
+  `virtualInference.mode.completion` (`AppConfig.virtualInferenceModeCompletion`,
+  default `local-only`) and a Phase 4 in `resolveEndpoint()`
+  (`src/lib/gpu/fleet-router.ts`) that walks an ordered `CloudProvider[]`
+  (`src/lib/gpu/cloud-provider.ts`, §9.2) after every local phase fails. Two
+  `ai-provider.ts` call sites (`completeAI`, `streamWithOllama`) detect a
+  `source: 'cloud'` result and call OpenRouter's `chat()` directly. `hybrid`
+  (per-request local/cloud choice under load) is NOT implemented — only the
+  failover shape (`local-first`) exists today; `hybrid` remains a legal config
+  value with no distinct runtime behaviour yet.
+- **`embedding` / `code-embedding` `all-sources`** — implemented via
+  `virtualInference.mode.embedding` / `.code-embedding`
+  (`virtualInferenceModeEmbedding` / `virtualInferenceModeCodeEmbedding`,
+  default `local-only`) and `AllSourcesEmbeddingProvider`
+  (`src/lib/ingestion/all-sources-embedding-provider.ts`), wired into the
+  `ollama` branch of `src/services/worker-init.ts`. `local-first` and
+  `cloud-only` for these two roles remain config-legal but unimplemented
+  (Phase 4 deliberately does NOT cover embedding roles — see the comment on
+  `virtualInferenceModeFor()` in fleet-router.ts).
 
 ### Permission matrix — which roles may take which mode
 
-| Role | `local-only` | `local-first` | `hybrid` | `cloud-only` |
-|---|---|---|---|---|
-| `embedding` | ✅ | ✅ | ❌ **forbidden** | ✅ |
-| `code-embedding` | ✅ | ✅ | ❌ **forbidden** | ✅ |
-| `reranker` | ✅ | ✅ | ✅ | ✅ |
-| `rlm` | ✅ | ✅ | ✅ | ✅ |
-| `completion` | ✅ | ✅ | ✅ | ✅ |
-| `ocr` | ✅ | ❌ | ❌ | ❌ |
+| Role | `local-only` | `local-first` | `hybrid` | `cloud-only` | `all-sources` |
+|---|---|---|---|---|---|
+| `embedding` | ✅ | ⚠️ not yet implemented | ❌ **forbidden** | ⚠️ not yet implemented | ✅ implemented |
+| `code-embedding` | ✅ | ⚠️ not yet implemented | ❌ **forbidden** | ⚠️ not yet implemented | ✅ implemented |
+| `reranker` | ✅ | ✅ implemented | ✅ | ✅ | n/a |
+| `rlm` | ✅ | ⚠️ not yet implemented | ⚠️ not yet implemented | ⚠️ not yet implemented | n/a |
+| `completion` | ✅ | ✅ implemented | ⚠️ config-legal, same runtime as local-first | ⚠️ not yet implemented | n/a |
+| `ocr` | ✅ | ❌ | ❌ | ❌ | n/a |
 
 `hybrid` is forbidden for embedding roles for the reason in §2.1: it would mix
 two providers' vectors **inside one table**. The UI must not offer it — not
-merely reject it on save.
+merely reject it on save. `all-sources` is NOT `hybrid` under another name: it
+never mixes providers within a result set or picks one per-request — every
+batch is split across BOTH sources and every vector lands in the SAME table,
+which is legal only because `AllSourcesEmbeddingProvider.createIfSafe()`
+verifies (live, not from a static dims table — its module header explains why
+a table can't be trusted) that both sources produce the identical model at the
+identical width before engaging, and refuses (falling back to local-only)
+otherwise.
 
 Even in `local-first`, an embedding role switching provider **must not happen
 mid-build**. The provider is resolved once per ingestion run and pinned for its
@@ -438,12 +476,25 @@ Follow the existing per-role convention already used by `gpu.min.<role>` and
 `gpu.idle.<role>` in the `Config` table:
 
 ```
-virtualInference.mode.<role>        local-only | local-first | hybrid | cloud-only
+virtualInference.mode.<role>        local-only | local-first | hybrid | cloud-only | all-sources
 virtualInference.model.<role>       OpenRouter model id, e.g. moonshotai/kimi-k3
 virtualInference.enabled            master kill switch, default false
 openrouter.apiKey                   SECRET — see §6
 openrouter.dailyCapUsd.<role>       spend guard, §8
 ```
+
+**As implemented (2026-09-15):** `virtualInference.mode.embedding`,
+`.code-embedding` and `.completion` exist exactly as above (`AppConfig`'s
+`virtualInferenceModeEmbedding` / `virtualInferenceModeCodeEmbedding` /
+`virtualInferenceModeCompletion`, default `local-only`). The other two rows
+were NOT added as new keys — the equivalent already existed and adding a
+second key for the same fact would just create a place for them to disagree:
+`openrouter.enabled` (`AppConfig.openRouterEnabled`) is the master switch, and
+`openrouter.embeddingModel` / `.codeEmbeddingModel` / `.rerankModel` /
+`.chatModel` (already in §1's per-role model mapping) are the per-role model
+selections — there is no separate `virtualInference.model.<role>`.
+`openrouter.dailyCapUsd` is one JSON-object key (`Record<string, number>`),
+not per-role dotted keys, matching how it already shipped before this phase.
 
 ---
 
@@ -680,6 +731,21 @@ interface CloudProvider {
 `CloudProvider`s read from config**. OpenRouter and RunPod each implement it.
 Operators reorder them; neither spec owns the slot. `SPEC-runpod-overflow.md`
 should be amended to reference this interface rather than its own phase.
+
+**Implemented (2026-09-15):** `src/lib/gpu/cloud-provider.ts` defines
+`CloudProvider` / `CloudEndpoint` and `openRouterCloudProvider`
+(`canServe`/`resolve` as above, scoped to the `completion` role only —
+embedding and reranker keep their own dedicated cloud paths, §9.1 and
+`./search/reranker.ts` respectively). `getCloudProviders()` returns a plain
+ordered array (`[openRouterCloudProvider]` today) rather than reading order
+from config — the "operators reorder them" config surface described above is
+not yet built; RunPod slots into that same array when it lands.
+`resolveEndpoint()`'s Phase 4 (after the existing Phase 1-3 block, before the
+final throw) walks it and, gated on `virtualInferenceModeCompletion !==
+'local-only'`, returns a `ResolvedEndpoint` with `source: 'cloud'` +
+`cloudProviderId` + `cloudModel` instead of throwing. `SPEC-runpod-overflow.md`
+has NOT yet been amended to reference this interface — that edit is still
+outstanding and belongs to whoever picks up RunPod.
 
 ---
 
