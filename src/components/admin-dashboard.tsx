@@ -48,7 +48,11 @@ const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'rlm', label: 'RLM AI', icon: '∞' },
   { key: 'aikeys', label: 'AI Keys $', icon: '⚷' },
   { key: 'aiservices', label: 'AI Services', icon: '✦' },
-  { key: 'openrouter', label: 'OpenRouter', icon: '☯' },
+  // ⋔ (U+22D4), not ☯ (U+262F): the latter has an emoji presentation variant, so
+  // the system font renders it in colour while every other tab here is a
+  // monochrome text glyph. U+22D4 has no emoji form, and its branching shape
+  // suits a router.
+  { key: 'openrouter', label: 'OpenRouter', icon: '⋔' },
   { key: 'workers', label: 'Workers', icon: '⚙' },
   { key: 'redis', label: 'Redis Cache', icon: '⧫' },
   { key: 'cache', label: 'Cache Manager', icon: '⟲' },
