@@ -1712,6 +1712,20 @@ async function enforceMinOnline(): Promise<void> {
       } else {
         recordAcquireSuccess(sidecarUrl, role);
         logger.info(`min-online: acquired ${role} on ${sidecarUrl}`);
+        // Release it again straight away. This /acquire is a LIFECYCLE action —
+        // "make sure this role is up" — not an in-flight request, and this loop
+        // re-runs every 30s for as long as the deficit is reported. Holding the
+        // lease made the sidecar's counter climb by one per role per tick
+        // forever: measured at 29.7s between leases on both macOS hosts, which
+        // is exactly this interval. The role stays resident on policy, not on a
+        // held lease — the sidecar's idle timer already refuses to stop a role
+        // whose minOnline >= 1 (sideCar/src/lib/idle-timers.ts).
+        const leaseId = (result as { leaseId?: string } | undefined)?.leaseId;
+        sendToSidecar(sidecarUrl, '/release', { role, ...(leaseId ? { leaseId } : {}) }).catch((err) => {
+          logger.debug('min-online: release after acquire failed (non-fatal)', {
+            role, sidecarUrl, error: (err as Error).message,
+          });
+        });
       }
     } catch (err) {
       recordAcquireFailure(sidecarUrl, role);
