@@ -149,24 +149,26 @@ than be forgotten.
 | `max_errors` | **yes** | Stops a loop erroring in circles. |
 | `max_iterations` | default 30 | Root-loop bound. |
 | `max_concurrent_subcalls` | 4 (default) | An RLM fans out; this bounds the burst. |
-| `max_budget` | **INERT — do not rely on it** | See below. |
+| `max_budget` | **works — conditionally** | See below. |
 
-**`max_budget` does not work through our proxy.** Its docstring: *"Requires
-cost-tracking backend (e.g. OpenRouter)"* — it reads cost off the response. Our
-route presents as a generic `openai` backend, so that field is absent and the
-parameter silently becomes a no-op. On a role that makes many sub-calls per
-question, a budget cap that looks configured and does nothing is worse than an
-absent one.
+**Corrected after reading the source.** An earlier draft of this document
+asserted `max_budget` was inert through our proxy, reasoning from its docstring
+(*"Requires cost-tracking backend (e.g. OpenRouter)"*) that a generic `openai`
+backend would lose it. That was wrong. `rlm/clients/openai.py:_track_cost` reads
+`usage.cost` off the response and is **not** gated on `base_url` — it only
+checks whether the field is present.
 
-Two ways out, in order of preference:
+So the rail is live, on two conditions, both of which the implementation meets:
 
-1. **Pass OpenRouter's `usage` through verbatim** in the route's response. Then
-   `max_budget` works as designed. Preferred, and cheap.
-2. Leave it unset and rely on `max_timeout` + `max_tokens` + `max_errors`, with
-   OpenRouter's own per-role daily caps as the backstop.
+1. The route asks OpenRouter for cost — `chat()` sends `usage: {include: true}`,
+   without which the field is absent.
+2. The route returns the upstream response **verbatim**. This is why
+   `openrouter-client.chat()` does not reshape, unlike `embed()`/`rerank()`.
 
-Until (1) ships, **`max_budget` must not be passed** — an unset parameter is
-honest, a dead one is not.
+**If either is undone, `max_budget` silently becomes a no-op** on a role that
+makes many sub-calls per question. That is the failure the earlier draft
+imagined, and it is one careless refactor away — hence the comments at both
+sites and the gated integration test that asserts `usage.cost` is a number.
 
 ---
 
@@ -224,26 +226,38 @@ trap, where editing only `defaultRegistry` is silently dropped at runtime.
 
 ---
 
-## 8. Verification order
+## 8. Verification
 
 Deliberately bottom-up — each step is provable before the next exists, so a
 failure is never debugged through two layers of container.
 
-1. **Route alone.** `curl -s localhost:8098/v1/chat/completions -d '{...}'`
-   returns a real completion from `deepseek/deepseek-v4-flash`. No image yet.
-2. **Route rejects ambiguity.** Two configured masters → 409, not a guess.
-3. **Image builds** on a host with only a master route, and the sha256 check
-   fails closed on a corrupted tarball.
-4. **Container answers** `GET /health`, then `/v1/chat/completions` with a
-   trivial prompt, run by hand with `docker run`.
-5. **Sidecar starts it** from a role assignment: the row goes *not provisioned*
-   → *running*, `/api/status` reports `config.port: 8101`.
-6. **Master routes to it** — set `virtualInference.mode.rlm = 'local-first'`
-   with no `ss-rlm` anywhere, and confirm the `notice` event that marks a
-   degraded answer fires.
+### Done
 
-Only (6) exercises `resolveRlmEndpoint`'s fallback, and only it proves the
-feature. (1)–(5) are what make (6) debuggable.
+| # | check | result |
+|---|---|---|
+| 1 | Vendored tarball is fetchable from a running master and its sha256 matches the manifest | ✅ `200 application/gzip`, 93,842 bytes, sha matches |
+| 2 | Route refuses rather than guesses whose key to spend | ✅ 8 tests, incl. 409-on-two-masters naming both |
+| 3 | Image builds fetching only from a master — no GitHub, no PyPI | ✅ |
+| 4 | Checksum verification **fails closed** on a wrong sha | ✅ `sha256sum: WARNING: 1 computed checksum did NOT match`, no image produced |
+| 5 | Container boots and serves | ✅ `/health` and `/v1/models` both 200 |
+| 6 | `/admin/openrouter` can no longer blank the sandbox model | ✅ 6 tests; mutation-checked (4 fail against the old guard) |
+
+### Not done — and what each needs
+
+| # | check | blocked on |
+|---|---|---|
+| 7 | Route returns a **real** completion, and `usage.cost` is a number | A real OpenRouter key. Gated integration test exists: `OPENROUTER_TEST_KEY=sk-or-… npx jest virtual-chat-openrouter` from `sideCar/`. This is the only check that proves `max_budget` works. |
+| 8 | Container completes an end-to-end RLM run through the route | (7), plus a sidecar with the model configured |
+| 9 | Sidecar starts it from a role assignment — row goes *not provisioned* → *running*, `/api/status` shows `config.port: 8101` | image published to a registry (§6 open question) |
+| 10 | Master routes to it: `virtualInference.mode.rlm = 'local-first'`, no `ss-rlm` anywhere, `notice` event fires | 7–9, and a non-empty `rlm.sandboxModel` |
+
+Only (10) proves the feature. 1–6 are what make it debuggable; 7 is the next
+step and needs nothing but a key.
+
+**Live blocker for (10):** `rlmSandboxModel` was observed **empty** on this
+master on 2026-09-15 — almost certainly wiped by the save bug fixed in (6).
+`resolveRlmEndpoint()` skips the sandbox fallback entirely when it is unset, so
+it must be set on `/admin/openrouter` before any of this routes.
 
 ---
 

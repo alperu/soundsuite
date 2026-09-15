@@ -661,6 +661,69 @@ export async function serveKeyInfo(serverUrl: string): Promise<Record<string, un
   }
 }
 
+export type SandboxMasterResolution =
+  | { ok: true; serverUrl: string; config: OpenRouterMasterConfig }
+  | { ok: false; status: number; error: string };
+
+/**
+ * Which master's key and model a sandbox sub-model call should use.
+ *
+ * Every other virtual-* action gets this for free: they arrive over a specific
+ * master's WebSocket, so `m.serverUrl` identifies the caller. The sandbox calls
+ * in over **HTTP** and has no such context — and the key, the model and the
+ * spend are per-master by design precisely so Sound Suite and Fantom cannot
+ * charge each other.
+ *
+ * v1 therefore resolves only when exactly one master has a usable config, and
+ * **fails with 409 when more than one does**. It deliberately does not pick the
+ * first: that would spend one master's budget on the other's model, silently
+ * and unprovably. The 409 is what will force the caller-identity header to be
+ * built when Fantom's half lands, rather than letting it be forgotten.
+ *
+ * `explicitServerUrl` is the forward path: once the master identifies itself
+ * when dialling :8101, the sandbox forwards it and ambiguity disappears.
+ */
+export function resolveSandboxMaster(explicitServerUrl?: string): SandboxMasterResolution {
+  if (explicitServerUrl) {
+    const cfg = G.byMaster.get(explicitServerUrl);
+    if (!cfg) {
+      return { ok: false, status: 404, error: `master ${explicitServerUrl} has pushed no OpenRouter config` };
+    }
+    if (!cfg.apiKey) {
+      return { ok: false, status: 503, error: `master ${explicitServerUrl} has no OpenRouter key on file` };
+    }
+    return { ok: true, serverUrl: explicitServerUrl, config: cfg };
+  }
+
+  const usable = [...G.byMaster.entries()].filter(([, c]) => !!c.apiKey);
+  if (usable.length === 0) {
+    return { ok: false, status: 503, error: 'no master has pushed an OpenRouter key to this sidecar' };
+  }
+  if (usable.length > 1) {
+    return {
+      ok: false,
+      status: 409,
+      error:
+        `${usable.length} masters have OpenRouter keys on this sidecar ` +
+        `(${usable.map(([u]) => u).join(', ')}). The caller must identify itself ` +
+        `with the X-SoundSuite-Master header — refusing to guess whose key and ` +
+        `budget to spend.`,
+    };
+  }
+  const [serverUrl, config] = usable[0];
+  return { ok: true, serverUrl, config };
+}
+
+/**
+ * The model this master configured for a role, or undefined.
+ * `allowedModels` is the per-master channel — deliberately NOT the
+ * sidecar-global modelOverrides, which one master could clobber for the other.
+ */
+export function sandboxModelFor(config: OpenRouterMasterConfig, role: string): string | undefined {
+  const m = config.allowedModels?.[role]?.model;
+  return typeof m === 'string' && m.trim() ? m.trim() : undefined;
+}
+
 export function __resetVirtualInferenceForTest(): void {
   G.byMaster.clear();
   G.statsByMaster.clear();

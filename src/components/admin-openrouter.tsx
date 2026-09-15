@@ -182,6 +182,15 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
   // tools+reasoning models (see `rlmCandidates` below), so a hand-picked
   // fallback could point at a model the filter would have excluded.
   const [rlmSandboxModel, setRlmSandboxModel] = useState(initialConfig.rlmSandboxModel || '');
+  // Whether the operator actually chose this value in this session.
+  //
+  // The state above initialises to `''` whenever `initialConfig` arrives without
+  // the field — so a blank value is ambiguous: it may mean "cleared" or "never
+  // loaded". Submitting that ambiguity is what let an unrelated dropdown change
+  // wipe a configured sandbox model on save. The submit path now sends this
+  // field only when it is non-empty or the operator explicitly picked "none",
+  // so an unloaded field is omitted and the server leaves it alone.
+  const [rlmSandboxTouched, setRlmSandboxTouched] = useState(false);
   // Operator opt-in for the ss-rlm-sandbox fallback — mirrors
   // virtualInference.mode.<role> for every other role (embedding/completion/
   // reranker). Default local-only preserves today's behavior: no sidecar
@@ -215,7 +224,14 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           codeEmbeddingModel,
           rerankModel,
           chatModel,
-          rlmSandboxModel,
+          // Omitted entirely when blank and untouched — the server treats an
+          // absent field as "no change", so a save that never loaded this value
+          // can no longer clear it. `__clear__` is the only way to clear.
+          ...(rlmSandboxModel
+            ? { rlmSandboxModel }
+            : rlmSandboxTouched
+            ? { rlmSandboxModel: '__clear__' }
+            : {}),
           virtualInferenceModeRlm,
           virtualInferenceModeEmbedding: embeddingMode,
           virtualInferenceModeCodeEmbedding: codeEmbeddingMode,
@@ -646,7 +662,13 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
                 : `${rlmCandidates.length} of ${catalogue.length} catalogue models support both tools + reasoning (required to drive the RLM tool-use loop). Used only when ss-rlm has no sidecar available and the toggle below is set to "Allow sandbox fallback". This is Sound Suite's own model choice — the Fantom MCP master (code search) configures its own sandbox model independently; the two never overwrite each other.`
             }
             value={rlmSandboxModel}
-            onChange={setRlmSandboxModel}
+            onChange={(v) => {
+              // Mark touched so a deliberate clear is distinguishable from a
+              // field that never loaded. Without this the submit path cannot
+              // tell "operator chose none" from "server payload hadn't arrived".
+              setRlmSandboxTouched(true);
+              setRlmSandboxModel(v);
+            }}
             options={rlmOptions}
           />
           <div>

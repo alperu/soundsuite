@@ -196,3 +196,36 @@ export async function rerank(
   }>(apiKey, '/rerank', body, opts.timeoutMs ?? 60_000);
   return { results: json.results, model: json.model, totalTokens: json.usage?.total_tokens };
 }
+
+export interface ChatOptions {
+  timeoutMs?: number;
+  /** Forwarded verbatim: temperature, top_p, max_tokens, seed, tools, … */
+  passthrough?: Record<string, unknown>;
+}
+
+/**
+ * Chat completion — the ss-rlm-sandbox sub-model path.
+ *
+ * Unlike embed()/rerank() this returns the provider's response **unmodified**.
+ * Two reasons, both load-bearing:
+ *
+ *  1. The caller is an OpenAI-compatible shim. Anything we reshape, the shim
+ *     has to reshape back, and `tool_calls` round-tripping is exactly where
+ *     that goes wrong.
+ *  2. `usage` carries OpenRouter's cost accounting, and the rlm library's
+ *     `max_budget` reads cost off the response. Strip or normalise `usage` and
+ *     that safety rail silently becomes a no-op on a role that makes many
+ *     sub-calls per question. See docs/DESIGN-ss-rlm-sandbox-runtime.md §5.
+ */
+export async function chat(
+  apiKey: string,
+  model: string,
+  messages: unknown[],
+  opts: ChatOptions = {},
+): Promise<Record<string, unknown>> {
+  const body: Record<string, unknown> = { ...(opts.passthrough ?? {}), model, messages };
+  // `usage: {include: true}` is what makes OpenRouter return cost on the
+  // response. Without it max_budget has nothing to read.
+  body.usage = { include: true };
+  return post<Record<string, unknown>>(apiKey, '/chat/completions', body, opts.timeoutMs ?? 300_000);
+}

@@ -33,6 +33,16 @@ function pickWritableKey(raw: unknown): string | undefined {
  * nobody chose, and for embedding that means vectors landing in the wrong
  * space.
  */
+/**
+ * Explicit "clear this field" marker for `rlmSandboxModel`.
+ *
+ * A blank string cannot mean "clear" here, because the form submits every field
+ * on every save and initialises to `''` when the server payload has not arrived
+ * — so blank is overwhelmingly "the user never touched this", not intent. The
+ * UI sends this sentinel only from a deliberate "none" choice.
+ */
+export const CLEAR_SENTINEL = '__clear__';
+
 const EMBEDDING_MODES = ['local-only', 'local-first', 'all-sources', 'cloud-only'] as const;
 type EmbeddingMode = (typeof EMBEDDING_MODES)[number];
 
@@ -121,7 +131,23 @@ export async function POST(request: NextRequest) {
       openRouterCodeEmbeddingModel: typeof body.codeEmbeddingModel === 'string' ? body.codeEmbeddingModel : undefined,
       openRouterRerankModel: typeof body.rerankModel === 'string' ? body.rerankModel : undefined,
       openRouterChatModel: typeof body.chatModel === 'string' ? body.chatModel : undefined,
-      rlmSandboxModel: typeof body.rlmSandboxModel === 'string' ? body.rlmSandboxModel : undefined,
+      // `''` means "no change", NOT "clear it". An empty string is still a
+      // string, so the old `typeof === 'string'` guard let it through and wrote
+      // it to rlm.sandboxModel — which meant changing an unrelated dropdown and
+      // saving could silently wipe a configured sandbox model. That is not a
+      // cosmetic clobber: resolveRlmEndpoint() skips the whole ss-rlm-sandbox
+      // fallback when no sandbox model is set (stream-rlm.ts, "sandbox fallback
+      // skipped — no rlm.sandboxModel configured"), so the role goes dark.
+      //
+      // Clearing therefore has to be deliberate. The sentinel below is the only
+      // way to do it; a blank field can no longer do it by accident.
+      // See docs/TASK-openrouter-save-rlm-model-2026-09-15.md.
+      rlmSandboxModel:
+        body.rlmSandboxModel === CLEAR_SENTINEL
+          ? ''
+          : typeof body.rlmSandboxModel === 'string' && body.rlmSandboxModel.trim()
+          ? body.rlmSandboxModel.trim()
+          : undefined,
       virtualInferenceModeRlm:
         body.virtualInferenceModeRlm === 'local-only' || body.virtualInferenceModeRlm === 'local-first'
           ? body.virtualInferenceModeRlm
