@@ -22,6 +22,18 @@ jest.mock('@/lib/openrouter/client', () => {
   return { ...actual, embed: jest.fn() };
 });
 
+// This suite is about the local/cloud SPLIT and width-safety, not fleet
+// dispatch (that's virtual-embed-dispatch.test.ts). Real
+// `@/lib/gpu/virtual-embed-dispatch` pulls in fleet-router.ts's full
+// dependency chain (role-registry → mode-catalog-server → 'server-only',
+// unresolvable under Jest — see the fleet-router test suites, which mock the
+// same chain for the same reason). Stub it to just call `directFallback`,
+// i.e. behave exactly like the pre-fan-out direct `this.cloud.embed()` call
+// this provider used to make — preserving every existing assertion below.
+jest.mock('@/lib/gpu/virtual-embed-dispatch', () => ({
+  dispatchVirtualEmbed: jest.fn(({ texts, directFallback }) => directFallback(texts)),
+}));
+
 const mockEmbed = openRouterEmbed as jest.MockedFunction<typeof openRouterEmbed>;
 
 function fakeVectors(n: number, dims: number): number[][] {
@@ -157,5 +169,19 @@ describe('AllSourcesEmbeddingProvider.embed', () => {
     mockEmbed.mockResolvedValue({ vectors: fakeVectors(2, 1536), model: OPENROUTER_MODEL, dims: 1536 });
 
     await expect(provider.embed(['a', 'b', 'c', 'd'])).rejects.toThrow(/refusing to return a mixed-width batch/);
+  });
+
+  it('falls back to the local provider for the cloud share when fleet dispatch AND its direct-OpenRouter fallback both fail', async () => {
+    const provider = await buildProvider();
+    mockEmbed.mockClear();
+    // dispatchVirtualEmbed is mocked (module top) to call directFallback,
+    // which is `this.cloud.embed` → the real OpenRouter client mock. Make
+    // that reject to exercise the provider's own last-resort local rescue.
+    mockEmbed.mockRejectedValue(new Error('openrouter down'));
+
+    const vectors = await provider.embed(['a', 'b', 'c', 'd']);
+
+    expect(vectors).toHaveLength(4);
+    vectors.forEach((v) => expect(v).toHaveLength(2560));
   });
 });

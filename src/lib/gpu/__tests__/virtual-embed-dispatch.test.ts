@@ -1,0 +1,262 @@
+/**
+ * @jest-environment node
+ *
+ * `dispatchVirtualEmbed` is the master-side half of the sidecar's
+ * `virtual-embed` WS command — it spreads a text batch round-robin across
+ * every connected, role-eligible sidecar and falls back to a direct
+ * OpenRouter call (`directFallback`) when no sidecar is eligible or every
+ * eligible sidecar fails for its share.
+ *
+ * `@/lib/gpu/fleet-router` and `@/lib/gpu/master-identity` are mocked — the
+ * real fleet-router.ts pulls in role-registry → mode-catalog-server →
+ * 'server-only', which Jest cannot resolve (same reason the existing
+ * fleet-router-*.test.ts suites mock that chain instead of importing it for
+ * real). No network, no DB — synthetic fixtures only (CLAUDE.md § Privacy).
+ */
+
+import { dispatchVirtualEmbed } from '../virtual-embed-dispatch';
+import { sendToSidecar, getFleetStatus } from '@/lib/gpu/fleet-router';
+import { getCanonicalMasterUrl } from '@/lib/gpu/master-identity';
+
+jest.mock('@/lib/logger', () => ({
+  createLogger: () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }),
+}));
+
+jest.mock('@/lib/gpu/fleet-router', () => ({
+  sendToSidecar: jest.fn(),
+  getFleetStatus: jest.fn(),
+}));
+
+jest.mock('@/lib/gpu/master-identity', () => ({
+  getCanonicalMasterUrl: jest.fn(),
+}));
+
+const mockSendToSidecar = sendToSidecar as jest.MockedFunction<typeof sendToSidecar>;
+const mockGetFleetStatus = getFleetStatus as jest.MockedFunction<typeof getFleetStatus>;
+const mockGetCanonicalMasterUrl = getCanonicalMasterUrl as jest.MockedFunction<typeof getCanonicalMasterUrl>;
+
+const MODEL = 'qwen/qwen3-embedding-4b';
+const DIMS = 2560;
+const SELF_URL = 'http://master.local:3000';
+
+function fleetOf(urls: string[]) {
+  return {
+    sidecars: urls.map((url) => ({
+      url,
+      hostname: url,
+      mode: 'websocket' as const,
+      lastSeen: new Date().toISOString(),
+      status: 'connected' as const,
+      containers: [],
+    })),
+    wsRelayPort: 3002,
+    connectedViaWs: urls.length,
+  };
+}
+
+function fakeVectors(n: number, dims = DIMS): number[][] {
+  return Array.from({ length: n }, (_, i) => Array.from({ length: dims }, (_, j) => (i + j) / 1000));
+}
+
+/** Sidecar /status response making `role` eligible for SELF_URL. */
+function statusEligible(role: string) {
+  return { masters: [{ serverUrl: SELF_URL, virtualInference: { rolesWithModel: [role] } }] };
+}
+
+function statusIneligible() {
+  return { masters: [{ serverUrl: SELF_URL, virtualInference: { rolesWithModel: [] } }] };
+}
+
+describe('dispatchVirtualEmbed', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetCanonicalMasterUrl.mockResolvedValue(SELF_URL);
+  });
+
+  it('returns [] for empty input without touching the fleet', async () => {
+    const directFallback = jest.fn();
+    const result = await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts: [], expectedDims: DIMS, directFallback });
+    expect(result).toEqual([]);
+    expect(mockGetFleetStatus).not.toHaveBeenCalled();
+    expect(directFallback).not.toHaveBeenCalled();
+  });
+
+  it('falls back directly to OpenRouter when zero sidecars are connected', async () => {
+    mockGetFleetStatus.mockResolvedValue(fleetOf([]));
+    const texts = ['a', 'b', 'c'];
+    const directFallback = jest.fn().mockResolvedValue(fakeVectors(3));
+
+    const result = await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts, expectedDims: DIMS, directFallback });
+
+    expect(result).toHaveLength(3);
+    expect(directFallback).toHaveBeenCalledWith(texts);
+    expect(mockSendToSidecar).not.toHaveBeenCalled();
+  });
+
+  it('falls back directly to OpenRouter when sidecars are connected but none allow-list the role', async () => {
+    mockGetFleetStatus.mockResolvedValue(fleetOf(['http://sc1:8098']));
+    mockSendToSidecar.mockImplementation(async (url, path) => {
+      if (path === '/status') return statusIneligible();
+      throw new Error(`unexpected call ${path}`);
+    });
+    const texts = ['a', 'b'];
+    const directFallback = jest.fn().mockResolvedValue(fakeVectors(2));
+
+    const result = await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts, expectedDims: DIMS, directFallback });
+
+    expect(result).toHaveLength(2);
+    expect(directFallback).toHaveBeenCalledWith(texts);
+    // /status was checked, but /virtual-embed never sent to an ineligible sidecar.
+    expect(mockSendToSidecar).not.toHaveBeenCalledWith(expect.anything(), '/virtual-embed', expect.anything(), expect.anything(), expect.anything());
+  });
+
+  it('single eligible sidecar gets the entire batch', async () => {
+    mockGetFleetStatus.mockResolvedValue(fleetOf(['http://sc1:8098']));
+    mockSendToSidecar.mockImplementation(async (url, path, body) => {
+      if (path === '/status') return statusEligible('embedding');
+      if (path === '/virtual-embed') {
+        const texts = (body as any).texts as string[];
+        expect((body as any).localAvailable).toBe(false);
+        return { source: 'openrouter', embeddings: fakeVectors(texts.length), model: MODEL, dims: DIMS };
+      }
+      throw new Error(`unexpected call ${path}`);
+    });
+    const texts = ['a', 'b', 'c', 'd'];
+    const directFallback = jest.fn();
+
+    const result = await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts, expectedDims: DIMS, directFallback });
+
+    expect(result).toHaveLength(4);
+    result.forEach((v) => expect(v).toHaveLength(DIMS));
+    expect(directFallback).not.toHaveBeenCalled();
+    const embedCalls = mockSendToSidecar.mock.calls.filter((c) => c[1] === '/virtual-embed');
+    expect(embedCalls).toHaveLength(1);
+    expect((embedCalls[0][2] as any).texts).toEqual(texts);
+  });
+
+  it('round-robins a batch across multiple eligible sidecars', async () => {
+    mockGetFleetStatus.mockResolvedValue(fleetOf(['http://sc1:8098', 'http://sc2:8098']));
+    const seenBySidecar: Record<string, string[]> = {};
+    mockSendToSidecar.mockImplementation(async (url, path, body) => {
+      if (path === '/status') return statusEligible('embedding');
+      if (path === '/virtual-embed') {
+        const texts = (body as any).texts as string[];
+        seenBySidecar[url] = texts;
+        return { source: 'openrouter', embeddings: fakeVectors(texts.length), model: MODEL, dims: DIMS };
+      }
+      throw new Error(`unexpected call ${path}`);
+    });
+    const texts = ['t0', 't1', 't2', 't3'];
+    const directFallback = jest.fn();
+
+    const result = await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts, expectedDims: DIMS, directFallback });
+
+    expect(result).toHaveLength(4);
+    expect(directFallback).not.toHaveBeenCalled();
+    // Deterministic round-robin: index % 2 — sc1 gets t0/t2, sc2 gets t1/t3.
+    expect(seenBySidecar['http://sc1:8098']).toEqual(['t0', 't2']);
+    expect(seenBySidecar['http://sc2:8098']).toEqual(['t1', 't3']);
+  });
+
+  it('re-dispatches a failing sidecar share to another eligible sidecar', async () => {
+    mockGetFleetStatus.mockResolvedValue(fleetOf(['http://bad:8098', 'http://good:8098']));
+    const seenByGood: string[][] = [];
+    mockSendToSidecar.mockImplementation(async (url, path, body) => {
+      if (path === '/status') return statusEligible('embedding');
+      if (path === '/virtual-embed') {
+        if (url === 'http://bad:8098') throw new Error('sidecar unreachable');
+        const texts = (body as any).texts as string[];
+        seenByGood.push(texts);
+        return { source: 'openrouter', embeddings: fakeVectors(texts.length), model: MODEL, dims: DIMS };
+      }
+      throw new Error(`unexpected call ${path}`);
+    });
+    // 4 texts, round-robin over 2 sidecars: bad gets ['t0','t2'], good gets ['t1','t3'].
+    // bad's share must be RE-dispatched to good, not dropped.
+    const texts = ['t0', 't1', 't2', 't3'];
+    const directFallback = jest.fn();
+
+    const result = await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts, expectedDims: DIMS, directFallback });
+
+    expect(result).toHaveLength(4);
+    result.forEach((v) => expect(v).toHaveLength(DIMS));
+    expect(directFallback).not.toHaveBeenCalled();
+    // The good sidecar must have actually received BOTH its own share and the
+    // re-dispatched share from bad — not just "something" of the right length.
+    expect(seenByGood.sort()).toEqual([['t1', 't3'], ['t0', 't2']].sort());
+  });
+
+  it('falls back to directFallback (not silently dropped) even when directFallback itself is the last resort after every sidecar fails', async () => {
+    mockGetFleetStatus.mockResolvedValue(fleetOf(['http://sc1:8098', 'http://sc2:8098']));
+    mockSendToSidecar.mockImplementation(async (url, path) => {
+      if (path === '/status') return statusEligible('embedding');
+      if (path === '/virtual-embed') throw new Error('boom');
+      throw new Error(`unexpected call ${path}`);
+    });
+    const texts = ['t0', 't1'];
+    const directFallback = jest.fn().mockImplementation((t: string[]) => Promise.resolve(fakeVectors(t.length)));
+
+    const result = await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts, expectedDims: DIMS, directFallback });
+
+    expect(result).toHaveLength(2);
+    result.forEach((v) => expect(v).toHaveLength(DIMS));
+    // Each of the two round-robin shares (one text each, over two sidecars)
+    // fell back independently — every text must be accounted for, none dropped.
+    const fallenBackTexts = directFallback.mock.calls.flatMap((c) => c[0] as string[]).sort();
+    expect(fallenBackTexts).toEqual(['t0', 't1']);
+  });
+
+  it('falls back to directFallback for a share when every eligible sidecar fails', async () => {
+    mockGetFleetStatus.mockResolvedValue(fleetOf(['http://sc1:8098']));
+    mockSendToSidecar.mockImplementation(async (url, path) => {
+      if (path === '/status') return statusEligible('embedding');
+      if (path === '/virtual-embed') throw new Error('boom');
+      throw new Error(`unexpected call ${path}`);
+    });
+    const texts = ['t0'];
+    const directFallback = jest.fn().mockResolvedValue(fakeVectors(1));
+
+    const result = await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts, expectedDims: DIMS, directFallback });
+
+    expect(result).toHaveLength(1);
+    expect(directFallback).toHaveBeenCalledWith(['t0']);
+  });
+
+  it('treats a width mismatch from a sidecar as a failure and falls back rather than returning mixed widths', async () => {
+    mockGetFleetStatus.mockResolvedValue(fleetOf(['http://sc1:8098']));
+    mockSendToSidecar.mockImplementation(async (url, path, body) => {
+      if (path === '/status') return statusEligible('embedding');
+      if (path === '/virtual-embed') {
+        const texts = (body as any).texts as string[];
+        // Drifted provider — wrong width.
+        return { source: 'openrouter', embeddings: fakeVectors(texts.length, 1536), model: MODEL, dims: 1536 };
+      }
+      throw new Error(`unexpected call ${path}`);
+    });
+    const texts = ['t0', 't1'];
+    const directFallback = jest.fn().mockResolvedValue(fakeVectors(2, DIMS));
+
+    const result = await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts, expectedDims: DIMS, directFallback });
+
+    // Refused the wrong-width sidecar result and fell back — never returned
+    // the 1536-dim vectors from the sidecar.
+    expect(directFallback).toHaveBeenCalledWith(texts);
+    result.forEach((v) => expect(v).toHaveLength(DIMS));
+  });
+
+  it('treats a sidecar routing to local (localAvailable ignored) as a failure, not a silent local answer', async () => {
+    mockGetFleetStatus.mockResolvedValue(fleetOf(['http://sc1:8098']));
+    mockSendToSidecar.mockImplementation(async (url, path) => {
+      if (path === '/status') return statusEligible('embedding');
+      if (path === '/virtual-embed') return { source: 'local' };
+      throw new Error(`unexpected call ${path}`);
+    });
+    const texts = ['t0'];
+    const directFallback = jest.fn().mockResolvedValue(fakeVectors(1));
+
+    const result = await dispatchVirtualEmbed({ role: 'embedding', model: MODEL, texts, expectedDims: DIMS, directFallback });
+
+    expect(directFallback).toHaveBeenCalledWith(texts);
+    expect(result).toHaveLength(1);
+  });
+});

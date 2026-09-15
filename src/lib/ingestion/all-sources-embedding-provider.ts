@@ -36,6 +36,7 @@
 import { EmbeddingProvider } from './embedding-provider';
 import { OpenRouterEmbeddingProvider } from './openrouter-embedding-provider';
 import { findEmbeddingModel } from '@/lib/openrouter/models';
+import { dispatchVirtualEmbed } from '@/lib/gpu/virtual-embed-dispatch';
 import { createLogger } from '../logger';
 
 const logger = createLogger('AllSourcesEmbeddingProvider');
@@ -48,6 +49,10 @@ export interface AllSourcesConfig {
   /** OpenRouter model id, e.g. 'qwen/qwen3-embedding-4b'. Must be in
    *  OPENROUTER_EMBEDDING_MODELS — see OpenRouterEmbeddingProvider. */
   openRouterModel: string;
+  /** Role key as pushed in `virtualInference.mode.<role>` — 'embedding' or
+   *  'code-embedding'. Used only to pick which sidecars are eligible for
+   *  fan-out; defaults to 'embedding' (the only wired-up caller today). */
+  role?: string;
   timeoutMs?: number;
 }
 
@@ -56,6 +61,8 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
     private readonly local: EmbeddingProvider,
     private readonly cloud: OpenRouterEmbeddingProvider,
     private readonly dims: number,
+    private readonly openRouterModel: string,
+    private readonly role: string,
   ) {
     super();
   }
@@ -112,7 +119,7 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
         model: config.openRouterModel,
         localModel: config.local.getModelName(),
       });
-      return new AllSourcesEmbeddingProvider(config.local, cloud, localDims);
+      return new AllSourcesEmbeddingProvider(config.local, cloud, localDims, config.openRouterModel, config.role || 'embedding');
     } catch (err) {
       logger.warn('all-sources: verification probe failed — refusing, falling back to local-only', {
         model: config.openRouterModel,
@@ -127,6 +134,17 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
    * Order of the returned vectors matches the order of `texts` — callers
    * (chunk → embedding zip) rely on that, same contract as every other
    * provider.
+   *
+   * The cloud half goes through `dispatchVirtualEmbed`, which spreads it
+   * round-robin across every connected sidecar whose pushed config
+   * allow-lists this role (each sidecar spending its own OpenRouter key) and
+   * falls back to `this.cloud` (a direct master-side OpenRouter call) when no
+   * sidecar is eligible or every eligible sidecar fails for its share. This
+   * is what makes "each file to a separate sidecar" true — see
+   * virtual-embed-dispatch.ts. If BOTH of those fail (fleet dispatch throws
+   * and the direct OpenRouter call it fell back to also throws), the cloud
+   * share falls back once more to `this.local` — an embedding batch must
+   * never come back partially filled just because the cloud side is down.
    */
   async embed(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
@@ -138,9 +156,25 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
     const localTexts = texts.slice(0, splitAt);
     const cloudTexts = texts.slice(splitAt);
 
+    const cloudPromise = cloudTexts.length
+      ? dispatchVirtualEmbed({
+          role: this.role,
+          model: this.openRouterModel,
+          texts: cloudTexts,
+          expectedDims: this.dims,
+          directFallback: (t) => this.cloud.embed(t),
+        }).catch((err) => {
+          logger.warn('all-sources: cloud share failed on every sidecar and the direct OpenRouter fallback — falling back to local for this share', {
+            error: (err as Error).message,
+            count: cloudTexts.length,
+          });
+          return this.local.embed(cloudTexts);
+        })
+      : Promise.resolve([]);
+
     const [localVecs, cloudVecs] = await Promise.all([
       this.local.embed(localTexts),
-      cloudTexts.length ? this.cloud.embed(cloudTexts) : Promise.resolve([]),
+      cloudPromise,
     ]);
 
     const combined = [...localVecs, ...cloudVecs];
