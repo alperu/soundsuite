@@ -46,6 +46,31 @@ const ROLE = 'rlm-sandbox';
  */
 const CALLER_MAY_NOT_SET = new Set(['model', 'api_key', 'apiKey']);
 
+/**
+ * Identity and domain each have a canonical `X-SoundSuite-*` name and a
+ * Fantom-prefixed alias.
+ *
+ * Fantom shipped `X-FantomMCP-Master` / `X-FantomMCP-Domain` before this side
+ * read either, and sends the `X-SoundSuite-` spellings alongside them.
+ * Accepting both means neither master has to redeploy in lockstep with the
+ * other — which is the whole reason the aliases exist rather than a rename.
+ */
+function callerMaster(req: NextRequest): string | undefined {
+  return (
+    req.headers.get('x-soundsuite-master') ||
+    req.headers.get('x-fantommcp-master') ||
+    undefined
+  );
+}
+
+function callerDomain(req: NextRequest): string | undefined {
+  return (
+    req.headers.get('x-soundsuite-domain') ||
+    req.headers.get('x-fantommcp-domain') ||
+    undefined
+  );
+}
+
 function err(status: number, message: string) {
   // OpenAI error envelope: the rlm library surfaces `error.message`, so a
   // misconfiguration reads as a sentence in the trace rather than "500".
@@ -67,11 +92,33 @@ export async function POST(req: NextRequest) {
 
   // Forward path for the two-master case: once a master identifies itself when
   // dialling :8101, the sandbox passes it through and ambiguity disappears.
-  const explicit = req.headers.get('x-soundsuite-master') || undefined;
+  const explicit = callerMaster(req);
   const resolved = resolveSandboxMaster(explicit);
   if (!resolved.ok) {
     log.warn(`refused: ${resolved.error}`);
     return err(resolved.status, resolved.error);
+  }
+
+  // The per-request domain header is advisory here — this route does not use it
+  // (tool injection happens in the container). We cross-check it against the
+  // master's own stored declaration so a mismatch is caught at the one place
+  // that can see both. A caller whose header disagrees with its config push is
+  // misconfigured, and the consequence — retrieval from the wrong domain — is
+  // silent everywhere else.
+  const claimedDomain = callerDomain(req);
+  const storedDomain = resolved.config.domain;
+  if (claimedDomain && storedDomain && claimedDomain !== storedDomain) {
+    log.warn(
+      `${resolved.serverUrl} claims domain "${claimedDomain}" per-request but its config push ` +
+      `declared "${storedDomain}". The config push is authoritative; the container will act on ` +
+      `the header. Fix one of them.`,
+    );
+  } else if (claimedDomain && !storedDomain) {
+    log.warn(
+      `${resolved.serverUrl} sent domain "${claimedDomain}" but has declared none in its config ` +
+      `push. Add \`domain\` to the pushed openrouter block — a header alone does not survive a ` +
+      `caller that forgets to send it.`,
+    );
   }
 
   const model = sandboxModelFor(resolved.config, ROLE);
@@ -125,7 +172,7 @@ export async function GET(req: NextRequest) {
   // a caller that correctly identified itself still got a 409 from this probe,
   // which reads as "the header does not work" rather than "this handler ignores
   // it" — and the probe is the first thing anyone tries.
-  const resolved = resolveSandboxMaster(req.headers.get('x-soundsuite-master') || undefined);
+  const resolved = resolveSandboxMaster(callerMaster(req));
   if (!resolved.ok) return err(resolved.status, resolved.error);
   const model = sandboxModelFor(resolved.config, ROLE);
   return NextResponse.json({

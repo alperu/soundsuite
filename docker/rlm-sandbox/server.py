@@ -103,21 +103,78 @@ MAX_TOKENS = _int_env("SS_MAX_TOKENS", 0) or None
 MAX_BUDGET_USD = _float_env("SS_MAX_BUDGET_USD", 0.0) or None
 
 
-def build_rlm(master_url=None):
+VALID_DOMAINS = ("legal", "code")
+
+# Identity and domain each have a canonical name and a Fantom-prefixed alias.
+# Fantom shipped X-FantomMCP-* before this side read either, and Sound Suite
+# uses X-SoundSuite-*; accepting both means neither has to redeploy in step
+# with the other. Order matters only in that the first present wins.
+MASTER_HEADERS = ("X-SoundSuite-Master", "X-FantomMCP-Master")
+DOMAIN_HEADERS = ("X-SoundSuite-Domain", "X-FantomMCP-Domain")
+
+
+def first_header(headers, names):
+    """First present, non-empty value among `names`. Case-insensitive —
+    BaseHTTPRequestHandler's mapping already is, but be explicit."""
+    for n in names:
+        v = headers.get(n) or headers.get(n.lower())
+        if v and v.strip():
+            return v.strip()
+    return None
+
+
+def tools_for_domain(domain):
+    """REPL tools for a retrieval domain.
+
+    Returns None (no tools) for an unknown or absent domain — deliberately, not
+    a default. Handing a code caller legal retrieval answers confidently and
+    wrongly, which is worse than answering with no retrieval at all.
+
+    Both branches are empty today: neither master exposes its tools over HTTP.
+    When they do, each becomes a dict of plain Python callables (possible
+    because environment="local" keeps them in-process; the code-string
+    constraint in the original design note applies only to isolated
+    environments).
+    """
+    if domain == "legal":
+        return None  # TODO: query_case_knowledge, query_case_graph
+    if domain == "code":
+        return None  # TODO: search_code, search_symbols, search_files
+    return None
+
+
+def build_rlm(master_url=None, domain=None):
     """A fresh RLM per request: completion() spawns and tears down its own
     environment and LM handler, and sharing one across concurrent requests would
     share REPL state between unrelated callers.
 
-    `master_url` is the caller's identity, taken from the incoming request's
-    X-SoundSuite-Master header and forwarded on every sub-model call. It has to
-    be per-request rather than per-container: two masters register on the same
-    sidecar and each has its own key, model and budget, so a container-wide
-    value would make one master's traffic spend the other's money. The sidecar
-    refuses with 409 rather than guess, which is what surfaces here if the
-    header is missing.
+    `master_url` is the caller's identity, taken from the incoming request and
+    forwarded on every sub-model call. It has to be per-request rather than
+    per-container: two masters register on the same sidecar and each has its own
+    key, model and budget, so a container-wide value would make one master's
+    traffic spend the other's money. The sidecar refuses with 409 rather than
+    guess, which is what surfaces here if the header is missing.
+
+    `domain` is which retrieval world this caller lives in — 'legal' (Sound
+    Suite, case law) or 'code' (Fantom, a codebase). It selects which tools get
+    injected into the REPL. Getting it wrong does not error; it answers a code
+    question with legal retrieval, which is the confidently-wrong failure the
+    two-master contract exists to prevent. So an unrecognised value yields NO
+    tools rather than a guess.
     """
     effective_master = (master_url or MASTER_URL or "").strip()
-    default_headers = {"X-SoundSuite-Master": effective_master} if effective_master else None
+    effective_domain = domain if domain in VALID_DOMAINS else None
+
+    default_headers = {}
+    if effective_master:
+        # Canonical name, plus the Fantom-prefixed alias they already send, so
+        # whichever the sidecar reads works without a redeploy on either side.
+        default_headers["X-SoundSuite-Master"] = effective_master
+        default_headers["X-FantomMCP-Master"] = effective_master
+    if effective_domain:
+        default_headers["X-SoundSuite-Domain"] = effective_domain
+        default_headers["X-FantomMCP-Domain"] = effective_domain
+
     return RLM(
         backend="openai",
         backend_kwargs={
@@ -134,13 +191,12 @@ def build_rlm(master_url=None):
         max_concurrent_subcalls=MAX_CONCURRENT_SUBCALLS,
         **({"max_tokens": MAX_TOKENS} if MAX_TOKENS else {}),
         **({"max_budget": MAX_BUDGET_USD} if MAX_BUDGET_USD else {}),
-        # custom_tools is STUBBED in v1. With environment="local" these would be
-        # ordinary Python callables (the code-string constraint applies only to
-        # isolated environments), but the master does not yet expose
-        # query_case_knowledge / query_case_graph over HTTP. The loop runs and
-        # reasons over the prompt it is given; it cannot retrieve.
-        # See DESIGN §7.
-        custom_tools=None,
+        # Tools per domain. Still EMPTY on both sides — neither master exposes
+        # query_case_knowledge/query_case_graph ('legal') nor
+        # search_code/search_symbols/search_files ('code') over HTTP yet. The
+        # domain now reaches the exact point where they get injected, so wiring
+        # them is a change to tools_for_domain() alone.
+        custom_tools=tools_for_domain(effective_domain),
         verbose=False,
     )
 
@@ -262,17 +318,28 @@ class Handler(BaseHTTPRequestHandler):
             self._error(400, "messages contained no text content")
             return
 
-        # Forward the caller's identity, so sub-model calls are billed to the
-        # master that asked. Case-insensitive: BaseHTTPRequestHandler's headers
-        # are, but be explicit rather than rely on it.
-        caller = self.headers.get("X-SoundSuite-Master") or self.headers.get("x-soundsuite-master")
+        # Who is calling (bills the sub-model calls) and what they retrieve over
+        # (selects the REPL tools). Both are per-request: one container serves
+        # both masters, so neither can be a container-wide setting.
+        caller = first_header(self.headers, MASTER_HEADERS)
+        domain = first_header(self.headers, DOMAIN_HEADERS)
+
         if not caller and not MASTER_URL:
-            print("[rlm] no X-SoundSuite-Master on request and no SS_MASTER_URL — "
+            print(f"[rlm] no {'/'.join(MASTER_HEADERS)} on request and no SS_MASTER_URL — "
                   "the sidecar will 409 if more than one master has a key", file=sys.stderr)
+        if domain and domain not in VALID_DOMAINS:
+            # Loud, because the consequence is silent: an unrecognised domain
+            # gets no tools, and a caller expecting retrieval sees a plausible
+            # answer built from the prompt alone.
+            print(f"[rlm] domain {domain!r} is not one of {VALID_DOMAINS} — no tools will be "
+                  "injected. Check the header value.", file=sys.stderr)
+        elif not domain:
+            print("[rlm] no domain header — no tools will be injected. Send "
+                  f"{DOMAIN_HEADERS[0]} (or {DOMAIN_HEADERS[1]}).", file=sys.stderr)
 
         started = time.time()
         try:
-            result = build_rlm(caller).completion(prompt)
+            result = build_rlm(caller, domain).completion(prompt)
         except Exception as e:
             took = time.time() - started
             print(f"[rlm] failed after {took:.1f}s: {type(e).__name__}: {e}", file=sys.stderr)

@@ -108,3 +108,50 @@ describe('sandboxModelFor', () => {
     if (r.ok) expect(sandboxModelFor(r.config, 'rlm-sandbox')).toBeUndefined();
   });
 });
+
+/**
+ * Header aliases.
+ *
+ * Fantom shipped `X-FantomMCP-Master` / `X-FantomMCP-Domain` before this side
+ * read either, and sends the `X-SoundSuite-` spellings alongside them. Both
+ * spellings are accepted so neither master has to redeploy in lockstep with the
+ * other — that is the reason these are aliases rather than a rename.
+ *
+ * These assert the CONSTANTS agree across the two files that must not drift:
+ * the sidecar route reads them, the container's server.py sends them.
+ */
+describe('master/domain header aliases', () => {
+  const ROUTE = 'sideCar/src/app/api/v1/chat/completions/route.ts';
+  const SERVER_PY = 'docker/rlm-sandbox/server.py';
+  const read = (p: string) =>
+    require('fs').readFileSync(require('path').join(__dirname, '../../../../', p), 'utf8');
+
+  it('the sidecar route accepts both spellings for identity and domain', () => {
+    const src = read(ROUTE);
+    for (const h of [
+      'x-soundsuite-master', 'x-fantommcp-master',
+      'x-soundsuite-domain', 'x-fantommcp-domain',
+    ]) {
+      expect(src).toContain(h);
+    }
+  });
+
+  it('the container sends both spellings, so either side can read it', () => {
+    const src = read(SERVER_PY);
+    for (const h of [
+      'X-SoundSuite-Master', 'X-FantomMCP-Master',
+      'X-SoundSuite-Domain', 'X-FantomMCP-Domain',
+    ]) {
+      expect(src).toContain(h);
+    }
+  });
+
+  it('the container refuses to guess a domain it does not recognise', () => {
+    // tools_for_domain returns None for anything outside legal|code. Handing a
+    // code caller legal retrieval answers confidently and wrongly, which is the
+    // failure the two-master contract exists to prevent.
+    const src = read(SERVER_PY);
+    expect(src).toContain('VALID_DOMAINS = ("legal", "code")');
+    expect(src).toMatch(/def tools_for_domain/);
+  });
+});

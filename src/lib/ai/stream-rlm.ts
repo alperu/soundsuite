@@ -110,6 +110,25 @@ const RLM_SANDBOX_PORT = 8101;
 const SANDBOX_MASTER_HEADER = 'X-SoundSuite-Master';
 
 /**
+ * This master's retrieval domain, restated per request.
+ *
+ * The AUTHORITATIVE declaration is `domain: 'legal'` in the config push
+ * (`buildOpenRouterPush`), which the sidecar stores per master. This header
+ * restates it on the unit that actually selects tools: the container picks the
+ * REPL tool set per request, and it can only see headers — the stored config
+ * lives on the sidecar, which the container never queries.
+ *
+ * Hardcoded, like the push. Which retrieval domain this software operates over
+ * is a fact about the software, not an operator preference, and a wrong value
+ * does not error — it answers a legal question with code retrieval.
+ *
+ * Fantom sends the same pair under an `X-FantomMCP-` prefix; both sides accept
+ * both spellings so neither has to redeploy in lockstep.
+ */
+const SANDBOX_DOMAIN_HEADER = 'X-SoundSuite-Domain';
+const SANDBOX_DOMAIN = 'legal';
+
+/**
  * Headers for a request to an RLM endpoint. Adds the caller identity only for
  * the sandbox — the self-hosted ss-rlm vLLM server has no use for it and would
  * just log an unknown header.
@@ -117,6 +136,10 @@ const SANDBOX_MASTER_HEADER = 'X-SoundSuite-Master';
 async function rlmHeaders(resolved: ResolvedRlmEndpoint): Promise<Record<string, string>> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (!resolved.sandbox) return headers;
+  // Domain is a constant — send it even if identity resolution fails below, so
+  // a master that cannot name itself still gets the right tools rather than
+  // none.
+  headers[SANDBOX_DOMAIN_HEADER] = SANDBOX_DOMAIN;
   try {
     const { getCanonicalMasterUrl } = await import('@/lib/gpu/master-identity');
     const self = await getCanonicalMasterUrl();
