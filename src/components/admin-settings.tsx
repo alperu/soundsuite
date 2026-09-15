@@ -34,9 +34,13 @@ const PROVIDER_MODELS: Record<string, Array<{ name: string; label: string; size:
     { name: 'claude-3-haiku-20240307', label: 'Claude 3 Haiku', size: 0 },
   ],
   ollama: [
-    { name: 'qwen3-embedding:0.6b', label: 'Qwen3 Embedding 0.6B (1024 dims, 32K context) — Best for Legal', size: 639 * 1024 * 1024 },
-    { name: 'qwen3-embedding:4b', label: 'Qwen3 Embedding 4B (2560 dims, 32K context) — Highest Quality', size: 2500 * 1024 * 1024 },
+    { name: 'qwen3-embedding:0.6b', label: 'Qwen3 Embedding 0.6B — Q8_0 (1024 dims, 32K context) — Best for Legal', size: 639 * 1024 * 1024 },
+    { name: 'qwen3-embedding:0.6b-fp16', label: 'Qwen3 Embedding 0.6B — fp16 (1024 dims, highest precision)', size: 1200 * 1024 * 1024 },
+    { name: 'qwen3-embedding:4b', label: 'Qwen3 Embedding 4B — Q4_K_M (2560 dims, 32K context) — Highest Quality', size: 2500 * 1024 * 1024 },
+    { name: 'qwen3-embedding:4b-q8_0', label: 'Qwen3 Embedding 4B — Q8_0 (2560 dims, nearer full precision)', size: 4300 * 1024 * 1024 },
+    { name: 'qwen3-embedding:4b-fp16', label: 'Qwen3 Embedding 4B — fp16 (2560 dims, matches hosted providers)', size: 8000 * 1024 * 1024 },
     { name: 'qwen3-embedding:8b', label: 'Qwen3 Embedding 8B (4096 dims, 32K context) — #1 MTEB (MLEB: 85.0, ~5GB)', size: 5000 * 1024 * 1024 },
+    { name: 'qwen3-embedding:8b-fp16', label: 'Qwen3 Embedding 8B — fp16 (4096 dims, matches hosted providers)', size: 16000 * 1024 * 1024 },
     { name: 'nomic-embed-text', label: 'nomic-embed-text (768 dims, 8K context)', size: 274 * 1024 * 1024 },
     { name: 'snowflake-arctic-embed2', label: 'snowflake-arctic-embed2 (1024 dims, 8K context)', size: 1200 * 1024 * 1024 },
     { name: 'bge-m3', label: 'bge-m3 (1024 dims, 8K context, multilingual)', size: 1200 * 1024 * 1024 },
@@ -387,10 +391,17 @@ export default function AdminSettings({ initialConfig, initialModelDownloads }: 
                   ollama pull {config.embeddingModel}
                 </pre>
                 <p className="text-xs text-blue-600 mt-2">
+                  {/* Match on the FAMILY, not the exact tag. The same weights
+                      ship at several precisions (:4b, :4b-q8_0, :4b-fp16) and
+                      an exact-equality check sent every suffixed tag into the
+                      0.6B branch — describing an 8GB 2560-dim model as "1024
+                      dims, ~639MB". */}
                   {config.embeddingModel.startsWith('qwen3-embedding')
-                    ? config.embeddingModel === 'qwen3-embedding:4b'
-                      ? 'Highest quality for legal docs (MLEB: 82.6). 2560 dims, 32K context. ~2.5GB download. Needs ~5GB RAM.'
-                      : 'Best value for legal docs (MLEB: 76.4). 1024 dims, 32K context. ~639MB download. Needs ~1.2GB RAM.'
+                    ? config.embeddingModel.includes(':8b')
+                      ? 'Top of MTEB (MLEB: 85.0). 4096 dims, 32K context. fp16 doubles the download and the RAM.'
+                      : config.embeddingModel.includes(':4b')
+                        ? 'Highest quality for legal docs (MLEB: 82.6). 2560 dims, 32K context. Q4_K_M ~2.5GB / Q8_0 ~4.3GB / fp16 ~8GB — higher precision is slower to run, and only fp16 shares a vector space with hosted providers.'
+                        : 'Best value for legal docs (MLEB: 76.4). 1024 dims, 32K context. Q8_0 ~639MB, fp16 ~1.2GB. No hosted provider serves the 0.6B, so precision here is about quality, not cloud compatibility.'
                     : config.embeddingModel === 'nomic-embed-text'
                       ? 'Good general-purpose model. 768 dims, 8K context. ~274MB. Outperformed by Qwen3 on legal benchmarks.'
                       : `Selected model size: ~${formatBytes(availableModels.find(m => m.name === config.embeddingModel)?.size || 0)}.`}
