@@ -35,8 +35,8 @@ const PROVIDER_MODELS: Record<string, Array<{ name: string; label: string; size:
   ],
   ollama: [
     { name: 'qwen3-embedding:0.6b', label: 'Qwen3 Embedding 0.6B (1024 dims, 32K context) — Best for Legal', size: 639 * 1024 * 1024 },
-    { name: 'qwen3-embedding:4b', label: 'Qwen3 Embedding 4B (1024 dims, 40K context) — Highest Quality', size: 2500 * 1024 * 1024 },
-    { name: 'qwen3-embedding:8b', label: 'Qwen3 Embedding 8B (1024 dims, 32K context) — #1 MTEB (MLEB: 85.0, ~5GB)', size: 5000 * 1024 * 1024 },
+    { name: 'qwen3-embedding:4b', label: 'Qwen3 Embedding 4B (2560 dims, 32K context) — Highest Quality', size: 2500 * 1024 * 1024 },
+    { name: 'qwen3-embedding:8b', label: 'Qwen3 Embedding 8B (4096 dims, 32K context) — #1 MTEB (MLEB: 85.0, ~5GB)', size: 5000 * 1024 * 1024 },
     { name: 'nomic-embed-text', label: 'nomic-embed-text (768 dims, 8K context)', size: 274 * 1024 * 1024 },
     { name: 'snowflake-arctic-embed2', label: 'snowflake-arctic-embed2 (1024 dims, 8K context)', size: 1200 * 1024 * 1024 },
     { name: 'bge-m3', label: 'bge-m3 (1024 dims, 8K context, multilingual)', size: 1200 * 1024 * 1024 },
@@ -58,7 +58,7 @@ const CODE_EMBEDDING_MODELS: Array<{
   { name: 'hf.co/jinaai/jina-code-embeddings-1.5b-GGUF:F16', label: 'Jina Code Embeddings 1.5B — F16 (1536 dims, highest precision)', size: 3090 * 1024 * 1024, dims: 1536, about: 'Code-aware embeddings (Qwen2.5-Coder-1.5B base, last-token pooling, F16 weights)' },
   { name: 'hf.co/jinaai/jina-code-embeddings-0.5b-GGUF:Q8_0', label: 'Jina Code Embeddings 0.5B — Q8_0 (896 dims, lighter)', size: 600 * 1024 * 1024, dims: 896, about: 'Code-aware embeddings (Qwen2.5-Coder-0.5B base, last-token pooling)' },
   { name: 'qwen3-embedding:0.6b', label: 'Qwen3 Embedding 0.6B (0.6B params, 1024 dims, 32K context)', size: 639 * 1024 * 1024, dims: 1024, about: 'General-purpose Qwen3 embedding, 0.6B parameters, 1024 dims' },
-  { name: 'qwen3-embedding:4b', label: 'Qwen3 Embedding 4B (4B params, 2560 dims, 40K context)', size: 2500 * 1024 * 1024, dims: 2560, about: 'General-purpose Qwen3 embedding, 4B parameters, 2560 dims' },
+  { name: 'qwen3-embedding:4b', label: 'Qwen3 Embedding 4B (4B params, 2560 dims, 32K context)', size: 2500 * 1024 * 1024, dims: 2560, about: 'General-purpose Qwen3 embedding, 4B parameters, 2560 dims' },
   { name: 'qwen3-embedding:8b', label: 'Qwen3 Embedding 8B (8B params, 4096 dims, 32K context)', size: 5000 * 1024 * 1024, dims: 4096, about: 'General-purpose Qwen3 embedding, 8B parameters, 4096 dims' },
 ];
 
@@ -387,8 +387,8 @@ export default function AdminSettings({ initialConfig, initialModelDownloads }: 
                 <p className="text-xs text-blue-600 mt-2">
                   {config.embeddingModel.startsWith('qwen3-embedding')
                     ? config.embeddingModel === 'qwen3-embedding:4b'
-                      ? 'Highest quality for legal docs (MLEB: 82.6). 1024 dims, 40K context. ~2.5GB download. Needs ~5GB RAM.'
-                      : 'Best value for legal docs (MLEB: 76.4). 768 dims, 32K context. ~639MB download. Needs ~1.2GB RAM.'
+                      ? 'Highest quality for legal docs (MLEB: 82.6). 2560 dims, 32K context. ~2.5GB download. Needs ~5GB RAM.'
+                      : 'Best value for legal docs (MLEB: 76.4). 1024 dims, 32K context. ~639MB download. Needs ~1.2GB RAM.'
                     : config.embeddingModel === 'nomic-embed-text'
                       ? 'Good general-purpose model. 768 dims, 8K context. ~274MB. Outperformed by Qwen3 on legal benchmarks.'
                       : `Selected model size: ~${formatBytes(availableModels.find(m => m.name === config.embeddingModel)?.size || 0)}.`}
