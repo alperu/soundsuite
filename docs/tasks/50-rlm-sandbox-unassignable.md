@@ -204,6 +204,41 @@ without asking the operator to notice anything. If normalization is rejected,
 the acceptance criteria must instead state that a stale row requires a re-click
 or **Reset to defaults** — silence is the one option that is not acceptable.
 
+## The pushed policy overwrites the sidecar default — pin on the read path
+
+Setting `state.idleTimeouts['rlm-sandbox'] = 0` and `minOnline = 1` in the
+sidecar's `state.ts` is **not sufficient**, and it is worth being precise about
+why, because the sidecar defaults look like they settle the question.
+
+`ws-client.ts:455-460` applies the master's pushed maps over the sidecar's:
+
+```ts
+if (payload.idleTimeouts) Object.assign(state.idleTimeouts, payload.idleTimeouts);
+// …and the equivalent loop for payload.minOnline
+```
+
+Those payloads are built by `getEffectiveIdleTimeoutsMs()` and
+`getEffectiveMinOnline()` from the **stored DB columns**. A row created before
+this policy existed carries `idleTimeoutMin: 5` (the old generic default), so
+the very first `/config` push overwrites the sidecar's `0` and re-arms the idle
+timer. The sidecar default is only ever reachable for a host the master has
+never configured.
+
+Fixing it in `setAssignment` alone does not work either: that only writes the
+new default on the **create** branch, and the rows that matter already exist.
+
+So the pin lives on the read path — `PINNED_POLICY` in `role-registry.ts`,
+applied inside both `getEffective*` functions, overriding the stored column
+when it builds the push. That is the same shape as `PINNED_RUNTIME`, and for
+the same reason: these are properties of how the master routes to the role, not
+operator preferences. An operator turns the sandbox off with `enabled`, not by
+starving it of `minOnline`.
+
+This was caught in review, after the first implementation had already shipped
+the `state.ts` defaults and believed them load-bearing. The regression test
+mutation-checks it: reverting the pin makes `getEffectiveIdleTimeoutsMs` return
+`300000` instead of `0`.
+
 ## Sidecar defaults are missing the role entirely
 
 `sideCar/src/lib/state.ts` keys two maps by short role name, and neither has
@@ -338,6 +373,12 @@ in the UI or the PR notes, or they will reasonably conclude the fix did not land
 - ESLint on the two largest changed files: the single
   `react/no-unescaped-entities` error in `admin-role-assignments.tsx` is
   **pre-existing** — confirmed identical with this change stashed.
+- Two guards were **mutation-checked**, not merely observed green: reverting
+  the `PINNED_POLICY` pin makes `getEffectiveIdleTimeoutsMs` return `300000`
+  and the test fails; and the sidecar's runtime-refusal test now forces
+  `dockerSupportsGpu()` true via `state.gpuCache` so the refusal is proven to
+  come from the mode switch rather than from the GPU gate short-circuiting
+  ahead of it (without that, deleting the new cases would not fail the test).
 
 **NOT checked — do this before believing the feature works:**
 

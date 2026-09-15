@@ -254,7 +254,9 @@ export async function getEffectiveMinOnline(
 ): Promise<Record<string, number>> {
   const rows = await getEnabledAssignmentsForHost(sidecarUrl);
   const out: Record<string, number> = {};
-  for (const r of rows) out[r.mode.replace(/^ss-/, '')] = r.minOnline;
+  for (const r of rows) {
+    out[r.mode.replace(/^ss-/, '')] = PINNED_POLICY[r.mode]?.minOnline ?? r.minOnline;
+  }
   return out;
 }
 
@@ -264,7 +266,10 @@ export async function getEffectiveIdleTimeoutsMs(
 ): Promise<Record<string, number>> {
   const rows = await getEnabledAssignmentsForHost(sidecarUrl);
   const out: Record<string, number> = {};
-  for (const r of rows) out[r.mode.replace(/^ss-/, '')] = r.idleTimeoutMin * 60_000;
+  for (const r of rows) {
+    const mins = PINNED_POLICY[r.mode]?.idleTimeoutMin ?? r.idleTimeoutMin;
+    out[r.mode.replace(/^ss-/, '')] = mins * 60_000;
+  }
   return out;
 }
 
@@ -302,6 +307,30 @@ export function isRuntimeChoice(s: unknown): s is RuntimeChoice {
  */
 const PINNED_RUNTIME: Record<string, RuntimeChoice> = {
   'ss-rlm-sandbox': 'docker-cpu',
+};
+
+/**
+ * Modes whose residency policy is a property of how the master routes to them,
+ * not an operator preference — so it is applied on the READ path that builds
+ * the /config push, overriding whatever the stored columns say.
+ *
+ * This is not belt-and-braces over the sidecar's own defaults in state.ts:
+ * ws-client applies `Object.assign(state.idleTimeouts, payload.idleTimeouts)`
+ * and the same for minOnline, both built from these two functions. The pushed
+ * value WINS over the sidecar default, so a row created before this policy
+ * existed (idleTimeoutMin=5, the old generic default) would overwrite the
+ * sidecar's 0 on the very first push and re-arm the idle timer. Pinning on the
+ * read path is what makes the sidecar default reachable at all.
+ *
+ * ss-rlm-sandbox: minOnline 1 because minOnline=0 is a HARD never-auto-start
+ * gate and the master only routes to a sandbox whose container reports
+ * running (resolveRlmEndpoint) — 0 means the fallback can never fire, which is
+ * not a preference, it is a broken row. idleTimeoutMin 0 disables the idle
+ * timer; there is nothing to reclaim by stopping a vram:0 Python process.
+ * Operators turn this role off with `enabled`, not by starving it.
+ */
+const PINNED_POLICY: Record<string, { minOnline: number; idleTimeoutMin: number }> = {
+  'ss-rlm-sandbox': { minOnline: 1, idleTimeoutMin: 0 },
 };
 
 /**

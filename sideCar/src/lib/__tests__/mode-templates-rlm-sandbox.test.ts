@@ -12,6 +12,7 @@ import {
   resolveMode, roleToMode, modeToRole, isModeName, isRuntimeChoice,
   ALL_MODES, ALL_RUNTIME_CHOICES,
 } from '../mode-templates';
+import { state, dockerSupportsGpu } from '../state';
 
 describe('ss-rlm-sandbox — sidecar mode-templates', () => {
   it('is a recognized ModeName', () => {
@@ -85,6 +86,31 @@ describe('ss-rlm-sandbox — explicit runtime (the path the master actually uses
       // The GPU-gated container runtimes.
       expect(resolveMode('ss-rlm-sandbox', hostOs, 'docker-ollama')).toBeNull();
       expect(resolveMode('ss-rlm-sandbox', hostOs, 'docker-vllm')).toBeNull();
+    }
+  });
+
+  it('refuses docker-ollama/docker-vllm because of the mode, not the GPU gate', () => {
+    // The assertion above passes for two different reasons and cannot tell
+    // them apart: both branches open with `if (!dockerSupportsGpu()) return
+    // null`, which is false in this environment, so they return before ever
+    // reaching the ss-rlm-sandbox case. Deleting those cases would not fail
+    // that test. Force the gate open and the refusal has to come from the
+    // mode switch itself.
+    const prevCache = state.gpuCache;
+    // dockerSupportsGpu()'s strongest signal: a non-empty gpuCache means
+    // passthrough is proven working, regardless of hostOs.
+    (state as { gpuCache: unknown }).gpuCache = [{ index: 0, name: 'test', memoryTotal: 49140, memoryUsed: 0 }];
+    try {
+      expect(dockerSupportsGpu()).toBe(true);
+      for (const hostOs of ALL_OS) {
+        expect(resolveMode('ss-rlm-sandbox', hostOs, 'docker-ollama')).toBeNull();
+        expect(resolveMode('ss-rlm-sandbox', hostOs, 'docker-vllm')).toBeNull();
+      }
+      // …and docker-cpu still resolves with the gate open, i.e. the new branch
+      // is not accidentally depending on the gate either way.
+      expect(resolveMode('ss-rlm-sandbox', 'linux', 'docker-cpu')).not.toBeNull();
+    } finally {
+      (state as { gpuCache: unknown }).gpuCache = prevCache;
     }
   });
 

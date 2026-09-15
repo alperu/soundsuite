@@ -39,6 +39,8 @@ import {
   isRuntimeChoice,
   defaultRuntimeFor,
   getRuntimesForHost,
+  getEffectiveMinOnline,
+  getEffectiveIdleTimeoutsMs,
   setAssignment,
   type RuntimeChoice,
 } from '../role-registry';
@@ -123,6 +125,39 @@ describe('getRuntimesForHost', () => {
     findMany.mockResolvedValue([{ ...row('ss-embedding', 'host'), enabled: false }]);
     const out = await getRuntimesForHost('http://192.0.2.10:8098', 'linux');
     expect(out).toEqual({});
+  });
+});
+
+/**
+ * These two functions build the minOnline / idleTimeouts maps that ride on the
+ * /config push, and ws-client Object.assign's them OVER the sidecar's own
+ * state.ts defaults. So a stale stored column does not merely fail to help —
+ * it actively overwrites the correct sidecar default on the first push. That
+ * makes this the load-bearing place for the sandbox's residency policy.
+ */
+describe('pinned residency policy survives a stale row', () => {
+  const stale = { ...row('ss-rlm-sandbox', 'host'), minOnline: 0, idleTimeoutMin: 5 };
+
+  it('pushes minOnline 1 even when the stored column says 0', async () => {
+    findMany.mockResolvedValue([stale]);
+    const out = await getEffectiveMinOnline('http://192.0.2.10:8098');
+    // 0 would be a HARD never-auto-start gate on the sidecar, so the master
+    // could never find a running sandbox to route to.
+    expect(out['rlm-sandbox']).toBe(1);
+  });
+
+  it('pushes a disabled idle timer even when the stored column says 5 minutes', async () => {
+    findMany.mockResolvedValue([stale]);
+    const out = await getEffectiveIdleTimeoutsMs('http://192.0.2.10:8098');
+    expect(out['rlm-sandbox']).toBe(0);
+  });
+
+  it('leaves the stored policy of every other role untouched', async () => {
+    findMany.mockResolvedValue([
+      { ...row('ss-completion', 'docker-ollama'), minOnline: 0, idleTimeoutMin: 10 },
+    ]);
+    expect((await getEffectiveMinOnline('http://192.0.2.10:8098'))['completion']).toBe(0);
+    expect((await getEffectiveIdleTimeoutsMs('http://192.0.2.10:8098'))['completion']).toBe(600_000);
   });
 });
 
