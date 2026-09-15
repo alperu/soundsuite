@@ -202,10 +202,52 @@ Registry entry is already correct and needs no change: `port: 8101`, `vram: 0`,
 `type: 'vllm'`, `requiresGpu: false`, runtime `docker-cpu`
 (`sideCar/src/lib/state.ts:220`, `mode-templates.ts:rlmSandboxDef`).
 
-**Open: where the image is published.** `soundsuite/rlm-sandbox:latest` is the
-string in the registry and it 404s on Docker Hub. Whatever replaces it must be
-changed in **both** `state.ts` and `mode-templates.ts` — the registry-overwrite
-trap, where editing only `defaultRegistry` is silently dropped at runtime.
+**Registry: Docker Hub `soundsuite/rlm-sandbox`** (decided 2026-09-15). Keeping
+the name already in the registry means **no change to `state.ts` or
+`mode-templates.ts`**, and therefore no sidecar release needed on account of the
+image. (Had the name changed, it would have had to change in *both* files — the
+registry-overwrite trap, where editing only `defaultRegistry` is silently
+dropped at runtime.)
+
+### 6.1 The image MUST be multi-arch
+
+The fleet is mixed, verified live on 2026-09-15 — all five hosts on sidecar
+2.4.8:
+
+| host | `host.os` | GPU | arch |
+|---|---|---|---|
+| `10.10.20.5` | windows-docker-wsl2 | RTX A6000 | amd64 |
+| `10.10.20.6` | windows-docker-wsl2 | RTX A6000 | amd64 |
+| `10.10.20.134` | windows-docker-wsl2 | TITAN RTX | amd64 |
+| `192.168.88.249` | mac-docker-ollama | — | arm64 |
+| `192.168.88.238` | mac-docker-ollama | — | arm64 |
+
+A single-arch image fails on whichever half it was not built for, with
+`exec format error` — and the failure surfaces as a container that will not
+start, not as a pull error, so it reads like a bug in this role rather than a
+packaging mistake.
+
+Build with a `docker-container` buildx driver; the default `docker` driver
+cannot export a manifest list:
+
+```bash
+docker buildx create --name ssmulti --driver docker-container --use   # once
+docker buildx build --builder ssmulti \
+  --platform linux/amd64,linux/arm64 \
+  --build-arg MASTER_URL=http://<master>:3000 \
+  --build-arg RLMS_SHA256=$(node -p "require('./public/rlm/manifest.json').sha256") \
+  -t soundsuite/rlm-sandbox:0.1.0 -t soundsuite/rlm-sandbox:latest \
+  --push docker/rlm-sandbox
+```
+
+Verify the manifest list really carries both before trusting it —
+`docker buildx imagetools inspect soundsuite/rlm-sandbox:latest` must list
+`linux/amd64` **and** `linux/arm64`. (Two `unknown/unknown` entries alongside
+them are buildx attestation manifests and are expected.)
+
+Note the two Macs are the hosts that could not run this role at all before the
+`docker-cpu` runtime shipped in 2.4.8 — they are the reason the multi-arch
+requirement exists.
 
 ---
 
