@@ -341,12 +341,28 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           </button>
         </div>
 
+        {/*
+          Code vs text, and drop-in status, are the two things an operator needs
+          before switching a role. `ss-embedding` (qwen3-embedding:0.6b, 1024d)
+          and `ss-code-embedding` (qwen3-embedding:4b, 2560d) have different
+          widths, so a model that is a drop-in for one is a re-index for the
+          other. Saying which is which here prevents picking by price alone and
+          discovering the mismatch at ingestion time.
+        */}
         <CuratedTable
-          title="Embedding models"
+          title="Embedding models — code vs text"
           rows={OPENROUTER_EMBEDDING_MODELS.map((m) => ({
             id: m.id,
-            label: m.label,
-            detail: `${m.dims} dims · ${fmtCtx(m.contextTokens)} ctx · ${fmtPrice(m.pricePerMTokens)}/M · pinned: ${m.pinProvider}`,
+            label: `${m.label}  ${m.codeCapable ? '[Code + Text]' : '[Text]'}`,
+            detail: [
+              `${m.dims} dims`,
+              fmtCtx(m.contextTokens) + ' ctx',
+              fmtPrice(m.pricePerMTokens) + '/M',
+              `pinned: ${m.pinProvider}`,
+              m.dropInFor
+                ? `drop-in for ss-${m.dropInFor} (same ${m.dims}d — no re-index)`
+                : 'new vector space only — dimensions match no current role',
+            ].join(' · '),
           }))}
           availability={availability}
         />
