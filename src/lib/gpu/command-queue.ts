@@ -17,11 +17,35 @@ import { SidecarError } from '@/lib/gpu/sidecar-error';
 const logger = createLogger('CommandQueue');
 
 // In-memory waiters: commandId → { resolve, reject, timer }
-const waiters = new Map<string, {
+//
+// Backed by globalThis for the same reason ws-relay.ts's connection map is:
+// Next.js re-evaluates this module in separate contexts (worker-init vs. API
+// route handlers are distinct webpack layers), so a plain module-level Map
+// exists once PER CONTEXT. `queueSidecarCommand` (called from worker-init —
+// IngestionPipeline, the min-online enforcement loop, VirtualEmbedDispatch —
+// or from an admin route handler) registered its waiter in one instance of
+// this Map; `reportCommandResult` (always called from the
+// /api/admin/gpu/sidecars/result ROUTE HANDLER) read from a different,
+// permanently-empty instance. `waiters.get(commandId)` therefore always
+// missed — logged as "Command result received but no waiter" with
+// waitersCount: 0 — even though the sidecar had polled and reported back in
+// a second or two. The caller's promise was never resolved, so every
+// HTTP-fallback command sat until its own 15s timer fired and rejected with
+// the misleading "sidecar did not poll in time" (it had). This silently
+// broke ALL HTTP-queue-fallback command delivery fleet-wide: WS-delivered
+// commands were unaffected because ws-relay.ts's `pendingCommands` map
+// already carries this same globalThis fix.
+const g = globalThis as any;
+if (!g.__ss_cmdq_waiters__) g.__ss_cmdq_waiters__ = new Map<string, {
   resolve: (result: any) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }>();
+const waiters: Map<string, {
+  resolve: (result: any) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}> = g.__ss_cmdq_waiters__;
 
 /**
  * Queue a command to a sidecar. Tries WS first, falls back to DB queue.
