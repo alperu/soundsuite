@@ -123,6 +123,27 @@ async function buildProcessDocumentFn(): Promise<(documentId: string, filePath: 
             openRouterEmbeddingModel: config.openRouterEmbeddingModel,
           });
         }
+      } else if (config.virtualInferenceModeEmbedding === 'cloud-only' && config.openRouterEnabled) {
+        // POLICY 4 — 'cloud-only' ("OpenRouter Only" on /admin/openrouter).
+        //
+        // This branch was missing, and its absence was silent: only
+        // 'all-sources' was checked, so selecting "OpenRouter Only" left the
+        // Ollama provider constructed above completely untouched. Every
+        // embedding kept going to local Ollama, the /admin/openrouter Live
+        // Activity panel sat at "never called" forever, and nothing in the
+        // logs said the chosen policy had been ignored.
+        //
+        // The mode IS pushed to sidecars (fleet-router's modeByRole), which is
+        // why the setting looked like it did something — but the master's own
+        // provider is chosen here, from `embedding.provider`, and never
+        // consulted the policy.
+        const { OpenRouterEmbeddingProvider } = await import('@/lib/ingestion/openrouter-embedding-provider');
+        const openRouterModel = config.openRouterEmbeddingModel || 'qwen/qwen3-embedding-4b';
+        embeddingProvider = new OpenRouterEmbeddingProvider({
+          apiKey: config.openRouterApiKey,
+          model: openRouterModel,
+        });
+        logger.info('Embedding routed to OpenRouter by policy (cloud-only)', { openRouterModel });
       }
       break;
     }
