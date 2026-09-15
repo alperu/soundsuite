@@ -86,6 +86,13 @@ unconfigured.** It must not default to either side. Silently defaulting would
 hand legal retrieval tools to a code caller, or the reverse — a failure that
 produces confidently wrong answers rather than an error.
 
+On Sound Suite's side, `domain: 'legal'` is **hardcoded** in
+`buildOpenRouterPush()`, not read from an admin setting — there is no UI toggle
+for it. Which retrieval domain a codebase operates over is a fact about the
+software, not an operator preference; exposing it as a setting would let a
+misclick point the push at the wrong tool set. Fantom's implementation should
+hardcode `'code'` for the same reason rather than making it configurable.
+
 ---
 
 ## 3. Tool injection

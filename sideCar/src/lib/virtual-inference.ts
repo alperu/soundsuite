@@ -76,6 +76,19 @@ export interface OpenRouterModelConfig {
   note?: string;
 }
 
+/**
+ * Which retrieval domain this master drives the RLM sandbox pattern over
+ * (ss-rlm-sandbox — see docs/SPEC-ss-rlm-sandbox.md). Each master declares
+ * its own; the sidecar never infers it (not from port, not from serverUrl
+ * shape — a deployment can renumber ports and this must not silently break).
+ * A master with no `domain` gets NO tool injection for the sandbox and is
+ * treated as unconfigured for that role, exactly like a master with no
+ * OpenRouter key gets no cloud routing at all — silently defaulting to
+ * either domain would risk handing one caller's retrieval tools (and the
+ * data reachable through them) to the other.
+ */
+export type SandboxDomain = 'legal' | 'code';
+
 export interface OpenRouterMasterConfig {
   /** Encrypted at rest (openrouter-store.ts). Never logged, never returned by
    *  getStatus(). Absent when the master pushed models/modes but no key —
@@ -83,6 +96,9 @@ export interface OpenRouterMasterConfig {
   apiKey?: string;
   allowedModels: Record<string, OpenRouterModelConfig>;
   modeByRole: Record<string, RoutingMode>;
+  /** See SandboxDomain. Optional — absent means "not declared", not "legal
+   *  by default". Only meaningful for the ss-rlm-sandbox role today. */
+  domain?: SandboxDomain;
 }
 
 export interface RoutingDecision {
@@ -177,6 +193,16 @@ function sanitizeModeByRole(raw: unknown): Record<string, RoutingMode> {
   return out;
 }
 
+const VALID_DOMAINS: SandboxDomain[] = ['legal', 'code'];
+
+/** Untrusted network input — anything other than exactly 'legal' or 'code'
+ *  becomes undefined (not declared), never a guessed default. */
+function sanitizeDomain(raw: unknown): SandboxDomain | undefined {
+  return typeof raw === 'string' && (VALID_DOMAINS as string[]).includes(raw)
+    ? (raw as SandboxDomain)
+    : undefined;
+}
+
 /**
  * Apply a master's OpenRouter config push. Mirrors the existing `case
  * 'config'` handling in ws-client.ts: partial pushes merge onto the
@@ -209,11 +235,17 @@ export function setOpenRouterConfig(serverUrl: string, payload: unknown): void {
   const modeByRole = obj.modeByRole !== undefined
     ? sanitizeModeByRole(obj.modeByRole)
     : existing?.modeByRole ?? {};
+  // Same merge-on-partial-push rule as apiKey/allowedModels/modeByRole above:
+  // a push that omits `domain` keeps whatever this master declared last,
+  // rather than clearing it. An invalid value (sanitizeDomain returned
+  // undefined) also falls back to `existing` — a malformed push must not
+  // silently un-declare a domain that was working.
+  const domain = obj.domain !== undefined ? (sanitizeDomain(obj.domain) ?? existing?.domain) : existing?.domain;
 
-  G.byMaster.set(serverUrl, { apiKey, allowedModels, modeByRole });
+  G.byMaster.set(serverUrl, { apiKey, allowedModels, modeByRole, domain });
   // Survive restarts. A self-update restarts this process, and without this
   // the whole fleet silently de-configures itself on every release.
-  saveOpenRouterStore(G.byMaster as Map<string, { apiKey: string; allowedModels: Record<string, unknown>; modeByRole: Record<string, string> }>);
+  saveOpenRouterStore(G.byMaster as Map<string, { apiKey: string; allowedModels: Record<string, unknown>; modeByRole: Record<string, string>; domain?: string }>);
 
   const roleModes = Object.entries(modeByRole).map(([r, m]) => `${r}=${m}`).join(', ') || '(none set — all local-only)';
   const modeledRoles = Object.keys(allowedModels).join(', ') || '(none)';
@@ -228,7 +260,7 @@ export function clearOpenRouterConfig(serverUrl: string): void {
     log.info(`[${serverUrl}] OpenRouter config cleared (master retired)`);
     // Persist the removal too, or a retired master's key would come back on
     // the next boot and a reused URL could inherit a stranger's credentials.
-    saveOpenRouterStore(G.byMaster as Map<string, { apiKey: string; allowedModels: Record<string, unknown>; modeByRole: Record<string, string> }>);
+    saveOpenRouterStore(G.byMaster as Map<string, { apiKey: string; allowedModels: Record<string, unknown>; modeByRole: Record<string, string>; domain?: string }>);
   }
   G.statsByMaster.delete(serverUrl);
 }
@@ -254,12 +286,16 @@ export function getOpenRouterStatus(serverUrl: string): {
   openrouter: 'configured' | 'key-missing' | 'unset';
   modeByRole: Record<string, RoutingMode>;
   rolesWithModel: string[];
+  /** This master's declared sandbox domain, or undefined if never declared
+   *  (or declared invalid) — see SandboxDomain. */
+  domain?: SandboxDomain;
 } {
   const cfg = G.byMaster.get(serverUrl);
   return {
     openrouter: !cfg ? 'unset' : (cfg.apiKey ? 'configured' : 'key-missing'),
     modeByRole: cfg?.modeByRole ?? {},
     rolesWithModel: cfg ? Object.keys(cfg.allowedModels) : [],
+    domain: cfg?.domain,
   };
 }
 

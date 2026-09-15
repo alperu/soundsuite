@@ -97,6 +97,62 @@ describe('buildOpenRouterPush', () => {
   });
 });
 
+describe('buildOpenRouterPush — ss-rlm-sandbox two-master contract', () => {
+  it('always declares this master (Sound Suite) as the legal domain', () => {
+    // Fantom's own master declares 'code' from its own codebase — this repo
+    // cannot and must not speak for it. See docs/SPEC-ss-rlm-sandbox.md.
+    expect(buildOpenRouterPush(cfg())!.domain).toBe('legal');
+    // Even when nothing else is configured, as long as the feature is on.
+    expect(
+      buildOpenRouterPush(
+        cfg({ openRouterEmbeddingModel: undefined, openRouterCodeEmbeddingModel: undefined, openRouterRerankModel: undefined }),
+      )!.domain,
+    ).toBe('legal');
+  });
+
+  it('maps rlm.sandboxModel to the rlm-sandbox role, separately from every other role', () => {
+    const out = buildOpenRouterPush(cfg({ rlmSandboxModel: 'deepseek/deepseek-v4-flash' } as Partial<AppConfig>))!;
+    expect(out.allowedModels['rlm-sandbox']).toEqual({ model: 'deepseek/deepseek-v4-flash' });
+  });
+
+  it('rlm-sandbox does not appear at all when no sandbox model is configured', () => {
+    const out = buildOpenRouterPush(cfg())!;
+    expect(out.allowedModels['rlm-sandbox']).toBeUndefined();
+    expect(out.modeByRole['rlm-sandbox']).toBeUndefined();
+  });
+
+  it("rlm-sandbox's mode comes from virtualInference.mode.rlm, not a hardcoded value (unlike reranker)", () => {
+    const out = buildOpenRouterPush(
+      cfg({
+        rlmSandboxModel: 'deepseek/deepseek-v4-flash',
+        virtualInferenceModeRlm: 'local-first',
+      } as Partial<AppConfig>),
+    )!;
+    expect(out.modeByRole['rlm-sandbox']).toBe('local-first');
+  });
+
+  it('rlm-sandbox mode defaults to local-only when virtualInferenceModeRlm is unset', () => {
+    const out = buildOpenRouterPush(cfg({ rlmSandboxModel: 'deepseek/deepseek-v4-flash' } as Partial<AppConfig>))!;
+    expect(out.modeByRole['rlm-sandbox']).toBe('local-only');
+  });
+
+  it('the sandbox model rides the same per-master channel as embedding/reranker, not a separate one', () => {
+    // This is the architectural point: rlm-sandbox is just another entry in
+    // allowedModels/modeByRole, the SAME per-serverUrl map that already keeps
+    // Sound Suite and Fantom from clobbering each other's embedding/rerank
+    // config. No new field shape, no new push path.
+    const out = buildOpenRouterPush(
+      cfg({
+        openRouterEmbeddingModel: 'qwen/qwen3-embedding-4b',
+        openRouterCodeEmbeddingModel: undefined,
+        openRouterRerankModel: undefined,
+        rlmSandboxModel: 'deepseek/deepseek-v4-flash',
+      } as Partial<AppConfig>),
+    )!;
+    expect(Object.keys(out.allowedModels).sort()).toEqual(['embedding', 'rlm-sandbox']);
+  });
+});
+
 describe('buildOpenRouterPush — modes come from config', () => {
   it('passes the configured mode through per role', () => {
     const out = buildOpenRouterPush(

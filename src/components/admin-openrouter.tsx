@@ -487,13 +487,21 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           {/* ss-rlm-sandbox — fallback used only when ss-rlm is unavailable
               locally (see stream-rlm.ts's resolveRlmEndpoint). Options come
               from the live catalogue filtered to tools+reasoning models —
-              anything else literally cannot drive the RLM tool-use loop. */}
+              anything else literally cannot drive the RLM tool-use loop.
+
+              THIS IS SOUND SUITE'S OWN SETTING, not a fleet-wide global. A
+              sidecar can serve multiple masters (Sound Suite + Fantom MCP),
+              and each pushes its own model/mode for ss-rlm-sandbox over the
+              same per-master channel embedding/reranker already use — see
+              buildOpenRouterPush() in fleet-router.ts and
+              docs/SPEC-ss-rlm-sandbox.md. Changing it here never touches
+              what another master has configured. */}
           <Picker
-            label="RLM Sandbox fallback (ss-rlm-sandbox)"
+            label="RLM Sandbox fallback (ss-rlm-sandbox) — this master's setting"
             hint={
               catalogueLoading
                 ? 'Loading eligible models…'
-                : `${rlmCandidates.length} of ${catalogue.length} catalogue models support both tools + reasoning (required to drive the RLM tool-use loop). Used only when ss-rlm has no sidecar available and the toggle below is set to "Allow sandbox fallback".`
+                : `${rlmCandidates.length} of ${catalogue.length} catalogue models support both tools + reasoning (required to drive the RLM tool-use loop). Used only when ss-rlm has no sidecar available and the toggle below is set to "Allow sandbox fallback". This is Sound Suite's own model choice — the Fantom MCP master (code search) configures its own sandbox model independently; the two never overwrite each other.`
             }
             value={rlmSandboxModel}
             onChange={setRlmSandboxModel}
@@ -501,7 +509,7 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           />
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              RLM fallback mode
+              RLM fallback mode — this master&apos;s setting
             </label>
             <select
               value={virtualInferenceModeRlm}
@@ -513,7 +521,11 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
             </select>
             <p className="text-xs text-gray-500 mt-1">
               Governs <code>virtualInference.mode.rlm</code> — same switch every other role
-              (embedding/completion/reranker) uses to opt into a cloud/hosted fallback.
+              (embedding/completion/reranker) uses to opt into a cloud/hosted fallback. This
+              master (Sound Suite / legal domain) declares itself separately from the Fantom
+              MCP master (code domain) on the shared sidecar fleet — each configures its own
+              model and mode here without affecting the other. See
+              docs/SPEC-ss-rlm-sandbox.md for the two-master contract.
             </p>
           </div>
         </div>

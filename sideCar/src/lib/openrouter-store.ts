@@ -51,6 +51,10 @@ export interface StoredMasterConfig {
   apiKey: string;
   allowedModels: Record<string, unknown>;
   modeByRole: Record<string, string>;
+  /** This master's declared ss-rlm-sandbox domain ('legal' | 'code'), if any.
+   *  See virtual-inference.ts's SandboxDomain. Optional for back-compat with
+   *  a store file written before this field existed. */
+  domain?: string;
 }
 
 /** Key material: operator passphrase if provided, else stable host material.
