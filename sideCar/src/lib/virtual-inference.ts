@@ -77,8 +77,10 @@ export interface OpenRouterModelConfig {
 }
 
 export interface OpenRouterMasterConfig {
-  /** IN-MEMORY ONLY. Never persisted, never logged, never returned by getStatus(). */
-  apiKey: string;
+  /** Encrypted at rest (openrouter-store.ts). Never logged, never returned by
+   *  getStatus(). Absent when the master pushed models/modes but no key —
+   *  see setOpenRouterConfig. */
+  apiKey?: string;
   allowedModels: Record<string, OpenRouterModelConfig>;
   modeByRole: Record<string, RoutingMode>;
 }
@@ -191,9 +193,14 @@ export function setOpenRouterConfig(serverUrl: string, payload: unknown): void {
 
   const existing = G.byMaster.get(serverUrl);
   const apiKey = typeof obj.apiKey === 'string' && obj.apiKey ? obj.apiKey : existing?.apiKey;
+  // A keyless push used to be discarded WHOLESALE — models and modes included.
+  // That made re-push useless after a restart: the master cannot resend the
+  // key (it never stores one), so every re-push was rejected and the operator
+  // saw "delivered to 5/5" while nothing applied. Models and modes are not
+  // secret and are worth keeping; without a key nothing can route to cloud
+  // anyway, and resolveRouting enforces that below.
   if (!apiKey) {
-    log.warn(`[${serverUrl}] OpenRouter config pushed with no apiKey (and none on file) — ignoring`);
-    return;
+    log.warn(`[${serverUrl}] OpenRouter config pushed with no apiKey (and none on file) — storing models/modes; cloud stays off until a key arrives`);
   }
 
   const allowedModels = obj.allowedModels !== undefined
@@ -241,13 +248,16 @@ export function restoreOpenRouterConfig(): number {
 /** Presence-only status for unauthenticated surfaces (/api/status, /api/config).
  *  NEVER include the key or any prefix of it here. */
 export function getOpenRouterStatus(serverUrl: string): {
-  openrouter: 'configured' | 'unset';
+  /** 'configured' = usable. 'key-missing' = models/modes stored but no key, so
+   *  every role resolves local until one arrives — distinct from 'unset' so the
+   *  master can say "re-enter the key" instead of "nothing was ever pushed". */
+  openrouter: 'configured' | 'key-missing' | 'unset';
   modeByRole: Record<string, RoutingMode>;
   rolesWithModel: string[];
 } {
   const cfg = G.byMaster.get(serverUrl);
   return {
-    openrouter: cfg ? 'configured' : 'unset',
+    openrouter: !cfg ? 'unset' : (cfg.apiKey ? 'configured' : 'key-missing'),
     modeByRole: cfg?.modeByRole ?? {},
     rolesWithModel: cfg ? Object.keys(cfg.allowedModels) : [],
   };
@@ -340,6 +350,9 @@ export function resolveRouting(params: {
   const modelCfg = cfg?.allowedModels?.[role];
   const detailSuffix = detail ? ` (${detail})` : '';
 
+  if (!cfg?.apiKey) {
+    return { source: 'local', reason: 'no OpenRouter key on file for this master' };
+  }
   if (mode === 'local-only') {
     return { source: 'local', reason: 'local-only (default)' };
   }
@@ -471,6 +484,9 @@ export async function serveEmbedding(params: ServeEmbeddingParams): Promise<Serv
   const startedAt = Date.now();
   rec.inFlight++;
   try {
+    // resolveRouting only returns 'openrouter' when a key is on file; assert it
+    // rather than trusting a caller ordering that could change.
+    if (!cfg.apiKey) throw new Error('no OpenRouter key on file for this master');
     const result = await orEmbed(cfg.apiKey, texts, modelCfg.model, { pinProvider: provider, expectedDims: dims });
     const ms = Date.now() - startedAt;
     log.info(
@@ -556,6 +572,7 @@ export async function serveRerank(params: ServeRerankParams): Promise<ServeReran
   const startedAt = Date.now();
   rec.inFlight++;
   try {
+    if (!cfg.apiKey) throw new Error('no OpenRouter key on file for this master');
     const result = await orRerank(cfg.apiKey, query, documents, modelCfg.model, { topN: params.topN });
     const ms = Date.now() - startedAt;
     log.info(

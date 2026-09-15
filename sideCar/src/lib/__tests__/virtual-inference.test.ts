@@ -121,9 +121,15 @@ describe('virtual-inference', () => {
       });
     });
 
-    it('rejects a config push with no apiKey and no key on file', () => {
+    it('stores models/modes from a keyless push but reports key-missing', () => {
+      // Discarding the whole config made re-push useless after a restart: the
+      // master cannot resend a key it never stores, so every re-push was
+      // rejected while reporting success. Keep the non-secret parts; routing
+      // stays local until a key arrives.
       setOpenRouterConfig(MASTER_A, { modeByRole: { embedding: 'cloud-only' } });
-      expect(getOpenRouterStatus(MASTER_A).openrouter).toBe('unset');
+      expect(getOpenRouterStatus(MASTER_A).openrouter).toBe('key-missing');
+      expect(getOpenRouterStatus(MASTER_A).modeByRole.embedding).toBe('cloud-only');
+      expect(resolveRouting({ role: 'embedding', serverUrl: MASTER_A }).source).toBe('local');
     });
 
     it('a later push without apiKey keeps the previously pushed key (merge, not replace)', () => {
