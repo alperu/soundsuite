@@ -59,6 +59,12 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
   const [embeddingModel, setEmbeddingModel] = useState(
     initialConfig.openRouterEmbeddingModel || OPENROUTER_EMBEDDING_MODELS[0]?.id || '',
   );
+  // Separate from the text embedding model: ss-embedding and ss-code-embedding
+  // run different local models at different widths (1024d vs 2560d), so a single
+  // setting cannot serve both.
+  const [codeEmbeddingModel, setCodeEmbeddingModel] = useState(
+    initialConfig.openRouterCodeEmbeddingModel || 'qwen/qwen3-embedding-4b',
+  );
   const [rerankModel, setRerankModel] = useState(
     initialConfig.openRouterRerankModel || OPENROUTER_RERANK_MODELS[0]?.id || '',
   );
@@ -315,8 +321,31 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
       {/* --- Model pickers --- */}
       <section className="bg-white border border-gray-200 rounded-lg p-6 space-y-4">
         <h3 className="text-lg font-semibold text-gray-900">Model Selection</h3>
-        <div className="grid sm:grid-cols-3 gap-4">
-          <Picker label="Embedding" value={embeddingModel} onChange={setEmbeddingModel} options={OPENROUTER_EMBEDDING_MODELS.map((m) => ({ id: m.id, label: m.label }))} />
+        <div className="grid sm:grid-cols-2 gap-4">
+          {/* ss-embedding — any curated model is offered, but none matches the
+              local 0.6b's 1024 dims, so every choice implies a re-index. */}
+          <Picker
+            label="Text embedding (ss-embedding)"
+            hint="Local: qwen3-embedding:0.6b (1024d). No hosted model matches that width — switching means a full re-index."
+            value={embeddingModel}
+            onChange={setEmbeddingModel}
+            options={OPENROUTER_EMBEDDING_MODELS.map((m) => ({
+              id: m.id,
+              label: `${m.label} · ${m.dims}d${m.codeCapable ? '' : ' · text-only'}`,
+            }))}
+          />
+          {/* ss-code-embedding — restricted to code-capable models. Offering a
+              text-only embedder here would quietly degrade code search. */}
+          <Picker
+            label="Code embedding (ss-code-embedding)"
+            hint="Local: qwen3-embedding:4b (2560d). The 4B below matches that width exactly — no re-index."
+            value={codeEmbeddingModel}
+            onChange={setCodeEmbeddingModel}
+            options={OPENROUTER_EMBEDDING_MODELS.filter((m) => m.codeCapable).map((m) => ({
+              id: m.id,
+              label: `${m.label} · ${m.dims}d${m.dropInFor === 'code-embedding' ? ' · drop-in' : ''}`,
+            }))}
+          />
           <Picker label="Reranker" value={rerankModel} onChange={setRerankModel} options={OPENROUTER_RERANK_MODELS.map((m) => ({ id: m.id, label: m.label }))} />
           <Picker label="Chat" value={chatModel} onChange={setChatModel} options={OPENROUTER_CHAT_MODELS.map((m) => ({ id: m.id, label: m.label }))} />
         </div>
@@ -480,11 +509,15 @@ function Picker({
   value,
   onChange,
   options,
+  hint,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   options: { id: string; label: string }[];
+  /** Short note under the control — used to state the local model and width, so
+   *  the re-index consequence of a mismatch is visible at the point of choice. */
+  hint?: string;
 }) {
   return (
     <div>
@@ -500,6 +533,7 @@ function Picker({
           </option>
         ))}
       </select>
+      {hint && <p className="text-xs text-gray-500 mt-1">{hint}</p>}
     </div>
   );
 }

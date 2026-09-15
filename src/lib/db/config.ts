@@ -19,8 +19,14 @@ export interface AppConfig {
   openRouterApiKey?: string;
   /** Master kill switch — nothing reaches OpenRouter while this is false. */
   openRouterEnabled: boolean;
-  /** Embedding model id used when embeddingProvider === 'openrouter'. */
+  /** Embedding model id for the TEXT embedding role (ss-embedding), used when
+   *  embeddingProvider === 'openrouter'. */
   openRouterEmbeddingModel?: string;
+  /** Embedding model id for the CODE embedding role (ss-code-embedding).
+   *  Separate from the text model because the two roles run different local
+   *  models at different widths — ss-embedding is 1024d, ss-code-embedding is
+   *  2560d — so one setting cannot serve both without forcing a re-index. */
+  openRouterCodeEmbeddingModel?: string;
   /** Rerank model id used when rerankProvider === 'openrouter'. */
   openRouterRerankModel?: string;
   /** Chat model id for search / completion via OpenRouter. */
@@ -227,6 +233,10 @@ export async function getConfig(): Promise<AppConfig> {
     openRouterApiKey: configMap.get('openrouter.apiKey'),
     openRouterEnabled: configMap.get('openrouter.enabled') === 'true',
     openRouterEmbeddingModel: configMap.get('openrouter.embeddingModel') || 'qwen/qwen3-embedding-4b',
+    // Defaults to the 4B: it is the only hosted model that matches
+    // ss-code-embedding's local 2560 dims exactly, so it is the one choice that
+    // needs no re-index.
+    openRouterCodeEmbeddingModel: configMap.get('openrouter.codeEmbeddingModel') || 'qwen/qwen3-embedding-4b',
     openRouterRerankModel: configMap.get('openrouter.rerankModel') || 'qwen/qwen3-reranker-8b',
     openRouterChatModel: configMap.get('openrouter.chatModel') || 'deepseek/deepseek-v4-flash',
     openRouterDailyCapUsd: (() => {
@@ -571,6 +581,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.openRouterEmbeddingModel !== undefined) {
     updates.push({ key: 'openrouter.embeddingModel', value: config.openRouterEmbeddingModel });
+  }
+  if (config.openRouterCodeEmbeddingModel !== undefined) {
+    updates.push({ key: 'openrouter.codeEmbeddingModel', value: config.openRouterCodeEmbeddingModel });
   }
   if (config.openRouterRerankModel !== undefined) {
     updates.push({ key: 'openrouter.rerankModel', value: config.openRouterRerankModel });

@@ -9,7 +9,8 @@
  */
 
 import { createLogger } from '@/lib/logger';
-import { getConfig, setConfigValue } from '@/lib/db/config';
+import { getConfig, setConfigValue, type AppConfig } from '@/lib/db/config';
+import { findEmbeddingModel, findRerankModel } from '@/lib/openrouter/models';
 import * as wsRelay from '@/lib/gpu/ws-relay';
 import { queueSidecarCommand } from '@/lib/gpu/command-queue';
 import * as statusCache from '@/lib/gpu/status-cache';
@@ -926,6 +927,60 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
  * one /config call. Falls back to global config keys for roles that have no
  * per-host assignment, preserving back-compat for built-in role names.
  */
+/**
+ * The `openrouter` block pushed to a sidecar so its `virtualInference` can serve
+ * a role when the local model is unavailable.
+ *
+ * Returns `null` — which the sidecar reads as "not configured" — unless the
+ * feature is enabled AND a key exists. A sidecar with no block never calls out,
+ * which is the required default.
+ *
+ * Per-MASTER by construction: the receiving sidecar files this under the
+ * `serverUrl` of whichever master sent it, so two masters pushing different
+ * allow-lists to the same sidecar do not overwrite each other. That is what lets
+ * Sound Suite and the Fantom MCP server expose different model sets through one
+ * host.
+ *
+ * The key rides the same WebSocket as the rest of the config and is held in
+ * memory on the sidecar only — never written to its config.json, never surfaced
+ * by /api/status.
+ */
+function buildOpenRouterPush(cfg: AppConfig): {
+  apiKey: string;
+  allowedModels: Record<string, { model: string; provider?: string; dims?: number }>;
+  modeByRole: Record<string, string>;
+} | null {
+  if (!cfg.openRouterEnabled || !cfg.openRouterApiKey) return null;
+
+  const allowedModels: Record<string, { model: string; provider?: string; dims?: number }> = {};
+  const add = (role: string, id: string | undefined) => {
+    if (!id) return;
+    const e = findEmbeddingModel(id);
+    if (e) {
+      // Provider and dims travel with the model: the sidecar pins embedding
+      // calls to that provider (so one vector space cannot silently split across
+      // two) and enforces the width on the response.
+      allowedModels[role] = { model: id, provider: e.pinProvider, dims: e.dims };
+      return;
+    }
+    const r = findRerankModel(id);
+    allowedModels[role] = r ? { model: id, provider: r.pinProvider } : { model: id };
+  };
+
+  // The two embedding roles are configured separately — ss-embedding and
+  // ss-code-embedding run different local models at different widths.
+  add('embedding', cfg.openRouterEmbeddingModel);
+  add('code-embedding', cfg.openRouterCodeEmbeddingModel);
+  add('reranker', cfg.openRouterRerankModel);
+
+  // Only roles with a model are eligible; anything else stays local-only, which
+  // is also the sidecar's default for an unlisted role.
+  const modeByRole: Record<string, string> = {};
+  for (const role of Object.keys(allowedModels)) modeByRole[role] = 'local-first';
+
+  return { apiKey: cfg.openRouterApiKey, allowedModels, modeByRole };
+}
+
 export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {
   // Seed on demand for fresh sidecars so the first push isn't empty.
   const hostOs = detectHostOs(agentUrl);
@@ -983,6 +1038,7 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
     gpuMemUtils: buildGpuMemUtils(cfg),
     rerankEnforceEager: cfg.rerankEnforceEager,
     hostOsOverride,
+    openrouter: buildOpenRouterPush(cfg),
   });
   markSelfConfigPush(agentUrl);
   return result;
