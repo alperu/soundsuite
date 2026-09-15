@@ -147,6 +147,13 @@ const sidecars: Map<string, SidecarConnection> = g.__ss_ws_sidecars__;
 const pendingCommands: Map<string, PendingCommand> = g.__ss_ws_pending__;
 const cmdCounter: { value: number } = g.__ss_ws_cmdCounter__;
 const blockedAgents: Map<string, number> = g.__ss_ws_blocked__;
+/** Last OpenRouter config re-push per sidecar, for the heartbeat self-heal.
+ *  globalThis-backed like the maps above — route handlers and instrumentation
+ *  compile as separate webpack layers, so a plain module map would exist twice
+ *  and the throttle would be per-layer rather than per-sidecar. */
+const openRouterRepushAt: Map<string, number> =
+  g.__ss_ws_or_repush__ || (g.__ss_ws_or_repush__ = new Map<string, number>());
+const OPENROUTER_REPUSH_THROTTLE_MS = 60_000;
 let wss: WebSocketServer | null = g.__ss_wss__ || null;
 
 const BLOCK_DURATION_MS = 60_000;
@@ -626,6 +633,50 @@ export function startWsRelay(): WebSocketServer {
         if (registeredUrl && sidecars.has(registeredUrl)) {
           const entry = sidecars.get(registeredUrl)!;
           entry.lastSeen = Date.now();
+
+          // Self-heal the OpenRouter config push.
+          //
+          // The pushed API key is held IN MEMORY on the sidecar and never
+          // persisted (see saveConfig in sideCar/src/lib/config.ts), so a
+          // sidecar that restarts — an auto-update being the common case — comes
+          // back reporting `openrouter: 'unset'` with an empty Virtual
+          // Containers panel. Registration does push config, but a restart that
+          // reconnects without a fresh register, or a push that raced the
+          // sidecar's boot, leaves the two sides disagreeing and nothing reaches
+          // OpenRouter until someone saves the settings page again.
+          //
+          // So: when the sidecar says it has no OpenRouter config and this
+          // master does, re-push. Throttled per sidecar — heartbeats are
+          // frequent and pushFullConfig is not free.
+          const reportsVirtualInference = msg.statusData?.masters?.some(
+            (m: { virtualInference?: unknown }) => m?.virtualInference !== undefined,
+          );
+          const sidecarHasConfig = msg.statusData?.masters?.some(
+            (m: { virtualInference?: { openrouter?: string } }) =>
+              m?.virtualInference?.openrouter === 'configured',
+          );
+          if (reportsVirtualInference && !sidecarHasConfig) {
+            const last = openRouterRepushAt.get(registeredUrl) ?? 0;
+            if (Date.now() - last > OPENROUTER_REPUSH_THROTTLE_MS) {
+              openRouterRepushAt.set(registeredUrl, Date.now());
+              const url = registeredUrl;
+              import('@/lib/gpu/fleet-router').then(async ({ pushFullConfig }) => {
+                const { getConfig } = await import('@/lib/db/config');
+                const c = await getConfig();
+                if (!c.openRouterEnabled || !c.openRouterApiKey) return;
+                logger.info('Sidecar reports no OpenRouter config — re-pushing', { agentUrl: url });
+                await pushFullConfig(url, {
+                  embedding: c.gpuIdleEmbeddingMin,
+                  completion: c.gpuIdleCompletionMin,
+                  ocr: c.gpuIdleOcrMin,
+                  reranker: c.gpuIdleRerankerMin,
+                });
+              }).catch((err) => {
+                logger.warn('OpenRouter re-push failed', { agentUrl: url, error: (err as Error).message });
+              });
+            }
+          }
+
           entry.containers = msg.containers || entry.containers;
           entry.activeRequests = msg.activeRequests ?? entry.activeRequests;
 

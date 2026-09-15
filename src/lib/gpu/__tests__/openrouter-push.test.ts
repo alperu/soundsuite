@@ -84,7 +84,9 @@ describe('buildOpenRouterPush', () => {
       cfg({ openRouterCodeEmbeddingModel: undefined, openRouterRerankModel: undefined }),
     )!;
     expect(Object.keys(out.modeByRole).sort()).toEqual(['embedding']);
-    expect(out.modeByRole['embedding']).toBe('local-first');
+    // Mode now comes from config, not a hardcoded value. cfg() leaves the mode
+    // fields unset, so this is the AppConfig default.
+    expect(out.modeByRole['embedding']).toBe('local-only');
     // An unlisted role must not appear at all — the sidecar defaults an unknown
     // role to local-only, which is the safe state.
     expect(out.allowedModels['reranker']).toBeUndefined();
@@ -92,5 +94,33 @@ describe('buildOpenRouterPush', () => {
 
   it('passes the key through unchanged when enabled', () => {
     expect(buildOpenRouterPush(cfg())!.apiKey).toBe(KEY);
+  });
+});
+
+describe('buildOpenRouterPush — modes come from config', () => {
+  it('passes the configured mode through per role', () => {
+    const out = buildOpenRouterPush(
+      cfg({
+        virtualInferenceModeEmbedding: 'cloud-only',
+        virtualInferenceModeCodeEmbedding: 'local-first',
+      } as Partial<AppConfig>),
+    )!;
+    expect(out.modeByRole['embedding']).toBe('cloud-only');
+    expect(out.modeByRole['code-embedding']).toBe('local-first');
+  });
+
+  it('maps all-sources to local-first for the sidecar', () => {
+    // all-sources is a MASTER-side fan-out; the sidecar's RoutingMode union has
+    // no such member, and its observable behaviour is local-first. Pushing the
+    // raw string would be an unparseable mode.
+    const out = buildOpenRouterPush(
+      cfg({ virtualInferenceModeEmbedding: 'all-sources' } as Partial<AppConfig>),
+    )!;
+    expect(out.modeByRole['embedding']).toBe('local-first');
+  });
+
+  it('always marks reranker local-first — it has no mode key of its own', () => {
+    const out = buildOpenRouterPush(cfg({ virtualInferenceModeEmbedding: 'cloud-only' } as Partial<AppConfig>))!;
+    expect(out.modeByRole['reranker']).toBe('local-first');
   });
 });

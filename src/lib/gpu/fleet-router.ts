@@ -981,10 +981,37 @@ export function buildOpenRouterPush(cfg: AppConfig): {
   add('code-embedding', cfg.openRouterCodeEmbeddingModel);
   add('reranker', cfg.openRouterRerankModel);
 
-  // Only roles with a model are eligible; anything else stays local-only, which
-  // is also the sidecar's default for an unlisted role.
+  // Modes come from `virtualInference.mode.<role>`. This used to push a
+  // hardcoded 'local-first' for every role, so the sidecar reported a mode the
+  // operator had never chosen and the configured one was silently ignored.
+  //
+  // `all-sources` is a MASTER-side concept: the ingestion provider fans batches
+  // across local and cloud. From the sidecar's side the observable behaviour is
+  // the same as local-first (serve when asked, prefer local otherwise), and its
+  // RoutingMode union has no 'all-sources' member — so it is mapped here rather
+  // than passed through. Do not widen the sidecar enum for this unless the
+  // sidecar itself gains fan-out.
+  // Defaults to local-only when the config value is missing: an undefined mode
+  // would serialize to an absent key, and the sidecar would then infer its own
+  // default for a role we explicitly listed — safe here, but a silent
+  // disagreement between the two sides about what was configured.
+  const sidecarMode = (m: string | undefined): string =>
+    !m ? 'local-only' : m === 'all-sources' ? 'local-first' : m;
+
   const modeByRole: Record<string, string> = {};
-  for (const role of Object.keys(allowedModels)) modeByRole[role] = 'local-first';
+  if (allowedModels['embedding']) {
+    modeByRole['embedding'] = sidecarMode(cfg.virtualInferenceModeEmbedding);
+  }
+  if (allowedModels['code-embedding']) {
+    modeByRole['code-embedding'] = sidecarMode(cfg.virtualInferenceModeCodeEmbedding);
+  }
+  if (allowedModels['reranker']) {
+    // Reranking has no mode key: Policy 1 gates on openRouterEnabled plus a
+    // configured model, and both already hold by the time we push this block.
+    // local-first matches what reranker.ts actually does — exhaust local hosts,
+    // then fall back.
+    modeByRole['reranker'] = 'local-first';
+  }
 
   return { apiKey: cfg.openRouterApiKey, allowedModels, modeByRole };
 }
