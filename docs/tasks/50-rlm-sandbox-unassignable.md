@@ -1,6 +1,6 @@
 # `ss-rlm-sandbox` cannot be assigned on any host — no runtime resolves it
 
-**Status:** Open — root cause identified in source, not yet reproduced against a live sidecar · **Effort:** S–M · **Priority:** **P1** — the mode ships in every catalog, renders an enabled radio, persists the click, and is then silently dropped by the sidecar
+**Status:** **Implemented 2026-09-15** — steps 1–8 all landed; not yet exercised against a live sidecar (see *Verification status*) · **Effort:** S–M · **Priority:** **P1** — the mode shipped in every catalog, rendered an enabled radio, persisted the click, and was then silently dropped by the sidecar
 **Created:** 2026-09-15
 **Root cause:** `sideCar/src/lib/mode-templates.ts:381` (`resolveModeForRuntime` has no `ss-rlm-sandbox` case in any of its four runtime branches)
 **Secondary:** `src/components/admin-role-assignments.tsx` (no port, no runtime map, no reset default) · `src/lib/db/role-registry.ts:245` (`RUNTIME_VALUES` omits `docker-model-runner`)
@@ -320,12 +320,54 @@ built. Done here means the *assignment path* works end to end:
 Because of (6), an operator who enables the row will see a pull failure. Say so
 in the UI or the PR notes, or they will reasonably conclude the fix did not land.
 
+## Verification status (as implemented, 2026-09-15)
+
+**Checked, and passing:**
+
+- `npx tsc --noEmit` — sidecar reports *No errors found*; master reports no
+  errors in any touched file (the master tree has unrelated pre-existing
+  errors in `next.config.ts` and several test files).
+- Sidecar suite: **114/114 pass**, including 11 in
+  `mode-templates-rlm-sandbox.test.ts` (8 of them new, all on the explicit-
+  runtime path that previously had no coverage at all).
+- Master suite, diffed against a clean `HEAD` worktree: baseline 17 failing
+  suites / 89 failing tests → with this change 12 / 77. **Zero new failures**;
+  every remaining failure is a subset of the baseline set and fails to *load*
+  (`PrismaClientInitializationError`, missing native modules), not to assert.
+  The 5-suite difference is baseline flakiness, not something this fixed.
+- ESLint on the two largest changed files: the single
+  `react/no-unescaped-entities` error in `admin-role-assignments.tsx` is
+  **pre-existing** — confirmed identical with this change stashed.
+
+**NOT checked — do this before believing the feature works:**
+
+1. **No live sidecar was touched.** The `not satisfiable` log line that proves
+   the original diagnosis was never observed; it was read out of
+   `ws-client.ts:606`. Grep a running sidecar for it before and after
+   deploying.
+2. **No `/config` push was observed.** Acceptance criteria 3 and 4 (a stale
+   row self-healing, and `/api/status` reporting `config.port === 8101`) are
+   untested end-to-end.
+3. **The container has never started**, because
+   `soundsuite/rlm-sandbox:latest` still does not exist. Criterion 6 — that
+   the pull fails *cleanly* at `pullFailCount >= 3` rather than retry-looping
+   — is unverified, and is the most likely place for a follow-up defect.
+
 ## Risks and open questions
 
 - **Not reproduced live.** Every claim above is read from source at the cited
   lines; nothing was exercised against a running fleet. Grep a sidecar log for
   `not satisfiable` first. If that line is absent for `ss-rlm-sandbox` on a host
   where the row is enabled, this diagnosis is wrong.
+- **The seed was deliberately not changed.** `role-registry-seed.ts` still
+  seeds only embedding/completion/ocr (+reranker on Linux). Adding the sandbox
+  there would auto-enable a role whose image does not exist on every freshly
+  registered host, producing pull failures nobody asked for. It stays opt-in.
+- **The legacy registry has no sandbox entry either.**
+  `fleet-router.ts:buildLegacyRegistry` only emits embedding/completion/ocr/
+  reranker for pre-2.3 sidecars. `ss-rlm` is already absent for the same
+  reason, so this is consistent existing behaviour — but a pre-2.3 sidecar
+  cannot run the sandbox at all.
 - **Widening `RuntimeChoice` touches the whole roleassign grid.** Every
   `Record<RuntimeChoice, boolean>` becomes non-exhaustive and must gain a
   `'docker-cpu':` key. That is the desired failure mode — it is how the compiler

@@ -58,8 +58,17 @@ export type { ModeName, ModeCatalogEntry, HostOs };
  *   'docker-model-runner' — Docker Model Runner (vllm-metal on Apple Silicon,
  *                           DMR on Linux). Used by ss-rlm on Mac since plain
  *                           docker-vllm has no GPU on macOS.
+ *   'docker-cpu'          — plain Docker container, NO GPU passthrough and no
+ *                           `dockerSupportsGpu()` gate, so it resolves on every
+ *                           OS with a Docker daemon. Only for roles carrying
+ *                           `requiresGpu: false` — today ss-rlm-sandbox alone.
  */
-export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner';
+export type RuntimeChoice =
+  | 'host'
+  | 'docker-ollama'
+  | 'docker-vllm'
+  | 'docker-model-runner'
+  | 'docker-cpu';
 
 export interface AssignmentInput {
   sidecarUrl: string;
@@ -140,7 +149,14 @@ export async function setAssignment(input: AssignmentInput): Promise<AssignmentR
         : {}),
       ...(input.idleTimeoutMin != null ? { idleTimeoutMin: input.idleTimeoutMin } : {}),
       ...(input.modelOverride !== undefined ? { modelOverride: input.modelOverride } : {}),
-      ...(input.runtime != null ? { runtime: input.runtime } : {}),
+      // A pinned mode ignores what the caller asked for — and repairs a stale
+      // stored value on the next edit of the row, so the DB converges instead
+      // of relying on getRuntimesForHost() masking it forever.
+      ...(PINNED_RUNTIME[input.mode]
+        ? { runtime: PINNED_RUNTIME[input.mode] }
+        : input.runtime != null
+        ? { runtime: input.runtime }
+        : {}),
     },
     create: {
       sidecarUrl: url,
@@ -172,12 +188,22 @@ export async function setAssignment(input: AssignmentInput): Promise<AssignmentR
       // cold-start. We pin those at 60 min so a typical multi-query
       // research session keeps the model resident. Ollama roles (5 min)
       // cycle cheaply enough that the default is fine.
+      //
+      // ss-rlm-sandbox gets 0 (= idle timer disabled) rather than joining the
+      // 60-min group: it holds no weights and costs 0 MB of VRAM, so there is
+      // nothing to reclaim by stopping it — and the master only routes to it
+      // when the sidecar reports its container running (resolveRlmEndpoint),
+      // so an idle-stopped sandbox is an unreachable one.
       idleTimeoutMin:
         input.idleTimeoutMin != null
           ? input.idleTimeoutMin
+          : input.mode === 'ss-rlm-sandbox'
+          ? 0
           : (input.mode === 'ss-rlm' || input.mode === 'ss-reranker' ? 60 : 5),
       modelOverride: input.modelOverride ?? null,
-      runtime: input.runtime ?? 'docker-ollama',
+      // A pinned mode has exactly one valid runtime; never let the generic
+      // 'docker-ollama' fallback write a value the sidecar would refuse.
+      runtime: PINNED_RUNTIME[input.mode] ?? input.runtime ?? 'docker-ollama',
     },
   });
 }
@@ -242,11 +268,41 @@ export async function getEffectiveIdleTimeoutsMs(
   return out;
 }
 
-const RUNTIME_VALUES: RuntimeChoice[] = ['host', 'docker-ollama', 'docker-vllm'];
+/**
+ * Every member of RuntimeChoice. Keep this exhaustive: a value present in the
+ * type but missing here is NOT rejected loudly — `getRuntimesForHost` falls
+ * through to `defaultRuntimeFor()` and pushes a *different* runtime than the
+ * operator stored. That is what happened to 'docker-model-runner', which was
+ * in the type and the doc comment above but absent from this array, so every
+ * saved DMR row was silently rewritten (for ss-rlm on Mac, to 'host' — a
+ * runtime the sidecar then refuses outright).
+ */
+const RUNTIME_VALUES: RuntimeChoice[] = [
+  'host',
+  'docker-ollama',
+  'docker-vllm',
+  'docker-model-runner',
+  'docker-cpu',
+];
 
 export function isRuntimeChoice(s: unknown): s is RuntimeChoice {
   return typeof s === 'string' && (RUNTIME_VALUES as string[]).includes(s);
 }
+
+/**
+ * Modes with exactly one valid runtime, regardless of what the DB row says.
+ *
+ * ss-rlm-sandbox is a GPU-less container (`requiresGpu: false`): 'host' means
+ * native Ollama and 'docker-model-runner' means DMR loading weights, and it is
+ * neither. Rows predating the 'docker-cpu' runtime were saved with whatever
+ * `defaultRuntimeFor` returned ('host' on Mac, 'docker-ollama' elsewhere) and
+ * would otherwise keep resolving to null on the sidecar forever — so pin the
+ * value rather than requiring the operator to re-click a row that already
+ * looks enabled.
+ */
+const PINNED_RUNTIME: Record<string, RuntimeChoice> = {
+  'ss-rlm-sandbox': 'docker-cpu',
+};
 
 /**
  * Default runtime for a (mode, hostOs) pair when the DB row has no explicit
@@ -257,6 +313,8 @@ export function defaultRuntimeFor(
   mode: string,
   hostOs: 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2' | 'unknown',
 ): RuntimeChoice {
+  const pinned = PINNED_RUNTIME[mode];
+  if (pinned) return pinned;
   if (mode === 'ss-reranker') {
     // Linux + windows-docker-wsl2 both run the vLLM reranker in Docker with
     // GPU passthrough. mac-docker-ollama has no supported reranker path; fall
@@ -273,6 +331,9 @@ export function defaultRuntimeFor(
  * default when the DB row has runtime=null. Keyed by the FULL mode name
  * (`ss-embedding`, not `embedding`) — that's what the sidecar's config
  * handler keys runtimes by.
+ *
+ * A mode in PINNED_RUNTIME ignores the stored column entirely — see that
+ * constant for why the stale rows this repairs exist.
  */
 export async function getRuntimesForHost(
   sidecarUrl: string,
@@ -281,7 +342,10 @@ export async function getRuntimesForHost(
   const rows = await getEnabledAssignmentsForHost(sidecarUrl);
   const out: Record<string, RuntimeChoice> = {};
   for (const r of rows) {
-    out[r.mode] = isRuntimeChoice(r.runtime)
+    const pinned = PINNED_RUNTIME[r.mode];
+    out[r.mode] = pinned
+      ? pinned
+      : isRuntimeChoice(r.runtime)
       ? r.runtime
       : defaultRuntimeFor(r.mode, hostOs);
   }

@@ -425,6 +425,12 @@ export const state = processGlobal('state', () => ({
     ocr: 5 * 60 * 1000,
     reranker: 5 * 60 * 1000,
     rlm: 10 * 60 * 1000,
+    // 0 = idle timer disabled (idle-timers.ts:31). The sandbox is a Python
+    // process at vram:0, so there is nothing to reclaim by stopping it, and
+    // the master's fallback (stream-rlm.ts resolveRlmEndpoint) only selects a
+    // sidecar whose rlm-sandbox container reports status==='running' — an
+    // idle-stopped sandbox is an invisible sandbox.
+    'rlm-sandbox': 0,
     cuda: 0,
   } as Record<string, number>,
 
@@ -437,6 +443,12 @@ export const state = processGlobal('state', () => ({
     ocr: 1,
     reranker: 1,
     rlm: 0,
+    // 1, NOT 0 — deliberately different from ss-rlm. minOnline=0 is a HARD
+    // never-auto-start gate (handlers.ts handleAcquire), and this role is only
+    // ever reached through resolveRlmEndpoint's status==='running' check, so
+    // 0 would make the fallback structurally unable to fire. The cost of
+    // keeping it resident is one Python process at vram:0.
+    'rlm-sandbox': 1,
   } as Record<string, number>,
 
   // Timestamp (epoch ms) of the last /config POST from master. Surfaced in

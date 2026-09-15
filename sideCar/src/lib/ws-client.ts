@@ -555,8 +555,10 @@ async function executeCommand(
       // only trims roles when the operator has explicitly assigned a
       // non-empty mode set. Fail closed, not open.
       if (Array.isArray(payload.enabledModes) && (payload.enabledModes as unknown[]).length > 0) {
-        const { resolveMode, modeToRole, isModeName, ALL_MODES, withGpuMemUtil, withBoolFlag } =
-          await import('./mode-templates');
+        const {
+          resolveMode, modeToRole, isModeName, isRuntimeChoice,
+          ALL_MODES, withGpuMemUtil, withBoolFlag,
+        } = await import('./mode-templates');
         const enabled = (payload.enabledModes as unknown[]).filter(
           (m): m is string => typeof m === 'string',
         );
@@ -596,11 +598,11 @@ async function executeCommand(
           }
           validNameCount++;
           const rtRaw = runtimes[mode];
-          const runtime =
-            rtRaw === 'host' || rtRaw === 'docker-ollama' ||
-            rtRaw === 'docker-vllm' || rtRaw === 'docker-model-runner'
-              ? rtRaw
-              : undefined;
+          // undefined means "master picked nothing" → resolveMode falls back to
+          // its OS-derived selection. An unrecognised value lands here too, so
+          // keep the predicate shared (mode-templates) rather than re-listing
+          // the union inline.
+          const runtime = isRuntimeChoice(rtRaw) ? rtRaw : undefined;
           const def = resolveMode(mode, state.hostOs, runtime);
           if (!def) {
             log.warn(

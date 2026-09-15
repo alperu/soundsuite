@@ -39,7 +39,21 @@ export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-code-embedding', 'ss-c
 // the operator's choice (embedding.codeOllamaModel).
 const CODE_EMBED_MODEL = 'hf.co/jinaai/jina-code-embeddings-1.5b-GGUF:Q8_0';
 export type HostOs = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | 'unknown';
-export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner';
+/**
+ * Which runtime *engine* the master asked to serve a role with. This is the
+ * OPERATOR'S choice, pushed per-mode in the /config `runtimes` map — it is a
+ * different axis from `ContainerDef.runtime` (`RoleRuntime` in state.ts), which
+ * records how the sidecar ends up *managing* the thing (`'docker'` | `'host'` |
+ * `'docker-model-runner'`). Several RuntimeChoice values collapse onto
+ * RoleRuntime `'docker'`: docker-ollama, docker-vllm and docker-cpu all produce
+ * a sidecar-managed container.
+ *
+ * 'docker-cpu' — plain Docker, NO GPU passthrough and no `dockerSupportsGpu()`
+ * gate, so it is available on every OS with a Docker daemon (Mac and Windows
+ * included). Only for roles that are not GPU inference servers, i.e. those
+ * carrying `requiresGpu: false` — today that is ss-rlm-sandbox alone.
+ */
+export type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner' | 'docker-cpu';
 
 /**
  * vLLM serve args appended to the rlm container cmd. Must be kept in sync
@@ -140,6 +154,26 @@ export function roleToMode(role: string): ModeName | null {
 
 export function isModeName(s: string): s is ModeName {
   return (ALL_MODES as string[]).includes(s);
+}
+
+export const ALL_RUNTIME_CHOICES: RuntimeChoice[] = [
+  'host',
+  'docker-ollama',
+  'docker-vllm',
+  'docker-model-runner',
+  'docker-cpu',
+];
+
+/**
+ * Validate a runtime string off the wire. Callers MUST use this rather than an
+ * inline comparison chain — ws-client's copy of that chain was one of the
+ * places the runtime union had to be widened by hand, and a value the chain
+ * does not list is silently downgraded to `undefined` (i.e. "no runtime
+ * picked") rather than rejected, so drift here looks like a mode quietly
+ * resolving to the wrong thing instead of an error.
+ */
+export function isRuntimeChoice(s: unknown): s is RuntimeChoice {
+  return typeof s === 'string' && (ALL_RUNTIME_CHOICES as string[]).includes(s);
 }
 
 /**
@@ -336,28 +370,43 @@ export function resolveMode(
       };
 
     case 'ss-rlm-sandbox':
-      // Runs everywhere — it's a small Python sandbox process, not a GPU
-      // inference server. See state.ts:defaultRegistry['rlm-sandbox'] for
-      // why type:'vllm' (not 'utility'), why requiresGpu:false (without it
-      // Mac/GPU-less Docker hosts would refuse to create this container at
-      // all), and the security constraints (no Docker socket, no API key,
-      // no outbound internet).
-      return {
-        image: 'soundsuite/rlm-sandbox:latest',
-        model: null,
-        port: 8101,
-        vram: 0,
-        type: 'vllm',
-        modes: ['searching'],
-        containerName,
-        priority: 'normal',
-        runtime: 'docker',
-        requiresGpu: false,
-      };
+      return rlmSandboxDef(containerName);
 
     default:
       return null;
   }
+}
+
+/**
+ * ss-rlm-sandbox's ContainerDef — ONE definition, reached from both
+ * `resolveMode`'s OS-default switch and `resolveModeForRuntime`'s docker-cpu
+ * branch. Do not inline a second copy: the OS-default and explicit-runtime
+ * paths disagreeing is precisely how this mode became unassignable (the
+ * explicit path had no case at all), and a duplicated literal is how the next
+ * divergence would arrive quietly.
+ *
+ * Runs everywhere — it's a small Python sandbox process, not a GPU inference
+ * server. See state.ts:defaultRegistry['rlm-sandbox'] for why type:'vllm'
+ * (not 'utility'), why requiresGpu:false (without it Mac/GPU-less Docker hosts
+ * would refuse to create this container at all), and the security constraints
+ * (no Docker socket, no API key, no outbound internet).
+ *
+ * `runtime: 'docker'` here is the RoleRuntime — how the sidecar manages it —
+ * not the operator's RuntimeChoice, which is 'docker-cpu'. See RuntimeChoice.
+ */
+function rlmSandboxDef(containerName: string): ContainerDef {
+  return {
+    image: 'soundsuite/rlm-sandbox:latest',
+    model: null,
+    port: 8101,
+    vram: 0,
+    type: 'vllm',
+    modes: ['searching'],
+    containerName,
+    priority: 'normal',
+    runtime: 'docker',
+    requiresGpu: false,
+  };
 }
 
 /**
@@ -374,6 +423,9 @@ export function resolveMode(
  *   - `docker-vllm` only makes sense for ss-reranker today and requires GPU.
  *   - `docker-model-runner` is reserved (DMR — Apple Silicon vllm-metal);
  *     refuse here, callers fall through to other runtimes.
+ *   - `docker-cpu` is the no-GPU container path: NO `dockerSupportsGpu()` gate,
+ *     so it resolves on Mac and Windows as well as Linux. Only for roles with
+ *     `requiresGpu: false` (today: ss-rlm-sandbox).
  *
  * Returns null when the chosen runtime is not satisfiable on this host —
  * caller should log WARN and skip the mode.
@@ -385,6 +437,20 @@ function resolveModeForRuntime(
   containerName: string,
 ): ContainerDef | null {
   void hostOs; // host/docker GPU compat is captured by dockerSupportsGpu()
+
+  // docker-cpu: plain container, no GPU. Deliberately FIRST and deliberately
+  // ahead of every `dockerSupportsGpu()` guard — that guard exists to stop
+  // multi-GB vLLM/Ollama pulls retry-looping on GPU-less Docker, and it has no
+  // business gating a Python REPL that asks for 0 MB of VRAM. Gating it here
+  // is what made ss-rlm-sandbox unresolvable on Mac and Windows.
+  if (runtime === 'docker-cpu') {
+    // Only ss-rlm-sandbox is GPU-less today. Every other mode IS a GPU
+    // inference server, so a docker-cpu request for one is an operator
+    // mistake, not a valid CPU fallback — refuse rather than start a
+    // container that would be uselessly slow or fail to load at all.
+    if (mode !== 'ss-rlm-sandbox') return null;
+    return rlmSandboxDef(containerName);
+  }
 
   if (runtime === 'host') {
     switch (mode) {
@@ -441,6 +507,11 @@ function resolveModeForRuntime(
         return null;
       case 'ss-rlm':
         // No host-vLLM path today; RLM only runs via docker-vllm or DMR.
+        return null;
+      case 'ss-rlm-sandbox':
+        // There is no native process to talk to: 'host' means native Ollama,
+        // and the sandbox is a Python REPL image, not an Ollama model. It only
+        // runs via docker-cpu.
         return null;
     }
   }
@@ -507,6 +578,10 @@ function resolveModeForRuntime(
       case 'ss-rlm':
         // vLLM, not Ollama, runs RLM.
         return null;
+      case 'ss-rlm-sandbox':
+        // Not an Ollama image, and docker-ollama is GPU-gated besides — the
+        // sandbox's whole point is that it needs neither. Use docker-cpu.
+        return null;
     }
   }
 
@@ -555,6 +630,8 @@ function resolveModeForRuntime(
   //   ss-reranker on mac-docker-ollama — vllm-metal lacks cross-encoder head
   //            (vllm-metal#361); the master's mode.availableOn already filters
   //            Mac out, this is just belt-and-suspenders.
+  //   ss-rlm-sandbox — DMR serves *models*; the sandbox is a container running
+  //            the RLM loop, with no weights for DMR to load. docker-cpu.
   //
   // image is the sentinel 'docker-model-runner' — the sidecar's start handler
   // does NOT docker-run for runtime==='docker-model-runner'; it forwards to
@@ -563,6 +640,7 @@ function resolveModeForRuntime(
   // time (see fleet-router pushModelRegistry).
   if (runtime === 'docker-model-runner') {
     if (mode === 'ss-rlm') return null;
+    if (mode === 'ss-rlm-sandbox') return null;
     // jina-code-embeddings has no MLX/vllm-metal build — Mac serves it via
     // host-Ollama (the operator's `ollama create` from the GGUF), not DMR.
     if (mode === 'ss-code-embedding') return null;

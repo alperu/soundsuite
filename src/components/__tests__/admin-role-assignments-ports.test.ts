@@ -109,3 +109,42 @@ describe('disabled rows fall back to the runtime they would use', () => {
     expect(portForRuntime('ss-code-embedding', wouldBe)).toBe(11437);
   });
 });
+
+/**
+ * ss-rlm-sandbox was assignable-looking and unassignable-in-fact: no MODE_PORTS
+ * entry (so the Port column read "—"), and a default runtime that varied by OS
+ * even though the sidecar only ever resolves it under docker-cpu. On a Mac the
+ * OS default was 'host', which would have printed native Ollama's 11434 for a
+ * Python container that binds 8101.
+ */
+describe('ss-rlm-sandbox — docker-cpu, 8101, on every host', () => {
+  const ALL_OS = ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'] as const;
+
+  it('binds 8101 under docker-cpu', () => {
+    expect(portForRuntime('ss-rlm-sandbox', 'docker-cpu')).toBe(8101);
+  });
+
+  it('defaults to docker-cpu regardless of OS or GPU', () => {
+    for (const os of ALL_OS) {
+      expect(defaultRuntimeForRow('ss-rlm-sandbox', os, false)).toBe('docker-cpu');
+      expect(defaultRuntimeForRow('ss-rlm-sandbox', os, true)).toBe('docker-cpu');
+    }
+  });
+
+  it('shows 8101 on a disabled row on every host — not 11434 or 12434', () => {
+    for (const os of ALL_OS) {
+      const wouldBe = defaultRuntimeForRow('ss-rlm-sandbox', os, false);
+      expect(portForRuntime('ss-rlm-sandbox', wouldBe)).toBe(8101);
+    }
+  });
+
+  it('is not collapsed onto the shared host/DMR endpoints', () => {
+    // portForRuntime short-circuits on runtime before consulting MODE_PORTS,
+    // so this asserts the row can never be rendered under those runtimes —
+    // runtimesForMode is what keeps it off them.
+    expect(portForRuntime('ss-rlm-sandbox', 'host')).toBe(11434);
+    expect(portForRuntime('ss-rlm-sandbox', 'docker-model-runner')).toBe(12434);
+    // …which is exactly why the default must be docker-cpu.
+    expect(defaultRuntimeForRow('ss-rlm-sandbox', 'mac-docker-ollama', false)).not.toBe('host');
+  });
+});

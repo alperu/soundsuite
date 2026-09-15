@@ -478,9 +478,17 @@ model HostRoleAssignment {
   idleTimeoutMin Int      @default(5)
   modelOverride  String?
   // Where the operator wants this role to run on the sidecar:
-  //   'host'         — native Ollama on the sidecar host (host.docker.internal)
-  //   'docker-ollama' — sidecar runs `ollama/ollama` as a container w/ GPU passthrough
-  //   'docker-vllm'  — sidecar runs `vllm/vllm-openai` as a container (CUDA only)
+  //   'host'                — native Ollama on the sidecar host (host.docker.internal)
+  //   'docker-ollama'       — sidecar runs `ollama/ollama` as a container w/ GPU passthrough
+  //   'docker-vllm'         — sidecar runs `vllm/vllm-openai` as a container (CUDA only)
+  //   'docker-model-runner' — Docker Model Runner (vllm-metal on Apple Silicon)
+  //   'docker-cpu'          — plain container, no GPU passthrough; works on every
+  //                           OS with a Docker daemon. GPU-less roles only
+  //                           (requiresGpu:false — today ss-rlm-sandbox).
+  // Deliberately a free String, not an enum: adding a value must not require a
+  // migration. Validation lives in role-registry.ts (RUNTIME_VALUES) — keep
+  // that array exhaustive, an unlisted value is silently replaced rather than
+  // rejected.
   // Defaults to 'docker-ollama' on linux/win32 and 'host' on darwin (handled
   // in app code; column default is the most-common cross-platform value).
   runtime        String?  @default("docker-ollama")

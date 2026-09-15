@@ -45,7 +45,32 @@ interface SidecarSummary {
   >;
 }
 
-type RuntimeChoice = 'host' | 'docker-ollama' | 'docker-vllm' | 'docker-model-runner';
+type RuntimeChoice =
+  | 'host'
+  | 'docker-ollama'
+  | 'docker-vllm'
+  | 'docker-model-runner'
+  /**
+   * Plain Docker, no GPU passthrough. Unlike the other docker-* runtimes it is
+   * NOT gated on the host's Docker daemon supporting GPU, so it resolves on
+   * Mac and Windows as well as Linux. Only for roles that aren't GPU inference
+   * servers (`requiresGpu: false` in the sidecar registry) — today
+   * ss-rlm-sandbox alone.
+   */
+  | 'docker-cpu';
+
+/**
+ * Modes whose runtime is not the operator's to choose — mirrors
+ * PINNED_RUNTIME in src/lib/db/role-registry.ts, which is server-only
+ * (Prisma) and so cannot be imported here.
+ *
+ * ss-rlm-sandbox has exactly one valid runtime. Rows saved before 'docker-cpu'
+ * existed carry 'host' or 'docker-ollama'; honoring that stored value would
+ * render the radio on a column the sidecar refuses, so read through the pin.
+ */
+const PINNED_RUNTIME: Record<string, RuntimeChoice> = {
+  'ss-rlm-sandbox': 'docker-cpu',
+};
 
 interface RoleAssignment {
   mode: string;
@@ -61,6 +86,7 @@ const RUNTIME_COLUMNS: Array<{ key: RuntimeChoice; short: string; label: string 
   { key: 'docker-ollama', short: 'docker', label: 'Docker Ollama' },
   { key: 'docker-vllm', short: 'vllm', label: 'Docker vLLM' },
   { key: 'docker-model-runner', short: 'dmr', label: 'Docker Model Runner' },
+  { key: 'docker-cpu', short: 'docker-only', label: 'Docker (no GPU)' },
 ];
 
 /**
@@ -77,6 +103,10 @@ const MODE_PORTS: Record<string, number> = {
   'ss-ocr': 11436,
   'ss-reranker': 8099,
   'ss-rlm': 8100,
+  // The sandbox binds this under docker-cpu, its only runtime. Matches
+  // state.ts defaultRegistry['rlm-sandbox'].port and RLM_SANDBOX_PORT in
+  // src/lib/ai/stream-rlm.ts, which is what the master actually dials.
+  'ss-rlm-sandbox': 8101,
 };
 
 /** Defaults for the two runtimes that serve every role from ONE endpoint. */
@@ -150,22 +180,27 @@ export function reportedPortFor(
  * mac-docker-ollama: Docker Desktop on Mac lacks GPU passthrough for plain
  * Docker containers, so docker-ollama and docker-vllm are unavailable; native
  * Ollama (host) and Docker Model Runner (vllm-metal) are the GPU-backed paths.
+ *
+ * `docker-cpu` is true on EVERY OS, including Mac and Windows: it is the
+ * no-GPU container path, so the GPU-passthrough question that disqualifies
+ * docker-ollama/docker-vllm on Mac simply does not arise. The only requirement
+ * is a Docker daemon, which every supported host has.
  */
 function availableRuntimesForOs(
   os: ModeOs | string | undefined,
   _hasNvidia: boolean,
 ): Record<RuntimeChoice, boolean> {
   if (os === 'mac-docker-ollama') {
-    return { host: true, 'docker-ollama': false, 'docker-vllm': false, 'docker-model-runner': true };
+    return { host: true, 'docker-ollama': false, 'docker-vllm': false, 'docker-model-runner': true, 'docker-cpu': true };
   }
   if (os === 'linux') {
-    return { host: true, 'docker-ollama': true, 'docker-vllm': true, 'docker-model-runner': true };
+    return { host: true, 'docker-ollama': true, 'docker-vllm': true, 'docker-model-runner': true, 'docker-cpu': true };
   }
   if (os === 'windows-docker-wsl2') {
-    return { host: false, 'docker-ollama': true, 'docker-vllm': true, 'docker-model-runner': true };
+    return { host: false, 'docker-ollama': true, 'docker-vllm': true, 'docker-model-runner': true, 'docker-cpu': true };
   }
   // Unknown OS — be permissive.
-  return { host: true, 'docker-ollama': true, 'docker-vllm': true, 'docker-model-runner': true };
+  return { host: true, 'docker-ollama': true, 'docker-vllm': true, 'docker-model-runner': true, 'docker-cpu': true };
 }
 
 /**
@@ -174,21 +209,30 @@ function availableRuntimesForOs(
  * Mac because vllm-metal lacks the cross-encoder head) are handled separately
  * via `mode.availableOn`, so they don't need to be re-encoded here.
  *
- *   ss-reranker — vLLM cross-encoder. Runs on Docker vLLM (NVIDIA) and DMR on
- *                 Linux/Windows; Mac is already filtered out by availableOn.
- *   ss-rlm      — Any vLLM engine. Ollama excluded — no official GGUF yet.
- *   others      — Ollama-backed but also servable by DMR's vLLM. DMR is true
- *                 here as a UI affordance; sidecar resolution for non-rlm
- *                 roles on DMR is pending (task #11).
+ *   ss-reranker     — vLLM cross-encoder. Runs on Docker vLLM (NVIDIA) and DMR
+ *                     on Linux/Windows; Mac is already filtered by availableOn.
+ *   ss-rlm          — Any vLLM engine. Ollama excluded — no official GGUF yet.
+ *   ss-rlm-sandbox  — docker-cpu ONLY. It is not an inference server: 'host'
+ *                     means native Ollama and DMR means loading weights, and
+ *                     it is neither. Mirrors the sidecar's refusals in
+ *                     mode-templates.ts:resolveModeForRuntime.
+ *   others          — Ollama-backed but also servable by DMR's vLLM. DMR is
+ *                     true here as a UI affordance; sidecar resolution for
+ *                     non-rlm roles on DMR is pending (task #11). docker-cpu is
+ *                     false: every other role IS a GPU inference server, so a
+ *                     no-GPU container would be useless or fail to load.
  */
 function runtimesForMode(modeName: string): Record<RuntimeChoice, boolean> {
   if (modeName === 'ss-reranker') {
-    return { host: false, 'docker-ollama': false, 'docker-vllm': true, 'docker-model-runner': true };
+    return { host: false, 'docker-ollama': false, 'docker-vllm': true, 'docker-model-runner': true, 'docker-cpu': false };
   }
   if (modeName === 'ss-rlm') {
-    return { host: false, 'docker-ollama': false, 'docker-vllm': true, 'docker-model-runner': true };
+    return { host: false, 'docker-ollama': false, 'docker-vllm': true, 'docker-model-runner': true, 'docker-cpu': false };
   }
-  return { host: true, 'docker-ollama': true, 'docker-vllm': true, 'docker-model-runner': true };
+  if (modeName === 'ss-rlm-sandbox') {
+    return { host: false, 'docker-ollama': false, 'docker-vllm': false, 'docker-model-runner': false, 'docker-cpu': true };
+  }
+  return { host: true, 'docker-ollama': true, 'docker-vllm': true, 'docker-model-runner': true, 'docker-cpu': false };
 }
 
 /** OS-aware default runtime for the "Reset to defaults" path. */
@@ -197,6 +241,9 @@ export function defaultRuntimeForRow(
   os: ModeOs | string | undefined,
   hasNvidia: boolean,
 ): RuntimeChoice {
+  // Modes with exactly one valid runtime never vary by OS.
+  const pinned = PINNED_RUNTIME[modeName];
+  if (pinned) return pinned;
   if (modeName === 'ss-reranker') return 'docker-vllm';
   if (modeName === 'ss-rlm') {
     return os === 'mac-docker-ollama' ? 'docker-model-runner' : 'docker-vllm';
@@ -215,8 +262,15 @@ export function defaultRuntimeForRow(
 function resolveRuntime(
   assignment: RoleAssignment | undefined,
   os: ModeOs | string | undefined,
+  modeName?: string,
 ): RuntimeChoice | null {
   if (!assignment?.enabled) return null;
+  // Read a pinned mode through the pin, not through the stored column: rows
+  // saved before 'docker-cpu' existed carry a runtime the sidecar refuses, and
+  // showing the radio there would mean the row renders enabled on a column
+  // that can never start. getRuntimesForHost applies the same pin server-side,
+  // so this is display agreeing with behaviour, not the UI inventing one.
+  if (modeName && PINNED_RUNTIME[modeName]) return PINNED_RUNTIME[modeName];
   if (assignment.runtime) return assignment.runtime;
   return os === 'mac-docker-ollama' ? 'host' : 'docker-ollama';
 }
@@ -236,6 +290,7 @@ const FALLBACK_MODES: ModeCatalogEntry[] = [
   { name: 'ss-ocr', label: 'OCR', availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'], defaultModel: {} },
   { name: 'ss-reranker', label: 'Reranker', availableOn: ['linux', 'windows-docker-wsl2'], defaultModel: {} },
   { name: 'ss-rlm', label: 'RLM', availableOn: ['linux', 'windows-docker-wsl2'], defaultModel: {} },
+  { name: 'ss-rlm-sandbox', label: 'RLM Sandbox (hosted pattern)', availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'], defaultModel: {} },
 ];
 
 const RESET_DEFAULTS: Record<string, { minOnline: number; idleTimeoutMin: number }> = {
@@ -245,9 +300,34 @@ const RESET_DEFAULTS: Record<string, { minOnline: number; idleTimeoutMin: number
   'ss-ocr': { minOnline: 1, idleTimeoutMin: 5 },
   'ss-reranker': { minOnline: 0, idleTimeoutMin: 5 },
   'ss-rlm': { minOnline: 0, idleTimeoutMin: 10 },
+  // minOnline 1, not 0: the master only routes to this role when the sidecar
+  // reports its container running (stream-rlm.ts resolveRlmEndpoint), and
+  // minOnline=0 is a HARD never-auto-start gate on the sidecar — so 0 would
+  // make the fallback structurally unable to fire. idleTimeoutMin 0 disables
+  // the idle timer. Both are cheap here: the container is vram:0.
+  'ss-rlm-sandbox': { minOnline: 1, idleTimeoutMin: 0 },
 };
 
 /* ─────────────────────────── Helpers ─────────────────────────── */
+
+/**
+ * Why a mode's row is greyed out on this host. Per-mode, because the reasons
+ * are genuinely different and a wrong reason sends the operator to the wrong
+ * settings page — this used to be a two-way string that told everything except
+ * ss-ocr it lacked cross-encoder support, which is only true of ss-reranker.
+ */
+function unavailableReason(modeName: string, os: ModeOs | string | undefined): string {
+  switch (modeName) {
+    case 'ss-ocr':
+      return `The selected OCR model is Docker-only and Docker on Mac has no GPU passthrough — ss-ocr can't run on this host. Change the model on OCR settings, or set a Mac-compatible per-host model override (e.g. minicpm-v).`;
+    case 'ss-reranker':
+      return `ss-reranker is not supported on ${os} — vllm-metal lacks cross-encoder support. Use a Linux+NVIDIA sidecar for reranking.`;
+    case 'ss-rlm':
+      return `ss-rlm is not supported on ${os} — no MLX conversion of the RLM fine-tune has been published, so vllm-metal can't load it. Use a Linux/Windows+NVIDIA sidecar, or enable ss-rlm-sandbox instead.`;
+    default:
+      return `${modeName} is not supported on ${os}.`;
+  }
+}
 
 function inferOs(
   hostname: string | undefined,
@@ -789,7 +869,7 @@ export default function AdminRoleAssignments() {
                         <tbody>
                           {catalog.map((mode) => {
                             const assignment = assigns.find((a) => a.mode === mode.name);
-                            const selectedRuntime = resolveRuntime(assignment, sidecar.os);
+                            const selectedRuntime = resolveRuntime(assignment, sidecar.os, mode.name);
                             const modeRuntimes = runtimesForMode(mode.name);
                             // ss-ocr availability is model-aware: the server catalog
                             // strips Mac when the global OCR model is Docker-only
@@ -814,11 +894,7 @@ export default function AdminRoleAssignments() {
                                   {!modeAvailableOnHost && (
                                     <span
                                       className="ml-1 text-amber-500"
-                                      title={
-                                        mode.name === 'ss-ocr'
-                                          ? `The selected OCR model is Docker-only and Docker on Mac has no GPU passthrough — ss-ocr can't run on this host. Change the model on OCR settings, or set a Mac-compatible per-host model override (e.g. minicpm-v).`
-                                          : `${mode.name} is not supported on ${sidecar.os} — vllm-metal lacks cross-encoder support. Use a Linux+NVIDIA sidecar for reranking.`
-                                      }
+                                      title={unavailableReason(mode.name, sidecar.os)}
                                     >
                                       ⓘ
                                     </span>
@@ -876,6 +952,12 @@ export default function AdminRoleAssignments() {
                                       : 'Not available on this host.';
                                   } else if (col.key === 'docker-model-runner' && mode.name !== 'ss-rlm') {
                                     tooltip = `Run ${mode.name} via ${col.label}. Note: sidecar DMR resolution for ${mode.name} is pending — model picker will set the override but the container won't start until that ships.`;
+                                  } else if (mode.name === 'ss-rlm-sandbox') {
+                                    // Be explicit that the image is not published yet: an
+                                    // operator who enables this and sees a failed pull
+                                    // should know that is the expected state, not a
+                                    // symptom of picking the wrong column.
+                                    tooltip = `Run ${mode.name} via ${col.label} (no GPU needed — port 8101). The soundsuite/rlm-sandbox image is not published yet, so the pull will fail until it ships.`;
                                   } else {
                                     tooltip = `Run ${mode.name} via ${col.label}`;
                                   }
