@@ -945,7 +945,7 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
  * memory on the sidecar only — never written to its config.json, never surfaced
  * by /api/status.
  */
-function buildOpenRouterPush(cfg: AppConfig): {
+export function buildOpenRouterPush(cfg: AppConfig): {
   apiKey: string;
   allowedModels: Record<string, { model: string; provider?: string; dims?: number }>;
   modeByRole: Record<string, string>;
