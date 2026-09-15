@@ -409,6 +409,10 @@ function rlmSandboxDef(containerName: string): ContainerDef {
     priority: 'normal',
     runtime: 'docker',
     requiresGpu: false,
+    // MUST match state.ts. Without it createContainer synthesizes a vLLM
+    // command line from def.model and the container execs the model id as a
+    // binary — see ContainerDef.usesImageCmd.
+    usesImageCmd: true,
   };
 }
 

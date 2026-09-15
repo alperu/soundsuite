@@ -149,6 +149,41 @@ describe('the sandbox image string cannot drift between its two definitions', ()
   });
 });
 
+/**
+ * The sandbox is typed 'vllm' for its container LIFECYCLE only — it is not
+ * vLLM. createContainer also reads that type as "build `[model, --host, ...]`
+ * as Cmd", which is right for vllm/vllm-openai (ENTRYPOINT `vllm serve`) and
+ * fatal here: Docker execs argv[0], so the container died on startup with
+ *
+ *   [FATAL tini (7)] exec deepseek/deepseek-v4-flash failed: No such file or directory
+ *
+ * across the whole fleet. Nothing caught it because the type lie was only
+ * observable once a container actually ran — every unit test passed, the image
+ * pulled fine, and the symptom looked like a broken image rather than a
+ * command the sidecar had invented.
+ */
+describe('ss-rlm-sandbox starts itself — no synthesized command line', () => {
+  it('declares usesImageCmd in both definitions', () => {
+    expect(defaultRegistry['rlm-sandbox'].usesImageCmd).toBe(true);
+    expect(resolveMode('ss-rlm-sandbox', 'linux', 'docker-cpu')!.usesImageCmd).toBe(true);
+  });
+
+  it('is the ONLY role that does — every other vllm role needs the real command', () => {
+    for (const [role, def] of Object.entries(defaultRegistry)) {
+      if (role === 'rlm-sandbox') continue;
+      expect(`${role}:${def.usesImageCmd ?? false}`).toBe(`${role}:false`);
+    }
+  });
+
+  it('keeps type vllm — the flag fixes the command, not the lifecycle', () => {
+    // Flipping to 'utility' would make ensureContainerForRole and
+    // provisionContainers skip the role entirely, so it would never be created
+    // at all. That was the original design note's suggestion and SPEC §6
+    // explicitly reversed it.
+    expect(defaultRegistry['rlm-sandbox'].type).toBe('vllm');
+  });
+});
+
 describe('isRuntimeChoice', () => {
   it('accepts every member of the union', () => {
     for (const v of ALL_RUNTIME_CHOICES) expect(isRuntimeChoice(v)).toBe(true);

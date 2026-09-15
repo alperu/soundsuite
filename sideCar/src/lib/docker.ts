@@ -6,6 +6,15 @@ import { processGlobal } from './process-global';
 
 const log = createLogger('docker');
 
+/**
+ * The port this sidecar itself listens on, as seen from a container it created.
+ *
+ * Only used to tell `usesImageCmd` roles where to send their sub-model calls.
+ * 8098 is the sidecar's fixed port (package.json `dev`/`start`, the launcher's
+ * `-p 8098:3000`); PORT overrides it for a sidecar run on a non-default port.
+ */
+const SIDECAR_SELF_PORT = process.env.SS_SIDECAR_SELF_PORT || process.env.PORT || '8098';
+
 /** Resolved Docker connection — set once by initDocker() or lazily on first use */
 const G = processGlobal('docker', () => ({
   resolvedConnection: null as { socketPath?: string; hostname?: string; port?: number } | null,
@@ -927,12 +936,36 @@ export async function createContainer(role: string): Promise<{ Id?: string; exis
     (config.HostConfig as Record<string, unknown>).Binds = ['ollama-models:/root/.ollama'];
   }
 
-  if (def.type === 'vllm' && def.model) {
+  // `usesImageCmd` roles start themselves — see ContainerDef. Synthesizing a
+  // vLLM command line for an image whose ENTRYPOINT is not `vllm serve` execs
+  // the model id as a binary and kills the container on startup.
+  if (def.type === 'vllm' && def.model && !def.usesImageCmd) {
     (config as Record<string, unknown>).Cmd = buildVllmCmd(def.model, def.port, def.vllmArgs);
     const hc = config.HostConfig as Record<string, unknown>;
     hc.Binds = (hc.Binds as string[]) || [];
     (hc.Binds as string[]).push('huggingface-cache:/root/.cache/huggingface');
     hc.ShmSize = 4 * 1024 * 1024 * 1024;
+  }
+
+  if (def.usesImageCmd) {
+    const hc = config.HostConfig as Record<string, unknown>;
+    // The container has to reach THIS sidecar to make its sub-model calls (it
+    // holds no API key by design). `host.docker.internal` is only resolvable
+    // out of the box on Docker Desktop; on Linux/WSL2 engines it needs the
+    // gateway alias explicitly — the same `--add-host` the sidecar's own
+    // launcher passes to itself (public/sideCar/scripts/start.sh:112).
+    hc.ExtraHosts = ['host.docker.internal:host-gateway'];
+
+    const derived: Record<string, string> = {
+      SS_SIDECAR_URL: `http://host.docker.internal:${SIDECAR_SELF_PORT}/api/v1`,
+      // A hint only: the sidecar's own /api/v1 route resolves the authoritative
+      // model from the calling master's allowedModels and ignores whatever the
+      // container asks for. Passed so logs and the library's bookkeeping name
+      // the right model.
+      ...(def.model ? { SS_SANDBOX_MODEL: def.model } : {}),
+    };
+    const merged = { ...derived, ...(def.env ?? {}) };
+    (config as Record<string, unknown>).Env = Object.entries(merged).map(([k, v]) => `${k}=${v}`);
   }
 
   log.info(`Creating container ${name}`, { image: def.image, port: hostPort });

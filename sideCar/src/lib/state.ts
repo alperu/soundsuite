@@ -61,6 +61,27 @@ export interface ContainerDef {
   // before applying their GPU-only behavior, so setting this to `false` is
   // additive — it does not change any existing role's behavior.
   requiresGpu?: boolean;
+  // The image starts itself — do NOT synthesize a command line for it.
+  //
+  // `type: 'vllm'` is load-bearing for the container LIFECYCLE (it is what gets
+  // a role through ensureContainerForRole/provisionContainers rather than being
+  // skipped as 'utility'), but createContainer also reads it as "this is
+  // literally vLLM" and builds `[model, '--host', ..., '--port', ...]` as Cmd.
+  // That is correct for vllm/vllm-openai, whose ENTRYPOINT is `vllm serve`, and
+  // catastrophic for any other image: Docker execs argv[0], so the container
+  // dies instantly with
+  //
+  //   [FATAL tini (7)] exec deepseek/deepseek-v4-flash failed: No such file or directory
+  //
+  // — observed on the whole fleet 2026-09-15, and it looks like a bad image
+  // rather than a bad command. Both prior design docs said the sandbox is typed
+  // vllm "purely to get the normal container lifecycle; it is not literally
+  // vLLM" without anyone tracing what else keyed off the type. This flag is
+  // that trace made explicit. Setting it also skips the huggingface-cache bind
+  // and the 4 GB shm, which are equally vLLM-specific.
+  usesImageCmd?: boolean;
+  // Extra env for the container, merged over anything createContainer derives.
+  env?: Record<string, string>;
 }
 
 export interface PerRoleState {
@@ -241,6 +262,9 @@ export const defaultRegistry: Record<string, ContainerDef> = {
     modes: ['searching'],
     containerName: `${CONTAINER_PREFIX}rlm-sandbox`,
     priority: 'normal',
+    // The image runs its own server.py — see ContainerDef.usesImageCmd. Without
+    // this the sidecar execs the model id as a binary and the container dies.
+    usesImageCmd: true,
     // No GPU needed — see `requiresGpu`'s doc comment above. Without this,
     // ensureContainerForRole()/provisionContainers() would refuse to create
     // this container at all on Mac/Windows-without-WSL2-passthrough hosts
