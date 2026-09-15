@@ -219,6 +219,14 @@ export default function AdminRoleTypes() {
                   const allSame =
                     availableValues.length > 0 &&
                     availableValues.every((v) => v === availableValues[0]);
+                  // ss-rlm-sandbox's "model" is an OpenRouter chat-model id the
+                  // sandbox calls over the API — not a weight any sidecar pulls
+                  // or loads (its runtime is pinned to 'docker-cpu',
+                  // requiresGpu: false). Without saying so the id reads exactly
+                  // like the local Ollama/vLLM model ids in every other row,
+                  // and the Start/Stop/Pull controls alongside it invite the
+                  // reading that the host is about to fetch DeepSeek's weights.
+                  const hostedByOpenRouter = m.name === 'ss-rlm-sandbox';
 
                   return (
                     <tr key={m.name} className="border-b border-gray-100 align-top">
@@ -247,6 +255,14 @@ export default function AdminRoleTypes() {
                         ) : allSame ? (
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-mono text-xs text-gray-800">{availableValues[0]}</span>
+                            {hostedByOpenRouter && (
+                              <span
+                                title="Called over the OpenRouter API. No weights are pulled or loaded on the sidecar — this role runs a GPU-less container that relays to the hosted model."
+                                className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-50 text-violet-800 border border-violet-200"
+                              >
+                                OpenRouter
+                              </span>
+                            )}
                             {source && (
                               <Link
                                 href={source.href}

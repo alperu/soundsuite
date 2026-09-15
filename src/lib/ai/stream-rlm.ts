@@ -12,6 +12,11 @@
  * Discovery mirrors src/lib/search/reranker.ts.
  */
 
+// Static import: models.ts is a pure data module with no side effects and no
+// 'server-only' marker, so it costs nothing here and keeps hostedContextBudget
+// synchronous (the budget is needed inside resolveRlmEndpoint's hot path).
+import { findChatModel } from '@/lib/openrouter/models';
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
@@ -46,6 +51,15 @@ export interface ResolvedRlmEndpoint {
   /** Only set when sandbox === true: the operator-configured OpenRouter
    *  chat-model id (rlm.sandboxModel) the sandbox should drive. */
   model?: string;
+  /**
+   * Total context window (input + output) to budget this endpoint against.
+   *
+   * Resolved here rather than at the call sites because there are two of them
+   * (`streamRlm` and `runRlmWithTools`) and a budget that differs between them
+   * is a 400 waiting to happen. Always set: the self-hosted path carries
+   * RLM_CONTEXT_TOKENS, the sandbox path the hosted model's own window.
+   */
+  contextTokens: number;
 }
 
 export interface StreamRlmEvent {
@@ -69,12 +83,10 @@ const RLM_PORT = 8100;
 // assumption here (and in streamRlm/runRlmWithTools's fetch calls) rather
 // than trusting it.
 //
-// Also TODO: RLM_CONTEXT_TOKENS (40960) still clamps/trims the sandbox path
-// below — that's ss-rlm's vLLM ceiling, not the hosted model's (e.g.
-// deepseek/deepseek-v4-flash advertises ~1.05M ctx). Not wrong (it just
-// over-trims relative to what the hosted model could actually take), but
-// worth a per-model context budget once the sandbox's real contract exists,
-// rather than reusing the self-hosted RLM's fixed ceiling for both paths.
+// RESOLVED (the context-budget half of this TODO): the sandbox path no longer
+// reuses ss-rlm's 40960 vLLM ceiling. `ResolvedRlmEndpoint.contextTokens` now
+// carries the hosted model's own window — see hostedContextBudget() below.
+// The HTTP-contract assumption above is still outstanding.
 const RLM_SANDBOX_PORT = 8101;
 export const RLM_MODEL_ID = 'mit-oasys/rlm-qwen3-8b-v0.1';
 
@@ -103,6 +115,36 @@ export const TOKEN_CHAR_RATIO = 3.2;
 export const SAFETY_MARGIN_TOKENS = 256;
 export const MIN_OUTPUT_TOKENS = 768;
 
+/**
+ * Fraction of a hosted model's advertised window we will actually budget.
+ *
+ * SAFETY_MARGIN_TOKENS (256) and TOKEN_CHAR_RATIO (3.2) were both tuned
+ * against the 40960 vLLM ceiling, where 256 tokens is a 0.6% cushion. Against
+ * DeepSeek's 1,048,576 the same constant is 0.025%, and the char/token ratio
+ * is calibrated for Qwen's tokenizer, not DeepSeek's. A 10% estimator error
+ * costs 4k tokens at 40960 — the clamp absorbs it — but 105k at 1M, which is
+ * a provider-side 400: exactly the failure this module exists to prevent,
+ * on the path with the least production exposure.
+ *
+ * So the advertised figure is scaled rather than used raw. This is a
+ * deliberately blunt instrument; a real tokenizer would let it go away.
+ */
+export const HOSTED_CONTEXT_UTILIZATION = 0.9;
+
+/**
+ * Context budget for a hosted (sandbox) model id.
+ *
+ * `rlm.sandboxModel` is free-form — `/api/openrouter/settings` accepts any
+ * string without checking it against the catalogue — so an id we do not know
+ * is a real path, not a defensive branch. Falling back to RLM_CONTEXT_TOKENS
+ * is the conservative choice: too small only over-trims, while guessing too
+ * large is a 400.
+ */
+export function hostedContextBudget(modelId: string): number {
+  const known = findChatModel(modelId)?.contextTokens;
+  return known ? Math.floor(known * HOSTED_CONTEXT_UTILIZATION) : RLM_CONTEXT_TOKENS;
+}
+
 export function estimateInputTokens(messages: ChatMessage[]): number {
   let chars = 0;
   for (const m of messages) {
@@ -125,6 +167,7 @@ export function estimateInputTokens(messages: ChatMessage[]): number {
 export function clampOutputTokens(
   messages: ChatMessage[],
   requested: number,
+  contextTokens: number = RLM_CONTEXT_TOKENS,
 ): { maxTokens: number; clamped: boolean; estimatedInput: number; needsInputTrim: boolean } {
   const estimatedInput = estimateInputTokens(messages);
   // The invariant vLLM enforces: estimatedInput + maxTokens + SAFETY_MARGIN must
@@ -134,7 +177,7 @@ export function clampOutputTokens(
   // (e.g. estimatedInput=40193 → ceil=511 but it sent max_tokens=768 → 40961 >
   // 40960). When ceil < MIN_OUTPUT_TOKENS the input is too large for a useful
   // answer and the CALLER must trim input (needsInputTrim) before sending.
-  const ceil = RLM_CONTEXT_TOKENS - estimatedInput - SAFETY_MARGIN_TOKENS;
+  const ceil = contextTokens - estimatedInput - SAFETY_MARGIN_TOKENS;
   if (ceil < MIN_OUTPUT_TOKENS) {
     return { maxTokens: Math.max(1, ceil), clamped: true, estimatedInput, needsInputTrim: true };
   }
@@ -148,11 +191,14 @@ export function clampOutputTokens(
  * Preserves messages[0] (system) and messages[1] (the initial user turn).
  * Returns the number of messages removed.
  */
-export function trimHistoryToFit(messages: ChatMessage[]): number {
+export function trimHistoryToFit(
+  messages: ChatMessage[],
+  contextTokens: number = RLM_CONTEXT_TOKENS,
+): number {
   let removed = 0;
   while (true) {
     const estimatedInput = estimateInputTokens(messages);
-    if (estimatedInput + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS <= RLM_CONTEXT_TOKENS) break;
+    if (estimatedInput + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS <= contextTokens) break;
     let assistantIdx = -1;
     for (let i = 2; i < messages.length - 1; i++) {
       if (messages[i].role === 'assistant') {
@@ -184,12 +230,15 @@ export function trimHistoryToFit(messages: ChatMessage[]): number {
  * (re-fetchable) excerpts first. Returns messages removed + chars truncated so
  * the caller can surface a "input was shortened" notice.
  */
-export function trimMessagesToFit(messages: ChatMessage[]): { removed: number; truncatedChars: number } {
-  const removed = trimHistoryToFit(messages);
+export function trimMessagesToFit(
+  messages: ChatMessage[],
+  contextTokens: number = RLM_CONTEXT_TOKENS,
+): { removed: number; truncatedChars: number } {
+  const removed = trimHistoryToFit(messages, contextTokens);
   let truncatedChars = 0;
   const TRUNC_MARKER = '\n\n…[input truncated to fit the model context window]';
   const fits = () =>
-    estimateInputTokens(messages) + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS <= RLM_CONTEXT_TOKENS;
+    estimateInputTokens(messages) + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS <= contextTokens;
   while (!fits()) {
     let idx = -1, maxLen = 0;
     for (let i = 0; i < messages.length; i++) {
@@ -198,7 +247,7 @@ export function trimMessagesToFit(messages: ChatMessage[]): { removed: number; t
     }
     if (idx < 0 || maxLen <= TRUNC_MARKER.length) break; // nothing left to shed
     const overTokens =
-      estimateInputTokens(messages) + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS - RLM_CONTEXT_TOKENS;
+      estimateInputTokens(messages) + MIN_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS - contextTokens;
     const dropChars = Math.ceil(overTokens * TOKEN_CHAR_RATIO) + TRUNC_MARKER.length + 64;
     const cur = messages[idx].content ?? '';
     const keep = Math.max(0, cur.length - dropChars);
@@ -245,7 +294,7 @@ export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> 
       try {
         const host = new URL(s.url).hostname;
         console.log(`[RLM] endpoint resolved: ${s.hostname ?? s.url} → http://${host}:${RLM_PORT} (others: ${probed.join(', ') || 'none'})`);
-        return { endpoint: `http://${host}:${RLM_PORT}`, host };
+        return { endpoint: `http://${host}:${RLM_PORT}`, host, contextTokens: RLM_CONTEXT_TOKENS };
       } catch { /* skip */ }
     }
 
@@ -268,7 +317,7 @@ export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> 
           }
           const host = new URL(cand.url).hostname;
           console.log(`[RLM] endpoint resolved via live probe (cache was stale): ${cand.hostname} → http://${host}:${RLM_PORT}`);
-          return { endpoint: `http://${host}:${RLM_PORT}`, host };
+          return { endpoint: `http://${host}:${RLM_PORT}`, host, contextTokens: RLM_CONTEXT_TOKENS };
         } catch (err) {
           probed.push(`${cand.hostname}:live-probe-err-${(err as Error).message.slice(0, 40)}`);
         }
@@ -295,7 +344,7 @@ export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> 
             continue;
           }
           console.warn(`[RLM] endpoint resolved via vLLM direct probe — sidecar says rlm not_found but vLLM is serving (operator deleted/recreated container out-of-band?). host=${host}`);
-          return { endpoint: `http://${host}:${RLM_PORT}`, host };
+          return { endpoint: `http://${host}:${RLM_PORT}`, host, contextTokens: RLM_CONTEXT_TOKENS };
         } catch (err) {
           probed.push(`${cand.hostname}:vllm-probe-err-${(err as Error).message.slice(0, 40)}`);
         }
@@ -333,8 +382,9 @@ export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> 
         if (!sandboxCS || sandboxCS.status !== 'running') continue;
         try {
           const host = new URL(s.url).hostname;
-          console.warn(`[RLM] DEGRADED: falling back to ss-rlm-sandbox on ${s.hostname ?? s.url} → http://${host}:${RLM_SANDBOX_PORT} (model=${sandboxModel}) — ss-rlm is unavailable`);
-          return { endpoint: `http://${host}:${RLM_SANDBOX_PORT}`, host, sandbox: true, model: sandboxModel };
+          const budget = hostedContextBudget(sandboxModel);
+          console.warn(`[RLM] DEGRADED: falling back to ss-rlm-sandbox on ${s.hostname ?? s.url} → http://${host}:${RLM_SANDBOX_PORT} (model=${sandboxModel}, ctx=${budget}${budget === RLM_CONTEXT_TOKENS ? ' — model not in catalogue, using the self-hosted ceiling' : ''}) — ss-rlm is unavailable`);
+          return { endpoint: `http://${host}:${RLM_SANDBOX_PORT}`, host, sandbox: true, model: sandboxModel, contextTokens: budget };
         } catch { /* skip */ }
       }
       console.warn('[RLM] sandbox fallback found no sidecar with rlm-sandbox=running either.');
@@ -367,11 +417,13 @@ export async function* streamRlm(opts: {
   // (rlm.sandboxModel), not the self-hosted RLM fine-tune.
   const model = resolved.sandbox && resolved.model ? resolved.model : RLM_MODEL_ID;
   // Same context-budget defense as runRlmWithTools — streamRlm is the
-  // tool-less path (synthesis / draft generation) but still hits the same
-  // 32K ceiling. Clamp without trimming since this path has only system+user.
-  const clamp = clampOutputTokens(opts.messages, opts.maxTokens ?? 2048);
+  // tool-less path (synthesis / draft generation). Clamp without trimming
+  // since this path has only system+user. The budget comes from the resolved
+  // endpoint, so the hosted sandbox model is not held to ss-rlm's ceiling.
+  const ctxBudget = resolved.contextTokens;
+  const clamp = clampOutputTokens(opts.messages, opts.maxTokens ?? 2048, ctxBudget);
   if (clamp.clamped) {
-    console.warn(`[RLM] streamRlm clamp max_tokens ${opts.maxTokens ?? 2048} → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput}, ctx=${RLM_CONTEXT_TOKENS})`);
+    console.warn(`[RLM] streamRlm clamp max_tokens ${opts.maxTokens ?? 2048} → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput}, ctx=${ctxBudget})`);
   }
   let res: Response;
   try {
@@ -523,12 +575,17 @@ export async function* runRlmWithTools(opts: {
   // sandbox: drive the configured hosted chat model instead of the
   // self-hosted RLM fine-tune. See resolveRlmEndpoint()'s Phase 2.
   const model = resolved.sandbox && resolved.model ? resolved.model : RLM_MODEL_ID;
+  // Budget every round against THIS endpoint's window, not ss-rlm's fixed
+  // ceiling. The tool loop is where it matters most: it accumulates chunk
+  // payloads across rounds, and on a hosted model that ceiling was throwing
+  // away context the provider would happily have taken.
+  const ctxBudget = resolved.contextTokens;
   const maxRounds = opts.maxRounds ?? 4;
   const t0 = Date.now();
 
   // Initial prompt size — operator wants to know "is the request actually big".
   const initialPromptChars = opts.messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
-  console.log(`[RLM] run start endpoint=${endpoint} model=${model} sandbox=${!!resolved.sandbox} maxRounds=${maxRounds} tools=[${opts.tools.map(t => t.function.name).join(', ')}] initialPromptChars=${initialPromptChars} maxTokens=${opts.maxTokens ?? 2048}`);
+  console.log(`[RLM] run start endpoint=${endpoint} model=${model} sandbox=${!!resolved.sandbox} ctx=${ctxBudget} maxRounds=${maxRounds} tools=[${opts.tools.map(t => t.function.name).join(', ')}] initialPromptChars=${initialPromptChars} maxTokens=${opts.maxTokens ?? 2048}`);
 
   // Visible signal that this run used the degraded hosted-pattern fallback,
   // not the self-hosted RLM — surfaced to the caller (deep-search.ts) rather
@@ -553,24 +610,24 @@ export async function* runRlmWithTools(opts: {
     // ── Context budget enforcement ────────────────────────────────────────
     // vLLM rejects prompt_tokens + max_tokens > max_model_len. Clamp first;
     // if even MIN_OUTPUT_TOKENS doesn't fit, trim oldest history and re-clamp.
-    let clamp = clampOutputTokens(messages, requestedMaxTokens);
+    let clamp = clampOutputTokens(messages, requestedMaxTokens, ctxBudget);
     if (clamp.needsInputTrim) {
       // Input alone is too large to leave room for a useful answer. Drop oldest
       // history and, if still over (e.g. a giant round-1 paste with no history),
       // truncate the largest message keeping its head. This GUARANTEES we never
       // send prompt_tokens + max_tokens > max_model_len (the prior 400).
       const before = messages.length;
-      const { removed, truncatedChars } = trimMessagesToFit(messages);
-      clamp = clampOutputTokens(messages, requestedMaxTokens);
+      const { removed, truncatedChars } = trimMessagesToFit(messages, ctxBudget);
+      clamp = clampOutputTokens(messages, requestedMaxTokens, ctxBudget);
       console.warn(`[RLM] round ${round} input over budget — removed ${removed} msg(s) (was=${before}, now=${messages.length})${truncatedChars > 0 ? `, truncated ${truncatedChars} chars` : ''}; estInput now ${clamp.estimatedInput}, maxTokens ${clamp.maxTokens}`);
       if (truncatedChars > 0) {
         yield {
           type: 'notice',
-          message: `Your input was too long for the model's ${RLM_CONTEXT_TOKENS}-token window — about ${Math.round(truncatedChars / TOKEN_CHAR_RATIO)} tokens of input were dropped to make room for the answer. Shorten the pasted text or split it across turns for a complete result.`,
+          message: `Your input was too long for the model's ${ctxBudget}-token window — about ${Math.round(truncatedChars / TOKEN_CHAR_RATIO)} tokens of input were dropped to make room for the answer. Shorten the pasted text or split it across turns for a complete result.`,
         };
       }
     } else if (clamp.clamped) {
-      console.warn(`[RLM] round ${round} clamp max_tokens ${requestedMaxTokens} → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput}, ctx=${RLM_CONTEXT_TOKENS})`);
+      console.warn(`[RLM] round ${round} clamp max_tokens ${requestedMaxTokens} → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput}, ctx=${ctxBudget})`);
     }
     const roundMaxTokens = clamp.maxTokens;
 

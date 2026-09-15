@@ -28,7 +28,7 @@ jest.mock('@/lib/db/config', () => ({
 
 import { getFleetStatus } from '@/lib/gpu/fleet-router';
 import { getConfig } from '@/lib/db/config';
-import { resolveRlmEndpoint } from '../stream-rlm';
+import { resolveRlmEndpoint, RLM_CONTEXT_TOKENS } from '../stream-rlm';
 
 const mockGetFleetStatus = getFleetStatus as jest.Mock;
 const mockGetConfig = getConfig as jest.Mock;
@@ -59,7 +59,7 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
 
     const resolved = await resolveRlmEndpoint();
 
-    expect(resolved).toEqual({ endpoint: 'http://sidecar-a:8100', host: 'sidecar-a' });
+    expect(resolved).toEqual({ endpoint: 'http://sidecar-a:8100', host: 'sidecar-a', contextTokens: RLM_CONTEXT_TOKENS });
     expect(mockGetConfig).not.toHaveBeenCalled();
   });
 
@@ -116,7 +116,12 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
       host: 'sidecar-a',
       sandbox: true,
       model: 'deepseek/deepseek-v4-flash',
+      // The hosted model's own window (1_048_576 × HOSTED_CONTEXT_UTILIZATION),
+      // not ss-rlm's 40960 vLLM ceiling. Written as a literal rather than
+      // recomputed, so changing either input has to be deliberate.
+      contextTokens: 943_718,
     });
+    expect(resolved!.contextTokens).toBeGreaterThan(RLM_CONTEXT_TOKENS);
   });
 
   it('prefers ss-rlm over the sandbox when both are available', async () => {
@@ -139,7 +144,7 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
 
     const resolved = await resolveRlmEndpoint();
 
-    expect(resolved).toEqual({ endpoint: 'http://sidecar-a:8100', host: 'sidecar-a' });
+    expect(resolved).toEqual({ endpoint: 'http://sidecar-a:8100', host: 'sidecar-a', contextTokens: RLM_CONTEXT_TOKENS });
     expect(mockGetConfig).not.toHaveBeenCalled();
   });
 
