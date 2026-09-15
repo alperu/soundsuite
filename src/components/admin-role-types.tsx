@@ -87,6 +87,20 @@ const FALLBACK_CATALOG_NO_DEFAULTS: ModeCatalogEntry[] = [
     defaultModel: {},
     description: "vLLM cross-encoder reranker. Linux native or Windows Docker (WSL2). Mac unsupported — vllm-metal lacks cross-encoder support.",
   },
+  {
+    name: 'ss-rlm',
+    label: 'RLM (recursive reasoning)',
+    availableOn: ['linux', 'windows-docker-wsl2'],
+    defaultModel: {},
+    description: 'Recursive Language Model (Qwen3-8B post-trained) for deep long-context reasoning. Served via Docker vLLM on Linux/Windows+NVIDIA.',
+  },
+  {
+    name: 'ss-rlm-sandbox',
+    label: 'RLM Sandbox (hosted pattern)',
+    availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
+    defaultModel: {},
+    description: 'Fallback for ss-rlm: runs the recursive-reasoning pattern against a hosted OpenRouter chat model instead of self-hosting the RLM fine-tune. Not a local inference server — ~0 VRAM.',
+  },
 ];
 
 const OS_LABEL: Record<ModeOs, string> = {
@@ -102,6 +116,12 @@ export default function AdminRoleTypes() {
   const [loading, setLoading] = useState(true);
   const [backendOffline, setBackendOffline] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Per-mode "add a model" input state — keyed by mode name. Draft text the
+  // operator is typing before Save; cleared on successful save (the saved
+  // value then comes back through `catalog` on reload).
+  const [modelDrafts, setModelDrafts] = useState<Record<string, string>>({});
+  const [savingMode, setSavingMode] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -136,6 +156,37 @@ export default function AdminRoleTypes() {
   useEffect(() => {
     load();
   }, [load]);
+
+  /**
+   * Persist a mode's default model via the existing role-assignment/config
+   * path (POST /api/admin/mode-catalog → setConfigValue on the SAME Config
+   * key the mode's dedicated settings page owns — see that route's header
+   * comment). Not a parallel storage mechanism.
+   */
+  const saveModel = useCallback(
+    async (mode: string) => {
+      const model = (modelDrafts[mode] ?? '').trim();
+      if (!model) return;
+      setSavingMode(mode);
+      setSaveError((prev) => ({ ...prev, [mode]: '' }));
+      try {
+        const res = await fetch('/api/admin/mode-catalog', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode, model }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+        setModelDrafts((prev) => ({ ...prev, [mode]: '' }));
+        await load();
+      } catch (e: any) {
+        setSaveError((prev) => ({ ...prev, [mode]: e?.message || String(e) }));
+      } finally {
+        setSavingMode(null);
+      }
+    },
+    [modelDrafts, load],
+  );
 
   // Re-fetch when the tab regains focus — operator may have just edited the
   // source settings page and tabbed back; the live value should appear
@@ -274,6 +325,35 @@ export default function AdminRoleTypes() {
                               </Link>
                             )}
                           </div>
+                        )}
+
+                        {/* Add/override a model directly from this table —
+                            writes to the same Config key `source` links to
+                            (POST /api/admin/mode-catalog), so it's the same
+                            role-assignment/config path the dedicated
+                            settings page uses, not a new mechanism. */}
+                        {!backendOffline && source && (
+                          <div className="flex items-center gap-1.5 mt-2">
+                            <input
+                              type="text"
+                              value={modelDrafts[m.name] ?? ''}
+                              onChange={(e) =>
+                                setModelDrafts((prev) => ({ ...prev, [m.name]: e.target.value }))
+                              }
+                              placeholder="add a model…"
+                              className="w-40 px-1.5 py-1 border border-gray-300 rounded text-[11px] font-mono"
+                            />
+                            <button
+                              onClick={() => saveModel(m.name)}
+                              disabled={savingMode === m.name || !(modelDrafts[m.name] ?? '').trim()}
+                              className="px-2 py-1 bg-blue-600 text-white rounded text-[11px] font-medium hover:bg-blue-700 disabled:opacity-40"
+                            >
+                              {savingMode === m.name ? 'Saving…' : 'Save'}
+                            </button>
+                          </div>
+                        )}
+                        {saveError[m.name] && (
+                          <p className="text-[11px] text-red-600 mt-1">{saveError[m.name]}</p>
                         )}
                       </td>
                       <td className="py-3 px-3">

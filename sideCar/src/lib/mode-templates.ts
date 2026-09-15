@@ -27,8 +27,8 @@
  */
 import { CONTAINER_PREFIX, VLLM_IMAGE, dockerSupportsGpu, state, type ContainerDef } from './state';
 
-export type ModeName = 'ss-embedding' | 'ss-code-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker' | 'ss-rlm';
-export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-code-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker', 'ss-rlm'];
+export type ModeName = 'ss-embedding' | 'ss-code-embedding' | 'ss-completion' | 'ss-ocr' | 'ss-reranker' | 'ss-rlm' | 'ss-rlm-sandbox';
+export const ALL_MODES: ModeName[] = ['ss-embedding', 'ss-code-embedding', 'ss-completion', 'ss-ocr', 'ss-reranker', 'ss-rlm', 'ss-rlm-sandbox'];
 
 // Code-aware embedding (ss-code-embedding). Ollama pulls the GGUF directly from
 // HuggingFace via the hf.co/{repo}:{quant} reference — the bare name
@@ -333,6 +333,26 @@ export function resolveMode(
         priority: 'high',
         runtime: 'docker',
         vllmArgs: RLM_VLLM_ARGS,
+      };
+
+    case 'ss-rlm-sandbox':
+      // Runs everywhere — it's a small Python sandbox process, not a GPU
+      // inference server. See state.ts:defaultRegistry['rlm-sandbox'] for
+      // why type:'vllm' (not 'utility'), why requiresGpu:false (without it
+      // Mac/GPU-less Docker hosts would refuse to create this container at
+      // all), and the security constraints (no Docker socket, no API key,
+      // no outbound internet).
+      return {
+        image: 'soundsuite/rlm-sandbox:latest',
+        model: null,
+        port: 8101,
+        vram: 0,
+        type: 'vllm',
+        modes: ['searching'],
+        containerName,
+        priority: 'normal',
+        runtime: 'docker',
+        requiresGpu: false,
       };
 
     default:

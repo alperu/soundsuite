@@ -51,6 +51,16 @@ export interface ContainerDef {
   // vLLM defaults to gpu_memory_utilization=0.9 and grabs the whole GPU,
   // evicting other roles. Only honored by type==='vllm' roles.
   vllmArgs?: string[];
+  // Opt OUT of GPU passthrough for a docker-runtime role that is not itself
+  // a GPU inference server (currently only ss-rlm-sandbox). Every other
+  // docker-runtime role implicitly requires GPU today — this flag exists so
+  // that stays true by DEFAULT (undefined behaves exactly like `true`):
+  // `ensureContainerForRole`'s Mac/Windows-no-GPU refusal
+  // (containers.ts) and `createContainer`'s unconditional
+  // HostConfig.DeviceRequests (docker.ts) both check `requiresGpu !== false`
+  // before applying their GPU-only behavior, so setting this to `false` is
+  // additive — it does not change any existing role's behavior.
+  requiresGpu?: boolean;
 }
 
 export interface PerRoleState {
@@ -165,6 +175,65 @@ export const defaultRegistry: Record<string, ContainerDef> = {
       '--enable-auto-tool-choice',
       '--tool-call-parser', 'qwen3_xml',
     ],
+  },
+  // ss-rlm-sandbox — the RLM *pattern* (hold context as a REPL variable;
+  // chunk/grep/recursively sub-query it) driven against a hosted OpenRouter
+  // chat model, instead of self-hosting the mit-oasys/rlm-qwen3-8b-v0.1
+  // fine-tune. The master routes here when no sidecar has ss-rlm running
+  // (see resolveRlmEndpoint() fallback in the master's stream-rlm.ts) and
+  // the operator has opted in via virtualInference.mode.rlm !== 'local-only'.
+  //
+  // model: null — deliberately. The "model" here is an OpenRouter chat-model
+  // id (default deepseek/deepseek-v4-flash), which is config, not a weight
+  // this container loads; the master pushes it via modelOverrides like any
+  // other mode.
+  //
+  // type: 'vllm' rather than 'utility' — DELIBERATE deviation from the
+  // original design note, which suggested 'utility' (the type the 'cuda'
+  // role above uses). 'utility' roles are explicitly skipped by
+  // ensureContainerForRole() and provisionContainers() (see containers.ts) —
+  // the sidecar never docker-pulls or docker-creates them; 'cuda' works that
+  // way because gpu.ts manages it out-of-band. ss-rlm-sandbox has no such
+  // out-of-band manager and needs the sidecar to actually run its container,
+  // so it must go through the normal docker/'vllm'-typed lifecycle
+  // (ensureContainerForRole, idle timers, eviction) like ss-rlm and
+  // ss-reranker — 'vllm' is the closest existing type for an HTTP-served
+  // non-Ollama role; it is not literally vLLM. If a future refactor adds a
+  // dedicated ContainerDef type for generic HTTP utility servers, migrate
+  // this role to it instead of re-litigating 'utility' vs 'vllm' here.
+  //
+  // Security (non-negotiable, from the design note): this container gets NO
+  // Docker socket mount, NO OpenRouter API key, and needs NO outbound
+  // internet — its sub-model calls route back through THIS sidecar's own
+  // virtual-inference (the same path other roles use to reach OpenRouter),
+  // not a direct connection. Whoever builds the image/compose config for
+  // `image` below must not add a socket mount, an env-injected API key, or
+  // an egress-open network policy — that would defeat the whole point of
+  // sandboxing an LLM-driven Python REPL. The host-side proxy that lets the
+  // sandbox call back into the sidecar (and the Fantom HTTP tool exposure)
+  // is NOT built yet — see docs referenced in the design note, steps 3-4.
+  //
+  // image: not yet published — this name is a placeholder for the operator
+  // task of building/publishing the sandbox image (python:3.11-slim + the
+  // rlm library, no Docker socket, no API key baked in, network-restricted).
+  // Building/pushing that image is explicitly out of scope here.
+  'rlm-sandbox': {
+    image: 'soundsuite/rlm-sandbox:latest',
+    model: null,
+    port: 8101,
+    vram: 0,
+    type: 'vllm',
+    modes: ['searching'],
+    containerName: `${CONTAINER_PREFIX}rlm-sandbox`,
+    priority: 'normal',
+    // No GPU needed — see `requiresGpu`'s doc comment above. Without this,
+    // ensureContainerForRole()/provisionContainers() would refuse to create
+    // this container at all on Mac/Windows-without-WSL2-passthrough hosts
+    // (the blanket "Docker has no GPU support on this host" guard that
+    // exists to stop multi-GB vLLM/Ollama image pulls from retry-looping on
+    // GPU-less Docker), contradicting the "runs on every host Docker
+    // supports" point of this mode.
+    requiresGpu: false,
   },
   cuda: {
     image: 'nvidia/cuda:12.4.1-base-ubuntu22.04',

@@ -16,7 +16,9 @@ import { createLogger } from '@/lib/logger';
 
 const logger = createLogger('OpenRouterModels');
 
-const CACHE_KEY = 'openrouter:models:v1';
+// v2: payload now carries supportsTools/supportsReasoning — bump so a stale
+// v1 cache entry (pre-existing deploys) doesn't serve the old shape.
+const CACHE_KEY = 'openrouter:models:v2';
 const CACHE_TTL_SEC = 60 * 60; // 1h
 
 export interface OpenRouterCatalogueModel {
@@ -27,6 +29,12 @@ export interface OpenRouterCatalogueModel {
   priceCompletionPerMTokens: number | null;
   modality: string | null;
   inputModalities: string[];
+  /** From upstream `supported_parameters`. A model that cannot call tools
+   *  cannot drive the RLM tool-use loop (ss-rlm-sandbox) — see
+   *  admin-openrouter.tsx's RLM picker, which filters on this. */
+  supportsTools: boolean;
+  /** From upstream `supported_parameters` (`reasoning` or `include_reasoning`). */
+  supportsReasoning: boolean;
 }
 
 interface UpstreamModel {
@@ -35,18 +43,24 @@ interface UpstreamModel {
   context_length?: number;
   pricing?: { prompt?: string; completion?: string };
   architecture?: { modality?: string; input_modalities?: string[] };
+  supported_parameters?: string[];
 }
 
 function trim(models: UpstreamModel[]): OpenRouterCatalogueModel[] {
-  return models.map((m) => ({
-    id: m.id,
-    name: m.name || m.id,
-    contextLength: typeof m.context_length === 'number' ? m.context_length : null,
-    pricePromptPerMTokens: m.pricing?.prompt != null ? parseFloat(m.pricing.prompt) * 1e6 : null,
-    priceCompletionPerMTokens: m.pricing?.completion != null ? parseFloat(m.pricing.completion) * 1e6 : null,
-    modality: m.architecture?.modality ?? null,
-    inputModalities: m.architecture?.input_modalities ?? [],
-  }));
+  return models.map((m) => {
+    const params = m.supported_parameters ?? [];
+    return {
+      id: m.id,
+      name: m.name || m.id,
+      contextLength: typeof m.context_length === 'number' ? m.context_length : null,
+      pricePromptPerMTokens: m.pricing?.prompt != null ? parseFloat(m.pricing.prompt) * 1e6 : null,
+      priceCompletionPerMTokens: m.pricing?.completion != null ? parseFloat(m.pricing.completion) * 1e6 : null,
+      modality: m.architecture?.modality ?? null,
+      inputModalities: m.architecture?.input_modalities ?? [],
+      supportsTools: params.includes('tools'),
+      supportsReasoning: params.includes('reasoning') || params.includes('include_reasoning'),
+    };
+  });
 }
 
 async function fetchCatalogue(): Promise<OpenRouterCatalogueModel[]> {

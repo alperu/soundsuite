@@ -36,6 +36,13 @@ export async function GET(request: NextRequest) {
       codeEmbeddingModel: config.openRouterCodeEmbeddingModel,
       rerankModel: config.openRouterRerankModel,
       chatModel: config.openRouterChatModel,
+      // ss-rlm-sandbox's model — filtered client-side to tools+reasoning
+      // models (see admin-openrouter.tsx). Not gated by `enabled`/API key
+      // like the others; it only takes effect when ss-rlm is unavailable
+      // AND virtualInference.mode.rlm is set to local-first (see
+      // resolveRlmEndpoint() in stream-rlm.ts).
+      rlmSandboxModel: config.rlmSandboxModel,
+      virtualInferenceModeRlm: config.virtualInferenceModeRlm,
       dailyCapUsd: config.openRouterDailyCapUsd ?? {},
     });
   } catch (error) {
@@ -69,6 +76,11 @@ export async function POST(request: NextRequest) {
       openRouterCodeEmbeddingModel: typeof body.codeEmbeddingModel === 'string' ? body.codeEmbeddingModel : undefined,
       openRouterRerankModel: typeof body.rerankModel === 'string' ? body.rerankModel : undefined,
       openRouterChatModel: typeof body.chatModel === 'string' ? body.chatModel : undefined,
+      rlmSandboxModel: typeof body.rlmSandboxModel === 'string' ? body.rlmSandboxModel : undefined,
+      virtualInferenceModeRlm:
+        body.virtualInferenceModeRlm === 'local-only' || body.virtualInferenceModeRlm === 'local-first'
+          ? body.virtualInferenceModeRlm
+          : undefined,
       openRouterDailyCapUsd: dailyCapUsd,
     });
 

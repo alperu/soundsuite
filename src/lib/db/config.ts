@@ -53,6 +53,15 @@ export interface AppConfig {
    *  vector-space mixing risk. Default `local-only` (never call OpenRouter)
    *  until an operator opts in. */
   virtualInferenceModeCompletion: 'local-only' | 'local-first' | 'hybrid' | 'cloud-only';
+  /**
+   * Governs whether resolveRlmEndpoint() (stream-rlm.ts) may fall back to
+   * ss-rlm-sandbox when no sidecar has ss-rlm running. `local-only`
+   * (default) preserves today's behaviour — no sidecar means no RLM, full
+   * stop. `local-first` allows the sandbox fallback. There is no
+   * `cloud-only` here: the sandbox still needs a sidecar to run the
+   * container in, it's just a different container than ss-rlm.
+   */
+  virtualInferenceModeRlm: 'local-only' | 'local-first';
   claudeApiKey?: string;
   geminiApiKey?: string;
   groqApiKey?: string;
@@ -79,6 +88,15 @@ export interface AppConfig {
   rlmModel?: string;
   rlmQuant?: 'fp16' | 'awq-int8' | 'awq-int4';
   rlmMaxContext?: number;
+  /**
+   * ss-rlm-sandbox — the RLM *pattern* run against a hosted OpenRouter chat
+   * model instead of the self-hosted mit-oasys/rlm-qwen3-8b-v0.1 fine-tune.
+   * Master falls back to this when no sidecar has ss-rlm running (see
+   * resolveRlmEndpoint() in stream-rlm.ts). Picked on /admin/openrouter,
+   * filtered there to models with both tools + reasoning support — a model
+   * that cannot call tools cannot drive the RLM tool-use loop at all.
+   */
+  rlmSandboxModel?: string;
   // AI Services — primary/fallback selection used by MCP tools, AI search,
   // document summarization, analysis, and the tag-fill feature.
   aiPrimaryProvider?: string;
@@ -271,6 +289,7 @@ export async function getConfig(): Promise<AppConfig> {
     virtualInferenceModeEmbedding: (configMap.get('virtualInference.mode.embedding') as AppConfig['virtualInferenceModeEmbedding']) || 'local-only',
     virtualInferenceModeCodeEmbedding: (configMap.get('virtualInference.mode.code-embedding') as AppConfig['virtualInferenceModeCodeEmbedding']) || 'local-only',
     virtualInferenceModeCompletion: (configMap.get('virtualInference.mode.completion') as AppConfig['virtualInferenceModeCompletion']) || 'local-only',
+    virtualInferenceModeRlm: (configMap.get('virtualInference.mode.rlm') as AppConfig['virtualInferenceModeRlm']) || 'local-only',
     claudeApiKey: configMap.get('embedding.claudeApiKey'),
     geminiApiKey: configMap.get('ai.geminiApiKey'),
     groqApiKey: configMap.get('ai.groqApiKey'),
@@ -283,6 +302,7 @@ export async function getConfig(): Promise<AppConfig> {
     ollamaDecomposeModel: configMap.get('ai.ollamaDecomposeModel'),
     ollamaOutlineModel: configMap.get('ai.ollamaOutlineModel'),
     rlmModel: configMap.get('rlm.model'),
+    rlmSandboxModel: configMap.get('rlm.sandboxModel'),
     rlmQuant: (configMap.get('rlm.quant') as AppConfig['rlmQuant']) || undefined,
     rlmMaxContext: configMap.has('rlm.maxContext')
       ? parseInt(configMap.get('rlm.maxContext') || '32768', 10)
@@ -625,6 +645,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   if (config.virtualInferenceModeCompletion !== undefined) {
     updates.push({ key: 'virtualInference.mode.completion', value: config.virtualInferenceModeCompletion });
   }
+  if (config.virtualInferenceModeRlm !== undefined) {
+    updates.push({ key: 'virtualInference.mode.rlm', value: config.virtualInferenceModeRlm });
+  }
 
   if (config.claudeApiKey !== undefined) {
     updates.push({ key: 'embedding.claudeApiKey', value: config.claudeApiKey });
@@ -678,6 +701,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.rlmMaxContext !== undefined) {
     updates.push({ key: 'rlm.maxContext', value: String(config.rlmMaxContext) });
+  }
+  if (config.rlmSandboxModel !== undefined) {
+    updates.push({ key: 'rlm.sandboxModel', value: config.rlmSandboxModel });
   }
 
   // AI Services — primary/fallback selection

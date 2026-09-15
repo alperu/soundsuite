@@ -776,10 +776,15 @@ export function buildExpectedConfig(role: string): ExpectedConfig {
   // docker-model-runner roles have no Docker container under our control.
   if (def.runtime !== 'host' && def.runtime !== 'docker-model-runner') {
     // GPU passthrough is required for any docker-runtime role on a host
-    // where Docker can actually do it (linux, windows-docker-wsl2). On
-    // GPU-less hosts ensureContainerForRole refuses earlier, so we never
-    // reach createContainer there — flagging RequiresGpu here is safe.
-    config.RequiresGpu = state.hostOs === 'linux' || state.hostOs === 'windows-docker-wsl2';
+    // where Docker can actually do it (linux, windows-docker-wsl2) — UNLESS
+    // the role opted out via requiresGpu:false (currently only
+    // ss-rlm-sandbox: a plain Docker container, not a GPU inference
+    // server). On GPU-less hosts ensureContainerForRole refuses earlier for
+    // every OTHER role, so we never reach createContainer there — flagging
+    // RequiresGpu here is safe for them.
+    config.RequiresGpu = def.requiresGpu === false
+      ? false
+      : state.hostOs === 'linux' || state.hostOs === 'windows-docker-wsl2';
     config.RequiresInit = true;
   }
 
@@ -906,7 +911,14 @@ export async function createContainer(role: string): Promise<{ Id?: string; exis
       Init: true,
       PortBindings: { [`${def.port}/tcp`]: [{ HostPort: hostPort }] },
       RestartPolicy: { Name: 'unless-stopped' },
-      DeviceRequests: [{ Driver: '', Count: -1, Capabilities: [['gpu']] }],
+      // Omitted when the role opted out via requiresGpu:false (currently
+      // only ss-rlm-sandbox) — Docker on a GPU-less host (Mac, Windows
+      // without WSL2 passthrough) rejects DeviceRequests for a GPU it
+      // doesn't have, which would otherwise block a container that never
+      // needed one in the first place.
+      ...(def.requiresGpu === false
+        ? {}
+        : { DeviceRequests: [{ Driver: '', Count: -1, Capabilities: [['gpu']] }] }),
     },
   };
 

@@ -117,6 +117,19 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
   const [chatModel, setChatModel] = useState(
     initialConfig.openRouterChatModel || OPENROUTER_CHAT_MODELS[0]?.id || '',
   );
+  // ss-rlm-sandbox — the RLM pattern driven against a hosted model when
+  // ss-rlm is unavailable locally. No curated default here (unlike the
+  // pickers above): the options come from the live catalogue, filtered to
+  // tools+reasoning models (see `rlmCandidates` below), so a hand-picked
+  // fallback could point at a model the filter would have excluded.
+  const [rlmSandboxModel, setRlmSandboxModel] = useState(initialConfig.rlmSandboxModel || '');
+  // Operator opt-in for the ss-rlm-sandbox fallback — mirrors
+  // virtualInference.mode.<role> for every other role (embedding/completion/
+  // reranker). Default local-only preserves today's behavior: no sidecar
+  // running ss-rlm means no RLM, full stop.
+  const [virtualInferenceModeRlm, setVirtualInferenceModeRlm] = useState(
+    initialConfig.virtualInferenceModeRlm || 'local-only',
+  );
   const [dailyCapUsd, setDailyCapUsd] = useState<Record<string, number>>(
     initialConfig.openRouterDailyCapUsd ?? {},
   );
@@ -140,6 +153,8 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           embeddingModel,
           rerankModel,
           chatModel,
+          rlmSandboxModel,
+          virtualInferenceModeRlm,
           dailyCapUsd,
         }),
       });
@@ -273,6 +288,34 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
     });
     return rows;
   }, [catalogue, search, sortKey, sortDir]);
+
+  // ss-rlm-sandbox candidates: a model that cannot call tools cannot drive
+  // the RLM tool-use loop at all (query_case_knowledge / query_case_graph),
+  // so this is a hard filter, not a sort preference. `reasoning` is
+  // required too — the RLM pattern is a multi-round evidence-gathering loop
+  // and a non-reasoning model is far more likely to stop after one round or
+  // loop without converging (see docs/rlm-endpoint.md's maxRounds history).
+  const rlmCandidates = useMemo(
+    () => catalogue.filter((m) => m.supportsTools && m.supportsReasoning),
+    [catalogue],
+  );
+  // Options for the RLM Sandbox <select>: the eligible list, plus the
+  // currently-stored value if it isn't in that list (catalogue still
+  // loading, or the stored model no longer supports tools+reasoning) — so
+  // the control never silently shows a DIFFERENT model than what's saved.
+  const rlmOptions = useMemo(() => {
+    const opts = rlmCandidates.map((m) => ({
+      id: m.id,
+      label: `${m.name} · ${fmtCtx(m.contextLength)} ctx · ${fmtPrice(m.pricePromptPerMTokens)}/M`,
+    }));
+    if (rlmSandboxModel && !opts.some((o) => o.id === rlmSandboxModel)) {
+      opts.unshift({
+        id: rlmSandboxModel,
+        label: `${rlmSandboxModel} (currently saved — ${catalogueLoading ? 'loading…' : 'not in tools+reasoning list'})`,
+      });
+    }
+    return opts;
+  }, [rlmCandidates, rlmSandboxModel, catalogueLoading]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const pageRows = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -441,6 +484,38 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           />
           <Picker label="Reranker" value={rerankModel} onChange={setRerankModel} options={OPENROUTER_RERANK_MODELS.map((m) => ({ id: m.id, label: m.label }))} />
           <Picker label="Chat" value={chatModel} onChange={setChatModel} options={OPENROUTER_CHAT_MODELS.map((m) => ({ id: m.id, label: m.label }))} />
+          {/* ss-rlm-sandbox — fallback used only when ss-rlm is unavailable
+              locally (see stream-rlm.ts's resolveRlmEndpoint). Options come
+              from the live catalogue filtered to tools+reasoning models —
+              anything else literally cannot drive the RLM tool-use loop. */}
+          <Picker
+            label="RLM Sandbox fallback (ss-rlm-sandbox)"
+            hint={
+              catalogueLoading
+                ? 'Loading eligible models…'
+                : `${rlmCandidates.length} of ${catalogue.length} catalogue models support both tools + reasoning (required to drive the RLM tool-use loop). Used only when ss-rlm has no sidecar available and the toggle below is set to "Allow sandbox fallback".`
+            }
+            value={rlmSandboxModel}
+            onChange={setRlmSandboxModel}
+            options={rlmOptions}
+          />
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              RLM fallback mode
+            </label>
+            <select
+              value={virtualInferenceModeRlm}
+              onChange={(e) => setVirtualInferenceModeRlm(e.target.value as 'local-only' | 'local-first')}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+            >
+              <option value="local-only">Local only (default) — no ss-rlm sidecar means no RLM</option>
+              <option value="local-first">Allow sandbox fallback — use ss-rlm-sandbox when ss-rlm is unavailable</option>
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              Governs <code>virtualInference.mode.rlm</code> — same switch every other role
+              (embedding/completion/reranker) uses to opt into a cloud/hosted fallback.
+            </p>
+          </div>
         </div>
       </section>
 

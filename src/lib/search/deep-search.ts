@@ -1932,6 +1932,11 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
   };
 
   let host: string | null = null;
+  // Actual model driving this run — RLM_MODEL_ID until the 'start' event
+  // reports otherwise. Set from ev.model rather than assumed, so an
+  // ss-rlm-sandbox fallback run (see resolveRlmEndpoint()'s Phase 2 in
+  // stream-rlm.ts) reports the real hosted model, not the fine-tune's id.
+  let rlmModelUsed: string = RLM_MODEL_ID;
   let finalReport = '';
   let roundsSeen = 0;
   const messages = [
@@ -1958,6 +1963,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
   })) {
     if (ev.type === 'start') {
       host = ev.host;
+      rlmModelUsed = ev.model;
       emit({
         step: 'rlm-synthesis',
         message: `Routing synthesis through ss-rlm on ${ev.host}…`,
@@ -1982,7 +1988,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
         step: 'rlm-subcall',
         message: `RLM round ${ev.round}: query_case_knowledge("${sq.slice(0, 80)}")`,
         rlmHost: host || undefined,
-        rlmModel: RLM_MODEL_ID,
+        rlmModel: rlmModelUsed,
         rlmRound: ev.round,
         rlmSubQuery: sq,
       });
@@ -1997,7 +2003,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
           ? `RLM round ${ev.round}: ${ev.chunkCount ?? 0} excerpts returned${ev.preview ? ` — ${ev.preview}` : ''}`
           : `RLM round ${ev.round}: tool failed`,
         rlmHost: host || undefined,
-        rlmModel: RLM_MODEL_ID,
+        rlmModel: rlmModelUsed,
         rlmRound: ev.round,
         rlmChunkCount: ev.chunkCount,
       });
@@ -2010,7 +2016,7 @@ You are in evidence-gathering mode. Call query_case_knowledge for any aspects un
     } else if (ev.type === 'notice') {
       // Input had to be shortened to fit the RLM context window — surface it so
       // the user knows the answer may be missing some of the pasted text.
-      emit({ step: 'rlm-synthesis', message: ev.message, rlmHost: host || undefined, rlmModel: RLM_MODEL_ID });
+      emit({ step: 'rlm-synthesis', message: ev.message, rlmHost: host || undefined, rlmModel: rlmModelUsed });
     } else if (ev.type === 'error') {
       throw new Error(`RLM synthesis failed: ${ev.message}`);
     }

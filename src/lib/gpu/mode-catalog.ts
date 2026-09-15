@@ -37,7 +37,8 @@ export type ModeName =
   | 'ss-completion'
   | 'ss-ocr'
   | 'ss-reranker'
-  | 'ss-rlm';
+  | 'ss-rlm'
+  | 'ss-rlm-sandbox';
 export type HostOs = 'linux' | 'mac-docker-ollama' | 'windows-docker-wsl2';
 
 export const ALL_MODES: readonly ModeName[] = [
@@ -47,6 +48,7 @@ export const ALL_MODES: readonly ModeName[] = [
   'ss-ocr',
   'ss-reranker',
   'ss-rlm',
+  'ss-rlm-sandbox',
 ];
 
 export interface ModeCatalogEntry {
@@ -112,6 +114,19 @@ export const MODE_METADATA: ModeMetadata[] = [
     description:
       'Recursive Language Model (Qwen3-8B post-trained) for deep long-context reasoning across many documents. Served via Docker vLLM on Linux/Windows+NVIDIA. Mac is not supported out-of-the-box: vllm-metal needs an MLX conversion of the weights and none has been published. AWQ-INT4 @ 32K context fits in ~10 GB VRAM.',
   },
+  {
+    name: 'ss-rlm-sandbox',
+    label: 'RLM Sandbox (hosted pattern)',
+    // Not a local inference server — this mode's "model" is an OpenRouter
+    // chat-model id, not a weight the sidecar loads. The sandbox drives the
+    // same RLM *pattern* (hold context as a REPL variable; chunk/grep/
+    // recursively sub-query it) against that hosted model instead of the
+    // mit-oasys/rlm-qwen3-8b-v0.1 fine-tune, so it needs no dedicated GPU and
+    // runs on every host Docker supports.
+    availableOn: ['linux', 'mac-docker-ollama', 'windows-docker-wsl2'],
+    description:
+      'Fallback for ss-rlm: runs the recursive-reasoning pattern in a sandboxed Python REPL (python:3.11-slim container) driving a hosted OpenRouter chat model, instead of self-hosting the RLM fine-tune. ~0 VRAM — not a local inference server. The sandbox has no Docker socket, no OpenRouter API key, and no outbound internet: sub-model calls route back through the sidecar\'s virtual-inference. Used only when ss-rlm is unavailable locally (see resolveRlmEndpoint() fallback in stream-rlm.ts).',
+  },
 ];
 
 /**
@@ -129,6 +144,13 @@ const STATIC_FALLBACK_MODEL: Record<ModeName, string> = {
   'ss-ocr': 'minicpm-v:latest',
   'ss-reranker': 'Qwen/Qwen3-Reranker-8B',
   'ss-rlm': 'mit-oasys/rlm-qwen3-8b-v0.1',
+  // OpenRouter chat-model id, not a local weight. Verified live 2026-09-15:
+  // 17 providers, $0.087/$0.174 per M tokens, 1.05M ctx, tools=true,
+  // reasoning=true — the two capabilities the RLM tool-use loop requires.
+  // Deliberately NOT poolside/laguna-s-2.1 (same price, but only ONE
+  // provider — the single-provider exposure that took the 4B/0.6B
+  // rerankers dark; see docs/rlm-endpoint.md and the openrouter admin page).
+  'ss-rlm-sandbox': 'deepseek/deepseek-v4-flash',
 };
 
 function buildDefaultModelMap(
@@ -183,6 +205,8 @@ export function settingsPageForMode(
       return { label: 'Reranking settings', href: '/admin/reranking', configKey: 'rerank.model' };
     case 'ss-rlm':
       return { label: 'RLM AI settings', href: '/admin/rlm', configKey: 'rlm.model' };
+    case 'ss-rlm-sandbox':
+      return { label: 'OpenRouter settings', href: '/admin/openrouter', configKey: 'rlm.sandboxModel' };
     default:
       return null;
   }
@@ -233,6 +257,9 @@ export function resolveModelFromConfig(
       break;
     case 'ss-rlm':
       v = cfg?.rlmModel;
+      break;
+    case 'ss-rlm-sandbox':
+      v = cfg?.rlmSandboxModel;
       break;
   }
   if (v && typeof v === 'string' && v.trim()) return v.trim();

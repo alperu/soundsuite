@@ -173,7 +173,9 @@ export async function ensureContainerForRole(role: string): Promise<void> {
   // containers that need it — they always fail with the CDI "no known GPU
   // vendor" error and put the sidecar into a retry loop that fills logs
   // and burns bandwidth (the nvidia/cuda image is ~200 MB, vllm is multi-GB).
-  if (!dockerSupportsGpu()) {
+  // `requiresGpu === false` (currently only ss-rlm-sandbox) opts a role out
+  // of this — it's a plain Docker container, not a GPU inference server.
+  if (def.requiresGpu !== false && !dockerSupportsGpu()) {
     throw new Error(
       `Cannot provision ${role} (${def.type}) on this host: Docker has no GPU support on ${state.hostOs}. ` +
       `Options: SS_HOST_OLLAMA=1 (native Ollama, Ollama-protocol roles only), ` +
@@ -651,7 +653,8 @@ export async function provisionContainers(): Promise<Record<string, Record<strin
 
     // Mac/Windows: refuse to pull/create any GPU container. The image pulls
     // alone are gigabytes and the containers will never start.
-    if (def.runtime !== 'host' && def.runtime !== 'docker-model-runner' && !dockerSupportsGpu()) {
+    // `requiresGpu === false` opts a role out (see ensureContainerForRole).
+    if (def.requiresGpu !== false && def.runtime !== 'host' && def.runtime !== 'docker-model-runner' && !dockerSupportsGpu()) {
       results[role].image = 'skipped-no-gpu';
       results[role].container = `skipped-no-gpu (host=${state.hostOs}; try SS_HOST_OLLAMA=1 or SS_DMR=1)`;
       continue;

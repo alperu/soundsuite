@@ -421,7 +421,12 @@ export async function handlePullModel(role: string, andLoad: boolean): Promise<R
       ok: true,
       model: def.model,
       container: def.containerName,
-      message: `${def.model} image pulled and container started — vLLM downloads the HF model on first request (cached afterwards)`,
+      // def.model is null for a non-inference-server 'vllm'-typed role
+      // (currently only ss-rlm-sandbox) — its "model" is operator config
+      // (rlm.sandboxModel), not something this container pulls/loads.
+      message: def.model
+        ? `${def.model} image pulled and container started — vLLM downloads the HF model on first request (cached afterwards)`
+        : `${def.image} image pulled and ${def.containerName} started (no model to load — ${role} is config-driven, not a weight this container serves)`,
     };
   }
 
@@ -512,7 +517,11 @@ export async function handleLoadModel(role: string): Promise<Record<string, unkn
         ok: true,
         model: def.model,
         container: def.containerName,
-        message: `${def.containerName} started — vLLM is loading ${def.model}`,
+        // def.model null → non-inference-server 'vllm'-typed role (see the
+        // matching comment in handlePull above).
+        message: def.model
+          ? `${def.containerName} started — vLLM is loading ${def.model}`
+          : `${def.containerName} started (no model to load — ${role} is config-driven, not a weight this container serves)`,
       };
     }
     return {

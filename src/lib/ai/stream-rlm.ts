@@ -38,6 +38,14 @@ export interface RlmToolSpec {
 export interface ResolvedRlmEndpoint {
   endpoint: string;
   host: string;
+  /** True when this endpoint is ss-rlm-sandbox (hosted-pattern fallback),
+   *  not the self-hosted ss-rlm vLLM container. Callers use this to pick
+   *  the right model id and to make the degraded path visible in logs/UI —
+   *  see resolveRlmEndpoint()'s Phase 2 below. */
+  sandbox?: boolean;
+  /** Only set when sandbox === true: the operator-configured OpenRouter
+   *  chat-model id (rlm.sandboxModel) the sandbox should drive. */
+  model?: string;
 }
 
 export interface StreamRlmEvent {
@@ -51,6 +59,23 @@ export interface StreamRlmEvent {
 }
 
 const RLM_PORT = 8100;
+// ss-rlm-sandbox — see sideCar/src/lib/state.ts:defaultRegistry['rlm-sandbox'].
+//
+// TODO(host-side proxy / Fantom HTTP tool exposure — design note steps 3-4,
+// explicitly out of scope here): this code assumes the sandbox exposes the
+// same OpenAI-compatible `/v1/chat/completions` surface as ss-rlm and that
+// tool_calls round-trip through it exactly like the vLLM path below. Neither
+// is built yet. Once the sandbox's actual HTTP contract exists, verify that
+// assumption here (and in streamRlm/runRlmWithTools's fetch calls) rather
+// than trusting it.
+//
+// Also TODO: RLM_CONTEXT_TOKENS (40960) still clamps/trims the sandbox path
+// below — that's ss-rlm's vLLM ceiling, not the hosted model's (e.g.
+// deepseek/deepseek-v4-flash advertises ~1.05M ctx). Not wrong (it just
+// over-trims relative to what the hosted model could actually take), but
+// worth a per-model context budget once the sandbox's real contract exists,
+// rather than reusing the self-hosted RLM's fixed ceiling for both paths.
+const RLM_SANDBOX_PORT = 8101;
 export const RLM_MODEL_ID = 'mit-oasys/rlm-qwen3-8b-v0.1';
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -278,6 +303,44 @@ export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> 
     }
 
     console.warn(`[RLM] endpoint NOT resolved — no sidecar has rlm=running. Fleet check: ${probed.join(', ') || '(empty fleet)'}`);
+
+    // ── Phase 2: ss-rlm-sandbox fallback ──────────────────────────────────
+    // Every ss-rlm discovery path above (cache, live-probe, direct vLLM
+    // probe) came up empty. Fall back to a sidecar running ss-rlm-sandbox —
+    // the RLM *pattern* driven against a hosted OpenRouter chat model
+    // instead of the self-hosted fine-tune — but ONLY when the operator has
+    // opted in via virtualInference.mode.rlm. Default is 'local-only': an
+    // unconfigured install throws exactly as it did before this fallback
+    // existed, rather than silently degrading a deep-research answer to a
+    // different model with no visible signal (see fleet-router.ts's Phase 4
+    // for the analogous local-only-by-default pattern on other roles).
+    try {
+      const { getConfig } = await import('@/lib/db/config');
+      const cfg = await getConfig();
+      if (cfg.virtualInferenceModeRlm === 'local-only') {
+        console.warn('[RLM] sandbox fallback skipped — virtualInference.mode.rlm=local-only (default). Set it on /admin/openrouter to allow.');
+        return null;
+      }
+      const sandboxModel = cfg.rlmSandboxModel;
+      if (!sandboxModel) {
+        console.warn('[RLM] sandbox fallback skipped — no rlm.sandboxModel configured on /admin/openrouter.');
+        return null;
+      }
+      for (const s of fleet.sidecars) {
+        if (s.status !== 'connected') continue;
+        const sandboxCS = (s.sidecarStatus as { containers?: Record<string, { status?: string }> } | undefined)
+          ?.containers?.['rlm-sandbox'];
+        if (!sandboxCS || sandboxCS.status !== 'running') continue;
+        try {
+          const host = new URL(s.url).hostname;
+          console.warn(`[RLM] DEGRADED: falling back to ss-rlm-sandbox on ${s.hostname ?? s.url} → http://${host}:${RLM_SANDBOX_PORT} (model=${sandboxModel}) — ss-rlm is unavailable`);
+          return { endpoint: `http://${host}:${RLM_SANDBOX_PORT}`, host, sandbox: true, model: sandboxModel };
+        } catch { /* skip */ }
+      }
+      console.warn('[RLM] sandbox fallback found no sidecar with rlm-sandbox=running either.');
+    } catch (err) {
+      console.warn(`[RLM] sandbox fallback check failed: ${(err as Error).message}`);
+    }
   } catch (err) {
     console.warn(`[RLM] endpoint resolve failed: fleet-router error: ${(err as Error).message}`);
   }
@@ -300,7 +363,9 @@ export async function* streamRlm(opts: {
   }
   const endpoint = resolved.endpoint;
 
-  const model = RLM_MODEL_ID;
+  // sandbox: the "model" is the operator-configured OpenRouter chat-model id
+  // (rlm.sandboxModel), not the self-hosted RLM fine-tune.
+  const model = resolved.sandbox && resolved.model ? resolved.model : RLM_MODEL_ID;
   // Same context-budget defense as runRlmWithTools — streamRlm is the
   // tool-less path (synthesis / draft generation) but still hits the same
   // 32K ceiling. Clamp without trimming since this path has only system+user.
@@ -455,13 +520,23 @@ export async function* runRlmWithTools(opts: {
     return;
   }
   const { endpoint, host } = resolved;
-  const model = RLM_MODEL_ID;
+  // sandbox: drive the configured hosted chat model instead of the
+  // self-hosted RLM fine-tune. See resolveRlmEndpoint()'s Phase 2.
+  const model = resolved.sandbox && resolved.model ? resolved.model : RLM_MODEL_ID;
   const maxRounds = opts.maxRounds ?? 4;
   const t0 = Date.now();
 
   // Initial prompt size — operator wants to know "is the request actually big".
   const initialPromptChars = opts.messages.reduce((n, m) => n + (m.content?.length ?? 0), 0);
-  console.log(`[RLM] run start endpoint=${endpoint} model=${model} maxRounds=${maxRounds} tools=[${opts.tools.map(t => t.function.name).join(', ')}] initialPromptChars=${initialPromptChars} maxTokens=${opts.maxTokens ?? 2048}`);
+  console.log(`[RLM] run start endpoint=${endpoint} model=${model} sandbox=${!!resolved.sandbox} maxRounds=${maxRounds} tools=[${opts.tools.map(t => t.function.name).join(', ')}] initialPromptChars=${initialPromptChars} maxTokens=${opts.maxTokens ?? 2048}`);
+
+  // Visible signal that this run used the degraded hosted-pattern fallback,
+  // not the self-hosted RLM — surfaced to the caller (deep-search.ts) rather
+  // than silently answering with a different model. See design constraint:
+  // "do not silently degrade a deep-search answer without it being visible."
+  if (resolved.sandbox) {
+    yield { type: 'notice', message: `ss-rlm unavailable — using ss-rlm-sandbox (${model}) instead of the self-hosted RLM.` };
+  }
 
   yield { type: 'start', host, model };
 
