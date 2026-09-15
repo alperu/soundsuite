@@ -44,6 +44,27 @@ const OLLAMA_MODEL_DIMENSIONS: Record<string, number> = {
   'qwen3-embedding:latest': 1024,
 };
 
+/**
+ * Ollama publishes the same weights at several precisions — `4b`, `4b-q8_0`,
+ * `4b-fp16` — and they all have IDENTICAL output width. Only the quantisation
+ * differs. A precision-suffixed tag missed the table above and fell through to
+ * the 384 default, which is the exact failure the comment there warns about: a
+ * width guard fed the wrong number looks like it is protecting something.
+ *
+ * Strip a trailing precision suffix before the lookup so a new tag cannot
+ * silently mis-size a table. Note the vectors DO differ between precisions
+ * even though the width does not — a precision change still requires a full
+ * re-index, it just does not change the column.
+ */
+const PRECISION_SUFFIX = /-(?:fp16|f16|bf16|q\d+(?:_[0-9a-zA-Z]+)*)$/i;
+
+export function dimensionsForOllamaModel(model: string): number | undefined {
+  const exact = OLLAMA_MODEL_DIMENSIONS[model];
+  if (exact !== undefined) return exact;
+  const base = model.replace(PRECISION_SUFFIX, '');
+  return OLLAMA_MODEL_DIMENSIONS[base];
+}
+
 interface OllamaEmbeddingConfig {
   host: string;   // e.g., http://192.168.1.100:11434
   model: string;  // e.g., all-minilm
@@ -115,7 +136,7 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
     super();
     this.host = config.host.replace(/\/+$/, ''); // strip trailing slash
     this.model = config.model;
-    this.dimensions = OLLAMA_MODEL_DIMENSIONS[config.model] || 384;
+    this.dimensions = dimensionsForOllamaModel(config.model) ?? 384;
     this.useOrchestrator = config.useOrchestrator ?? false;
   }
 
@@ -293,6 +314,8 @@ export class OllamaEmbeddingProvider extends EmbeddingProvider {
     return [
       'qwen3-embedding:0.6b',
       'qwen3-embedding:4b',
+      'qwen3-embedding:4b-q8_0',
+      'qwen3-embedding:4b-fp16',
       'nomic-embed-text',
       'snowflake-arctic-embed2',
       'bge-m3',
