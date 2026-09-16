@@ -257,6 +257,11 @@ export class OllamaOCREngine implements ITaskOCREngine {
             textLength: text.length,
             durationMs,
             reasons: quality.reasons,
+            // Present only for a pure repetition loop, and the whole point is
+            // that "salvage did nothing" must be distinguishable from
+            // "salvage never ran".
+            salvageDeclined: quality.salvageDeclined,
+            lineCount: text.split('\n').length,
             preview: text.slice(0, 120),
           });
           // Say that the output was REJECTED, not that the page has no text.

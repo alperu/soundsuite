@@ -49,6 +49,15 @@ export interface OcrQualityAssessment {
    * believe a prefix of it is real text.
    */
   salvagedText?: string;
+  /**
+   * Why salvage declined, when repetition was the only defect.
+   *
+   * Shipped without this once, and the result was unfalsifiable: a real page
+   * kept being discarded and the log could not say whether the salvage had
+   * run and declined or whether the code was not live at all. A feature that
+   * can silently do nothing needs to say so.
+   */
+  salvageDeclined?: string;
 }
 
 // Repetition
@@ -256,9 +265,12 @@ function lineKey(line: string): string {
  * lines that recur throughout the output, which removes the line the loop
  * repeats. The result is still verified against the full gate by the caller.
  */
-export function salvageRepetitionLoop(text: string, task: OcrGateTask = 'ocr'): string | undefined {
+export function salvageRepetitionLoop(
+  text: string,
+  task: OcrGateTask = 'ocr',
+): { text: string } | { declined: string } {
   const lines = text.split('\n');
-  if (lines.length < 2) return undefined;   // nothing to cut on
+  if (lines.length < 2) return { declined: 'single-line output: no line boundary to cut on' };
 
   // How often each normalized line occurs across the whole output.
   const counts = new Map<string, number>();
@@ -278,7 +290,7 @@ export function salvageRepetitionLoop(text: string, task: OcrGateTask = 'ocr'): 
       lastNovel = i;
     }
   }
-  if (lastNovel < 0) return undefined;
+  if (lastNovel < 0) return { declined: 'no line carried new content' };
 
   // Drop trailing lines that recur throughout — the loop's seed line is novel
   // exactly once, and without this it survives on the end of the salvage.
@@ -289,7 +301,7 @@ export function salvageRepetitionLoop(text: string, task: OcrGateTask = 'ocr'): 
     if (k && (counts.get(k) ?? 0) >= REPEAT_IS_LOOPY) cut--;
     else break;
   }
-  if (cut < 0) return undefined;
+  if (cut < 0) return { declined: 'every line recurs throughout — the whole output is loop' };
 
   const candidate = lines.slice(0, cut + 1).join('\n').trim();
 
@@ -299,9 +311,14 @@ export function salvageRepetitionLoop(text: string, task: OcrGateTask = 'ocr'): 
   //    chars) cannot vouch for it — this is why the floor sits at 400;
   //  · anything the gate would reject on its own. That last check is the
   //    safety property: salvage is a USE of the gate, never a hole in it.
-  if (candidate.length < MIN_SALVAGE_CHARS) return undefined;
-  if (computeReasons(candidate, task).length > 0) return undefined;
-  return candidate;
+  if (candidate.length < MIN_SALVAGE_CHARS) {
+    return { declined: `novel prefix too short to trust: ${candidate.length} < ${MIN_SALVAGE_CHARS} chars (lines=${lines.length}, lastNovel=${lastNovel}, cut=${cut})` };
+  }
+  const residual = computeReasons(candidate, task);
+  if (residual.length > 0) {
+    return { declined: `prefix still fails the gate: ${residual.join(', ')} (${candidate.length} chars)` };
+  }
+  return { text: candidate };
 }
 
 export function assessOcrOutput(
@@ -316,8 +333,9 @@ export function assessOcrOutput(
   // 'repetition-loop' + 'unexpected-script', 88 real cases) means the output
   // was never trustworthy, so no prefix of it is either.
   if (reasons.length === 1 && reasons[0] === 'repetition-loop') {
-    const salvagedText = salvageRepetitionLoop(text.trim(), task);
-    if (salvagedText) return { ok: false, reasons, salvagedText };
+    const outcome = salvageRepetitionLoop(text.trim(), task);
+    if ('text' in outcome) return { ok: false, reasons, salvagedText: outcome.text };
+    return { ok: false, reasons, salvageDeclined: outcome.declined };
   }
 
   return { ok: false, reasons };
