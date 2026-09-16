@@ -494,6 +494,25 @@ export async function POST(
         terminal: terminalPages,
         terminalCount: terminalPages.length,
         terminalByReasonCode: countByReasonCode(terminalPages),
+        /**
+         * Every stored repair entry, terminal or not.
+         *
+         * `terminal` alone is not enough for the UI. A page classified
+         * 'ocr-quality-rejected' is deliberately NON-terminal — it keeps its
+         * retry budget so it indexes itself once OCR is fixed — so it never
+         * appears in `terminal`, and the panel had no way to explain why the
+         * page was missing. It rendered as an unexplained gap while the
+         * stored reason said exactly what was wrong.
+         */
+        history: Object.entries(repair)
+          .map(([page, entry]) => ({
+            page: Number(page),
+            attempts: entry.attempts,
+            reasonCode: entry.reasonCode,
+            reason: entry.reason,
+            terminal: !!entry.terminal,
+          }))
+          .sort((a, b) => a.page - b.page),
         remainingEligible: selectable.length - attemptedPages.length,
         unindexedBefore: unindexedBefore.length,
         unindexedAfter: unindexedBefore.length,

@@ -182,6 +182,16 @@ export default function FixPartialPanel({
 }) {
   const [report, setReport] = useState<PageReport | null>(null);
   const [givenUp, setGivenUp] = useState<PageOutcome[]>([]);
+  /**
+   * Every stored repair entry, not just the terminal ones.
+   *
+   * `terminal` cannot carry an 'ocr-quality-rejected' page: that code is
+   * deliberately non-terminal so the page keeps its retry budget and indexes
+   * itself once OCR is fixed. Reading only `terminal` therefore left those
+   * pages rendering as unexplained gaps while the stored reason said exactly
+   * what was wrong with them.
+   */
+  const [history, setHistory] = useState<PageOutcome[]>([]);
   const [preflightNote, setPreflightNote] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -225,6 +235,7 @@ export default function FixPartialPanel({
     // The preflight is best-effort — the triage below still works without it.
     if (dryRes.status === 'fulfilled' && dryRes.value.ok) {
       setGivenUp(toPages(dryRes.value.data?.terminal));
+      setHistory(toPages(dryRes.value.data?.history));
     } else if (dryRes.status === 'fulfilled') {
       setPreflightNote(
         dryRes.value.status === 404
@@ -267,7 +278,11 @@ export default function FixPartialPanel({
    *   settled.
    */
   const imageOnly = givenUp.filter((p) => p.reasonCode === 'image-only');
-  const ocrRejected = givenUp.filter((p) => p.reasonCode === 'ocr-quality-rejected');
+  // From `history`, not `givenUp` — see the state declaration.
+  const stillMissing = new Set(unindexed.map((p) => p.pageNumber));
+  const ocrRejected = history.filter(
+    (p) => p.reasonCode === 'ocr-quality-rejected' && stillMissing.has(p.page),
+  );
 
   /**
    * `missing` excludes only image-only pages, so the tiles partition
