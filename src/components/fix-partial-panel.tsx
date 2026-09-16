@@ -247,40 +247,55 @@ export default function FixPartialPanel({
   const emptyPages = report?.summary.emptyPages ?? 0;
 
   /**
-   * Image-only pages: content, but no text. Counted separately from "missing".
+   * Two kinds of page that page-report cannot tell apart, and one of them is
+   * not the page's fault. Both arrive on the preflight's `terminal` array
+   * from `Document.tags.repair`; page-report only sees chunk counts and
+   * PageCache provenance, so both read as plain `unindexed` to it.
    *
-   * These carry ink — two real examples measured 32% and 74% coverage — and
-   * OCR found no text through any path, so they are photographs rather than
-   * blanks or failures. page-report cannot see this: it classifies from
-   * chunk counts and PageCache provenance, and an image-only page has no
-   * vectors, so it reads as plain `unindexed`. The distinction lives in
-   * `Document.tags.repair` as reasonCode 'image-only', which arrives here on
-   * the preflight's `terminal` array.
+   * `image-only` — ink on the page and OCR genuinely returned nothing. A
+   *   photograph or a dark scan. A fact about the page: no text exists, so no
+   *   chunk can. Shown next to "blank by design" because it is the same kind
+   *   of statement.
    *
-   * Carved OUT of `missing` rather than shown alongside it, so the four tiles
-   * still partition the page count. Adding a fifth independent tally would
-   * make 150 indexed + 4 image-only + 4 missing exceed a 154-page document.
+   * `ocr-quality-rejected` — OCR READ the page and the quality gate threw its
+   *   output away. NOT a fact about the page. This is the common case and it
+   *   was being misreported: four pages of a tax schedule were labelled
+   *   image-only while the model was returning 11k–32k characters of correct
+   *   text before degenerating into a repetition loop. Two of them later
+   *   extracted at density 1132 and 1362. These pages have text and become
+   *   indexable the moment OCR is fixed, so they must not be presented as
+   *   settled.
    */
   const imageOnly = givenUp.filter((p) => p.reasonCode === 'image-only');
+  const ocrRejected = givenUp.filter((p) => p.reasonCode === 'ocr-quality-rejected');
+
+  /**
+   * `missing` excludes only image-only pages, so the tiles partition
+   * totalPages. OCR-rejected pages stay counted as missing on purpose: the
+   * text is there and not indexed, which is exactly what "missing" means.
+   */
   const imageOnlyPages = new Set(imageOnly.map((p) => p.page));
   const missing = unindexed.filter((p) => !imageOnlyPages.has(p.pageNumber));
 
   const selected = includeOcr ? [...fixable, ...needsOcr] : fixable;
+
   /**
-   * Given up on, EXCLUDING image-only pages.
+   * Given up on, excluding both categories above.
    *
-   * An image-only page is not a repair that failed — it is what the page is,
-   * and it now has its own block above. Leaving it in the given-up list put
-   * it behind a "Reset history & retry" button that would spend ~30s per page
-   * re-rendering and re-OCRing a photograph to rediscover that it is a
-   * photograph. Four such pages cost 128 seconds to confirm once; there is no
-   * reason to offer that again.
+   * image-only is not a failed repair — it is what the page is, and retrying
+   * spends ~30s per page re-rendering and re-OCRing a photograph to
+   * rediscover that. OCR-rejected is not given up on at all: it is classed as
+   * infrastructure, keeps its retry budget, and has its own block saying what
+   * needs fixing.
    */
-  const givenUpRepairable = givenUp.filter((p) => p.reasonCode !== 'image-only');
+  const givenUpRepairable = givenUp.filter(
+    (p) => p.reasonCode !== 'image-only' && p.reasonCode !== 'ocr-quality-rejected',
+  );
 
   // "Nothing to fix" counts image-only alongside blank-by-design: both are
-  // pages that legitimately hold no text and will never yield a chunk, so a
-  // document whose only gaps are those is not really partial.
+  // pages that legitimately hold no text and will never yield a chunk. An
+  // OCR-rejected page is NOT counted here — there is something to fix, it is
+  // just not on this panel.
   const nothingToFix = !!report && missing.length === 0;
   const allGivenUp = !!report && missing.length > 0 && fixable.length === 0 && needsOcr.length === 0;
   const onlyNeedsOcr = fixable.length === 0 && needsOcr.length > 0;
@@ -460,7 +475,9 @@ export default function FixPartialPanel({
             <>
               {/* Coverage summary. The tiles partition totalPages: indexed +
                   blank + image-only + missing. A fifth independent tally
-                  would overcount, so image-only comes out of missing. */}
+                  would overcount, so image-only comes out of missing.
+                  OCR-rejected pages are NOT a tile — they are still missing,
+                  and they get their own block below saying why. */}
               <div className={`grid ${imageOnly.length > 0 ? 'grid-cols-5' : 'grid-cols-4'} gap-2 text-center`}>
                 <div className="bg-gray-50 rounded p-2">
                   <div className="text-lg font-semibold text-gray-900">{report.totalPages}</div>
@@ -516,13 +533,42 @@ export default function FixPartialPanel({
                 </div>
               )}
 
+              {/* OCR failed on a page that HAS text. Deliberately red rather
+                  than the muted grey of "given up": nothing about the page is
+                  settled, and the operator can act on it — by fixing or
+                  swapping the OCR model, not by clicking repair again. */}
+              {ocrRejected.length > 0 && (
+                <div className="border border-red-200 rounded">
+                  <div className="px-3 py-2 bg-red-50 border-b border-red-200">
+                    <p className="text-sm font-medium text-red-800">
+                      OCR failed on {ocrRejected.length} page{ocrRejected.length === 1 ? '' : 's'} that{' '}
+                      {ocrRejected.length === 1 ? 'has' : 'have'} text
+                    </p>
+                    <p className="text-[11px] text-red-700 mt-0.5">
+                      OCR read {ocrRejected.length === 1 ? 'this page' : 'these pages'} and its output was
+                      rejected by the quality gate — usually a repetition loop on a dense page, where the
+                      model starts correctly and then repeats until the whole result is discarded.{' '}
+                      {ocrRejected.length === 1 ? 'The page has' : 'The pages have'} text; OCR could not
+                      return it cleanly. Repairing again will not help until the OCR model is fixed or
+                      changed. These pages keep their retry budget and will index once it is.
+                    </p>
+                  </div>
+                  <div className="px-3 py-2 text-xs text-gray-600 font-mono break-words">
+                    {formatPageRanges(ocrRejected.map((p) => p.page))}
+                  </div>
+                </div>
+              )}
+
               {/* Nothing to fix */}
               {nothingToFix && (
                 <div className="text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded p-3">
                   <p className="font-medium">Nothing to repair.</p>
                   <p className="mt-1 text-xs">
-                    {emptyPages > 0
-                      ? `Every page is accounted for. The ${emptyPages} page${emptyPages === 1 ? '' : 's'} not in the index ${emptyPages === 1 ? 'is' : 'are'} blank by design — ${emptyPages === 1 ? 'it has' : 'they have'} no text to embed, so re-indexing can never change this and the document is not really partial.`
+                    {emptyPages > 0 || imageOnly.length > 0
+                      ? `Every page is accounted for. ${[
+                          emptyPages > 0 ? `${emptyPages} ${emptyPages === 1 ? 'page is' : 'pages are'} blank by design` : null,
+                          imageOnly.length > 0 ? `${imageOnly.length} ${imageOnly.length === 1 ? 'page is' : 'pages are'} image-only` : null,
+                        ].filter(Boolean).join(' and ')} — no text to embed, so re-indexing can never change this and the document is not really partial.`
                       : 'Every page of this document is present in the vector index.'}
                   </p>
                 </div>
@@ -582,11 +628,11 @@ export default function FixPartialPanel({
               )}
 
               {/* Already given up on */}
-              {givenUp.length > 0 && (
+              {givenUpRepairable.length > 0 && (
                 <div className="border border-gray-200 rounded">
                   <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
                     <p className="text-sm font-medium text-gray-800">
-                      {givenUp.length} page{givenUp.length === 1 ? '' : 's'} already given up on
+                      {givenUpRepairable.length} page{givenUpRepairable.length === 1 ? '' : 's'} already given up on
                     </p>
                     <p className="text-[11px] text-gray-600 mt-0.5">
                       Previous repairs exhausted their attempts or hit an unrecoverable failure. They are
@@ -594,7 +640,7 @@ export default function FixPartialPanel({
                     </p>
                   </div>
                   <div className="px-3 py-2">
-                    <PageOutcomeList pages={givenUp} />
+                    <PageOutcomeList pages={givenUpRepairable} />
                   </div>
                   {/*
                     The way back out. Without this the panel is a dead end: the
@@ -609,10 +655,10 @@ export default function FixPartialPanel({
                     <button
                       onClick={() => runFix({ resetTerminal: true })}
                       disabled={running}
-                      title={`Clear the repair history for ${givenUp.length} page${givenUp.length === 1 ? '' : 's'} and retry ${includeOcr ? 'with forced OCR' : 'immediately'}`}
+                      title={`Clear the repair history for ${givenUpRepairable.length} page${givenUpRepairable.length === 1 ? '' : 's'} and retry ${includeOcr ? 'with forced OCR' : 'immediately'}`}
                       className="flex-none text-xs px-2.5 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:bg-amber-300 text-white rounded-md transition-colors"
                     >
-                      {running ? 'Retrying…' : `Reset history & retry ${givenUp.length}`}
+                      {running ? 'Retrying…' : `Reset history & retry ${givenUpRepairable.length}`}
                     </button>
                   </div>
                 </div>
