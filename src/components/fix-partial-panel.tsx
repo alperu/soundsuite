@@ -281,16 +281,73 @@ export default function FixPartialPanel({
       : selected.map((p) => p.pageNumber);
     setRunning(true);
     try {
-      const res = await fetch(`/api/documents/${encodeURIComponent(documentId)}/fix-partial`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pages,
-          forceOcr: includeOcr,
-          ...(resetTerminal ? { resetTerminal: true } : {}),
-        }),
-      });
-      const data = await res.json().catch(() => null);
+      // Chunk the request.
+      //
+      // The route accepts up to 50 pages per call and this panel used to send
+      // every selected page at once. On a document needing OCR that does not
+      // survive one HTTP request: 41 pages at the ~9s/page OCR actually costs
+      // (measured: 26 pages in 234s) is ~370s, and it died with a bare
+      // `TypeError: fetch failed`. Worse, the server kept going — the request
+      // was orphaned, not cancelled, so the document sat in FIXING_PARTIAL
+      // holding its repair lock for 13+ minutes with nothing watching. That
+      // is precisely the "it says fixing but nothing is happening" report.
+      //
+      // Small chunks keep each request near 75s. The loop carries the rest.
+      const PAGES_PER_REQUEST = 8;
+      const chunks: number[][] = [];
+      for (let i = 0; i < pages.length; i += PAGES_PER_REQUEST) {
+        chunks.push(pages.slice(i, i + PAGES_PER_REQUEST));
+      }
+      if (chunks.length === 0) chunks.push([]);
+
+      let acc: FixPartialResult | null = null;
+      let res!: Response;
+      let data: Record<string, unknown> | null = null;
+
+      for (let c = 0; c < chunks.length; c++) {
+        res = await fetch(`/api/documents/${encodeURIComponent(documentId)}/fix-partial`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pages: chunks[c],
+            maxPages: PAGES_PER_REQUEST,
+            forceOcr: includeOcr,
+            // Only the first chunk re-arms: re-arming each chunk could revive
+            // a page another chunk just legitimately gave up on.
+            ...(resetTerminal && c === 0 ? { resetTerminal: true } : {}),
+          }),
+        });
+        data = await res.json().catch(() => null);
+        if (!res.ok) break;
+
+        const partial: FixPartialResult = {
+          attempted: toCount(data?.attempted, data?.attemptedPages),
+          repaired: toCount(data?.repaired, data?.repairedPages),
+          stillFailing: toCount(data?.stillFailing, data?.stillFailingCount),
+          terminal: toCount(data?.terminal, data?.terminalCount),
+          terminalPages: toPages(data?.terminal),
+          failingPages: toPages(data?.stillFailing),
+          remainingEligible: toCount(data?.remainingEligible),
+          unindexedAfter: toCount(data?.unindexedAfter),
+          message: typeof data?.message === 'string' ? data.message : undefined,
+          maxRepairAttempts: typeof data?.maxRepairAttempts === 'number' ? data.maxRepairAttempts : undefined,
+          stillPartial: typeof data?.stillPartial === 'boolean' ? data.stillPartial : undefined,
+        };
+
+        acc = acc === null ? partial : {
+          ...partial,
+          attempted: acc.attempted + partial.attempted,
+          repaired: acc.repaired + partial.repaired,
+          // The later reading wins for state-of-the-world counts; the
+          // per-page lists accumulate so nothing gets dropped from view.
+          terminalPages: [...acc.terminalPages, ...partial.terminalPages],
+          failingPages: [...acc.failingPages, ...partial.failingPages],
+        };
+        acc.stillFailing = acc.failingPages.length || partial.stillFailing;
+        acc.terminal = acc.terminalPages.length || partial.terminal;
+        // Surface progress between chunks rather than after the last one.
+        setResult({ ...acc });
+      }
 
       if (!res.ok) {
         const failed: FixPartialResult = {
@@ -305,18 +362,10 @@ export default function FixPartialPanel({
         return;
       }
 
-      const normalized: FixPartialResult = {
-        attempted: toCount(data?.attempted, data?.attemptedPages),
-        repaired: toCount(data?.repaired, data?.repairedPages),
-        stillFailing: toCount(data?.stillFailing, data?.stillFailingCount),
-        terminal: toCount(data?.terminal, data?.terminalCount),
-        terminalPages: toPages(data?.terminal),
-        failingPages: toPages(data?.stillFailing),
-        remainingEligible: toCount(data?.remainingEligible),
-        unindexedAfter: toCount(data?.unindexedAfter),
-        message: typeof data?.message === 'string' ? data.message : undefined,
-        maxRepairAttempts: typeof data?.maxRepairAttempts === 'number' ? data.maxRepairAttempts : undefined,
-        stillPartial: typeof data?.stillPartial === 'boolean' ? data.stillPartial : undefined,
+      const normalized: FixPartialResult = acc ?? {
+        attempted: 0, repaired: 0, stillFailing: 0, terminal: 0,
+        terminalPages: [], failingPages: [], remainingEligible: 0,
+        unindexedAfter: unindexed.length,
       };
       setResult(normalized);
       onStarted?.(normalized);

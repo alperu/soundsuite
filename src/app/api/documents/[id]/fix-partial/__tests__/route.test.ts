@@ -337,7 +337,13 @@ describe('POST /api/documents/[id]/fix-partial — re-verify and bookkeeping', (
     expect(body.reindexError).toContain('PDF render crashed');
     const entry = writtenRepair()['10'];
     expect(entry.reasonCode).toBe('reindex-request-failed');
-    expect(entry.attempts).toBe(1);
+    // The reason IS recorded, so the operator can see why nothing happened —
+    // but a failed reindex REQUEST says nothing about the page, so it must
+    // not spend the page's retry budget. This asserted 1 until a real page
+    // was permanently given up after three attempts against an embedding
+    // model that did not exist on an OpenRouter-only install; fixing the
+    // routing could not revive it. See isInfrastructureFailure.
+    expect(entry.attempts).toBe(0);
     expect(entry.terminal).toBe(false);
   });
 
