@@ -132,17 +132,40 @@ describe('populations that per-page repair cannot fix', () => {
     expect(r.verdict).toBe('fixed');
   });
 
-  it('does not promise re-embedding will fix pages that have no text at all', async () => {
+  // Regression: textDensity 0 is NOT evidence that a page has no text.
+  //
+  // Two pages of a real 154-page document reported exactly this shape and
+  // were skipped as unfixable. Repairing them anyway took 5s and both came
+  // back indexed at density 938 and 524 from plain extraction. The zero was
+  // stale PageScore provenance, not an empty page. Trusting it would have
+  // abandoned 69 recoverable pages across two documents.
+  it('attempts a density-0 page instead of writing it off', async () => {
     const { fetchImpl, calls } = makeFetch({
-      reports: [[
-        page(1, 'indexed'),
-        page(40, 'unindexed', { textDensity: 0, textPreview: '' }),
-      ]],
+      reports: [
+        [page(1, 'indexed'), page(40, 'unindexed', { textDensity: 0, textPreview: '', source: 'extract' })],
+        [page(1, 'indexed'), page(40, 'indexed', { textDensity: 938 })],
+      ],
+      fixPartial: [{ repairedPages: [40], unindexedAfter: 0, remainingEligible: 0 }],
+    });
+
+    const r = await repairDocument({ baseUrl: BASE, fetchImpl }, 'doc-stale-density');
+
+    expect(calls.fix).toBe(1);          // it tried
+    expect(r.verdict).toBe('fixed');
+    expect(r.repaired).toEqual([40]);
+  });
+
+  it('skips only pages the index itself calls blank by design', async () => {
+    // status 'empty' comes from PageCache/PageScore source === 'empty' — the
+    // one signal that actually means "no text on this page".
+    const { fetchImpl, calls } = makeFetch({
+      reports: [[page(1, 'indexed'), page(40, 'empty')]],
     });
 
     const r = await repairDocument({ baseUrl: BASE, fetchImpl }, 'doc-blank');
 
-    expect(r.verdict).toBe('blank-by-design');
+    // An 'empty' page is not 'unindexed', so there is no gap to repair at all.
+    expect(r.verdict).toBe('fixed');
     expect(calls.fix).toBe(0);
   });
 });

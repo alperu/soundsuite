@@ -139,11 +139,29 @@ function unindexed(pages: PageReportPage[]): number[] {
   return pages.filter((p) => p.status === 'unindexed').map((p) => p.pageNumber);
 }
 
-/** A page with neither density nor preview text has nothing for re-embedding
- *  to find; saying "re-embedding is likely to fix them" about it is a lie the
- *  UI should not tell. */
-function hasRecoverableText(p: PageReportPage): boolean {
-  return (p.textDensity ?? 0) > 0 || (p.textPreview ?? '').trim().length > 0;
+/**
+ * Do NOT infer "this page has no text" from `textDensity === 0`.
+ *
+ * That reading was tried and it was wrong. Two pages of a 154-page document
+ * reported `textDensity: 0, source: 'extract', textPreview: ''` and were
+ * classified unfixable on that basis. Repairing them anyway took 5 seconds
+ * and they came back `indexed` at density 938 and 524, from plain extraction
+ * — no OCR needed. The zero was stale provenance, not absent text:
+ * page-report reads density from PageCache, which is wiped after ingestion,
+ * then falls back to a PageScore snapshot that can predate the page's
+ * current state.
+ *
+ * Skipping on that signal would have abandoned 69 genuinely recoverable
+ * pages across two documents. The authoritative "blank by design" signal is
+ * `status === 'empty'` (PageCache/PageScore `source === 'empty'`), which
+ * page-report already computes and which this runner never has to guess at;
+ * and the authoritative "OCR found nothing" signal is reindex-pages'
+ * own `emptyPages` array, which only exists after an attempt.
+ *
+ * So: attempt the page, and let the attempt decide.
+ */
+function isKnownBlank(p: PageReportPage): boolean {
+  return p.status === 'empty';
 }
 
 /**
@@ -185,9 +203,11 @@ export async function repairDocument(
       elapsedMs: Date.now() - startedAt };
   }
 
-  // Every missing page is textless: re-embedding has nothing to work with.
+  // `unindexed` already excludes `empty`, so this can only fire if page-report
+  // and the unindexed filter ever disagree. Kept as a guard, deliberately NOT
+  // widened to a density heuristic — see isKnownBlank.
   const byNumber = new Map(before.pages.map((p) => [p.pageNumber, p]));
-  if (missingBefore.every((n) => { const p = byNumber.get(n); return p ? !hasRecoverableText(p) : false; })) {
+  if (missingBefore.every((n) => { const p = byNumber.get(n); return p ? isKnownBlank(p) : false; })) {
     return { ...base, verdict: 'blank-by-design', pagesAfter: missingBefore.length,
       elapsedMs: Date.now() - startedAt };
   }
