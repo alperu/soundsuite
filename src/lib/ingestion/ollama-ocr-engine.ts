@@ -41,6 +41,56 @@ const DEFAULT_TIMEOUT_MS = 90_000;
 const BASE_DELAY_MS = 3_000;
 const MAX_JITTER_MS = 1_000; // random jitter added to each retry delay
 
+
+/**
+ * Capture directory for rejected OCR output, or null when capture is off.
+ *
+ * Gated on the DIRECTORY EXISTING rather than an env var, deliberately: an
+ * env var needs a process restart, and the one time you want to capture a
+ * rejection is while a long repair is already running. `mkdir -p
+ * data/ocr-captures` turns it on, deleting the directory turns it off.
+ *
+ * PRIVACY: what lands here is verbatim OCR of real litigation pages — party
+ * names, account numbers, form data. `/data` is gitignored (.gitignore:43)
+ * and these files MUST NOT be committed or pasted into docs, tests or commit
+ * messages. Tests that replay one take its path from an env var and skip when
+ * unset, which is the pattern CLAUDE.md already requires for real PDFs.
+ */
+function rejectCaptureDir(): string | null {
+  try {
+    const dir = process.env.OCR_REJECT_CAPTURE_DIR
+      ?? require('path').join(process.cwd(), 'data', 'ocr-captures');
+    return require('fs').existsSync(dir) ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Write one rejected output plus the metadata needed to replay the gate. */
+function captureRejectedOutput(
+  dir: string,
+  meta: { model: string; task: string; reasons: string[]; salvageDeclined?: string; textLength: number },
+  text: string,
+): void {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const slug = meta.reasons.join('+').replace(/[^a-z-]/gi, '') || 'unknown';
+    const base = path.join(dir, `${stamp}_${meta.task}_${slug}`);
+    fs.writeFileSync(`${base}.txt`, text, 'utf8');
+    fs.writeFileSync(`${base}.json`, JSON.stringify({
+      ...meta,
+      lineCount: text.split('\n').length,
+      capturedAt: new Date().toISOString(),
+    }, null, 2), 'utf8');
+    logger.warn('Captured a rejected OCR output for replay', { file: `${base}.txt`, ...meta });
+  } catch (err) {
+    // Capture is a debugging aid; never let it affect OCR.
+    logger.warn('Failed to capture rejected OCR output', { error: (err as Error).message });
+  }
+}
+
 export class OllamaOCREngine implements ITaskOCREngine {
   private host: string;
   private model: string;
@@ -231,6 +281,18 @@ export class OllamaOCREngine implements ITaskOCREngine {
         // (page marked empty / ocrFailedCount), which is recoverable;
         // garbage in the vector index is silent search poisoning.
         const quality = assessOcrOutput(text, { task });
+        if (!quality.ok) {
+          const captureDir = rejectCaptureDir();
+          if (captureDir) {
+            captureRejectedOutput(captureDir, {
+              model: this.model,
+              task,
+              reasons: quality.reasons,
+              salvageDeclined: quality.salvageDeclined,
+              textLength: text.length,
+            }, text);
+          }
+        }
         if (!quality.ok && quality.salvagedText) {
           // The model read the page and then degenerated. Keep the part it
           // got right rather than losing the page: the gate has verified
