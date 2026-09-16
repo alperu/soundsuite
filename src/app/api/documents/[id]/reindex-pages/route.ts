@@ -34,6 +34,39 @@ async function clearProgress(documentId: string): Promise<void> {
 }
 
 /**
+ * Reject instead of hanging forever.
+ *
+ * `embed()` has no internal deadline, and the embedding role can stop
+ * answering without closing the socket (a sidecar mid-eviction, a cloud
+ * request that never completes). The repair route's error path is sound — it
+ * restores the document's previous status — but it can only run if something
+ * throws. This makes sure something does.
+ *
+ * The underlying request is not cancelled; it is abandoned. That is
+ * deliberate: the point is to free the document's status, and an orphaned
+ * HTTP request costs far less than a document wedged in FIXING_PARTIAL.
+ */
+async function withEmbedDeadline<T>(work: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(
+            `Embedding timed out after ${Math.round(timeoutMs / 1000)}s on ${label}. `
+            + `The embedding provider accepted the request and never answered.`,
+          )),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * POST /api/documents/[id]/reindex-pages
  * Selectively reindex specific pages of a document without clearing the whole index.
  * Body: { pages: number[] }
@@ -116,34 +149,14 @@ export async function POST(
 
     const config = await getConfig();
 
-    // --- Instantiate embedding provider (same pattern as worker-init.ts) ---
-    let embeddingProvider: import('@/lib/ingestion/embedding-provider').EmbeddingProvider;
-    switch (config.embeddingProvider) {
-      case 'openai': {
-        const { OpenAIEmbeddingProvider } = await import('@/lib/ingestion/openai-embedding-provider');
-        embeddingProvider = new OpenAIEmbeddingProvider(config.openaiApiKey || '', config.embeddingModel);
-        break;
-      }
-      case 'claude': {
-        const { ClaudeEmbeddingProvider } = await import('@/lib/ingestion/claude-embedding-provider');
-        embeddingProvider = new ClaudeEmbeddingProvider(config.claudeApiKey || '', config.embeddingModel);
-        break;
-      }
-      case 'ollama': {
-        const { OllamaEmbeddingProvider } = await import('@/lib/ingestion/ollama-embedding-provider');
-        embeddingProvider = new OllamaEmbeddingProvider({
-          host: config.ollamaHost || 'http://localhost:11434',
-          model: config.ollamaModel || config.embeddingModel || 'all-minilm',
-          useOrchestrator: !!config.embeddingUseOrchestrator,
-        });
-        break;
-      }
-      default: {
-        const { TransformersEmbeddingProvider } = await import('@/lib/ingestion/transformers-embedding-provider');
-        embeddingProvider = new TransformersEmbeddingProvider(config.embeddingModel);
-        break;
-      }
-    }
+    // --- Instantiate embedding provider ---
+    // Shared with worker-init via the factory. This used to be a local
+    // four-case switch commented "same pattern as worker-init.ts", which
+    // stopped being true once worker-init grew the OpenRouter policy arms:
+    // an OpenRouter-only install had every repair die on a local Ollama
+    // model it was never going to have. See the factory's module header.
+    const { createEmbeddingProvider } = await import('@/lib/ingestion/embedding-provider-factory');
+    const embeddingProvider = await createEmbeddingProvider(config, 'reindex-pages');
 
     // --- Extract text for target pages ---
     const pdfParser = new PDFParser();
@@ -431,6 +444,9 @@ export async function POST(
 
       // --- Generate embeddings ---
       const batchSize = config.embeddingBatchSize || 50;
+      // Generous: a cold cloud model or a large batch can legitimately take
+      // minutes. This is a stuck-detector, not a latency budget.
+      const embedTimeoutMs = Number(process.env.REINDEX_EMBED_TIMEOUT_MS) || 10 * 60_000;
       const embeddedChunks: import('@/lib/ingestion/embedding-provider').EmbeddedChunk[] = [];
       await publishProgress(id, 'embedding-generation', `Embedding ${allChunks.length} chunks...`, 78);
       logger.info(`Generating embeddings for ${allChunks.length} chunks (batch size ${batchSize})`);
@@ -438,7 +454,17 @@ export async function POST(
       for (let i = 0; i < allChunks.length; i += batchSize) {
         const batch = allChunks.slice(i, i + batchSize);
         const texts = batch.map(c => c.text);
-        const embeddings = await embeddingProvider.embed(texts);
+        // A bare `await embed()` here left documents in FIXING_PARTIAL
+        // forever. The outer catch DOES restore the previous status, but a
+        // hung embedding host never throws, so it never ran: the badge said
+        // "Repairing…" indefinitely and the only way out was a manual DB
+        // edit. A deadline converts the hang into the error path that
+        // already exists.
+        const embeddings = await withEmbedDeadline(
+          embeddingProvider.embed(texts),
+          embedTimeoutMs,
+          `batch ${i / batchSize + 1} of ${Math.ceil(allChunks.length / batchSize)} (${texts.length} chunks)`,
+        );
         for (let j = 0; j < batch.length; j++) {
           embeddedChunks.push({
             text: batch[j].text,
@@ -454,6 +480,24 @@ export async function POST(
         tableName: process.env.LANCEDB_TABLE || 'chunks',
       });
       await vectorStore.initialize();
+
+      // Chunking produced nothing from pages that DO have text. Deleting the
+      // existing vectors here and reporting success was the worst of both:
+      // the repair destroyed whatever coverage the pages had, then told the
+      // operator it had worked. Observed as:
+      //   Chunking: 9 non-empty pages → 0 page chunks
+      //   Generating embeddings for 0 chunks
+      //   Clearing old vectors for pages [11, 12, 15, …]
+      //   Reindex complete: 9 pages, 0 chunks
+      // Fail loudly instead, and leave the vectors alone.
+      if (embeddedChunks.length === 0 && nonEmptyPages.length > 0) {
+        throw new Error(
+          `Chunking produced 0 chunks from ${nonEmptyPages.length} page(s) with text `
+          + `(pages ${pages.join(', ')}). Existing vectors left untouched. `
+          + `This is a chunker gap, not an embedding failure — re-running the repair will not help.`,
+        );
+      }
+
       await publishProgress(id, 'vector-indexing', `Reindexing ${embeddedChunks.length} vectors...`, 90);
       logger.info(`Clearing old vectors for pages [${pages.join(', ')}]`);
       await vectorStore.deleteByPages(id, pages);

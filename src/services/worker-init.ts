@@ -74,112 +74,17 @@ async function buildProcessDocumentFn(): Promise<(documentId: string, filePath: 
     logger.info('OCR provider: Local PaddleOCR');
   }
 
-  // Instantiate the embedding provider based on admin config
-  let embeddingProvider: import('@/lib/ingestion/embedding-provider').EmbeddingProvider;
-  switch (config.embeddingProvider) {
-    case 'openai': {
-      const { OpenAIEmbeddingProvider } = await import('@/lib/ingestion/openai-embedding-provider');
-      embeddingProvider = new OpenAIEmbeddingProvider(config.openaiApiKey || '', config.embeddingModel);
-      break;
-    }
-    case 'claude': {
-      const { ClaudeEmbeddingProvider } = await import('@/lib/ingestion/claude-embedding-provider');
-      embeddingProvider = new ClaudeEmbeddingProvider(config.claudeApiKey || '', config.embeddingModel);
-      break;
-    }
-    case 'ollama': {
-      const { OllamaEmbeddingProvider } = await import('@/lib/ingestion/ollama-embedding-provider');
-      const embeddingHost = config.ollamaHost || 'http://localhost:11434';
-
-      logger.info('Embedding route', {
-        host: embeddingHost,
-        model: config.ollamaModel || config.embeddingModel,
-        orchestrator: !!config.embeddingUseOrchestrator,
-        note: config.embeddingUseOrchestrator ? 'host resolved per-request via fleet-router' : 'static host',
-      });
-
-      embeddingProvider = new OllamaEmbeddingProvider({
-        host: embeddingHost,
-        model: config.ollamaModel || config.embeddingModel || 'all-minilm',
-        useOrchestrator: config.embeddingUseOrchestrator,
-      });
-
-      // POLICY 3 — 'all-sources': fan ingestion across local AND OpenRouter
-      // for throughput (docs/SPEC-openrouter-virtual-inference.md §3, the
-      // embedding-legal form of hybrid). Opt-in only, and re-verified live on
-      // every startup — see AllSourcesEmbeddingProvider's module header for
-      // why a static dims table isn't trusted here. Any verification failure
-      // falls back to the local-only provider constructed above, silently.
-      if (config.virtualInferenceModeEmbedding === 'all-sources' && config.openRouterEnabled) {
-        const { AllSourcesEmbeddingProvider } = await import('@/lib/ingestion/all-sources-embedding-provider');
-        const allSources = await AllSourcesEmbeddingProvider.createIfSafe({
-          local: embeddingProvider,
-          openRouterModel: config.openRouterEmbeddingModel || 'qwen/qwen3-embedding-4b',
-        });
-        if (allSources) {
-          embeddingProvider = allSources;
-        } else {
-          logger.warn('all-sources mode requested but verification failed — continuing local-only', {
-            openRouterEmbeddingModel: config.openRouterEmbeddingModel,
-          });
-        }
-      } else if (config.virtualInferenceModeEmbedding === 'cloud-only' && config.openRouterEnabled) {
-        // POLICY 4 — 'cloud-only' ("OpenRouter Only" on /admin/openrouter).
-        //
-        // This branch was missing, and its absence was silent: only
-        // 'all-sources' was checked, so selecting "OpenRouter Only" left the
-        // Ollama provider constructed above completely untouched. Every
-        // embedding kept going to local Ollama, the /admin/openrouter Live
-        // Activity panel sat at "never called" forever, and nothing in the
-        // logs said the chosen policy had been ignored.
-        //
-        // The mode IS pushed to sidecars (fleet-router's modeByRole), which is
-        // why the setting looked like it did something — but the master's own
-        // provider is chosen here, from `embedding.provider`, and never
-        // consulted the policy.
-        const { OpenRouterEmbeddingProvider } = await import('@/lib/ingestion/openrouter-embedding-provider');
-        const openRouterModel = config.openRouterEmbeddingModel || 'qwen/qwen3-embedding-4b';
-        embeddingProvider = new OpenRouterEmbeddingProvider({
-          apiKey: config.openRouterApiKey,
-          model: openRouterModel,
-        });
-        logger.info('Embedding routed to OpenRouter by policy (cloud-only)', { openRouterModel });
-      }
-      break;
-    }
-    case 'openrouter': {
-      // Respect openRouterEnabled: an install that has never turned OpenRouter
-      // on must behave exactly as before, even if embeddingProvider was left
-      // at 'openrouter' from a prior config edit — fall through to local.
-      if (!config.openRouterEnabled) {
-        logger.warn('embeddingProvider is "openrouter" but openRouterEnabled is false — falling back to local transformers');
-        const { TransformersEmbeddingProvider } = await import('@/lib/ingestion/transformers-embedding-provider');
-        embeddingProvider = new TransformersEmbeddingProvider(config.embeddingModel);
-        break;
-      }
-      const { OpenRouterEmbeddingProvider } = await import('@/lib/ingestion/openrouter-embedding-provider');
-      const openRouterModel = config.openRouterEmbeddingModel || 'qwen/qwen3-embedding-4b';
-      embeddingProvider = new OpenRouterEmbeddingProvider({
-        apiKey: config.openRouterApiKey,
-        model: openRouterModel,
-      });
-      break;
-    }
-    default: {
-      const { TransformersEmbeddingProvider } = await import('@/lib/ingestion/transformers-embedding-provider');
-      embeddingProvider = new TransformersEmbeddingProvider(config.embeddingModel);
-      break;
-    }
-  }
-  logger.info(`Embedding provider initialized`, {
-    provider: config.embeddingProvider,
-    model: config.embeddingModel,
-    providerClass: embeddingProvider.constructor.name,
-    dimensions: embeddingProvider.getDimensions(),
-    modelName: embeddingProvider.getModelName(),
-    ...(config.embeddingProvider === 'ollama' ? { ollamaHost: config.ollamaHost, ollamaModel: config.ollamaModel } : {}),
+  // Instantiate the embedding provider based on admin config.
+  // The switch that used to live here is now shared with the Fix Partial
+  // repair path, which had a stale hand-copy of it — see the factory's
+  // module header for what that cost.
+  const { createEmbeddingProvider } = await import('@/lib/ingestion/embedding-provider-factory');
+  const embeddingProvider = await createEmbeddingProvider(config, 'worker-init');
+  logger.info('Embedding route', {
+    ...(config.embeddingProvider === 'ollama' ? { ollamaHost: config.ollamaHost, ollamaModel: config.ollamaModel, orchestrator: !!config.embeddingUseOrchestrator } : {}),
     ...(config.embeddingProvider === 'openrouter' ? { openRouterEnabled: config.openRouterEnabled, openRouterEmbeddingModel: config.openRouterEmbeddingModel } : {}),
   });
+
   const vectorStore = new VectorStore({
     dbPath: process.env.LANCEDB_PATH || 'data/lancedb',
     tableName: process.env.LANCEDB_TABLE || 'chunks',
