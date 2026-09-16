@@ -288,6 +288,47 @@ export class StructuredChunker implements ITextChunker {
       }
     }
     flushParas();
+
+    // LAST RESORT: a page that produced no chunks is unindexable, and no
+    // amount of re-embedding changes that — which is exactly what the Fix
+    // Partial repair loop reports, three times, before giving up:
+    //
+    //   "Re-embedded successfully but the page still did not appear in the index"
+    //
+    // The dedup above is structural on purpose (a heading sets context and is
+    // not re-emitted as body, so a chunk never contains its own heading
+    // twice), and `signature` blocks are excluded as furniture. Both are right
+    // for a page that also has prose. On a page that has ONLY those, they
+    // combine to emit nothing.
+    //
+    // Three shapes hit this in the real corpus, all of them legitimate,
+    // citable content — verified 2026-09-16 against two documents:
+    //   · exhibit tab separators — a `heading` ("TAB C") plus one descriptive
+    //     line, 159-244 chars. The description names what the exhibit proves,
+    //     so losing it loses the only searchable statement of that fact.
+    //   · signature pages — only `signature` blocks, ~58 chars.
+    //   · dotted tables of contents.
+    //
+    // So emit one chunk from whatever text the page has. `blockType:
+    // 'page_fallback'` marks it as low-signal for ranking without making it
+    // invisible, and keeps it distinguishable from real prose in provenance.
+    if (chunks.length === 0) {
+      const salvage = (page.blocks ?? [])
+        .map(b => b.text?.trim())
+        .filter((t): t is string => !!t)
+        .join('\n');
+      if (salvage) {
+        chunks.push({
+          text: prefixFor(heading) + truncateMiddle(salvage, bodyBudget(heading)),
+          metadata: meta({
+            blockType: 'page_fallback',
+            orders: (page.blocks ?? []).map(b => b.order),
+            bboxes: (page.blocks ?? []).map(b => b.bbox),
+          }),
+        });
+      }
+    }
+
     return chunks;
   }
 

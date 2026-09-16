@@ -252,15 +252,42 @@ export default function FixPartialPanel({
   const onlyNeedsOcr = fixable.length === 0 && needsOcr.length > 0;
   const canRun = !!report && selected.length > 0 && !running && !preflightNote;
 
-  const runFix = async () => {
+  /**
+   * `resetTerminal` re-arms pages the repair loop has given up on.
+   *
+   * A terminal verdict is permanent by design — three failed attempts, or an
+   * immediately-terminal failure like a dimension mismatch, and the page is
+   * never retried. That is right while the underlying cause is unfixed, and
+   * wrong the moment it IS fixed: without this there was no way back, and the
+   * Repair button stays disabled (`canRun` is false when every gap is
+   * given up on) so the panel became a dead end.
+   *
+   * The route clears history for ALL currently-unindexed pages regardless of
+   * `pages`, then uses `pages` to decide what to attempt — so a reset must send
+   * the given-up page numbers explicitly or it would clear the history and then
+   * attempt nothing.
+   */
+  const runFix = async (opts?: { resetTerminal?: boolean }) => {
+    const resetTerminal = opts?.resetTerminal === true;
+    // Note the two shapes: PageReportPage carries `pageNumber`, PageOutcome
+    // (what `givenUp` holds) carries `page`. Mixing them up silently sends
+    // `undefined` page numbers, which the route sanitizes away — a reset that
+    // clears history and then attempts nothing.
+    const pages = resetTerminal
+      ? [...new Set([
+          ...selected.map((p) => p.pageNumber),
+          ...givenUp.map((p) => p.page),
+        ])].sort((a, b) => a - b)
+      : selected.map((p) => p.pageNumber);
     setRunning(true);
     try {
       const res = await fetch(`/api/documents/${encodeURIComponent(documentId)}/fix-partial`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          pages: selected.map((p) => p.pageNumber),
+          pages,
           forceOcr: includeOcr,
+          ...(resetTerminal ? { resetTerminal: true } : {}),
         }),
       });
       const data = await res.json().catch(() => null);
@@ -448,13 +475,33 @@ export default function FixPartialPanel({
                   <div className="px-3 py-2">
                     <PageOutcomeList pages={givenUp} />
                   </div>
+                  {/*
+                    The way back out. Without this the panel is a dead end: the
+                    Repair button is disabled once every gap is given up on, and
+                    the text below tells the operator to "reset the repair
+                    history" with nothing to click.
+                  */}
+                  <div className="px-3 py-2 border-t border-gray-200 bg-gray-50 flex items-center justify-between gap-3">
+                    <p className="text-[11px] text-gray-600">
+                      Fixed the underlying cause? Clear these pages&apos; attempt history and try again.
+                    </p>
+                    <button
+                      onClick={() => runFix({ resetTerminal: true })}
+                      disabled={running}
+                      title={`Clear the repair history for ${givenUp.length} page${givenUp.length === 1 ? '' : 's'} and retry ${includeOcr ? 'with forced OCR' : 'immediately'}`}
+                      className="flex-none text-xs px-2.5 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:bg-amber-300 text-white rounded-md transition-colors"
+                    >
+                      {running ? 'Retrying…' : `Reset history & retry ${givenUp.length}`}
+                    </button>
+                  </div>
                 </div>
               )}
 
               {allGivenUp && (
                 <p className="text-xs text-gray-500">
-                  Every remaining gap has been given up on, so no repair is offered. Fix the underlying
-                  cause (OCR quality, embedding model width) and reset the repair history to re-arm them.
+                  Every remaining gap has been given up on, so the normal repair is not offered. Fix the
+                  underlying cause (OCR quality, embedding model width), then use
+                  <strong> Reset history &amp; retry</strong> above to re-arm them.
                 </p>
               )}
               {onlyNeedsOcr && !allGivenUp && !includeOcr && (
@@ -535,7 +582,7 @@ export default function FixPartialPanel({
               Close
             </button>
             <button
-              onClick={runFix}
+              onClick={() => runFix()}
               disabled={!canRun}
               title={
                 nothingToFix ? 'Nothing to repair — no page is missing from the index'
