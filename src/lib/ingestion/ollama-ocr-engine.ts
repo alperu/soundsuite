@@ -231,6 +231,25 @@ export class OllamaOCREngine implements ITaskOCREngine {
         // (page marked empty / ocrFailedCount), which is recoverable;
         // garbage in the vector index is silent search poisoning.
         const quality = assessOcrOutput(text, { task });
+        if (!quality.ok && quality.salvagedText) {
+          // The model read the page and then degenerated. Keep the part it
+          // got right rather than losing the page: the gate has verified
+          // this prefix on its own, so nothing unvetted reaches the index.
+          logger.warn('Ollama OCR output degenerated — keeping the verified prefix', {
+            model: this.model,
+            task,
+            keptChars: quality.salvagedText.length,
+            discardedChars: text.length - quality.salvagedText.length,
+            durationMs: Date.now() - startTime,
+            reasons: quality.reasons,
+          });
+          return {
+            text: quality.salvagedText,
+            confidence: 1.0,
+            salvaged: true,
+            salvagedFromLength: text.length,
+          };
+        }
         if (!quality.ok) {
           logger.warn('Ollama OCR output failed quality gate — discarding', {
             model: this.model,

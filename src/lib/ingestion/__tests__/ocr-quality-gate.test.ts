@@ -149,3 +149,94 @@ describe('assessOcrOutput', () => {
     });
   });
 });
+
+describe('salvaging an output that degenerated into a repetition loop', () => {
+  // 856 of 1,578 real rejections were pure 'repetition-loop', and discarding
+  // them lost pages that were mostly correct — one was 32,467 characters
+  // beginning "Schedule E (Form 1040) 2022" with accurate attachment numbers
+  // and figures before the tail started repeating.
+  const GOOD = [
+    'SCHEDULE E (Form 1040) 2022  Supplemental Income and Loss',
+    'Attachment Sequence No. 13   Name shown on return: A. PARTY',
+    'Part I  Income or Loss From Rental Real Estate and Royalties',
+    '1a Physical address of each property: 100 Example Street, Suite 4',
+    '2  For each rental real estate property listed above, report the',
+    '   number of fair rental and personal use days.',
+    '3  Rents received ......................... 24,000',
+    '4  Royalties received ...................... 1,150',
+    '5  Advertising ............................... 320',
+    '6  Auto and travel ........................... 890',
+    '7  Cleaning and maintenance ................ 1,470',
+    '8  Commissions ............................... 610',
+  ].join('\n');
+  const LOOP = Array.from({ length: 60 }, () => 'Page 1 of 2 Page 1 of 2 Page 1 of 2').join('\n');
+
+  it('keeps the good prefix and drops the loop', () => {
+    const assessment = assessOcrOutput(`${GOOD}\n${LOOP}`);
+
+    expect(assessment.ok).toBe(false);
+    expect(assessment.reasons).toEqual(['repetition-loop']);
+    expect(assessment.salvagedText).toBeDefined();
+    // The substance survives…
+    expect(assessment.salvagedText).toContain('SCHEDULE E');
+    expect(assessment.salvagedText).toContain('Rents received');
+    // …and the garbage does not.
+    expect(assessment.salvagedText).not.toContain('Page 1 of 2 Page 1 of 2');
+  });
+
+  it('returns text the gate itself accepts — the safety property', () => {
+    const { salvagedText } = assessOcrOutput(`${GOOD}\n${LOOP}`);
+    expect(salvagedText).toBeDefined();
+    // Whatever is salvaged must pass every check on its own, or the salvage
+    // would be a hole in the gate rather than a use of it.
+    expect(assessOcrOutput(salvagedText!).ok).toBe(true);
+  });
+
+  it('salvages NOTHING when the loop starts immediately', () => {
+    // The dangerous case. isRepetitionLoop is inoperative below 240 chars, so
+    // a naive "longest passing prefix" search would happily return ~239
+    // characters of pure garbage. MIN_SALVAGE_CHARS exists for this.
+    const assessment = assessOcrOutput(LOOP);
+    expect(assessment.ok).toBe(false);
+    expect(assessment.salvagedText).toBeUndefined();
+  });
+
+  it('refuses to salvage when something else is also wrong', () => {
+    // 88 real cases were 'repetition-loop' + 'unexpected-script'. An output
+    // that is also CJK soup was never trustworthy, so no prefix of it is.
+    // CJK must DOMINATE for 'unexpected-script' to fire (a stray stamp glyph
+    // on an English page is meant to pass), so the loop here is CJK too.
+    const cjkLoop = Array.from({ length: 60 }, () => '欽定四庫全書 欽定四庫全書 欽定四庫全書').join('\n');
+    const assessment = assessOcrOutput(`${GOOD}\n${cjkLoop}`);
+    expect(assessment.reasons).toContain('repetition-loop');
+    expect(assessment.reasons).toContain('unexpected-script');
+    expect(assessment.salvagedText).toBeUndefined();
+  });
+
+  it('leaves a clean output completely alone', () => {
+    const assessment = assessOcrOutput(GOOD);
+    expect(assessment.ok).toBe(true);
+    expect(assessment.salvagedText).toBeUndefined();
+  });
+
+  it('does not attempt single-line output', () => {
+    // The cut is line-based on purpose: "the last line that said something
+    // new" is a meaning the code can defend, and there is no equivalent
+    // inside one unbroken line. Declining is the honest outcome — the page
+    // stays 'ocr-quality-rejected' and therefore still repairable.
+    const oneLine = `${GOOD.replace(/\n/g, ' ')} ${'Page 1 of 2 '.repeat(200)}`;
+    const assessment = assessOcrOutput(oneLine);
+    expect(assessment.salvagedText).toBeUndefined();
+  });
+
+  it('keeps only the good text, not as much loop as the detector tolerates', () => {
+    // Regression on the first implementation, which searched for the longest
+    // prefix that still passed the gate: on this exact input it returned
+    // 2,571 characters — the 663 good ones plus ~53 lines of garbage, since
+    // line-uniqueness only trips at 13/(12+N) < 0.2.
+    const { salvagedText } = assessOcrOutput(`${GOOD}\n${LOOP}`);
+    expect(salvagedText).toBeDefined();
+    expect(salvagedText!.length).toBeLessThanOrEqual(GOOD.length + 40);
+    expect(salvagedText).not.toContain('Page 1 of 2');
+  });
+});

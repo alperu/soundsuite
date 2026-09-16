@@ -47,6 +47,19 @@ export interface OCRResult {
   rejectionReasons?: string[];
   /** How much text was discarded — the evidence that the page HAS text. */
   rejectedTextLength?: number;
+  /**
+   * `text` is the good PREFIX of an output that degenerated into a
+   * repetition loop, not the whole page.
+   *
+   * The page therefore has more content than was indexed. That is a
+   * deliberate trade: some correct text beats none, and the alternative was
+   * discarding 32,467 characters of accurate form data because the tail
+   * repeated. Callers that report coverage should say the page is partial
+   * rather than complete.
+   */
+  salvaged?: boolean;
+  /** Length of the full rejected output, so the shortfall is visible. */
+  salvagedFromLength?: number;
 }
 
 /**
