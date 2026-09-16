@@ -73,7 +73,7 @@ describe('OllamaEmbeddingProvider — returned-width guard', () => {
     const p = new OllamaEmbeddingProvider({ host: HOST, model: 'qwen3-embedding:4b' });
     embed.mockResolvedValue({ embeddings: vectors(2, 1024) });
 
-    await expect(p.embed(['a', 'b'])).rejects.toThrow(/1024-dim vectors for model "qwen3-embedding:4b".*2560/s);
+    await expect(p.embed(['a', 'b'])).rejects.toThrow(/1024-dim vectors for model "qwen3-embedding:4b"[\s\S]*2560/);
   });
 
   it('names the host, so the offending fleet member is identifiable', async () => {
@@ -99,7 +99,7 @@ describe('OllamaEmbeddingProvider — returned-width guard', () => {
     expect((await p.embed(['a']))[0]).toHaveLength(2560);
 
     embed.mockResolvedValue({ embeddings: vectors(1, 1024) });
-    await expect(p.embed(['a'])).rejects.toThrow(/1024-dim.*2560/s);
+    await expect(p.embed(['a'])).rejects.toThrow(/1024-dim[\s\S]*2560/);
   });
 
   it('accepts 1024 when 0.6b is what was actually requested', async () => {

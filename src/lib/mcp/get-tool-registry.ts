@@ -74,38 +74,28 @@ async function initRegistry(): Promise<ToolRegistry> {
     await vs.initialize();
     vectorStore = vs;
 
-    // Initialise EmbeddingProvider based on config
-    if (config.embeddingProvider === 'openai' && config.openaiApiKey) {
-      const { OpenAIEmbeddingProvider } = await import('../ingestion/openai-embedding-provider');
-      embeddingProvider = new OpenAIEmbeddingProvider(config.openaiApiKey, config.embeddingModel || 'text-embedding-3-small');
-    } else if (config.embeddingProvider === 'claude' && config.claudeApiKey) {
-      const { ClaudeEmbeddingProvider } = await import('../ingestion/claude-embedding-provider');
-      embeddingProvider = new ClaudeEmbeddingProvider(config.claudeApiKey, config.embeddingModel);
-    } else if (config.embeddingProvider === 'ollama' && config.ollamaHost) {
-      const { OllamaEmbeddingProvider } = await import('../ingestion/ollama-embedding-provider');
-      embeddingProvider = new OllamaEmbeddingProvider({
-        host: config.ollamaHost,
-        model: config.ollamaModel || 'all-minilm',
-        useOrchestrator: !!config.embeddingUseOrchestrator,
-      });
-    } else if (config.embeddingProvider === 'openrouter' && config.openRouterEnabled) {
-      // Query-side selection must match the model the corpus was embedded
-      // with — see OpenRouterEmbeddingProvider's module header. Gated on
-      // openRouterEnabled so an unconfigured install falls through to local.
-      const { OpenRouterEmbeddingProvider } = await import('../ingestion/openrouter-embedding-provider');
-      embeddingProvider = new OpenRouterEmbeddingProvider({
-        apiKey: config.openRouterApiKey,
-        model: config.openRouterEmbeddingModel || 'qwen/qwen3-embedding-4b',
-      });
-    } else {
-      // Default: local transformers provider
-      const { TransformersEmbeddingProvider } = await import('../ingestion/transformers-embedding-provider');
-      embeddingProvider = new TransformersEmbeddingProvider(config.embeddingModel || 'Xenova/all-MiniLM-L6-v2');
-    }
+    // Initialise EmbeddingProvider from config — through the shared factory,
+    // never a local switch.
+    //
+    // This file used to carry its own copy of the provider choice, and that
+    // copy had no 'cloud-only' arm. So with "OpenRouter Only" selected on
+    // /admin/openrouter, ingestion (worker-init) went to OpenRouter while the
+    // SEARCH query embedding built here still went to Ollama with
+    // useOrchestrator on — which asks the fleet for an embedding sidecar. Once
+    // no sidecar served embedding any more, every search first walked all five
+    // hosts at 15 s apiece before falling back: "Searching documents with
+    // vector similarity…" sat at 177 s+ on a page whose data load took 220 ms.
+    //
+    // The factory's own header describes exactly this drift; it just had not
+    // reached this caller yet.
+    const { createEmbeddingProvider } = await import('../ingestion/embedding-provider-factory');
+    embeddingProvider = await createEmbeddingProvider(config, 'tool-registry');
 
     logger.info('VectorStore and EmbeddingProvider initialised', {
       provider: config.embeddingProvider,
       model: config.embeddingModel,
+      providerClass: embeddingProvider?.constructor?.name,
+      embeddingMode: config.virtualInferenceModeEmbedding,
     });
   } catch (err) {
     logger.warn('Failed to initialise VectorStore/EmbeddingProvider — search tools will be unavailable', {
@@ -145,31 +135,10 @@ async function ensureEmbeddingProvider(registry: ToolRegistry): Promise<void> {
     const { getConfig } = await import('../db/config');
     const config = await getConfig();
 
-    let provider: any = null;
-
-    if (config.embeddingProvider === 'openai' && config.openaiApiKey) {
-      const { OpenAIEmbeddingProvider } = await import('../ingestion/openai-embedding-provider');
-      provider = new OpenAIEmbeddingProvider(config.openaiApiKey, config.embeddingModel || 'text-embedding-3-small');
-    } else if (config.embeddingProvider === 'claude' && config.claudeApiKey) {
-      const { ClaudeEmbeddingProvider } = await import('../ingestion/claude-embedding-provider');
-      provider = new ClaudeEmbeddingProvider(config.claudeApiKey, config.embeddingModel);
-    } else if (config.embeddingProvider === 'ollama' && config.ollamaHost) {
-      const { OllamaEmbeddingProvider } = await import('../ingestion/ollama-embedding-provider');
-      provider = new OllamaEmbeddingProvider({
-        host: config.ollamaHost,
-        model: config.ollamaModel || 'all-minilm',
-        useOrchestrator: !!config.embeddingUseOrchestrator,
-      });
-    } else if (config.embeddingProvider === 'openrouter' && config.openRouterEnabled) {
-      const { OpenRouterEmbeddingProvider } = await import('../ingestion/openrouter-embedding-provider');
-      provider = new OpenRouterEmbeddingProvider({
-        apiKey: config.openRouterApiKey,
-        model: config.openRouterEmbeddingModel || 'qwen/qwen3-embedding-4b',
-      });
-    } else {
-      const { TransformersEmbeddingProvider } = await import('../ingestion/transformers-embedding-provider');
-      provider = new TransformersEmbeddingProvider(config.embeddingModel || 'Xenova/all-MiniLM-L6-v2');
-    }
+    // Same factory as initRegistry() — the retry path had its own third copy
+    // of the switch, with the same missing 'cloud-only' arm.
+    const { createEmbeddingProvider } = await import('../ingestion/embedding-provider-factory');
+    const provider: any = await createEmbeddingProvider(config, 'tool-registry-retry');
 
     if (provider) {
       (ctx as any).embeddingProvider = provider;
