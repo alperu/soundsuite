@@ -578,3 +578,53 @@ describe('infrastructure failures do not spend a page\'s retry budget', () => {
     expect(after['8']).toBeUndefined();
   });
 });
+
+describe('an image-only page is neither a failure nor blank', () => {
+  // Two real pages of a 154-page document OCR'd to nothing through every
+  // extraction path, and the ink check measured 32% and 74% coverage — they
+  // are photographs, not blanks and not defects. The panel described them as
+  // "have extracted text but produced no chunks — re-embedding is likely to
+  // fix them", wrong in both halves, and they were retried to the attempt
+  // bound before being reported as a generic give-up.
+  it('classifies ink + no text as image-only, ahead of ocr-empty', () => {
+    const { code, reason } = classifyRepairFailure({
+      stillEmptyAfterOcr: true,   // it IS in reindex-pages' emptyPages…
+      inkedNoText: true,          // …but it carries ink, which is more specific
+    });
+    expect(code).toBe('image-only');
+    expect(reason).toMatch(/no extractable text/i);
+    expect(reason).toMatch(/exhibit\/image retrieval/i);
+  });
+
+  it('still reports a genuinely blank-ish page as ocr-empty', () => {
+    const { code } = classifyRepairFailure({ stillEmptyAfterOcr: true, inkedNoText: false });
+    expect(code).toBe('ocr-empty');
+  });
+
+  it('gives up on the first attempt rather than re-OCRing a photograph twice more', () => {
+    expect(isImmediatelyTerminal('image-only')).toBe(true);
+
+    const { tags, newlyTerminal } = updateRepairTags(
+      {}, [143], new Set([143]),
+      () => classifyRepairFailure({ stillEmptyAfterOcr: true, inkedNoText: true }),
+    );
+    expect(tags['143'].attempts).toBe(1);
+    expect(tags['143'].terminal).toBe(true);
+    expect(newlyTerminal).toEqual([143]);
+    // And it stops being offered, so the document stops claiming a fixable gap.
+    expect(partitionEligiblePages([143], tags).eligible).toEqual([]);
+    expect(partitionEligiblePages([143], tags).terminal[0]).toMatchObject({ page: 143 });
+  });
+
+  it('is not treated as infrastructure — it is a fact about the page', () => {
+    expect(isInfrastructureFailure('image-only')).toBe(false);
+  });
+
+  it('a request failure still outranks it: we learned nothing about the page', () => {
+    const { code } = classifyRepairFailure({
+      requestError: 'embedding host unreachable',
+      inkedNoText: true,
+    });
+    expect(code).toBe('reindex-request-failed');
+  });
+});

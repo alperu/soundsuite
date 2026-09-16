@@ -514,6 +514,8 @@ export async function POST(
     claimedStatus = true;
     let requestError: string | undefined;
     let emptyAfterOcr = new Set<number>();
+    // Subset of emptyAfterOcr whose pages carry ink: image-only, not blank.
+    let inkedNoText = new Set<number>();
 
     try {
       const res = await reindexPagesPOST(
@@ -531,8 +533,13 @@ export async function POST(
       const payload = await res.json().catch(() => ({} as Record<string, unknown>));
       if (res.status < 200 || res.status >= 300) {
         requestError = typeof payload?.error === 'string' ? payload.error : `reindex-pages returned HTTP ${res.status}`;
-      } else if (Array.isArray(payload?.emptyPages)) {
-        emptyAfterOcr = new Set((payload.emptyPages as unknown[]).map((n) => Number(n)));
+      } else {
+        if (Array.isArray(payload?.emptyPages)) {
+          emptyAfterOcr = new Set((payload.emptyPages as unknown[]).map((n) => Number(n)));
+        }
+        if (Array.isArray(payload?.inkedNoTextPages)) {
+          inkedNoText = new Set((payload.inkedNoTextPages as unknown[]).map((n) => Number(n)));
+        }
       }
     } catch (err) {
       requestError = err instanceof Error ? err.message : String(err);
@@ -588,6 +595,10 @@ export async function POST(
           // reindex-pages' own `emptyPages` array is the authoritative
           // "every extraction path ran and produced nothing" signal.
           stillEmptyAfterOcr: emptyAfterOcr.has(page),
+          // …and `inkedNoTextPages` is the subset of those that carry ink, so
+          // the page is an image rather than a blank or a failure. Checked
+          // first by the classifier, since it is the more specific fact.
+          inkedNoText: inkedNoText.has(page),
         }),
     );
 

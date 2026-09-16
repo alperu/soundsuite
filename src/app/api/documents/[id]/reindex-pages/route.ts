@@ -203,6 +203,13 @@ export async function POST(
       // Pages verified blank-by-design (render ok + OCR empty + ink below
       // threshold) — the ONLY pages allowed to persist as source='empty'.
       const blankVerifiedPages = new Set<number>();
+      // OCR found no text, but the page is NOT blank — it carries ink. These
+      // are image-only pages (photographs, dark scans, handwriting), and they
+      // are neither a defect nor blank-by-design. Tracked separately so the
+      // repair layer can say which of the two it is instead of reporting
+      // "missing, re-embedding is likely to fix them" about a page that is
+      // 74% ink and contains no text at all.
+      const inkedNoTextPages = new Set<number>();
 
       const preprocessSettings = {
         upscale: config.ocrUpscale,
@@ -311,7 +318,8 @@ export async function POST(
                     blankVerifiedPages.add(page.pageNumber);
                     logger.info(`Page ${page.pageNumber}: verified blank (inkRatio=${ink.inkRatio.toFixed(5)})`);
                   } else {
-                    logger.info(`Page ${page.pageNumber}: NOT blank (inkRatio=${ink.inkRatio.toFixed(5)}) — remains a gap`);
+                    inkedNoTextPages.add(page.pageNumber);
+                    logger.info(`Page ${page.pageNumber}: NOT blank (inkRatio=${ink.inkRatio.toFixed(5)}) — image-only, no extractable text`);
                   }
                 }
               }
@@ -539,6 +547,8 @@ export async function POST(
         ocrPages: ocrPageCount,
         exhibitCount,
         emptyPages,
+        // Subset of emptyPages that carry ink: no text, but not blank.
+        inkedNoTextPages: [...inkedNoTextPages],
       });
     } finally {
       if (documentLoaded) {

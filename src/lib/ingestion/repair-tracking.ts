@@ -20,6 +20,7 @@ export const MAX_REPAIR_ATTEMPTS = 3;
 
 export type RepairReasonCode =
   | 'ocr-empty'
+  | 'image-only'
   | 'dimension-mismatch'
   | 'reindex-request-failed'
   | 'unknown';
@@ -68,6 +69,8 @@ export function mergeRepairTags(existingTags: unknown, repair: RepairTags): Reco
 export function classifyRepairFailure(input: {
   requestError?: string;
   stillEmptyAfterOcr?: boolean;
+  /** OCR found no text AND the ink check says the page is not blank. */
+  inkedNoText?: boolean;
 }): { code: RepairReasonCode; reason: string } {
   if (input.requestError) {
     if (/dimension/i.test(input.requestError)) {
@@ -79,6 +82,21 @@ export function classifyRepairFailure(input: {
     return {
       code: 'reindex-request-failed',
       reason: `Reindex request failed: ${truncate(input.requestError)}`,
+    };
+  }
+  // A page that OCRs to nothing but carries ink is not a failure and not
+  // blank — it is an image. Two real pages measured 32% and 74% ink coverage
+  // with no extractable text, and the panel described them as "have extracted
+  // text but produced no chunks - re-embedding is likely to fix them", which
+  // is wrong in both halves. Terminal on the first attempt: the page has no
+  // text, so no number of re-embeddings will produce a chunk.
+  if (input.inkedNoText) {
+    return {
+      code: 'image-only',
+      reason:
+        'Image-only page: the page carries content but no extractable text '
+        + '(OCR ran through every path and found none, and the page is too inked to be blank). '
+        + 'Re-indexing cannot add it to the text index — it belongs to exhibit/image retrieval.',
     };
   }
   if (input.stillEmptyAfterOcr) {
@@ -93,9 +111,16 @@ export function classifyRepairFailure(input: {
   };
 }
 
-/** Dimension mismatches are a config problem, not a page problem — retrying never helps. */
+/**
+ * Retrying can never change the outcome.
+ *
+ * - `dimension-mismatch` is a config problem, not a page problem.
+ * - `image-only` is a fact about the page: it carries ink but no text, so
+ *   there is nothing for a text chunk to contain. Spending three attempts to
+ *   rediscover that just delays telling the operator what the page is.
+ */
 export function isImmediatelyTerminal(code: RepairReasonCode): boolean {
-  return code === 'dimension-mismatch';
+  return code === 'dimension-mismatch' || code === 'image-only';
 }
 
 /**
