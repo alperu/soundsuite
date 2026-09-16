@@ -365,8 +365,13 @@ async function post<T>(path: string, body: unknown, timeoutMs: number): Promise<
     const text = await res.text();
     if (!res.ok) {
       noteFailure();
+      // Keep enough of the body to read the provider's own error. OpenRouter
+      // wraps upstream failures twice (its envelope around the provider's
+      // envelope), and at 200 chars the 150-document rerank failure logged as
+      //   503 {"error":{"message":"HTTP 503: {"error":{"object":"error","type":"invalid_request_error","code":
+      // — cut off at exactly the field that said what was invalid.
       throw new OpenRouterError(
-        `OpenRouter ${path} failed: ${res.status} ${text.slice(0, 200)}`,
+        `OpenRouter ${path} failed: ${res.status} ${text.slice(0, 600)}`,
         res.status,
         classify(res.status, text),
       );
@@ -595,7 +600,7 @@ async function postWithRetry<T>(
       const backoff = 400 * Math.pow(3, attempt - 1) + Math.floor(Math.random() * 200);
       console.warn(
         `[OpenRouter] ${label} attempt ${attempt}/${attempts} failed (${kind}) — retrying in ${backoff}ms: ` +
-        `${(err as Error).message.slice(0, 140)}`,
+        `${(err as Error).message.slice(0, 500)}`,
       );
       await new Promise((r) => setTimeout(r, backoff));
     }
