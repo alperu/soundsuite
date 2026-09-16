@@ -565,9 +565,20 @@ export async function rerank<T extends RerankableResult>(
       // All hosts failed — return original order (graceful degrade). Emit one
       // clear, user-facing signal so the UI can show a "results not reranked"
       // badge instead of silently serving first-stage order.
-      const degradedMessage = opts?.interactive
-        ? 'Results not reranked — reranker unavailable within the interactive timeout; showing first-stage (hybrid) order.'
-        : 'Results not reranked — reranker unavailable; showing first-stage (hybrid) order.';
+      // Say what actually happened. The interactive wording implied a slow
+      // reranker, but the common OpenRouter case is an INSTANT failure: the
+      // client's circuit breaker is open after upstream 5xx (Fireworks is the
+      // only provider serving qwen3-reranker-8b), and reranking is refused for
+      // the 60 s cooldown without a single request. Reporting that as "within
+      // the interactive timeout" — with totalElapsedMs=1 — sent the
+      // investigation towards timeouts and pool sizes instead of the upstream
+      // outage the log had already named.
+      const breakerOpen = /circuit breaker is open/i.test(lastWarning?.message ?? '');
+      const degradedMessage = breakerOpen
+        ? 'Results not reranked — OpenRouter reranking is paused after repeated upstream errors (circuit breaker open, ~60 s); showing first-stage (hybrid) order.'
+        : opts?.interactive
+          ? 'Results not reranked — reranker unavailable within the interactive timeout; showing first-stage (hybrid) order.'
+          : 'Results not reranked — reranker unavailable; showing first-stage (hybrid) order.';
       warn('degraded', rerankHostLabel, degradedMessage);
       return skipped('degraded', results.slice(0, effectiveTopN), {
         message: degradedMessage,

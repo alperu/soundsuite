@@ -553,7 +553,10 @@ export async function* streamRlm(opts: {
         messages: opts.messages,
         max_tokens: clamp.maxTokens,
         temperature: opts.temperature ?? 0.3,
-        stream: true,
+        // The sandbox rejects stream=true with HTTP 400 ("stream is not
+        // supported — request a non-streaming completion"); only the
+        // self-hosted vLLM path streams.
+        stream: !resolved.sandbox,
       }),
       signal: opts.signal,
     });
@@ -565,6 +568,28 @@ export async function* streamRlm(opts: {
   if (!res.ok || !res.body) {
     const errBody = await res.text().catch(() => '');
     yield { type: 'error', message: `RLM HTTP ${res.status}: ${errBody.slice(0, 300)}` };
+    return;
+  }
+
+  if (resolved.sandbox) {
+    // Non-streaming: one OpenAI-shaped completion. Emit the whole answer as a
+    // single token so callers that render a stream still get their content.
+    let j: { choices?: Array<{ message?: { content?: unknown } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+    try {
+      j = await res.json();
+    } catch (err) {
+      yield { type: 'error', message: `RLM sandbox returned a non-JSON completion: ${(err as Error).message}` };
+      return;
+    }
+    const content = typeof j.choices?.[0]?.message?.content === 'string' ? j.choices[0].message.content : '';
+    if (content) yield { type: 'token', text: content };
+    yield {
+      type: 'done',
+      content,
+      usage: { inputTokens: j.usage?.prompt_tokens ?? 0, outputTokens: j.usage?.completion_tokens ?? 0 },
+      provider: 'ss-rlm-sandbox',
+      model,
+    };
     return;
   }
 
@@ -873,7 +898,33 @@ export async function* runRlmWithTools(opts: {
     //
     // Same clamp logic as the round POST — the streaming retry hits the same
     // vLLM ceiling and would otherwise re-trigger the 400 we just dodged.
-    const streamClamp = clampOutputTokens(messages, requestedMaxTokens);
+    // The sandbox does not stream: its /v1/chat/completions returns 400
+    // "stream is not supported — request a non-streaming completion" for
+    // stream=true (sideCar/src/app/api/v1/chat/completions/route.ts). The
+    // re-POST below exists only for token-by-token UX on the vLLM path — the
+    // complete answer is already in hand from the non-streaming round that
+    // produced no tool calls. So for the sandbox, emit that and finish. This
+    // was the failure after the identity header started being accepted: every
+    // evidence round succeeded and the run then died on the final turn.
+    if (resolved.sandbox) {
+      const content = typeof msg?.content === 'string' ? msg.content : '';
+      console.log(`[RLM] round ${round} no tool calls — sandbox endpoint, emitting the non-streamed answer (${content.length} chars) instead of re-POSTing with stream=true`);
+      if (content) yield { type: 'token', text: content };
+      console.log(`[RLM] run done rounds=${round} totalElapsed=${Date.now() - t0}ms finalContentChars=${content.length} tokens=${totalInputTokens}in+${totalOutputTokens}out (sandbox, non-streamed)`);
+      yield {
+        type: 'done',
+        content,
+        usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+        rounds: round,
+        host,
+        model,
+      };
+      return;
+    }
+
+    // Budget against this endpoint's window, like every other clamp in the
+    // loop — this call site was still defaulting to the vLLM ceiling.
+    const streamClamp = clampOutputTokens(messages, requestedMaxTokens, ctxBudget);
     if (streamClamp.clamped) {
       console.warn(`[RLM] round ${round} stream-retry clamp max_tokens → ${streamClamp.maxTokens} (estimatedInput=${streamClamp.estimatedInput})`);
     }
