@@ -1381,11 +1381,33 @@ export class IngestionPipeline {
         readiness !== undefined &&
         this.config.readinessGating === 'block' &&
         readiness.score < (this.config.readinessThreshold ?? 70);
+
+      // A document with no vectors is not indexed, whatever the pipeline
+      // completed. Six documents in the live corpus were stamped INDEXED
+      // with zero rows in LanceDB — 308 pages between them, one of them 198
+      // pages — and nothing flagged it: `verifyIndexing` above runs but is
+      // explicitly non-fatal, so its finding never reached the status write.
+      // They were invisible to search while the dashboard called them
+      // indexed, and the partial-page badge reported every page missing,
+      // which sent the operator to a per-page repair that cannot help. The
+      // honest state is ERROR, which is also the state that gets them
+      // re-ingested.
+      const noVectorsWritten = embeddedChunks.length === 0 && pageCount > 0;
+      if (noVectorsWritten) {
+        this.logger.error('Indexing produced no vectors — marking ERROR rather than INDEXED', {
+          documentId,
+          pageCount,
+          emptyPages: verification?.gapPages?.length ?? undefined,
+        });
+      }
       await this.database.document.update({
         where: { id: documentId },
         data: {
-          status: readinessBlocks ? 'ERROR' : 'INDEXED',
-          errorMessage: readinessBlocks
+          status: (readinessBlocks || noVectorsWritten) ? 'ERROR' : 'INDEXED',
+          errorMessage: noVectorsWritten
+            ? `Indexing produced no vectors for ${pageCount} page(s): the document would be invisible to search. `
+              + `Every page reports as unindexed, so per-page repair cannot fix it — this needs re-ingestion.`
+            : readinessBlocks
             ? `Readiness score ${readiness!.score} (${readiness!.band}) below threshold ${this.config.readinessThreshold ?? 70}: ${readiness!.warnings.map((w) => w.code).join(', ')}`
             : null,
           embeddingModel: modelName,

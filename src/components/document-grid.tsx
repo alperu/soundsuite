@@ -337,6 +337,15 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
   const [removeFromQueueInProgress, setRemoveFromQueueInProgress] = useState(false);
   const [removeStoppedInProgress, setRemoveStoppedInProgress] = useState(false);
   const [refreshFolderInProgress, setRefreshFolderInProgress] = useState(false);
+  // Repair All Partials. `repairAllProgress` is the live per-document tally the
+  // SSE stream feeds; the abort controller is what the Stop affordance uses,
+  // since the server checks request.signal between documents.
+  const [repairAllRunning, setRepairAllRunning] = useState(false);
+  const [repairAllProgress, setRepairAllProgress] = useState<{
+    done: number; total: number; fixed: number; repaired: number;
+    needsReingest: number; unverified: number; current?: string;
+  } | null>(null);
+  const repairAllAbort = useRef<AbortController | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; docId: string } | null>(null);
   const [refreshingPathIds, setRefreshingPathIds] = useState<Set<string>>(new Set());
   const lastClickedRef = useRef<string | null>(null);
@@ -540,6 +549,101 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
     }
   };
 
+  /**
+   * Repair every partially-indexed document, one at a time.
+   *
+   * Reads SSE from /api/documents/repair-all-partials rather than polling: a
+   * real corpus run takes minutes (one 665-page volume needs 41 pages of
+   * OCR), and a request that only answers at the end is indistinguishable
+   * from a hang — the exact confusion this feature already caused once.
+   *
+   * Documents whose gap is "zero vectors at all" are reported as
+   * needs-reingest and skipped, not ground through as per-page repairs; the
+   * largest such document is 198 pages and per-page repair cannot fix any of
+   * them. See partial-repair-runner's header.
+   */
+  const handleRepairAllPartials = async () => {
+    if (repairAllRunning) {
+      // Second click = stop. The server finishes the document in flight and
+      // stops at the next boundary; aborting mid-document is how you lose
+      // coverage, since reindex-pages deletes old vectors before inserting.
+      repairAllAbort.current?.abort();
+      return;
+    }
+
+    const controller = new AbortController();
+    repairAllAbort.current = controller;
+    setRepairAllRunning(true);
+    setRepairAllProgress({ done: 0, total: 0, fixed: 0, repaired: 0, needsReingest: 0, unverified: 0 });
+
+    try {
+      const res = await fetch('/api/documents/repair-all-partials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resetTerminal: true }),
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE frames are separated by a blank line.
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop() ?? '';
+        for (const frame of frames) {
+          const event = /^event: (.+)$/m.exec(frame)?.[1];
+          const dataLine = /^data: (.+)$/m.exec(frame)?.[1];
+          if (!event || !dataLine) continue;
+          let data: Record<string, unknown>;
+          try { data = JSON.parse(dataLine); } catch { continue; }
+
+          if (event === 'start') {
+            setRepairAllProgress((p) => ({ ...(p ?? { done: 0, fixed: 0, repaired: 0, needsReingest: 0, unverified: 0 }), total: Number(data.total) || 0 }) as typeof p);
+          } else if (event === 'document') {
+            setRepairAllProgress((p) => {
+              const base = p ?? { done: 0, total: 0, fixed: 0, repaired: 0, needsReingest: 0, unverified: 0 };
+              return {
+                ...base,
+                done: base.done + 1,
+                fixed: base.fixed + (data.verdict === 'fixed' ? 1 : 0),
+                needsReingest: base.needsReingest + (data.verdict === 'needs-reingest' ? 1 : 0),
+                repaired: base.repaired + ((data.repaired as number[])?.length ?? 0),
+                unverified: base.unverified + ((data.unverified as number[])?.length ?? 0),
+                current: String(data.documentId ?? '').slice(0, 8),
+              };
+            });
+          } else if (event === 'error') {
+            console.error('Repair all partials failed:', data.message);
+          }
+        }
+      }
+      // Re-fetch so the partial badges reflect the new coverage.
+      try {
+        const r = await fetch(`/api/documents?caseId=${caseId}`);
+        if (r.ok) {
+          const d = await r.json();
+          setDocuments(d.documents);
+          onDocumentsUpdate?.(d.documents);
+        }
+      } catch { /* the 2s poll will catch up */ }
+    } catch (error) {
+      if ((error as Error)?.name !== 'AbortError') {
+        console.error('Failed to repair partials:', error);
+      }
+    } finally {
+      setRepairAllRunning(false);
+      repairAllAbort.current = null;
+    }
+  };
+
   const handleStopIndexSelected = async () => {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
@@ -723,10 +827,57 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
     );
   }
 
+  /**
+   * Repair All Partials.
+   *
+   * Rendered in two places, deliberately. The requested position is left of
+   * the stop button, which lives in the selection action bar — but that bar
+   * only exists while documents are selected, and repairing every partial
+   * document is a corpus-wide action that must not require picking any. So
+   * it also appears in the always-visible toolbar when nothing is selected.
+   * Defined once here rather than transcribed twice; two copies of a button
+   * is how the two copies of the embedding-provider switch started.
+   *
+   * While running it becomes its own stop control: the run is minutes long,
+   * and the server stops at the next document boundary rather than
+   * interrupting one mid-repair (reindex-pages deletes a page's old vectors
+   * before inserting new ones).
+   */
+  const repairAllButton = (repairAllRunning || partialSet.size > 0) ? (
+    <button
+      onClick={handleRepairAllPartials}
+      title={
+        repairAllRunning
+          ? 'Stop after the current document finishes'
+          : `Re-index missing pages across ${partialSet.size} partially-indexed document(s)`
+      }
+      className={`text-sm px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5 text-white ${
+        repairAllRunning ? 'bg-amber-600 hover:bg-amber-700' : 'bg-indigo-600 hover:bg-indigo-700'
+      }`}
+    >
+      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+      </svg>
+      {repairAllRunning
+        ? `Stop repairing (${repairAllProgress?.done ?? 0}/${repairAllProgress?.total ?? 0})`
+        : `Repair All Partials (${partialSet.size})`}
+    </button>
+  ) : null;
+
   return (
     <div className="flex-1 h-full flex flex-col overflow-hidden">
       {/* Always-visible toolbar */}
       <div className="flex-none bg-white border-b border-gray-200 px-6 py-2 flex items-center justify-end gap-2">
+        {/* Only when the selection bar is absent — otherwise it shows there,
+            left of the stop button, and one button in two bars is confusing. */}
+        {selectedIds.size === 0 && repairAllButton}
+        {repairAllRunning && repairAllProgress && (
+          <span className="text-xs text-gray-600" title="Confirmed against the index, not just reported by the repair call">
+            {repairAllProgress.repaired} page(s) repaired
+            {repairAllProgress.needsReingest > 0 && ` · ${repairAllProgress.needsReingest} need re-ingest`}
+            {repairAllProgress.unverified > 0 && ` · ${repairAllProgress.unverified} unverified`}
+          </span>
+        )}
         {unfiledHidden > 0 && (
           <span
             className="mr-auto text-xs text-gray-500"
@@ -804,6 +955,8 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
               </svg>
               {reparseInProgress ? 'Reparsing...' : 'Reparse Selected'}
             </button>
+            {/* Repair All Partials, immediately left of the stop button. */}
+            {repairAllButton}
             <button
               onClick={handleStopIndexSelected}
               disabled={stopIndexInProgress}

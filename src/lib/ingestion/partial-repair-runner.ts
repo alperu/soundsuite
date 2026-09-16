@@ -96,6 +96,18 @@ export interface RepairRunnerOptions {
   documentIds?: string[];
   /** Per-page repair rounds per document before giving up on progress. */
   maxRounds?: number;
+  /**
+   * Pages to attempt per HTTP round.
+   *
+   * fix-partial defaults to 50, which is too many to survive one request
+   * when the pages need OCR. A 665-page volume with 41 missing pages died
+   * with a bare `TypeError: fetch failed` — 41 pages at the ~9s/page that
+   * OCR actually costs (measured: 26 pages in 234s on another document) is
+   * ~370s, past the client's socket timeout. The work had partly happened;
+   * the caller just never heard. Small rounds keep each request short and
+   * let the loop carry the document.
+   */
+  pagesPerRound?: number;
   /** Include documents that have zero indexed pages. Default false — see header. */
   includeZeroIndexed?: boolean;
   /** Clear terminal ("given up") marks before attempting. */
@@ -106,7 +118,10 @@ export interface RepairRunnerOptions {
   shouldStop?: () => boolean;
 }
 
-const DEFAULT_MAX_ROUNDS = 6;
+const DEFAULT_MAX_ROUNDS = 30;
+/** ~8 pages x ~9s/page of OCR keeps a round near 75s, well inside the
+ *  client socket timeout that a 41-page round blew through. */
+const DEFAULT_PAGES_PER_ROUND = 8;
 
 async function getJson<T>(f: typeof fetch, url: string, init?: RequestInit): Promise<T> {
   const res = await f(url, init);
@@ -174,6 +189,7 @@ export async function repairDocument(
 ): Promise<DocumentRepairResult> {
   const f = opts.fetchImpl ?? fetch;
   const maxRounds = opts.maxRounds ?? DEFAULT_MAX_ROUNDS;
+  const pagesPerRound = opts.pagesPerRound ?? DEFAULT_PAGES_PER_ROUND;
   const startedAt = Date.now();
 
   const base: DocumentRepairResult = {
@@ -233,7 +249,10 @@ export async function repairDocument(
         headers: { 'content-type': 'application/json' },
         // resetTerminal only on the first round: re-arming every round would
         // loop forever on a page that is genuinely unfixable.
-        body: JSON.stringify({ resetTerminal: round === 0 ? !!opts.resetTerminal : false }),
+        body: JSON.stringify({
+          resetTerminal: round === 0 ? !!opts.resetTerminal : false,
+          maxPages: pagesPerRound,
+        }),
       });
     } catch (e) {
       failures = [];
