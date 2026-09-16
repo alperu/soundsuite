@@ -82,6 +82,7 @@ const DEFAULT_MAX_PAGES = 50;
 const HARD_MAX_PAGES = 200;
 
 const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
+const TABLE_NAME = process.env.LANCEDB_TABLE || 'chunks';
 
 // ---------------------------------------------------------------------------
 // Page report (in-process reuse of the canonical per-page classifier)
@@ -221,6 +222,48 @@ async function isStillPartial(documentId: string, pageCount: number): Promise<bo
   }
 }
 
+/**
+ * Is the vector index readable at all?
+ *
+ * A liveness check about the INDEX, asked of the index — not inferred from
+ * one document's chunk count. `countRows()` with no filter is the cheapest
+ * question that distinguishes the three states that matter:
+ *
+ *   connect/open throws  -> LanceDB unreachable            -> refuse
+ *   table absent         -> nothing has ever been indexed  -> refuse
+ *   table present, rows  -> index is alive                 -> proceed
+ *
+ * A live index with zero rows corpus-wide is indistinguishable from a broken
+ * one from here, and on a system whose dashboard shows 91 indexed documents
+ * it means something is wrong, so that also refuses.
+ */
+async function probeIndexHealth(): Promise<{ ok: true; totalRows: number } | { ok: false; reason: string }> {
+  try {
+    const db = await lancedb.connect(LANCEDB_PATH);
+    const tables = await db.tableNames();
+    if (!tables.includes(TABLE_NAME)) {
+      return {
+        ok: false,
+        reason: `The vector index has no "${TABLE_NAME}" table — refusing to queue a repair against an index that cannot be read.`,
+      };
+    }
+    const table = await db.openTable(TABLE_NAME);
+    const totalRows = await table.countRows();
+    if (totalRows === 0) {
+      return {
+        ok: false,
+        reason: 'The vector index is empty (zero rows for every document) — refusing to queue a repair against an index that looks unreadable rather than merely incomplete.',
+      };
+    }
+    return { ok: true, totalRows };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `Could not read the vector index (${err instanceof Error ? err.message : String(err)}) — refusing to queue a repair.`,
+    };
+  }
+}
+
 function sanitizePageList(pages: unknown, pageCount: number): number[] | null {
   if (!Array.isArray(pages)) return null;
   const out = new Set<number>();
@@ -309,21 +352,38 @@ export async function POST(
 
     // page-report swallows LanceDB errors and proceeds with empty chunk data,
     // which is right for a read-only display but dangerous for an actuator:
-    // an unreachable index makes EVERY page look unindexed and would burn
-    // OCR on a document that is perfectly fine. An INDEXED document with
-    // pages and zero chunks cannot occur legitimately, so treat it as
-    // "index unavailable" and refuse rather than queue.
-    if (report.summary.totalChunks === 0) {
-      logger.error('Page report shows zero chunks for an INDEXED document — treating the index as unavailable', {
-        documentId: id,
+    // an unreachable index makes EVERY page look unindexed and would burn OCR
+    // on a document that is perfectly fine. So the liveness check must stay.
+    //
+    // What it must NOT do is infer index health from THIS document's chunk
+    // count. The original guard did, on the stated premise that "an INDEXED
+    // document with pages and zero chunks cannot occur legitimately". That
+    // premise is false. Six documents in the live corpus had exactly that
+    // shape against a completely healthy index: 30,961 rows present, chunks
+    // table readable, no orphaned document_ids — ingestion had simply marked
+    // them INDEXED without ever writing a vector (now guarded at the source
+    // in ingestion-pipeline.ts). The refusal fired on the documents that most
+    // needed the repair, and told the operator their index was broken when
+    // it was not.
+    //
+    // Probe the index itself instead: is the table there, and does it hold
+    // rows for anything at all? That separates "index unreadable" (refuse)
+    // from "this document has no vectors" (a real state, repairable page by
+    // page since the pages do have text).
+    const health = await probeIndexHealth();
+    if (!health.ok) {
+      logger.error('Vector index is not readable — refusing to queue a repair', {
+        documentId: id, reason: health.reason,
       });
-      return NextResponse.json(
-        {
-          error:
-            'The vector index reports zero chunks for this INDEXED document. That usually means LanceDB is unreachable or the chunks table is missing — refusing to queue a repair against an unreadable index.',
-        },
-        { status: 503 },
-      );
+      return NextResponse.json({ error: health.reason }, { status: 503 });
+    }
+    if (report.summary.totalChunks === 0) {
+      // Not an error, and not a reason to refuse — just worth saying plainly,
+      // because a full re-ingest is usually cheaper than N one-page repairs
+      // on a large document.
+      logger.warn('Document has no vectors at all; repairing page by page', {
+        documentId: id, pageCount, indexRows: health.totalRows,
+      });
     }
 
     // Second liveness gate: unlike page-report, computePartialDocumentIds

@@ -28,6 +28,7 @@ const mockPageReportGET = jest.fn();
 const mockReindexPOST = jest.fn();
 const mockLanceRows = jest.fn();
 const mockTableNames = jest.fn();
+const mockIndexRowCount = jest.fn();
 
 jest.mock('@/lib/api/route-guard', () => ({
   requireAdminApiAccess: (...args: unknown[]) => mockRequireAdminApiAccess(...args),
@@ -52,6 +53,10 @@ jest.mock('@lancedb/lancedb', () => ({
   connect: async () => ({
     tableNames: () => mockTableNames(),
     openTable: async () => ({
+      // `countRows()` backs the route's index-liveness probe. It asks the
+      // INDEX whether it is readable, rather than inferring that from one
+      // document's chunk count — see probeIndexHealth. Default: a live index.
+      countRows: async () => mockIndexRowCount(),
       query: () => ({
         select: () => ({
           where: () => ({ toArray: async () => mockLanceRows() }),
@@ -140,6 +145,8 @@ beforeEach(() => {
   mockPageCacheFindMany.mockResolvedValue([]);
   mockPageScoreFindMany.mockResolvedValue([]);
   mockTableNames.mockResolvedValue(['chunks']);
+  // A live index by default: 30,961 rows is the real corpus count.
+  mockIndexRowCount.mockResolvedValue(30961);
   // Pages 1-8 have vectors; 9 and 10 do not — so the doc reads as partial.
   mockLanceRows.mockReturnValue(
     Array.from({ length: 8 }, (_, i) => ({ document_id: DOC_ID, page_number: i + 1 })),
@@ -175,19 +182,64 @@ describe('POST /api/documents/[id]/fix-partial — access + preconditions', () =
     expect(mockReindexPOST).not.toHaveBeenCalled();
   });
 
-  it('refuses rather than queueing when the index reads as empty (page-report fails open)', async () => {
-    // page-report swallows LanceDB errors and reports every page unindexed.
-    // Acting on that would burn OCR on a document with nothing wrong.
+  // The liveness question is asked of the INDEX, not inferred from one
+  // document's chunk count. These four pin that distinction.
+
+  it('refuses when the chunks table is absent', async () => {
     setDoc();
-    mockPageReportGET.mockResolvedValue(
-      report({ 1: 'unindexed', 2: 'unindexed', 3: 'unindexed' }, /* totalChunks */ 0),
-    );
+    mockPageReportGET.mockResolvedValue(report({ 1: 'unindexed' }));
+    mockTableNames.mockResolvedValue([]);
 
     const res = await POST(request(), ctx());
 
     expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: expect.stringMatching(/no "chunks" table/i) });
     expect(mockReindexPOST).not.toHaveBeenCalled();
     expect(mockDocUpdate).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the index holds no rows for anything', async () => {
+    setDoc();
+    mockPageReportGET.mockResolvedValue(report({ 1: 'unindexed' }));
+    mockIndexRowCount.mockResolvedValue(0);
+
+    const res = await POST(request(), ctx());
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: expect.stringMatching(/index is empty/i) });
+    expect(mockReindexPOST).not.toHaveBeenCalled();
+  });
+
+  it('refuses when counting rows throws', async () => {
+    setDoc();
+    mockPageReportGET.mockResolvedValue(report({ 1: 'unindexed' }));
+    mockIndexRowCount.mockRejectedValue(new Error('LanceDB socket closed'));
+
+    const res = await POST(request(), ctx());
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: expect.stringMatching(/socket closed/i) });
+  });
+
+  it('REPAIRS a document with zero chunks when the index itself is healthy', async () => {
+    // Regression. This asserted 503 on the premise that "an INDEXED document
+    // with pages and zero chunks cannot occur legitimately". It can: six
+    // documents in the live corpus had exactly that shape against an index
+    // holding 30,961 rows with no orphaned ids — ingestion had marked them
+    // INDEXED without ever writing a vector. The old guard fired on the
+    // documents that most needed repair and blamed the index, which was fine.
+    setDoc();
+    mockPageReportGET
+      .mockResolvedValueOnce(report({ 1: 'unindexed', 2: 'unindexed' }, /* totalChunks */ 0))
+      .mockResolvedValueOnce(report({}, /* totalChunks */ 6));
+    mockReindexPOST.mockResolvedValue(reindexOk());
+
+    const res = await POST(request(), ctx());
+
+    expect(res.status).toBe(200);
+    expect(mockReindexPOST).toHaveBeenCalled();
+    const body = await res.json();
+    expect(body.attemptedPages).toEqual([1, 2]);
   });
 
   it('refuses when the partial re-check cannot reach LanceDB', async () => {
