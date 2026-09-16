@@ -98,6 +98,37 @@ export function isImmediatelyTerminal(code: RepairReasonCode): boolean {
   return code === 'dimension-mismatch';
 }
 
+/**
+ * Did this failure tell us anything about the PAGE?
+ *
+ * `reindex-request-failed` means the reindex call itself did not complete —
+ * the embedding host was unreachable, the model was not pulled, a socket
+ * timed out. That says nothing about the page, so it must not consume the
+ * page's retry budget.
+ *
+ * It used to. A real page 8 was marked "given up after 3 attempts" with:
+ *
+ *   Ollama embedding failed (http://<lan-host>:11434,
+ *   model=qwen3-embedding:4b-fp16): model not found, try pulling it first
+ *
+ * — the operator had switched embedding to OpenRouter-only and the repair
+ * path was still routing to a local model that did not exist. Three attempts
+ * burned on a misconfiguration, and once the routing was fixed the page
+ * stayed permanently terminal: `remainingEligible: 0`, "re-indexing them
+ * again cannot help". It took a manual resetTerminal to re-arm, after which
+ * it repaired in 2.4 seconds.
+ *
+ * Left unfixed, every page attempted during any infrastructure outage stays
+ * given-up forever, and Repair All Partials would skip them all and
+ * cheerfully report nothing to do.
+ *
+ * Infinite retries are not the risk here: fix-partial does not loop, and the
+ * batch runner stops a document as soon as a round makes no forward progress.
+ */
+export function isInfrastructureFailure(code: RepairReasonCode): boolean {
+  return code === 'reindex-request-failed';
+}
+
 function truncate(s: string, max = 200): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
@@ -146,8 +177,15 @@ export function updateRepairTags(
 
     const prior = tags[key];
     const { code, reason } = reasonFor(page);
-    const attempts = (prior?.attempts ?? 0) + 1;
-    const terminal = isImmediatelyTerminal(code) || attempts >= MAX_REPAIR_ATTEMPTS;
+    // An infrastructure failure is not evidence about the page, so it does
+    // not spend the page's budget — see isInfrastructureFailure. The entry is
+    // still written (the operator needs to see WHY nothing happened), it just
+    // does not advance `attempts` or become terminal.
+    const infra = isInfrastructureFailure(code);
+    const attempts = infra ? (prior?.attempts ?? 0) : (prior?.attempts ?? 0) + 1;
+    const terminal = infra
+      ? false
+      : isImmediatelyTerminal(code) || attempts >= MAX_REPAIR_ATTEMPTS;
     tags[key] = {
       attempts,
       lastAttemptAt: now().toISOString(),

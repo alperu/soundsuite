@@ -24,6 +24,7 @@ import {
   RepairTags,
   classifyRepairFailure,
   isImmediatelyTerminal,
+  isInfrastructureFailure,
   mergeRepairTags,
   partitionEligiblePages,
   readRepairTags,
@@ -496,5 +497,84 @@ describe('repair lifecycle (integration of the pure parts)', () => {
     expect(secondRound.cleared).toEqual([3]);
     expect(readRepairTags(tags)).toEqual({});
     expect(tags.recordStatus).toBe('draft');
+  });
+});
+
+describe('infrastructure failures do not spend a page\'s retry budget', () => {
+  // Regression. A real page 8 was marked "given up after 3 attempts" with
+  //   Ollama embedding failed (... model=qwen3-embedding:4b-fp16): model not found
+  // because the repair path was routing to a local model on an install that
+  // had been switched to OpenRouter-only. Three attempts burned on a
+  // misconfiguration; once the routing was fixed the page stayed permanently
+  // terminal and only a manual resetTerminal re-armed it — after which it
+  // repaired in 2.4s. Every page attempted during any outage had the same
+  // fate, and Repair All Partials would skip them all.
+  const infra = () => ({
+    code: 'reindex-request-failed' as RepairReasonCode,
+    reason: 'Reindex request failed: embedding host unreachable',
+  });
+
+  it('classifies a failed reindex request as infrastructure, not page content', () => {
+    expect(isInfrastructureFailure('reindex-request-failed')).toBe(true);
+    expect(isInfrastructureFailure('ocr-empty')).toBe(false);
+    expect(isInfrastructureFailure('unknown')).toBe(false);
+  });
+
+  it('never marks a page terminal for it, however many outages it sees', () => {
+    let tags: RepairTags = {};
+    for (let i = 0; i < MAX_REPAIR_ATTEMPTS + 4; i++) {
+      tags = updateRepairTags(tags, [8], new Set([8]), infra).tags;
+    }
+    expect(tags['8'].terminal).toBe(false);
+    expect(tags['8'].attempts).toBe(0);      // budget untouched
+    expect(tags['8'].reasonCode).toBe('reindex-request-failed');
+    // and it stays eligible, which is the whole point
+    expect(partitionEligiblePages([8], tags).eligible).toEqual([8]);
+    expect(partitionEligiblePages([8], tags).terminal).toEqual([]);
+  });
+
+  it('still records the reason, so the operator sees why nothing happened', () => {
+    const { tags, retriable, newlyTerminal } = updateRepairTags(
+      {}, [8], new Set([8]), infra,
+    );
+    expect(tags['8'].reason).toMatch(/embedding host unreachable/);
+    expect(retriable).toEqual([8]);
+    expect(newlyTerminal).toEqual([]);
+  });
+
+  it('does not shield a page that has genuine content failures too', () => {
+    // Two real ocr-empty failures, then an outage, then a third real one.
+    // The outage must not advance the count, and must not reset it either.
+    const ocrEmpty = () => ({ code: 'ocr-empty' as RepairReasonCode, reason: 'OCR produced no text' });
+    let tags = updateRepairTags({}, [9], new Set([9]), ocrEmpty).tags;
+    tags = updateRepairTags(tags, [9], new Set([9]), ocrEmpty).tags;
+    expect(tags['9'].attempts).toBe(2);
+    expect(tags['9'].terminal).toBe(false);
+
+    tags = updateRepairTags(tags, [9], new Set([9]), infra).tags;
+    expect(tags['9'].attempts).toBe(2);      // preserved, not incremented
+    expect(tags['9'].terminal).toBe(false);
+
+    tags = updateRepairTags(tags, [9], new Set([9]), ocrEmpty).tags;
+    expect(tags['9'].attempts).toBe(3);
+    expect(tags['9'].terminal).toBe(true);   // genuine budget still enforced
+  });
+
+  it('leaves the immediately-terminal dimension mismatch alone', () => {
+    // That one IS a config problem, but it is deliberately terminal on the
+    // first attempt so an operator is told to fix the config rather than
+    // watching a loop. resetTerminal is the escape hatch.
+    const { tags } = updateRepairTags({}, [10], new Set([10]), () => ({
+      code: 'dimension-mismatch' as RepairReasonCode, reason: 'width rejected',
+    }));
+    expect(tags['10'].terminal).toBe(true);
+    expect(isImmediatelyTerminal('dimension-mismatch')).toBe(true);
+  });
+
+  it('clears history once the page actually indexes', () => {
+    let tags = updateRepairTags({}, [8], new Set([8]), infra).tags;
+    const { tags: after, cleared } = updateRepairTags(tags, [8], new Set(), infra);
+    expect(cleared).toEqual([8]);
+    expect(after['8']).toBeUndefined();
   });
 });
