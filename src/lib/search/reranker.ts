@@ -877,27 +877,118 @@ async function rerankViaOpenRouter<T extends RerankableResult>(
   }
 
   const effectiveTopN = Math.min(topN, results.length);
-  const res = await rerankDocuments(query, documents, model, {
-    topN: effectiveTopN,
-    timeoutMs,
-    role: 'reranker',
-  });
 
-  if (!Array.isArray(res.results)) {
-    throw new Error('Unexpected OpenRouter response — no results array');
+  // Split the request so no single call exceeds what the upstream provider
+  // accepts.
+  //
+  // `maxDocChars` bounds each document against the model window, but nothing
+  // bounded the REQUEST: Deep Search's merge step sent all 150 pool documents
+  // in one call, and Fireworks (the only provider serving qwen3-reranker-8b)
+  // answered `invalid_request_error`, surfaced through OpenRouter as a 503.
+  // Interactive reranks of ≤45 documents on the same model succeeded all day.
+  // Eight sub-query reranks failing in parallel then tripped the client's
+  // 5-failure circuit breaker, which is what took reranking away from the
+  // interactive path too.
+  //
+  // Batches are scored by the same cross-encoder independently per pair, so
+  // scores are comparable across batches and a global merge is sound. Each
+  // batch asks for ALL of its scores (top_n = batch size) — asking for topN
+  // per batch would discard candidates before the merge could see them.
+  const batches = batchDocumentsForRerank(documents, OPENROUTER_RERANK_MAX_DOCS_PER_REQUEST, OPENROUTER_RERANK_MAX_CHARS_PER_REQUEST);
+  if (batches.length > 1) {
+    logger.info('Rerank: splitting OpenRouter request into batches', {
+      model,
+      docs: documents.length,
+      batches: batches.length,
+      maxDocsPerRequest: OPENROUTER_RERANK_MAX_DOCS_PER_REQUEST,
+      maxCharsPerRequest: OPENROUTER_RERANK_MAX_CHARS_PER_REQUEST,
+    });
   }
+
+  const merged: Array<{ index: number; relevance_score: number }> = [];
+  let totalTokens = 0;
+  for (let i = 0; i < batches.length; i += OPENROUTER_RERANK_BATCH_PARALLELISM) {
+    const group = batches.slice(i, i + OPENROUTER_RERANK_BATCH_PARALLELISM);
+    const outs = await Promise.all(
+      group.map((batch) =>
+        rerankDocuments(query, batch.indices.map((gi) => documents[gi]), model, {
+          topN: batch.indices.length,
+          timeoutMs,
+          role: 'reranker',
+        }),
+      ),
+    );
+    outs.forEach((res, k) => {
+      if (!Array.isArray(res.results)) {
+        throw new Error('Unexpected OpenRouter response — no results array');
+      }
+      const batch = group[k];
+      for (const rr of res.results) {
+        // Translate the batch-local index back to the caller's array.
+        const globalIndex = batch.indices[rr.index];
+        if (globalIndex === undefined) continue;
+        merged.push({ index: globalIndex, relevance_score: rr.relevance_score });
+      }
+      totalTokens += res.usage?.total_tokens ?? 0;
+    });
+  }
+
+  merged.sort((a, b) => b.relevance_score - a.relevance_score);
+  const top = merged.slice(0, effectiveTopN);
 
   logger.info('Reranking via OpenRouter completed', {
     model,
     docs: documents.length,
+    batches: batches.length,
     topN: effectiveTopN,
-    totalTokens: res.usage?.total_tokens ?? 0,
+    totalTokens,
   });
 
   return {
-    items: mapRerankResults(results, res.results),
-    totalTokens: res.usage?.total_tokens ?? 0,
+    items: mapRerankResults(results, top),
+    totalTokens,
   };
+}
+
+/**
+ * Per-request ceilings for OpenRouter rerank calls. The char ceiling is the
+ * model's 40,960-token window at ~2.7 chars/token — treating the window as a
+ * per-request total is stricter than a cross-encoder strictly needs, and that
+ * is the point: it stays well inside whatever request cap the provider
+ * enforces without having to know it. The doc ceiling keeps a batch of short
+ * chunks from becoming a huge request on count alone.
+ */
+const OPENROUTER_RERANK_MAX_DOCS_PER_REQUEST = 40;
+const OPENROUTER_RERANK_MAX_CHARS_PER_REQUEST = 110_000;
+/** Batches in flight at once. Each is its own OpenRouter call and its own
+ *  circuit-breaker sample, so this stays small on purpose. */
+const OPENROUTER_RERANK_BATCH_PARALLELISM = 3;
+
+/**
+ * Greedy, order-preserving split of `documents` into batches that respect both
+ * ceilings. A document longer than the char ceiling on its own still gets a
+ * batch (it has already been truncated to the per-document budget upstream).
+ * Exported for tests.
+ */
+export function batchDocumentsForRerank(
+  documents: string[],
+  maxDocs: number,
+  maxChars: number,
+): Array<{ indices: number[]; chars: number }> {
+  const batches: Array<{ indices: number[]; chars: number }> = [];
+  let cur: { indices: number[]; chars: number } = { indices: [], chars: 0 };
+  for (let i = 0; i < documents.length; i++) {
+    const len = documents[i].length;
+    const wouldOverflow = cur.indices.length >= maxDocs || (cur.indices.length > 0 && cur.chars + len > maxChars);
+    if (wouldOverflow) {
+      batches.push(cur);
+      cur = { indices: [], chars: 0 };
+    }
+    cur.indices.push(i);
+    cur.chars += len;
+  }
+  if (cur.indices.length > 0) batches.push(cur);
+  return batches;
 }
 
 /**
