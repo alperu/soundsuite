@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import PipelineStageIndicator from './pipeline-stage-indicator';
-import FixPartialPanel, { type FixPartialResult } from './fix-partial-panel';
+import FixPartialPanel, { formatPageRanges, type FixPartialResult } from './fix-partial-panel';
 import {
   STATUS_BG,
   STATUS_DOT,
@@ -17,6 +17,8 @@ interface StageProgress {
   progress: number;
   stageIndex: number;
   totalStages: number;
+  /** Pages the current repair round is working on, when this is a repair. */
+  pages?: number[];
 }
 
 interface Document {
@@ -226,6 +228,23 @@ function DocumentCard({
       {doc.status === 'PROCESSING' && !doc.stageProgress && (
         <div className="mt-2">
           <div className="text-xs text-yellow-600">Starting...</div>
+        </div>
+      )}
+
+      {/* Which pages the repair is on.
+          "Repairing missing pages…" on a 1,521-page volume told the operator
+          nothing they could check, and during a long repair the natural
+          question is "fixed what?". reindex-pages publishes the round's page
+          list; this names it. Ranges rather than a raw list — a round is 8
+          pages but a manual run can pass many more. */}
+      {isRepairing && doc.stageProgress?.pages && doc.stageProgress.pages.length > 0 && (
+        <div
+          className="mt-1 text-[11px] text-blue-700 truncate"
+          title={`Repairing page${doc.stageProgress.pages.length === 1 ? '' : 's'} ${doc.stageProgress.pages.join(', ')}`}
+        >
+          Page{doc.stageProgress.pages.length === 1 ? '' : 's'}{' '}
+          {formatPageRanges(doc.stageProgress.pages, 6)}
+          {doc.stageProgress.detail ? ` · ${doc.stageProgress.detail}` : ''}
         </div>
       )}
 

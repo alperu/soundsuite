@@ -10,7 +10,21 @@ const logger = createLogger('reindex-pages');
  * Publish stage progress to the same Redis key the main pipeline uses, so
  * the document card shows real progress instead of a perpetual "Starting...".
  */
-async function publishProgress(documentId: string, stage: string, detail: string, progress: number): Promise<void> {
+async function publishProgress(
+  documentId: string,
+  stage: string,
+  detail: string,
+  progress: number,
+  /**
+   * The pages this round is repairing.
+   *
+   * Published so the card can say WHICH pages are being fixed instead of a
+   * bare "Repairing missing pages…". On a 1,521-page volume that label told
+   * the operator nothing they could check, and during a long repair the
+   * natural question is "fixed what?".
+   */
+  pages?: number[],
+): Promise<void> {
   try {
     if (await isRedisAvailable()) {
       const key = `soundsuite:doc_progress:${documentId}`;
@@ -21,6 +35,7 @@ async function publishProgress(documentId: string, stage: string, detail: string
         progress: String(Math.round(progress)),
         stageIndex: String(stageIndex >= 0 ? stageIndex : 0),
         totalStages: String(PIPELINE_STAGES.length),
+        ...(pages && pages.length > 0 ? { pages: pages.join(',') } : {}),
       });
       await getRedis().expire(key, 300);
     }
@@ -185,7 +200,7 @@ export async function POST(
       await pdfParser.loadDocument(doc.filePath);
       documentLoaded = true;
 
-      await publishProgress(id, 'text-extraction', `Extracting ${pages.length} target page(s)...`, 5);
+      await publishProgress(id, 'text-extraction', `Extracting ${pages.length} target page(s)...`, 5, pages);
       logger.info('Extracting target pages from PDF...');
       // Targeted per-page extraction — the previous whole-document pass cost
       // ~90s per batch on large records just to discard all but N pages.
@@ -241,7 +256,7 @@ export async function POST(
         const progressPct = overall
           ? 10 + ((overall.done + pageIdx) / Math.max(1, overall.total)) * 60
           : 10 + (pageIdx / targetPages.length) * 60;
-        await publishProgress(id, 'ocr-fallback', progressDetail, progressPct);
+        await publishProgress(id, 'ocr-fallback', progressDetail, progressPct, pages);
         logger.info(`Page ${page.pageNumber}: density=${page.textDensity}, threshold=${ocrThreshold}${forceOcr ? ' (forceOcr)' : ''}`);
 
         if (forceOcr || page.textDensity < ocrThreshold) {
@@ -376,7 +391,7 @@ export async function POST(
       const isTranscriptDoc = /reporter.?s?\s+record/i.test(doc.documentType ?? '');
       if (config.docparseEnabled && !isTranscriptDoc) {
         try {
-          await publishProgress(id, 'text-extraction', 'Extracting page structure...', 72);
+          await publishProgress(id, 'text-extraction', 'Extracting page structure...', 72, pages);
           const { produceStructuredPages } = await import('@/lib/ingestion/structure-producer');
           const counters = await produceStructuredPages({
             filePath: doc.filePath,
@@ -500,7 +515,7 @@ export async function POST(
       // minutes. This is a stuck-detector, not a latency budget.
       const embedTimeoutMs = Number(process.env.REINDEX_EMBED_TIMEOUT_MS) || 10 * 60_000;
       const embeddedChunks: import('@/lib/ingestion/embedding-provider').EmbeddedChunk[] = [];
-      await publishProgress(id, 'embedding-generation', `Embedding ${allChunks.length} chunks...`, 78);
+      await publishProgress(id, 'embedding-generation', `Embedding ${allChunks.length} chunks...`, 78, pages);
       logger.info(`Generating embeddings for ${allChunks.length} chunks (batch size ${batchSize})`);
 
       for (let i = 0; i < allChunks.length; i += batchSize) {
@@ -550,7 +565,7 @@ export async function POST(
         );
       }
 
-      await publishProgress(id, 'vector-indexing', `Reindexing ${embeddedChunks.length} vectors...`, 90);
+      await publishProgress(id, 'vector-indexing', `Reindexing ${embeddedChunks.length} vectors...`, 90, pages);
       logger.info(`Clearing old vectors for pages [${pages.join(', ')}]`);
       await vectorStore.deleteByPages(id, pages);
 

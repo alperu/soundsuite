@@ -72,9 +72,17 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    // Enrich PROCESSING documents with stage progress from Redis
-    const processingDocs = documents.filter(d => d.status === 'PROCESSING');
-    let progressMap: Record<string, { stage: string; detail: string; progress: number; stageIndex: number; totalStages: number }> = {};
+    // Enrich in-flight documents with stage progress from Redis.
+    //
+    // FIXING_PARTIAL belongs here and was missing: reindex-pages publishes to
+    // the same key during a repair, but this filter only matched PROCESSING,
+    // so a repairing document never had its progress fetched at all. The card
+    // fell back to a bare "Repairing missing pages…" — the detail was not
+    // absent, it was never loaded.
+    const processingDocs = documents.filter(
+      d => d.status === 'PROCESSING' || d.status === 'FIXING_PARTIAL',
+    );
+    let progressMap: Record<string, { stage: string; detail: string; progress: number; stageIndex: number; totalStages: number; pages?: number[] }> = {};
 
     if (processingDocs.length > 0 && await isRedisAvailable()) {
       const redis = getRedis();
@@ -93,6 +101,15 @@ export async function GET(request: NextRequest) {
               progress: parseInt(data.progress || '0', 10),
               stageIndex: parseInt(data.stageIndex || '0', 10),
               totalStages: parseInt(data.totalStages || '10', 10),
+              // Which pages this round is repairing, so the card can name them.
+              ...(data.pages
+                ? {
+                    pages: data.pages
+                      .split(',')
+                      .map(n => parseInt(n, 10))
+                      .filter(n => Number.isFinite(n)),
+                  }
+                : {}),
             };
           }
         }
