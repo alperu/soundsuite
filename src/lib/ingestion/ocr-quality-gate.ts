@@ -331,9 +331,76 @@ function cutAtNoveltyCollapse(lines: string[]): string | undefined {
 }
 
 /**
+ * Cut where 24-character windows stop being novel.
+ *
+ * The line-granularity strategies above cannot see an INTRA-line loop, and
+ * two real captures say that is the shape that actually occurs:
+ *
+ *   25,954 chars in    18 lines  (~1,442 chars per line)
+ *   32,467 chars in   680 lines  (~48 chars per line)
+ *
+ * On the first, eighteen enormous lines are each unique, so "novel lines" and
+ * "novelty density" both report a healthy document while `shingleRatioLow`
+ * condemns it — the repetition is inside the lines. Both line strategies
+ * returned the whole output and salvage declined:
+ *
+ *   still fails the gate (25954ch:repetition-loop) [lines=18]
+ *
+ * So measure at the granularity that does the condemning: the same
+ * non-overlapping SHINGLE_STRIDE windows `shingleRatioLow` uses. Find the
+ * earliest window from which fewer than NOVELTY_FLOOR of the remaining
+ * windows are first occurrences, and keep what came before, backed off to a
+ * whitespace boundary so the kept text does not end mid-word.
+ */
+function cutAtShingleNoveltyCollapse(text: string): string | undefined {
+  const stride = SHINGLE_STRIDE;
+  const total = Math.floor(text.length / stride);
+  if (total < SHINGLE_MIN_COUNT * 2) return undefined;
+
+  const seen = new Set<string>();
+  const isFirst = new Array<boolean>(total);
+  for (let w = 0; w < total; w++) {
+    const sh = text.slice(w * stride, w * stride + stride);
+    isFirst[w] = !seen.has(sh);
+    if (isFirst[w]) seen.add(sh);
+  }
+
+  // LOCAL dead run, not a global density ratio.
+  //
+  // A global "novelty below 10% from here on" test measures the wrong thing
+  // when the clean prefix is a small share of the output — and it always is,
+  // because a loop pads the text. On a 10,122-char fixture whose good prose
+  // was 522 chars (22 of 421 windows), overall novelty was already 5.5% at
+  // window 0, so the scan concluded "loop from the start" and declined the
+  // very case it was written for.
+  //
+  // What actually marks the onset is a run of windows that introduce nothing
+  // at all. DEAD_RUN is SHINGLE_MIN_COUNT, the same span the gate needs
+  // before it will judge repetition — shorter runs occur naturally in legal
+  // text (repeated table cells, boilerplate).
+  const DEAD_RUN = SHINGLE_MIN_COUNT;
+  let runStart = -1;
+  for (let w = 0; w < total; w++) {
+    if (isFirst[w]) { runStart = -1; continue; }
+    if (runStart < 0) runStart = w;
+    if (w - runStart + 1 >= DEAD_RUN) {
+      if (runStart === 0) return undefined;          // dead from the first window
+      let end = runStart * stride;
+      // Back off to whitespace so the prefix does not end mid-token; a
+      // truncated word reads as OCR damage once it is in the index.
+      const boundary = Math.max(text.lastIndexOf(' ', end), text.lastIndexOf('\n', end));
+      if (boundary > 0 && boundary > end - stride * 4) end = boundary;
+      const candidate = text.slice(0, end).trim();
+      return candidate.length > 0 ? candidate : undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
  * The good prefix of an output that degenerated into a repetition loop.
  *
- * Two strategies, and the SHORTER passing candidate wins. Running both rather
+ * Three strategies, and the SHORTER passing candidate wins. Running both rather
  * than replacing one with the other is deliberate: each is correct on a shape
  * the other misreads, and preferring the shorter one keeps the failure mode on
  * the side of dropping good text rather than keeping garbage. Whichever is
@@ -345,14 +412,23 @@ export function salvageRepetitionLoop(
   task: OcrGateTask = 'ocr',
 ): { text: string } | { declined: string } {
   const lines = text.split('\n');
-  if (lines.length < 2) return { declined: 'single-line output: no line boundary to cut on' };
+  // Only the line strategies need line boundaries. The shingle strategy runs
+  // on anything, and it is the one that handles intra-line loops — an
+  // early `lines.length < 2` return used to short-circuit the whole function
+  // and refuse exactly the shape the shingle cut exists for.
+  const lineStrategies = lines.length >= 2
+    ? [cutAtNoveltyCollapse(lines), cutAtLastNovelLine(lines)]
+    : [];
 
-  const candidates = [cutAtNoveltyCollapse(lines), cutAtLastNovelLine(lines)]
+  const candidates = [
+    cutAtShingleNoveltyCollapse(text),
+    ...lineStrategies,
+  ]
     .filter((c): c is string => !!c)
     .sort((a, b) => a.length - b.length);
 
   if (candidates.length === 0) {
-    return { declined: `no cut point found (lines=${lines.length})` };
+    return { declined: `no cut point found (lines=${lines.length}, chars=${text.length})` };
   }
 
   const tooShort: number[] = [];

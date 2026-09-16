@@ -219,14 +219,23 @@ describe('salvaging an output that degenerated into a repetition loop', () => {
     expect(assessment.salvagedText).toBeUndefined();
   });
 
-  it('does not attempt single-line output', () => {
-    // The cut is line-based on purpose: "the last line that said something
-    // new" is a meaning the code can defend, and there is no equivalent
-    // inside one unbroken line. Declining is the honest outcome — the page
-    // stays 'ocr-quality-rejected' and therefore still repairable.
+  it('handles single-line output via the shingle cut', () => {
+    // This asserted "declines" while salvage was line-only. Real captures
+    // then showed intra-line loops are the common shape (one had 18 lines of
+    // ~1,442 chars each), so a shingle-granularity strategy was added — and
+    // a `lines.length < 2` early return was short-circuiting the whole
+    // function before it could run, refusing precisely the shape it exists
+    // for. Either outcome is acceptable here; silently skipping the strategy
+    // is not.
     const oneLine = `${GOOD.replace(/\n/g, ' ')} ${'Page 1 of 2 '.repeat(200)}`;
     const assessment = assessOcrOutput(oneLine);
-    expect(assessment.salvagedText).toBeUndefined();
+    if (assessment.salvagedText) {
+      expect(assessOcrOutput(assessment.salvagedText).ok).toBe(true);
+      expect(oneLine.startsWith(assessment.salvagedText)).toBe(true);
+    } else {
+      expect(assessment.salvageDeclined).toBeTruthy();
+      expect(assessment.salvageDeclined).not.toMatch(/no line boundary/);
+    }
   });
 
   it('keeps only the good text, not as much loop as the detector tolerates', () => {
@@ -264,3 +273,74 @@ describe('salvaging an output that degenerated into a repetition loop', () => {
  * ran and why it declined. Until one is observed, treat density-collapse as
  * implemented-and-reasoned, not verified.
  */
+
+describe('intra-line repetition — the shape real captures actually have', () => {
+  /**
+   * Two real captures settled what this looks like:
+   *
+   *   25,954 chars in    18 lines  (~1,442 chars per line)
+   *   32,467 chars in   680 lines  (~48 chars per line)
+   *
+   * Eighteen enormous unique lines defeat both line-granularity strategies —
+   * "novel lines" and "novelty density" each report a healthy document while
+   * shingleRatioLow condemns it, because the repetition lives INSIDE the
+   * lines. Salvage declined with `still fails the gate (25954ch)` until
+   * cutAtShingleNoveltyCollapse existed; it now recovers 1,968 of those
+   * 25,954 characters.
+   *
+   * Earlier attempts to synthesize this failed three times. The trick is
+   * alignment: shingleRatioLow walks NON-OVERLAPPING 24-char windows, so the
+   * repeating unit has to divide 24 to collapse the ratio. The unit below is
+   * exactly 24 characters.
+   */
+  const UNIT = 'the account balance was ';   // exactly 24 chars — grid-aligned
+  const prose = [
+    'IN THE DISTRICT COURT OF THE COUNTY OF EXAMPLE, STATE OF TEXAS.',
+    'Findings of fact and conclusions of law are set out below for the',
+    'record, together with the exhibits admitted during the hearing on',
+    'the merits and the stipulations of the parties as to authenticity.',
+    'The court finds that notice was proper and that all parties were',
+    'present or represented by counsel of record at the time of trial.',
+    'Payment history was received into evidence without objection and',
+    'is summarized in the attached schedule of deposits and charges.',
+  ].join(' ');
+
+  it('is condemned as a repetition loop even though the lines look fine', () => {
+    const full = `${prose} ${UNIT.repeat(400)}`;
+    expect(full.split('\n').length).toBe(1);        // one unbroken line
+    const assessment = assessOcrOutput(full);
+    expect(assessment.reasons).toEqual(['repetition-loop']);
+  });
+
+  it('salvages the prose and drops the intra-line loop', () => {
+    const full = `${prose} ${UNIT.repeat(400)}`;
+    const { salvagedText, salvageDeclined } = assessOcrOutput(full);
+
+    expect(salvageDeclined).toBeUndefined();
+    expect(salvagedText).toBeDefined();
+    expect(salvagedText).toContain('IN THE DISTRICT COURT');
+    expect(salvagedText).toContain('without objection');
+    // A handful of loop units may survive inside the final window; what must
+    // not survive is the bulk of them.
+    expect(salvagedText!.length).toBeLessThan(full.length / 4);
+    // Still a true prefix, and still something the gate accepts.
+    expect(full.startsWith(salvagedText!)).toBe(true);
+    expect(assessOcrOutput(salvagedText!).ok).toBe(true);
+  });
+
+  it('does not end the salvage mid-word', () => {
+    const full = `${prose} ${UNIT.repeat(400)}`;
+    const { salvagedText } = assessOcrOutput(full);
+    // The cut backs off to whitespace: a truncated token would read as OCR
+    // damage once it is in the index.
+    expect(salvagedText!).toBe(salvagedText!.trimEnd());
+    const nextChar = full.charAt(salvagedText!.length);
+    expect(nextChar === '' || /\s/.test(nextChar)).toBe(true);
+  });
+
+  it('declines when the intra-line loop starts at the beginning', () => {
+    const assessment = assessOcrOutput(UNIT.repeat(600));
+    expect(assessment.salvagedText).toBeUndefined();
+    expect(assessment.salvageDeclined).toBeTruthy();
+  });
+});
