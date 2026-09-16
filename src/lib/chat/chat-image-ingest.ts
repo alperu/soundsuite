@@ -5,7 +5,7 @@ import type { Chunk } from '../ingestion/text-chunker';
 import type { PageText } from '../ingestion/pdf-parser';
 import type { EmbeddedChunk } from '../ingestion/embedding-provider';
 import { getToolRegistry } from '../mcp/get-tool-registry';
-import { getChatVectorStore } from './chat-vector-store';
+import { getChatVectorStore, ensureChatTableWidth } from './chat-vector-store';
 import { prisma } from '../db/prisma';
 import { logger } from '../logger';
 
@@ -132,6 +132,18 @@ export async function ingestChatImage(opts: {
       }
     }
 
+    // Same self-heal as chat-ingest: a table built under an earlier embedding
+    // width is dropped, recreated by this insert, then refilled from the
+    // chat's other attachments.
+    const widthCheck = await ensureChatTableWidth(chatId, embedded[0].embedding.length);
+    if (widthCheck.recreated) {
+      logger.warn('chat-image-ingest: chat table was built under a different embedding width — recreating it', {
+        chatId,
+        previousWidth: widthCheck.previousWidth,
+        width: embedded[0].embedding.length,
+      });
+    }
+
     const vs = await getChatVectorStore(chatId);
     await vs.insertChunks(embedded);
 
@@ -150,6 +162,11 @@ export async function ingestChatImage(opts: {
       chunkCount: embedded.length,
       ocrTextLength: ocrText.length,
     });
+
+    if (widthCheck.recreated) {
+      const { reingestOtherAttachments } = await import('./chat-reingest');
+      await reingestOtherAttachments(chatId, attachmentId);
+    }
 
     return { chunkCount: embedded.length, ocrTextLength: ocrText.length };
   } catch (error) {

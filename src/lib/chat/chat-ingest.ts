@@ -4,7 +4,7 @@ import { LegalTextSplitter } from '../ingestion/legal-text-splitter';
 import type { Chunk } from '../ingestion/text-chunker';
 import type { EmbeddedChunk } from '../ingestion/embedding-provider';
 import { getToolRegistry } from '../mcp/get-tool-registry';
-import { getChatVectorStore } from './chat-vector-store';
+import { getChatVectorStore, ensureChatTableWidth } from './chat-vector-store';
 import { prisma } from '../db/prisma';
 import { logger } from '../logger';
 
@@ -101,6 +101,20 @@ export async function ingestChatAttachment(opts: {
       }
     }
 
+    // A chat table created under an earlier embedding model cannot take these
+    // vectors (see ensureChatTableWidth). Drop it first, then rebuild it from
+    // this chat's own attachments once the insert below has created it at the
+    // new width — so an old chat heals the first time a file is attached to it
+    // instead of failing at insert.
+    const widthCheck = await ensureChatTableWidth(chatId, embedded[0].embedding.length);
+    if (widthCheck.recreated) {
+      logger.warn('chat-ingest: chat table was built under a different embedding width — recreating it', {
+        chatId,
+        previousWidth: widthCheck.previousWidth,
+        width: embedded[0].embedding.length,
+      });
+    }
+
     const vs = await getChatVectorStore(chatId);
     await vs.insertChunks(embedded);
 
@@ -120,6 +134,12 @@ export async function ingestChatAttachment(opts: {
       chunkCount: embedded.length,
       ocrPages,
     });
+
+    if (widthCheck.recreated) {
+      // Lazy import: chat-reingest calls back into this module.
+      const { reingestOtherAttachments } = await import('./chat-reingest');
+      await reingestOtherAttachments(chatId, attachmentId);
+    }
 
     return { pageCount: pages.length, chunkCount: embedded.length, ocrPages };
   } catch (error) {
