@@ -27,6 +27,13 @@ export function classifyPageQuality(
   glyphPages: Set<number>,
 ): PageQualityClass | 'blank' {
   if (p.source === 'empty') return 'blank';
+  // An image-only page carries content but no extractable text, so it has no
+  // text to score. 'blank' here is the SCORING bucket meaning "excluded
+  // entirely" (see the `cls === 'blank'` continue below), not a claim that the
+  // page looks blank. Without this it falls through to the empty-text branch
+  // and is scored 'missing' — penalising a document for a page that nothing
+  // can fix, on exactly the documents now reported as "nothing to repair".
+  if (p.source === 'image-only') return 'blank';
   if (!p.text || p.text.trim().length === 0) return 'missing';
   if (glyphPages.has(p.pageNumber)) return 'glyph';
   if (p.source === 'ocr') {

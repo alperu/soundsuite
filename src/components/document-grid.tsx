@@ -61,6 +61,8 @@ interface DocumentGridProps {
   initialDocuments: Document[];
   onDocumentsUpdate?: (documents: Document[]) => void;
   partialDocumentIds?: string[];
+  /** Accounted for, but holding pages nothing can index (blank / image-only). */
+  nothingToRepairDocumentIds?: string[];
   /** Deep-linked selection from /?doc=id[,id...]. */
   initialSelectedIds?: string[];
   /** Reports selection changes upward (URL sync). */
@@ -99,6 +101,7 @@ function DocumentCard({
   isRetrying,
   isSelected,
   isPartial,
+  isNothingToRepair,
   onRetry,
   onFixPartial,
   fixResult,
@@ -109,6 +112,13 @@ function DocumentCard({
   isRetrying: boolean;
   isSelected: boolean;
   isPartial?: boolean;
+  /**
+   * Fully accounted for, but some pages are not in the index because nothing
+   * can put them there (blank by design, or image-only). NOT partial — there
+   * is no gap to close — so it gets a lighter green than a plain INDEXED
+   * document rather than the amber of a repairable gap.
+   */
+  isNothingToRepair?: boolean;
   onRetry?: () => void;
   /** Opens the Fix Partial triage panel (owned by the grid, not the card). */
   onFixPartial?: () => void;
@@ -119,9 +129,19 @@ function DocumentCard({
   // Open-ended lookups: Document.status is a bare String in the DB, so an
   // unfamiliar value must still render rather than interpolate `undefined`.
   const partialAccent = isPartial && doc.status === 'INDEXED';
-  const bg = partialAccent ? 'bg-amber-50' : (STATUS_BG[doc.status] ?? 'bg-gray-50');
-  const dot = partialAccent ? 'bg-amber-400' : (STATUS_DOT[doc.status] ?? 'bg-gray-400');
-  const text = partialAccent ? 'text-amber-700' : (STATUS_TEXT[doc.status] ?? 'text-gray-700');
+  // Lighter green than a fully indexed document: everything that CAN be
+  // indexed is, and the rest never will be. Distinct from amber, which means
+  // "there is something here to repair".
+  const nothingToRepairAccent = !partialAccent && isNothingToRepair && doc.status === 'INDEXED';
+  const bg = partialAccent ? 'bg-amber-50'
+    : nothingToRepairAccent ? 'bg-emerald-50/50'
+    : (STATUS_BG[doc.status] ?? 'bg-gray-50');
+  const dot = partialAccent ? 'bg-amber-400'
+    : nothingToRepairAccent ? 'bg-emerald-300'
+    : (STATUS_DOT[doc.status] ?? 'bg-gray-400');
+  const text = partialAccent ? 'text-amber-700'
+    : nothingToRepairAccent ? 'text-emerald-600'
+    : (STATUS_TEXT[doc.status] ?? 'text-gray-700');
 
   return (
     <div
@@ -153,7 +173,7 @@ function DocumentCard({
             <span className={`w-2.5 h-2.5 rounded-full ${dot} mr-2`}></span>
           )}
           <span className={`text-xs font-semibold uppercase ${text}`}>
-            {statusLabel(doc.status, isPartial)}
+            {statusLabel(doc.status, isPartial, isNothingToRepair)}
           </span>
           {doc.readinessScore != null && doc.readinessBand && doc.status === 'INDEXED' && (
             <span
@@ -244,13 +264,25 @@ function DocumentCard({
         </div>
       )}
 
-      {/* Partial index — offer the repair, and report what it could not fix. */}
-      {partialAccent && onFixPartial && (
+      {/* Partial index — offer the repair, and report what it could not fix.
+          Also shown when there is nothing to repair: the panel is how an
+          operator sees WHICH pages are blank or image-only and why, so
+          removing the button would hide the explanation along with the
+          problem. Muted to match the lighter green. */}
+      {(partialAccent || nothingToRepairAccent) && onFixPartial && (
         <div className="mt-2">
           <button
             onClick={(e) => { e.stopPropagation(); onFixPartial(); }}
-            className="text-xs px-2.5 py-1 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded transition-colors"
-            title="Show which pages are missing from the index and repair the ones that can be repaired"
+            className={`text-xs px-2.5 py-1 rounded transition-colors ${
+              partialAccent
+                ? 'bg-amber-100 hover:bg-amber-200 text-amber-800'
+                : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200'
+            }`}
+            title={
+              partialAccent
+                ? 'Show which pages are missing from the index and repair the ones that can be repaired'
+                : 'Every page is accounted for. Open to see which pages hold no text (blank by design or image-only) and why.'
+            }
           >
             Fix Partial
           </button>
@@ -309,7 +341,7 @@ function DocumentCard({
   );
 }
 
-export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpdate, partialDocumentIds, initialSelectedIds, onSelectionChange }: DocumentGridProps) {
+export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpdate, partialDocumentIds, nothingToRepairDocumentIds, initialSelectedIds, onSelectionChange }: DocumentGridProps) {
   const [documents, setDocuments] = useState<Document[]>(initialDocuments);
   /**
    * How many documents this case has that no filing references. The grid shows
@@ -350,6 +382,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
   const [refreshingPathIds, setRefreshingPathIds] = useState<Set<string>>(new Set());
   const lastClickedRef = useRef<string | null>(null);
   const partialSet = new Set(partialDocumentIds || []);
+  const nothingToRepairSet = new Set(nothingToRepairDocumentIds || []);
   // Fix Partial panel + results live here, not in DocumentCard: a successful
   // repair flips the document to FIXING_PARTIAL, which moves the card to
   // another column and remounts it, discarding any card-local state. The 2s
@@ -1027,6 +1060,7 @@ export default function DocumentGrid({ caseId, initialDocuments, onDocumentsUpda
                     isRetrying={false}
                     isSelected={selectedIds.has(doc.id)}
                     isPartial={partialSet.has(doc.id)}
+                    isNothingToRepair={nothingToRepairSet.has(doc.id)}
                     onFixPartial={() => setFixPanelDocId(doc.id)}
                     fixResult={fixResults[doc.id]}
                   />

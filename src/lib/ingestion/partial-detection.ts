@@ -70,12 +70,13 @@ function escapeSqlList(ids: string[]): string {
  * (chunks in LanceDB, plus pages known blank-by-design) falls short of
  * pageCount.
  */
-export async function computePartialDocumentIds(
+export async function computeDocumentCoverage(
   docs: PartialDetectionDoc[],
   opts: ComputePartialOptions,
-): Promise<Set<string>> {
+): Promise<DocumentCoverage> {
   const partial = new Set<string>();
-  if (docs.length === 0) return partial;
+  const nothingToRepair = new Set<string>();
+  if (docs.length === 0) return { partial, nothingToRepair };
 
   const tableName = opts.tableName ?? 'chunks';
   const db = await opts.lancedb.connect(opts.lancedbPath);
@@ -84,7 +85,7 @@ export async function computePartialDocumentIds(
   if (!tableNames.includes(tableName)) {
     // No chunks table at all means nothing has been proven indexed.
     for (const doc of docs) partial.add(doc.id);
-    return partial;
+    return { partial, nothingToRepair };
   }
 
   const table = await db.openTable(tableName);
@@ -106,16 +107,16 @@ export async function computePartialDocumentIds(
   // Naive candidates under the raw distinct-pages-vs-pageCount comparison.
   // Only these need the (more expensive) blank-page lookup.
   const candidates = docs.filter((d) => (indexedPagesByDoc.get(d.id)?.size ?? 0) < d.pageCount);
-  if (candidates.length === 0) return partial;
+  if (candidates.length === 0) return { partial, nothingToRepair };
 
   const candidateIds = candidates.map((d) => d.id);
   const [pcEmptyRows, psEmptyRows, pcAnyRows] = await Promise.all([
     opts.prisma.pageCache.findMany({
-      where: { documentId: { in: candidateIds }, source: 'empty' },
+      where: { documentId: { in: candidateIds }, source: { in: ['empty', 'image-only'] } },
       select: { documentId: true, pageNumber: true },
     }),
     opts.prisma.pageScore.findMany({
-      where: { documentId: { in: candidateIds }, source: 'empty' },
+      where: { documentId: { in: candidateIds }, source: { in: ['empty', 'image-only'] } },
       select: { documentId: true, pageNumber: true },
     }),
     opts.prisma.pageCache.findMany({
@@ -142,10 +143,46 @@ export async function computePartialDocumentIds(
 
   for (const doc of candidates) {
     const indexed = indexedPagesByDoc.get(doc.id) ?? new Set<number>();
-    const empty = emptyByDoc.get(doc.id) ?? new Set<number>();
-    const coveredCount = new Set([...indexed, ...empty]).size;
-    if (coveredCount < doc.pageCount) partial.add(doc.id);
+    const unindexable = emptyByDoc.get(doc.id) ?? new Set<number>();
+    const coveredCount = new Set([...indexed, ...unindexable]).size;
+    if (coveredCount < doc.pageCount) {
+      partial.add(doc.id);
+    } else if (unindexable.size > 0) {
+      // Fully accounted for, but not every page is IN the index: some are
+      // blank by design or image-only. Not partial — there is nothing to
+      // repair — but not plainly "indexed" either, and the dashboard needs
+      // to say which so it can show "Indexed (Nothing to repair)" rather
+      // than implying a gap that a repair could close.
+      nothingToRepair.add(doc.id);
+    }
   }
 
-  return partial;
+  return { partial, nothingToRepair };
+}
+
+/** Coverage verdict for a batch of documents. */
+export interface DocumentCoverage {
+  /** Has pages with no vectors that a repair could plausibly index. */
+  partial: Set<string>;
+  /**
+   * Every page is accounted for, but some are not in the index because they
+   * cannot be: blank by design, or image-only (ink, no extractable text).
+   * Nothing to repair — and saying "partial" about these was the complaint
+   * this set exists to answer.
+   */
+  nothingToRepair: Set<string>;
+}
+
+/**
+ * Back-compat shim: the partial set only.
+ *
+ * Kept because two callers and a test suite are written against it, and
+ * widening the return type at every call site is churn that buys nothing for
+ * the ones that only want the badge.
+ */
+export async function computePartialDocumentIds(
+  docs: PartialDetectionDoc[],
+  opts: ComputePartialOptions,
+): Promise<Set<string>> {
+  return (await computeDocumentCoverage(docs, opts)).partial;
 }

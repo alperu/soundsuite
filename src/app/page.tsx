@@ -2,7 +2,7 @@ import { prisma } from '@/lib/db/prisma';
 import CaseViewWrapper from '@/components/case-view-wrapper';
 import * as lancedb from '@lancedb/lancedb';
 import {
-  computePartialDocumentIds,
+  computeDocumentCoverage,
   type PartialDetectionPrisma,
 } from '@/lib/ingestion/partial-detection';
 import type { DocumentStatus } from '@/lib/document-status';
@@ -55,14 +55,14 @@ interface Document {
  * good chunks, and excluding them would make the badge flicker off mid-repair,
  * which reads as the fix having failed.
  */
-async function getPartialDocumentIds(): Promise<Set<string>> {
+async function getDocumentCoverage(): Promise<{ partial: Set<string>; nothingToRepair: Set<string> }> {
   try {
     const indexedDocs = await prisma.document.findMany({
       where: { status: { in: ['INDEXED', 'FIXING_PARTIAL'] }, pageCount: { gt: 0 } },
       select: { id: true, pageCount: true },
     });
 
-    if (indexedDocs.length === 0) return new Set();
+    if (indexedDocs.length === 0) return { partial: new Set(), nothingToRepair: new Set() };
 
     // computePartialDocumentIds returns EVERY input document as partial when the
     // chunks table is absent (fresh install, moved LANCEDB_PATH). That would badge
@@ -70,12 +70,12 @@ async function getPartialDocumentIds(): Promise<Set<string>> {
     // and fail open — which is what this page has always done.
     const db = await lancedb.connect(LANCEDB_PATH);
     const tableNames = await db.tableNames();
-    if (!tableNames.includes(TABLE_NAME)) return new Set();
+    if (!tableNames.includes(TABLE_NAME)) return { partial: new Set(), nothingToRepair: new Set() };
 
     // The real Prisma client is not structurally assignable to the narrow port
     // the module declares (its findMany args are generic `Exact<…>`); the cast is
     // required and is checked by the module's own runtime usage.
-    return await computePartialDocumentIds(
+    return await computeDocumentCoverage(
       indexedDocs.map((d) => ({ id: d.id, pageCount: d.pageCount ?? 0 })),
       {
         prisma: prisma as unknown as PartialDetectionPrisma,
@@ -85,9 +85,9 @@ async function getPartialDocumentIds(): Promise<Set<string>> {
       },
     );
   } catch {
-    // computePartialDocumentIds does not catch, and this is a `force-dynamic`
+    // computeDocumentCoverage does not catch, and this is a `force-dynamic`
     // server component — an unavailable LanceDB must not break the whole page.
-    return new Set();
+    return { partial: new Set(), nothingToRepair: new Set() };
   }
 }
 
@@ -187,7 +187,7 @@ export default async function Home({
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
   const sp = await searchParams;
-  const partialIds = await getPartialDocumentIds();
+  const { partial: partialIds, nothingToRepair: nothingToRepairIds } = await getDocumentCoverage();
   const [cases, initialDocuments] = await Promise.all([
     getCasesWithStats(partialIds),
     getInitialDocuments(),
@@ -204,6 +204,7 @@ export default async function Home({
       cases={cases}
       initialDocuments={initialDocuments}
       partialDocumentIds={Array.from(partialIds)}
+      nothingToRepairDocumentIds={Array.from(nothingToRepairIds)}
       initialCaseId={initialCaseId}
       initialDocIds={initialDocIds}
     />

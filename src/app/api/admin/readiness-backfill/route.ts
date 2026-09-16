@@ -188,9 +188,16 @@ export async function POST(req: NextRequest) {
             pageNumber: r.pageNumber,
             text: r.text,
             textDensity: r.textDensity,
-            // 'empty' (ink-verified blank) must survive the merge — mapping
-            // it to 'extract' would turn a blank into a penalized gap.
-            source: r.source === 'ocr' ? 'ocr' : r.source === 'empty' ? 'empty' : 'extract',
+            // 'empty' (ink-verified blank) and 'image-only' (ink, but OCR
+            // genuinely found no text) must both survive the merge — mapping
+            // either to 'extract' turns a page nothing can fix into a
+            // penalized gap, and erases the mark that keeps the document out
+            // of the PARTIAL badge. Same class of silent rewrite as
+            // RUNTIME_VALUES dropping docker-model-runner rows.
+            source: r.source === 'ocr' ? 'ocr'
+              : r.source === 'empty' ? 'empty'
+              : r.source === 'image-only' ? 'image-only'
+              : 'extract',
             confidence: r.confidence,
           });
         }
@@ -206,7 +213,7 @@ export async function POST(req: NextRequest) {
         }
 
         const withText = new Set(pages.filter((p) => p.text.trim().length > 0).map((p) => p.pageNumber));
-        const blankSet = new Set(pages.filter((p) => p.source === 'empty').map((p) => p.pageNumber));
+        const blankSet = new Set(pages.filter((p) => p.source === 'empty' || p.source === 'image-only').map((p) => p.pageNumber));
         const gapPages: number[] = [];
         for (let p = 1; p <= pageCount; p++) {
           if (!withText.has(p) && !blankSet.has(p)) gapPages.push(p);

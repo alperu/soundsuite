@@ -34,7 +34,7 @@ export interface VerificationResult {
     pageNumber: number;
     text: string;
     textDensity: number;
-    source: 'extract' | 'ocr' | 'empty';
+    source: 'extract' | 'ocr' | 'empty' | 'image-only';
     confidence: number | null;
   }>;
 }
@@ -80,9 +80,16 @@ export async function verifyIndexing(
     // Check each page. A page explicitly classified blank-by-design
     // (source='empty': render ok + OCR empty + ink below threshold) is NOT a
     // gap — it has no content to be missing.
+    //
+    // 'image-only' joins it: ink present, OCR genuinely returned nothing, so
+    // the page has content but no extractable TEXT. It is counted with the
+    // blanks because the question here is "is this a gap we could close?",
+    // and the answer is no. Left in the else-branch it became a gapPage,
+    // which is both a false defect and the thing that keeps the document
+    // reporting PARTIAL forever.
     for (let p = 1; p <= totalPages; p++) {
       const cached = pageMap.get(p);
-      if (cached && cached.source === 'empty') {
+      if (cached && (cached.source === 'empty' || cached.source === 'image-only')) {
         blankPages.push(p);
       } else if (!cached || !cached.text || cached.text.trim().length === 0) {
         pagesWithoutText++;

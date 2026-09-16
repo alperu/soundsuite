@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import * as lancedb from '@lancedb/lancedb';
 import { prisma } from '@/lib/db/prisma';
-import { computePartialDocumentIds } from '@/lib/ingestion/partial-detection';
+import { computeDocumentCoverage } from '@/lib/ingestion/partial-detection';
 
 const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
 
@@ -42,20 +42,29 @@ export async function GET() {
     });
 
     if (docs.length === 0) {
-      return NextResponse.json({ partialDocumentIds: [] });
+      return NextResponse.json({ partialDocumentIds: [], nothingToRepairDocumentIds: [] });
     }
 
-    const partial = await computePartialDocumentIds(
+    const { partial, nothingToRepair } = await computeDocumentCoverage(
       docs.map((d) => ({ id: d.id, pageCount: d.pageCount! })),
       {
-        prisma: prisma as unknown as Parameters<typeof computePartialDocumentIds>[1]['prisma'],
-        lancedb: lancedb as unknown as Parameters<typeof computePartialDocumentIds>[1]['lancedb'],
+        prisma: prisma as unknown as Parameters<typeof computeDocumentCoverage>[1]['prisma'],
+        lancedb: lancedb as unknown as Parameters<typeof computeDocumentCoverage>[1]['lancedb'],
         lancedbPath: LANCEDB_PATH,
         tableName: process.env.LANCEDB_TABLE || 'chunks',
       },
     );
 
-    return NextResponse.json({ partialDocumentIds: [...partial] });
+    return NextResponse.json({
+      partialDocumentIds: [...partial],
+      /**
+       * Accounted for, but not every page is in the index: blank by design or
+       * image-only. Reported separately so the dashboard can say "Indexed
+       * (Nothing to repair)" instead of either implying a closable gap or
+       * claiming plain INDEXED when some pages hold no text.
+       */
+      nothingToRepairDocumentIds: [...nothingToRepair],
+    });
   } catch (error) {
     console.error('Partial status error:', error);
     return NextResponse.json(

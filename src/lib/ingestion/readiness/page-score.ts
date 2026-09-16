@@ -30,7 +30,7 @@ export interface PageScoreResult {
   pageClass: PageScoreClass;
   flags: WarningCode[];
   textDensity: number;
-  source: 'extract' | 'ocr' | 'empty';
+  source: 'extract' | 'ocr' | 'empty' | 'image-only';
   confidence: number | null;
   chunkCount: number;
 }

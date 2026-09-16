@@ -41,6 +41,8 @@ interface CaseViewWrapperProps {
   cases: CaseWithStats[];
   initialDocuments: Record<string, Document[]>;
   partialDocumentIds: string[];
+  /** Accounted for, but holding pages nothing can index (blank / image-only). */
+  nothingToRepairDocumentIds?: string[];
   /** From /?case=... — deep-linked case selection. */
   initialCaseId?: string;
   /** From /?doc=id[,id...] — deep-linked document selection. */
@@ -61,6 +63,7 @@ export default function CaseViewWrapper({
   cases,
   initialDocuments,
   partialDocumentIds,
+  nothingToRepairDocumentIds,
   initialCaseId,
   initialDocIds,
 }: CaseViewWrapperProps) {
@@ -145,6 +148,7 @@ export default function CaseViewWrapper({
                 initialDocuments={initialDocuments[selectedCaseId] || []}
                 onDocumentsUpdate={setLiveDocuments}
                 partialDocumentIds={partialDocumentIds}
+                nothingToRepairDocumentIds={nothingToRepairDocumentIds}
                 initialSelectedIds={initialDocSelection}
                 onSelectionChange={handleDocSelectionChange}
               />

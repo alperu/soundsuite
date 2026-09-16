@@ -85,7 +85,16 @@ export interface PageTextLike {
   textDensity: number;
   /** 'empty' = classified blank-by-design (render ok + OCR empty + ink below
    * threshold) — excluded from quality scoring rather than penalized. */
-  source: 'extract' | 'ocr' | 'empty';
+  /**
+   * Page provenance.
+   *
+   * 'empty'      — ink-verified blank; no text exists.
+   * 'image-only' — ink present, OCR genuinely returned nothing. Content, but
+   *                no extractable text. Excluded from scoring like 'empty',
+   *                since there is no text to judge; scoring it 'missing'
+   *                penalises the document for a page nothing can fix.
+   */
+  source: 'extract' | 'ocr' | 'empty' | 'image-only';
   confidence: number | null;
 }
 

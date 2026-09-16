@@ -72,13 +72,23 @@ function makePrisma(seed: {
 
     const where = args.where as {
       documentId?: { in?: string[] };
-      source?: string;
+      // Prisma accepts either a scalar or `{ in: [...] }`, and the module
+      // uses the latter now that 'image-only' joins 'empty' as a source that
+      // means "not a gap". The fake understood only the scalar form, so the
+      // real query silently matched nothing here and every document with
+      // blank pages read as partial — a fake-fidelity gap, not a defect in
+      // the module.
+      source?: string | { in?: string[] };
     };
     const ids = where.documentId?.in;
+    const matchesSource = (rowSource: string): boolean => {
+      const w = where.source;
+      if (w === undefined) return true;
+      if (typeof w === 'string') return rowSource === w;
+      return !!w.in?.includes(rowSource);
+    };
     let out = rows.filter(
-      (r) =>
-        (!ids || ids.includes(r.documentId)) &&
-        (where.source === undefined || r.source === where.source),
+      (r) => (!ids || ids.includes(r.documentId)) && matchesSource(r.source),
     );
 
     if (args.distinct?.includes('documentId')) {

@@ -399,11 +399,24 @@ export async function POST(
       // gap ('extract' with empty text) so it keeps drawing attention.
       for (const page of targetPages) {
         const isEmpty = blankVerifiedPages.has(page.pageNumber);
+        // Genuinely image-only: ink on the page AND OCR truly returned
+        // nothing. Deliberately reads the set AFTER the ocrRejectedPages
+        // exclusion — a page whose OCR output was merely discarded by the
+        // quality gate must never be persisted as image-only, because that
+        // makes the misclassification durable and stops the page being
+        // re-examined. That is precisely how page 145 of an RR volume became
+        // permanently unindexed under the previous classifier, before a retry
+        // indexed it at density 654.
+        const isImageOnly = !isEmpty
+          && inkedNoTextPages.has(page.pageNumber)
+          && !ocrRejectedPages.has(page.pageNumber);
         // Empty-text pages that aren't verified blanks are gaps with
         // 'extract' provenance — never claim OCR produced nothing when OCR
         // simply failed to read the page.
         const source = isEmpty
           ? 'empty'
+          : isImageOnly
+          ? 'image-only'
           : ocrDonePages.has(page.pageNumber)
             ? 'ocr'
             : page.text.trim().length === 0

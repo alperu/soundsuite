@@ -39,8 +39,12 @@ const LABELS: Record<string, string> = {
   DISCOVERED: 'DISCOVERED',
 };
 
-export function statusLabel(status: string, isPartial = false): string {
+export function statusLabel(status: string, isPartial = false, nothingToRepair = false): string {
   if (isPartial && status === 'INDEXED') return 'PARTIAL';
+  // Every page is accounted for, but some hold no text and never will —
+  // blank by design, or image-only (ink, no extractable text). Calling that
+  // PARTIAL implies a gap a repair could close, and there is none.
+  if (nothingToRepair && status === 'INDEXED') return 'INDEXED (NOTHING TO REPAIR)';
   return LABELS[status] ?? status;
 }
 
