@@ -1003,6 +1003,18 @@ export function buildOpenRouterPush(cfg: AppConfig): {
   // the bare `{ model: id }` shape for a chat model like this, same as an
   // unrecognized rerank id.
   add('rlm-sandbox', cfg.rlmSandboxModel);
+  // completion — the chat model. Omitted until 2026-09-16, which left the
+  // sidecar's /api/status reporting neither a mode nor a model for a role the
+  // admin page showed as cloud-only: two sources of truth disagreeing about
+  // what the operator had configured.
+  //
+  // Not a functional break for THIS master, which reaches OpenRouter for
+  // completion on its own via resolveEndpoint Phase 0/4 reading master config
+  // (cloud-provider.ts → openRouterChatModel) and never consults the sidecar's
+  // copy. It matters for the sidecar's own /api/v1/chat/completions route,
+  // which resolves its model from allowedModels — so without this a
+  // sidecar-proxied chat caller gets a 503 "has not configured a model".
+  add('completion', cfg.openRouterChatModel);
 
   // Modes come from `virtualInference.mode.<role>`. This used to push a
   // hardcoded 'local-first' for every role, so the sidecar reported a mode the
@@ -1039,6 +1051,9 @@ export function buildOpenRouterPush(cfg: AppConfig): {
   }
   if (allowedModels['rlm-sandbox']) {
     modeByRole['rlm-sandbox'] = sidecarMode(cfg.virtualInferenceModeRlm);
+  }
+  if (allowedModels['completion']) {
+    modeByRole['completion'] = sidecarMode(cfg.virtualInferenceModeCompletion);
   }
 
   return { apiKey: cfg.openRouterApiKey, allowedModels, modeByRole, domain: 'legal' };

@@ -196,3 +196,45 @@ describe('buildOpenRouterPush — modes come from config', () => {
     expect(out.modeByRole['reranker']).toBe('local-first');
   });
 });
+
+/**
+ * `completion` was missing from the push until 2026-09-16.
+ *
+ * The admin page showed completion as cloud-only while the sidecar's
+ * /api/status reported neither a mode nor a model for it — two sources of truth
+ * disagreeing about what the operator had configured.
+ *
+ * Not a functional break for this master, which reaches OpenRouter for
+ * completion itself via resolveEndpoint (reading master config, never the
+ * sidecar's copy). It matters for the sidecar's own /api/v1/chat/completions
+ * route, which resolves its model out of allowedModels — so without this a
+ * sidecar-proxied chat caller got a 503 "has not configured a model".
+ */
+describe('buildOpenRouterPush — completion', () => {
+  it('pushes the chat model and its mode', () => {
+    const out = buildOpenRouterPush(cfg({
+      openRouterChatModel: 'deepseek/deepseek-v4.1-flash',
+      virtualInferenceModeCompletion: 'cloud-only',
+    } as Partial<AppConfig>))!;
+    expect(out.allowedModels['completion']).toEqual({ model: 'deepseek/deepseek-v4.1-flash' });
+    expect(out.modeByRole['completion']).toBe('cloud-only');
+  });
+
+  it('omits completion entirely when no chat model is configured', () => {
+    // An absent key is honest; the sidecar then infers nothing for a role we
+    // never listed. A listed role with no model would be the disagreement.
+    const out = buildOpenRouterPush(cfg({ openRouterChatModel: undefined } as Partial<AppConfig>))!;
+    expect(out.allowedModels['completion']).toBeUndefined();
+    expect(out.modeByRole['completion']).toBeUndefined();
+  });
+
+  it('does not disturb the other roles', () => {
+    const out = buildOpenRouterPush(cfg({
+      openRouterChatModel: 'deepseek/deepseek-v4.1-flash',
+    } as Partial<AppConfig>))!;
+    // completion is a chat id, so it must NOT pick up embedding dims or a
+    // pinned rerank provider from add()'s lookup chain.
+    expect(out.allowedModels['completion']).not.toHaveProperty('dims');
+    expect(out.allowedModels['completion']).not.toHaveProperty('provider');
+  });
+});
