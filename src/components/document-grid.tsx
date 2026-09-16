@@ -67,6 +67,18 @@ interface DocumentGridProps {
   onSelectionChange?: (docIds: string[]) => void;
 }
 
+/**
+ * Milliseconds since `dateStr`, or NaN if unparseable.
+ *
+ * Kept as a module-level helper rather than inlined in render: the linter's
+ * react-hooks/purity rule rightly rejects a bare Date.now() during render, and
+ * relativeTime below already reads the clock the same way. The grid's 2s poll
+ * is what re-renders these, so the value refreshes without a timer of its own.
+ */
+function elapsedMs(dateStr: string): number {
+  return Date.now() - new Date(dateStr).getTime();
+}
+
 function relativeTime(dateStr: string): string {
   const now = Date.now();
   const then = new Date(dateStr).getTime();
@@ -199,7 +211,36 @@ function DocumentCard({
 
       {isRepairing && !doc.stageProgress && (
         <div className="mt-2">
-          <div className="text-xs text-blue-600">Repairing missing pages…</div>
+          {/*
+            "Repairing…" was shown for as long as the document held
+            FIXING_PARTIAL, which is a CLAIMED status: the route returns 200 in
+            ~150ms and the work continues asynchronously. So a repair that is
+            queued, blocked, or dead is indistinguishable from one making
+            progress — observed 2026-09-16 with two documents sat at
+            "Repairing" while the log's last repair line was
+            "Generating embeddings for 5 chunks", blocked behind an OCR
+            ingestion run that was consuming the same embedding capacity.
+            No stage progress is emitted for repairs, so elapsed time is the
+            only signal available. Past the threshold, say waiting rather than
+            repairing — claiming progress that is not happening is what sent
+            the operator looking for a fault in the repair itself.
+          */}
+          {(() => {
+            const ms = elapsedMs(doc.updatedAt);
+            const STALL_MS = 90_000;
+            if (!Number.isFinite(ms) || ms < STALL_MS) {
+              return <div className="text-xs text-blue-600">Repairing missing pages…</div>;
+            }
+            const mins = Math.floor(ms / 60_000);
+            return (
+              <div
+                className="text-xs text-blue-600"
+                title="The repair has been claimed but has not reported progress. It is most likely waiting for embedding capacity — a concurrent ingestion run uses the same provider."
+              >
+                Waiting to be fixed · {mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`}
+              </div>
+            );
+          })()}
         </div>
       )}
 
