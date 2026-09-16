@@ -20,6 +20,7 @@ export const MAX_REPAIR_ATTEMPTS = 3;
 
 export type RepairReasonCode =
   | 'ocr-empty'
+  | 'ocr-quality-rejected'
   | 'image-only'
   | 'dimension-mismatch'
   | 'reindex-request-failed'
@@ -71,6 +72,8 @@ export function classifyRepairFailure(input: {
   stillEmptyAfterOcr?: boolean;
   /** OCR found no text AND the ink check says the page is not blank. */
   inkedNoText?: boolean;
+  /** OCR produced output and the quality gate discarded it. */
+  ocrRejected?: boolean;
 }): { code: RepairReasonCode; reason: string } {
   if (input.requestError) {
     if (/dimension/i.test(input.requestError)) {
@@ -82,6 +85,21 @@ export function classifyRepairFailure(input: {
     return {
       code: 'reindex-request-failed',
       reason: `Reindex request failed: ${truncate(input.requestError)}`,
+    };
+  }
+  // Checked before the "no text" codes, because it is the reason there
+  // appears to be no text. OCR read the page and the gate threw the output
+  // away: on real pages of a tax schedule it discarded 11,766-32,467
+  // characters of correct text for a repetition loop, and two of those pages
+  // later extracted at density 1132 and 1362. Calling that "image-only" or
+  // "ocr-empty" blames the page for a model failure.
+  if (input.ocrRejected) {
+    return {
+      code: 'ocr-quality-rejected',
+      reason:
+        'OCR read this page but its output was rejected by the quality gate (usually a repetition loop on a '
+        + 'dense page). The page HAS text — OCR could not return it cleanly. Not a page defect: fix or change '
+        + 'the OCR model and the page becomes indexable.',
     };
   }
   // A page that OCRs to nothing but carries ink is not a failure and not
@@ -151,7 +169,10 @@ export function isImmediatelyTerminal(code: RepairReasonCode): boolean {
  * batch runner stops a document as soon as a round makes no forward progress.
  */
 export function isInfrastructureFailure(code: RepairReasonCode): boolean {
-  return code === 'reindex-request-failed';
+  // 'ocr-quality-rejected' belongs here for the same reason: the page is
+  // fine, the OCR model is not. Spending the retry budget on it would leave
+  // every dense page permanently given-up over a model that can be swapped.
+  return code === 'reindex-request-failed' || code === 'ocr-quality-rejected';
 }
 
 function truncate(s: string, max = 200): string {

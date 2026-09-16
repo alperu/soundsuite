@@ -246,9 +246,43 @@ export default function FixPartialPanel({
   const fixable = unindexed.filter((p) => p.textDensity > 0 && !givenUpPages.has(p.pageNumber));
   const emptyPages = report?.summary.emptyPages ?? 0;
 
+  /**
+   * Image-only pages: content, but no text. Counted separately from "missing".
+   *
+   * These carry ink — two real examples measured 32% and 74% coverage — and
+   * OCR found no text through any path, so they are photographs rather than
+   * blanks or failures. page-report cannot see this: it classifies from
+   * chunk counts and PageCache provenance, and an image-only page has no
+   * vectors, so it reads as plain `unindexed`. The distinction lives in
+   * `Document.tags.repair` as reasonCode 'image-only', which arrives here on
+   * the preflight's `terminal` array.
+   *
+   * Carved OUT of `missing` rather than shown alongside it, so the four tiles
+   * still partition the page count. Adding a fifth independent tally would
+   * make 150 indexed + 4 image-only + 4 missing exceed a 154-page document.
+   */
+  const imageOnly = givenUp.filter((p) => p.reasonCode === 'image-only');
+  const imageOnlyPages = new Set(imageOnly.map((p) => p.page));
+  const missing = unindexed.filter((p) => !imageOnlyPages.has(p.pageNumber));
+
   const selected = includeOcr ? [...fixable, ...needsOcr] : fixable;
-  const nothingToFix = !!report && unindexed.length === 0;
-  const allGivenUp = !!report && unindexed.length > 0 && fixable.length === 0 && needsOcr.length === 0;
+  /**
+   * Given up on, EXCLUDING image-only pages.
+   *
+   * An image-only page is not a repair that failed — it is what the page is,
+   * and it now has its own block above. Leaving it in the given-up list put
+   * it behind a "Reset history & retry" button that would spend ~30s per page
+   * re-rendering and re-OCRing a photograph to rediscover that it is a
+   * photograph. Four such pages cost 128 seconds to confirm once; there is no
+   * reason to offer that again.
+   */
+  const givenUpRepairable = givenUp.filter((p) => p.reasonCode !== 'image-only');
+
+  // "Nothing to fix" counts image-only alongside blank-by-design: both are
+  // pages that legitimately hold no text and will never yield a chunk, so a
+  // document whose only gaps are those is not really partial.
+  const nothingToFix = !!report && missing.length === 0;
+  const allGivenUp = !!report && missing.length > 0 && fixable.length === 0 && needsOcr.length === 0;
   const onlyNeedsOcr = fixable.length === 0 && needsOcr.length > 0;
   const canRun = !!report && selected.length > 0 && !running && !preflightNote;
 
@@ -424,8 +458,10 @@ export default function FixPartialPanel({
 
           {report && !loading && (
             <>
-              {/* Coverage summary */}
-              <div className="grid grid-cols-4 gap-2 text-center">
+              {/* Coverage summary. The tiles partition totalPages: indexed +
+                  blank + image-only + missing. A fifth independent tally
+                  would overcount, so image-only comes out of missing. */}
+              <div className={`grid ${imageOnly.length > 0 ? 'grid-cols-5' : 'grid-cols-4'} gap-2 text-center`}>
                 <div className="bg-gray-50 rounded p-2">
                   <div className="text-lg font-semibold text-gray-900">{report.totalPages}</div>
                   <div className="text-[11px] text-gray-500">pages</div>
@@ -434,15 +470,51 @@ export default function FixPartialPanel({
                   <div className="text-lg font-semibold text-green-700">{report.summary.indexedPages}</div>
                   <div className="text-[11px] text-green-600">indexed</div>
                 </div>
-                <div className="bg-slate-50 rounded p-2">
+                <div
+                  className="bg-slate-50 rounded p-2"
+                  title="No text on the page at all: the render is faithful and ink coverage is below the blank threshold. Nothing to embed, so re-indexing can never change it."
+                >
                   <div className="text-lg font-semibold text-slate-600">{emptyPages}</div>
                   <div className="text-[11px] text-slate-500">blank by design</div>
                 </div>
+                {imageOnly.length > 0 && (
+                  <div
+                    className="bg-indigo-50 rounded p-2"
+                    title="The page carries content but no extractable text — OCR ran through every path and found none, and the page is too inked to be blank. A photograph or a dark scan. It belongs to exhibit/image retrieval, not the text index."
+                  >
+                    <div className="text-lg font-semibold text-indigo-700">{imageOnly.length}</div>
+                    <div className="text-[11px] text-indigo-600">image-only</div>
+                  </div>
+                )}
                 <div className="bg-amber-50 rounded p-2">
-                  <div className="text-lg font-semibold text-amber-700">{unindexed.length}</div>
+                  <div className="text-lg font-semibold text-amber-700">{missing.length}</div>
                   <div className="text-[11px] text-amber-600">missing</div>
                 </div>
               </div>
+
+              {/* Image-only detail. Stated positively: this is what the page
+                  IS, not a repair that failed. Sits next to "blank by design"
+                  conceptually — both are pages that legitimately hold no
+                  text and will never produce a chunk. */}
+              {imageOnly.length > 0 && (
+                <div className="border border-indigo-200 rounded">
+                  <div className="px-3 py-2 bg-indigo-50 border-b border-indigo-200">
+                    <p className="text-sm font-medium text-indigo-800">
+                      {imageOnly.length} image-only page{imageOnly.length === 1 ? '' : 's'}
+                    </p>
+                    <p className="text-[11px] text-indigo-700 mt-0.5">
+                      {imageOnly.length === 1 ? 'This page carries' : 'These pages carry'} content but no
+                      extractable text — OCR ran through every path and found none, and{' '}
+                      {imageOnly.length === 1 ? 'the page is' : 'they are'} too inked to be blank.
+                      Re-indexing cannot add {imageOnly.length === 1 ? 'it' : 'them'} to the text index;{' '}
+                      {imageOnly.length === 1 ? 'it belongs' : 'they belong'} to exhibit/image retrieval.
+                    </p>
+                  </div>
+                  <div className="px-3 py-2 text-xs text-gray-600 font-mono break-words">
+                    {formatPageRanges(imageOnly.map((p) => p.page))}
+                  </div>
+                </div>
+              )}
 
               {/* Nothing to fix */}
               {nothingToFix && (

@@ -628,3 +628,53 @@ describe('an image-only page is neither a failure nor blank', () => {
     expect(code).toBe('reindex-request-failed');
   });
 });
+
+describe('a rejected OCR output blames the model, not the page', () => {
+  // The misdiagnosis this prevents: pages of a tax schedule were labelled
+  // "image-only, no extractable text" because OCR returned nothing and the
+  // ink check said the page was not blank. The model had actually returned
+  // 11,766-32,467 characters of correct text — "Schedule E (Form 1040) 2022",
+  // attachment numbers, figures — then degenerated into a repetition loop, so
+  // the gate discarded all of it. Two of those pages later extracted at
+  // density 1132 and 1362, proving they had text all along.
+  const rejected = () => classifyRepairFailure({
+    stillEmptyAfterOcr: true,   // it IS in emptyPages…
+    inkedNoText: true,          // …and it does carry ink…
+    ocrRejected: true,          // …but the gate is why there is no text
+  });
+
+  it('outranks both image-only and ocr-empty', () => {
+    expect(rejected().code).toBe('ocr-quality-rejected');
+    expect(rejected().reason).toMatch(/HAS text/);
+    expect(rejected().reason).toMatch(/not a page defect/i);
+  });
+
+  it('does not spend the retry budget, so the page recovers when OCR is fixed', () => {
+    expect(isInfrastructureFailure('ocr-quality-rejected')).toBe(true);
+    expect(isImmediatelyTerminal('ocr-quality-rejected')).toBe(false);
+
+    let tags: RepairTags = {};
+    for (let i = 0; i < MAX_REPAIR_ATTEMPTS + 3; i++) {
+      tags = updateRepairTags(tags, [145], new Set([145]), rejected).tags;
+    }
+    expect(tags['145'].attempts).toBe(0);
+    expect(tags['145'].terminal).toBe(false);
+    expect(partitionEligiblePages([145], tags).eligible).toEqual([145]);
+  });
+
+  it('still calls a genuinely textless inked page image-only', () => {
+    // Same page shape, but OCR really did return nothing rather than being
+    // rejected. That remains a fact about the page.
+    const { code } = classifyRepairFailure({
+      stillEmptyAfterOcr: true, inkedNoText: true, ocrRejected: false,
+    });
+    expect(code).toBe('image-only');
+  });
+
+  it('a failed reindex request still outranks it', () => {
+    const { code } = classifyRepairFailure({
+      requestError: 'embedding host unreachable', ocrRejected: true,
+    });
+    expect(code).toBe('reindex-request-failed');
+  });
+});

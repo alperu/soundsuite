@@ -240,7 +240,17 @@ export class OllamaOCREngine implements ITaskOCREngine {
             reasons: quality.reasons,
             preview: text.slice(0, 120),
           });
-          return { text: '', confidence: 0 };
+          // Say that the output was REJECTED, not that the page has no text.
+          // The caller cannot otherwise distinguish this from a blank page,
+          // and it mislabelled dense form pages as "image-only" on exactly
+          // this signal. See OCRResult.rejected.
+          return {
+            text: '',
+            confidence: 0,
+            rejected: true,
+            rejectionReasons: quality.reasons,
+            rejectedTextLength: text.length,
+          };
         }
 
         logger.info('Ollama OCR completed', {

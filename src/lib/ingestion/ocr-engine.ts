@@ -22,6 +22,31 @@ export interface OCRConfig {
 export interface OCRResult {
   text: string;
   confidence: number;
+  /**
+   * The engine produced output and the quality gate threw it away.
+   *
+   * Without this, `text: ''` meant two completely different things and the
+   * caller could not tell them apart:
+   *
+   *   (a) the page genuinely has no text, and
+   *   (b) OCR read the page fine and its output was rejected as garbage.
+   *
+   * That conflation produced a real misdiagnosis. Pages of a tax schedule
+   * were labelled "image-only, no extractable text" on the reasoning that OCR
+   * had found nothing and the ink check said the page was not blank. In fact
+   * the model had returned 11,766–32,467 characters of correct text —
+   * "Schedule E (Form 1040) 2022", attachment numbers, figures — and then
+   * degenerated into a repetition loop, so the gate discarded the whole
+   * output. Two of those pages later extracted at density 1132 and 1362.
+   *
+   * A rejected page is an OCR problem, not a fact about the page, and it must
+   * stay repairable once OCR is fixed.
+   */
+  rejected?: boolean;
+  /** Gate reasons, e.g. ['repetition-loop']. Present when `rejected`. */
+  rejectionReasons?: string[];
+  /** How much text was discarded — the evidence that the page HAS text. */
+  rejectedTextLength?: number;
 }
 
 /**

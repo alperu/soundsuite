@@ -210,6 +210,12 @@ export async function POST(
       // "missing, re-embedding is likely to fix them" about a page that is
       // 74% ink and contains no text at all.
       const inkedNoTextPages = new Set<number>();
+      // OCR read the page and the quality gate discarded its output. This is
+      // an OCR problem, never a fact about the page, and it must not be
+      // confused with "no text here" — doing so labelled dense tax-form
+      // pages "image-only" while the model was returning 11k-32k characters
+      // of correct text before degenerating into a repetition loop.
+      const ocrRejectedPages = new Set<number>();
 
       const preprocessSettings = {
         upscale: config.ocrUpscale,
@@ -267,7 +273,16 @@ export async function POST(
                 ocrSuccess = true;
                 logger.info(`Page ${page.pageNumber}: OCR complete via candidate image, density=${page.textDensity}`);
               } else {
-                logger.info(`Page ${page.pageNumber}: candidate image OCR returned no text`);
+                if (ocrResult.rejected) {
+                  ocrRejectedPages.add(page.pageNumber);
+                  logger.warn(
+                    `Page ${page.pageNumber}: candidate image OCR output REJECTED by the quality gate `
+                    + `(${(ocrResult.rejectionReasons ?? []).join(', ')}) — discarded ${ocrResult.rejectedTextLength ?? 0} chars. `
+                    + `The page has text; OCR could not return it cleanly.`,
+                  );
+                } else {
+                  logger.info(`Page ${page.pageNumber}: candidate image OCR returned no text`);
+                }
               }
             } else {
               logger.info(`Page ${page.pageNumber}: has images but no suitable OCR candidate (below size thresholds)`);
@@ -306,7 +321,16 @@ export async function POST(
                 ocrSuccess = true;
                 logger.info(`Page ${page.pageNumber}: full-page render OCR success, density=${page.textDensity}`);
               } else {
-                logger.info(`Page ${page.pageNumber}: full-page render OCR returned no text`);
+                if (ocrResult.rejected) {
+                  ocrRejectedPages.add(page.pageNumber);
+                  logger.warn(
+                    `Page ${page.pageNumber}: full-page render OCR output REJECTED by the quality gate `
+                    + `(${(ocrResult.rejectionReasons ?? []).join(', ')}) — discarded ${ocrResult.rejectedTextLength ?? 0} chars. `
+                    + `The page has text; OCR could not return it cleanly.`,
+                  );
+                } else {
+                  logger.info(`Page ${page.pageNumber}: full-page render OCR returned no text`);
+                }
                 // Blank-by-design classification: OCR-empty alone is NOT
                 // sufficient (unreadable photos/handwriting also OCR empty).
                 // Require a faithful (non-placeholder) render with ink
@@ -317,6 +341,13 @@ export async function POST(
                   if (ink.blank) {
                     blankVerifiedPages.add(page.pageNumber);
                     logger.info(`Page ${page.pageNumber}: verified blank (inkRatio=${ink.inkRatio.toFixed(5)})`);
+                  } else if (ocrRejectedPages.has(page.pageNumber)) {
+                    // Ink present AND the gate rejected real output: this is
+                    // an OCR failure on a text page, NOT an image-only page.
+                    logger.warn(
+                      `Page ${page.pageNumber}: has ink (inkRatio=${ink.inkRatio.toFixed(5)}) and OCR output was rejected `
+                      + `— treating as an OCR failure, not as image-only. Page stays repairable.`,
+                    );
                   } else {
                     inkedNoTextPages.add(page.pageNumber);
                     logger.info(`Page ${page.pageNumber}: NOT blank (inkRatio=${ink.inkRatio.toFixed(5)}) — image-only, no extractable text`);
@@ -547,8 +578,12 @@ export async function POST(
         ocrPages: ocrPageCount,
         exhibitCount,
         emptyPages,
-        // Subset of emptyPages that carry ink: no text, but not blank.
-        inkedNoTextPages: [...inkedNoTextPages],
+        // Subset of emptyPages that carry ink AND whose OCR genuinely
+        // returned nothing: image-only pages.
+        inkedNoTextPages: [...inkedNoTextPages].filter((n) => !ocrRejectedPages.has(n)),
+        // Pages whose OCR output the quality gate discarded. An OCR problem,
+        // so these must stay repairable rather than being written off.
+        ocrRejectedPages: [...ocrRejectedPages],
       });
     } finally {
       if (documentLoaded) {

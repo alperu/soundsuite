@@ -516,6 +516,8 @@ export async function POST(
     let emptyAfterOcr = new Set<number>();
     // Subset of emptyAfterOcr whose pages carry ink: image-only, not blank.
     let inkedNoText = new Set<number>();
+    // OCR ran and the gate discarded its output: an OCR problem, not a page fact.
+    let ocrRejected = new Set<number>();
 
     try {
       const res = await reindexPagesPOST(
@@ -539,6 +541,9 @@ export async function POST(
         }
         if (Array.isArray(payload?.inkedNoTextPages)) {
           inkedNoText = new Set((payload.inkedNoTextPages as unknown[]).map((n) => Number(n)));
+        }
+        if (Array.isArray(payload?.ocrRejectedPages)) {
+          ocrRejected = new Set((payload.ocrRejectedPages as unknown[]).map((n) => Number(n)));
         }
       }
     } catch (err) {
@@ -599,6 +604,9 @@ export async function POST(
           // the page is an image rather than a blank or a failure. Checked
           // first by the classifier, since it is the more specific fact.
           inkedNoText: inkedNoText.has(page),
+          // Checked first by the classifier: it explains why there appears
+          // to be no text at all.
+          ocrRejected: ocrRejected.has(page),
         }),
     );
 
