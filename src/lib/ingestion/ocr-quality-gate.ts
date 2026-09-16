@@ -249,21 +249,96 @@ function lineKey(line: string): string {
   return line.trim().toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ');
 }
 
+/** Below this share of novel lines, a run is restating rather than reading. */
+const NOVELTY_FLOOR = 0.1;
+/** A line recurring at least this often across the output is loop furniture. */
+const REPEAT_IS_LOOPY = 3;
+
 /**
- * Longest prefix that still carries NEW content, with the loop's seed line
- * removed.
+ * Cut where the output stops carrying new content: the last line that said
+ * something new, minus trailing lines that recur throughout.
  *
- * The objective matters, and the obvious one is wrong. Searching for the
- * *longest prefix that passes the gate* maximises length, so it keeps
- * repetition right up to the detector's tolerance: on a real 663-character
- * form page followed by 60 identical lines, that returned 2,571 characters —
- * the good text plus ~53 lines of garbage, because line-uniqueness only trips
- * at 13/(12+N) < 0.2. Passing the gate is a floor, not a goal.
+ * Correct for the clean-prefix shape — good text, then one line repeated —
+ * but fragile by construction: "last novel line" is dragged to the very end
+ * by a single late novel line. On a real 13,773-character page of 1,079
+ * short lines it returned the whole output for exactly that reason.
+ */
+function cutAtLastNovelLine(lines: string[]): string | undefined {
+  const counts = new Map<string, number>();
+  for (const l of lines) {
+    const k = lineKey(l);
+    if (k) counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  const seen = new Set<string>();
+  let lastNovel = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const k = lineKey(lines[i]);
+    if (!k) continue;
+    if (!seen.has(k)) { seen.add(k); lastNovel = i; }
+  }
+  if (lastNovel < 0) return undefined;
+
+  let cut = lastNovel;
+  while (cut >= 0) {
+    const k = lineKey(lines[cut]);
+    if (k && (counts.get(k) ?? 0) >= REPEAT_IS_LOOPY) cut--;
+    else break;
+  }
+  if (cut < 0) return undefined;
+  return lines.slice(0, cut + 1).join('\n').trim();
+}
+
+/**
+ * Cut where the RATE of new content collapses.
  *
- * So cut where the output stops saying anything new: keep through the last
- * line whose normalized form appears for the first time, then drop trailing
- * lines that recur throughout the output, which removes the line the loop
- * repeats. The result is still verified against the full gate by the caller.
+ * This is the objective that survives interleaved repetition, which the
+ * last-novel-line cut cannot see: a loop whose lines differ slightly (OCR
+ * noise, varying amounts) looks novel line by line while being caught by the
+ * gate's 24-character shingle check. The question that distinguishes them is
+ * not "is this line new?" but "is this RUN still saying anything?".
+ *
+ * Finds the earliest index from which fewer than NOVELTY_FLOOR of the
+ * remaining lines introduce anything, and keeps everything before it. Tails
+ * shorter than LINE_MIN_COUNT are ignored: a density reading over two lines
+ * is noise and would cut good text off the end for nothing.
+ */
+function cutAtNoveltyCollapse(lines: string[]): string | undefined {
+  const n = lines.length;
+  const firstOcc = new Map<string, number>();
+  for (let i = 0; i < n; i++) {
+    const k = lineKey(lines[i]);
+    if (k && !firstOcc.has(k)) firstOcc.set(k, i);
+  }
+  // isFirst[i]: line i is the first appearance of its normalized form.
+  const isFirst = new Array<number>(n);
+  for (let i = 0; i < n; i++) {
+    const k = lineKey(lines[i]);
+    isFirst[i] = k && firstOcc.get(k) === i ? 1 : 0;
+  }
+  // suffixNovel[i] = novel lines in [i, n)
+  const suffixNovel = new Array<number>(n + 1).fill(0);
+  for (let i = n - 1; i >= 0; i--) suffixNovel[i] = suffixNovel[i + 1] + isFirst[i];
+
+  for (let i = 0; i < n; i++) {
+    const tail = n - i;
+    if (tail < LINE_MIN_COUNT) break;
+    if (suffixNovel[i] / tail < NOVELTY_FLOOR) {
+      if (i === 0) return undefined;             // loop from the first line
+      return lines.slice(0, i).join('\n').trim();
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The good prefix of an output that degenerated into a repetition loop.
+ *
+ * Two strategies, and the SHORTER passing candidate wins. Running both rather
+ * than replacing one with the other is deliberate: each is correct on a shape
+ * the other misreads, and preferring the shorter one keeps the failure mode on
+ * the side of dropping good text rather than keeping garbage. Whichever is
+ * chosen is re-checked against the full gate, so salvage stays a use of the
+ * gate and never a hole in it.
  */
 export function salvageRepetitionLoop(
   text: string,
@@ -272,53 +347,28 @@ export function salvageRepetitionLoop(
   const lines = text.split('\n');
   if (lines.length < 2) return { declined: 'single-line output: no line boundary to cut on' };
 
-  // How often each normalized line occurs across the whole output.
-  const counts = new Map<string, number>();
-  for (const l of lines) {
-    const k = lineKey(l);
-    if (k) counts.set(k, (counts.get(k) ?? 0) + 1);
+  const candidates = [cutAtNoveltyCollapse(lines), cutAtLastNovelLine(lines)]
+    .filter((c): c is string => !!c)
+    .sort((a, b) => a.length - b.length);
+
+  if (candidates.length === 0) {
+    return { declined: `no cut point found (lines=${lines.length})` };
   }
 
-  // Last line that introduced something.
-  const seen = new Set<string>();
-  let lastNovel = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const k = lineKey(lines[i]);
-    if (!k) continue;
-    if (!seen.has(k)) {
-      seen.add(k);
-      lastNovel = i;
-    }
+  const tooShort: number[] = [];
+  const residuals: string[] = [];
+  for (const candidate of candidates) {
+    if (candidate.length < MIN_SALVAGE_CHARS) { tooShort.push(candidate.length); continue; }
+    const residual = computeReasons(candidate, task);
+    if (residual.length > 0) { residuals.push(`${candidate.length}ch:${residual.join('+')}`); continue; }
+    return { text: candidate };
   }
-  if (lastNovel < 0) return { declined: 'no line carried new content' };
 
-  // Drop trailing lines that recur throughout — the loop's seed line is novel
-  // exactly once, and without this it survives on the end of the salvage.
-  const REPEAT_IS_LOOPY = 3;
-  let cut = lastNovel;
-  while (cut >= 0) {
-    const k = lineKey(lines[cut]);
-    if (k && (counts.get(k) ?? 0) >= REPEAT_IS_LOOPY) cut--;
-    else break;
-  }
-  if (cut < 0) return { declined: 'every line recurs throughout — the whole output is loop' };
-
-  const candidate = lines.slice(0, cut + 1).join('\n').trim();
-
-  // Guards, in order of what they protect against:
-  //  · nothing meaningful kept;
-  //  · a prefix short enough that isRepetitionLoop (inoperative below 240
-  //    chars) cannot vouch for it — this is why the floor sits at 400;
-  //  · anything the gate would reject on its own. That last check is the
-  //    safety property: salvage is a USE of the gate, never a hole in it.
-  if (candidate.length < MIN_SALVAGE_CHARS) {
-    return { declined: `novel prefix too short to trust: ${candidate.length} < ${MIN_SALVAGE_CHARS} chars (lines=${lines.length}, lastNovel=${lastNovel}, cut=${cut})` };
-  }
-  const residual = computeReasons(candidate, task);
-  if (residual.length > 0) {
-    return { declined: `prefix still fails the gate: ${residual.join(', ')} (${candidate.length} chars)` };
-  }
-  return { text: candidate };
+  const detail = [
+    tooShort.length ? `below the ${MIN_SALVAGE_CHARS}-char floor (${tooShort.join(', ')})` : null,
+    residuals.length ? `still fails the gate (${residuals.join('; ')})` : null,
+  ].filter(Boolean).join('; ');
+  return { declined: `${detail} [lines=${lines.length}]` };
 }
 
 export function assessOcrOutput(

@@ -240,3 +240,27 @@ describe('salvaging an output that degenerated into a repetition loop', () => {
     expect(salvagedText).not.toContain('Page 1 of 2');
   });
 });
+
+/**
+ * NOT COVERED: interleaved repetition.
+ *
+ * A real page — textLength 13,773 across 1,079 lines of ~13 characters —
+ * is condemned as a repetition loop by the gate's shingle check while every
+ * line looks novel line-by-line. `cutAtNoveltyCollapse` exists for that
+ * shape, and it is NOT exercised here, because three attempts to synthesize
+ * the shape failed and it is better to say so than to assert a fixture that
+ * proves something else:
+ *
+ *   · short non-dictionary tokens ("CHK 1000 24.0")  -> 'letter-soup'
+ *   · 250 distinct dictionary lines with varying tails -> passes cleanly
+ *
+ * The reason is structural: `shingleRatioLow` walks NON-OVERLAPPING 24-char
+ * windows across the whole text, so a repeating unit only collapses the ratio
+ * when its period aligns with that grid. Reproducing it needs the real
+ * output, not a plausible imitation.
+ *
+ * What exists instead: the engine logs `salvageDeclined` with the cut lengths
+ * and residual gate reasons, so the next real occurrence says which strategy
+ * ran and why it declined. Until one is observed, treat density-collapse as
+ * implemented-and-reasoned, not verified.
+ */
