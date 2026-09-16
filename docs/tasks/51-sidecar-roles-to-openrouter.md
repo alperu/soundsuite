@@ -1,6 +1,6 @@
 # Sidecar LLM roles → OpenRouter: what works, and four defects
 
-**Status:** Audited live 2026-09-16 against the running fleet · **Priority:** one P1, three P2
+**Status:** **All four fixed 2026-09-16** — see the commits named per defect below · **Priority:** was one P1, three P2
 **Scope:** the LAN layer — sidecar roles falling out to OpenRouter. **Not** the AI Keys
 (WAN) provider picker, which is a separate concern and deliberately untouched.
 
@@ -38,7 +38,9 @@ Captured from `logs/dashboard.log` during one real `/api/search/semantic` run:
 
 ---
 
-## Defect 1 — the reranker reaches OpenRouter and gets 503 · **P1**
+## Defect 1 — the reranker reaches OpenRouter and gets 503 · **P1** · FIXED
+
+> **Fixed in `ac89ac0e`.** Option 1 from the list below turned out not to exist — OpenRouter serves NO alternative rerank model, so retry was the only available fallback. Options 2 shipped; option 3 is still open and now interacts with the Phase 0 fix.
 
 ```
 [Reranker] Reranking via OpenRouter { model: 'qwen/qwen3-reranker-8b', docs: 48, topN: 48 }
@@ -68,7 +70,9 @@ nobody, and `-8b` is evidently thin too. One 503 exhausted the candidate list �
 
 ---
 
-## Defect 2 — `cloud-only` is not honoured by the fleet router · **P2**
+## Defect 2 — `cloud-only` is not honoured by the fleet router · **P2** · FIXED
+
+> **Fixed in `67f745ec`.** Phase 0 short-circuits to the cloud and falls through rather than throwing. Verified unreachable for every role but `completion`, and unreachable from the Claude/Gemini branches.
 
 `cloud-only` appears **nowhere** in `src/lib/gpu/*.ts`. The only mode gate in
 `resolveEndpoint()` is at `fleet-router.ts:1560`:
@@ -93,7 +97,9 @@ for some time, so this is a pre-existing gap, not a regression.
 
 ---
 
-## Defect 3 — acquire attempted on a host that has no reranker · **P2**
+## Defect 3 — acquire attempted on a host that has no reranker · **P2** · FIXED
+
+> **Fixed in `04a56fe8`.** Also stopped the rejected acquire incrementing the host load counter.
 
 ```
 [CommandQueue] WS transport failed for http://10.10.20.134:8098 ... { action: 'acquire',
@@ -115,7 +121,9 @@ message actively misleads.
 
 ---
 
-## Defect 4 — `completion` is never pushed in `allowedModels` · **P2**
+## Defect 4 — `completion` is never pushed in `allowedModels` · **P2** · FIXED
+
+> **Fixed in `dea2fd79`.** Unblocks sidecar-proxied chat, which is the route the sandbox and Fantom use.
 
 `buildOpenRouterPush()` (`fleet-router.ts`) adds `embedding`, `code-embedding`,
 `reranker` and `rlm-sandbox`. It does **not** add `completion`, though
