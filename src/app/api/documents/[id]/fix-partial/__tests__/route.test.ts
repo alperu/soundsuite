@@ -117,13 +117,16 @@ function ctx() {
   return { params: Promise.resolve({ id: DOC_ID }) };
 }
 
-function setDoc(opts: { status?: string; tags?: unknown; pageCount?: number | null } = {}) {
+function setDoc(opts: { status?: string; tags?: unknown; pageCount?: number | null; updatedAt?: Date } = {}) {
   const doc = {
     id: DOC_ID,
     caseId: 'case-1',
     pageCount: opts.pageCount === undefined ? PAGE_COUNT : opts.pageCount,
     status: opts.status ?? 'INDEXED',
     tags: opts.tags ?? {},
+    // The stale-lock check reads this; default to 'just now' so a
+    // FIXING_PARTIAL fixture reads as a live lock unless a test says otherwise.
+    updatedAt: opts.updatedAt ?? new Date(),
   };
   // First call selects the full row; the pre-write re-read selects only tags.
   mockDocFindUnique.mockImplementation(async (args: any) =>
@@ -477,5 +480,50 @@ describe('POST /api/documents/[id]/fix-partial — re-verify and bookkeeping', (
 
     expect(body.attemptedPages).toEqual([10]);
     expect(body.repaired).toBe(1);
+  });
+});
+
+describe('the FIXING_PARTIAL lock is honoured only while someone holds it', () => {
+  // reindex-pages restores the previous status on success AND on throw, but
+  // neither runs if the process holding the lock disappears. That happened
+  // twice: a batch driver was killed, and a client body timeout
+  // (UND_ERR_BODY_TIMEOUT) aborted an SSE run mid-document. The document then
+  // sat in FIXING_PARTIAL and every later repair was refused with 409
+  // forever — the "it says fixing and nothing happens" report itself.
+
+  it('refuses while the lock is fresh, so two runs cannot clobber the repair map', async () => {
+    setDoc({ status: 'FIXING_PARTIAL', updatedAt: new Date(Date.now() - 30_000) });
+
+    const res = await POST(request(), ctx());
+    const body = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(body.error).toMatch(/already running/i);
+    expect(mockReindexPOST).not.toHaveBeenCalled();
+  });
+
+  it('reclaims a lock nothing has touched for longer than the stale window', async () => {
+    // A live repair touches updatedAt every round (8 pages; the slowest single
+    // page measured 107s), so this quiet means abandoned.
+    setDoc({ status: 'FIXING_PARTIAL', updatedAt: new Date(Date.now() - 45 * 60_000) });
+    mockPageReportGET
+      .mockResolvedValueOnce(report({ 9: 'unindexed' }))
+      .mockResolvedValueOnce(report({}));
+    mockReindexPOST.mockResolvedValue(reindexOk());
+
+    const res = await POST(request(), ctx());
+
+    expect(res.status).toBe(200);
+    expect(mockReindexPOST).toHaveBeenCalled();
+  });
+
+  it('refuses rather than reclaiming when updatedAt is unusable', async () => {
+    // Fail closed: an unparseable timestamp is not evidence the lock is dead.
+    setDoc({ status: 'FIXING_PARTIAL', updatedAt: new Date('not a date') });
+
+    const res = await POST(request(), ctx());
+
+    expect(res.status).toBe(409);
+    expect(mockReindexPOST).not.toHaveBeenCalled();
   });
 });

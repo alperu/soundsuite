@@ -56,6 +56,32 @@ export async function POST(request: NextRequest) {
         } catch { /* client gone */ }
       };
 
+      /**
+       * Keep the stream from going silent.
+       *
+       * One document takes minutes — a 665-page volume spent 107s on a
+       * single page — so there can be many minutes between `document`
+       * events. A silent response body is not free: undici's default body
+       * timeout is 300s, and it killed a real run with
+       *
+       *   TypeError: terminated
+       *     [cause]: BodyTimeoutError: Body Timeout Error
+       *              code: 'UND_ERR_BODY_TIMEOUT'
+       *
+       * after which the abort propagated to the runner and left a document
+       * stranded in FIXING_PARTIAL. Browsers are more forgiving than undici
+       * but proxies are not, so this is not a test-harness quirk.
+       *
+       * An SSE comment line (`: text`) is ignored by every client while
+       * still being bytes on the wire, which is exactly what a keepalive
+       * needs to be.
+       */
+      const heartbeat = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(`: keepalive ${Date.now()}\n\n`));
+        } catch { /* client gone; the finally below clears this */ }
+      }, 15_000);
+
       try {
         const ids = body.documentIds?.length
           ? body.documentIds
@@ -104,6 +130,7 @@ export async function POST(request: NextRequest) {
         logger.error('Repair run failed', error);
         send('error', { message: error instanceof Error ? error.message : String(error) });
       } finally {
+        clearInterval(heartbeat);
         inFlight = false;
         try { controller.close(); } catch { /* already closed */ }
       }

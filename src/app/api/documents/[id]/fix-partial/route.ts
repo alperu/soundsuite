@@ -307,7 +307,9 @@ export async function POST(
 
     const doc = await prisma.document.findUnique({
       where: { id },
-      select: { id: true, caseId: true, pageCount: true, status: true, tags: true },
+      // updatedAt backs the stale-lock check below: a live repair touches it
+      // every round, so a quiet FIXING_PARTIAL document is an abandoned lock.
+      select: { id: true, caseId: true, pageCount: true, status: true, tags: true, updatedAt: true },
     });
     if (!doc) {
       return NextResponse.json({ error: 'Document not found' }, { status: 404 });
@@ -324,11 +326,41 @@ export async function POST(
     // Repair is a read-modify-write on a JSON blob and is therefore not
     // atomic: two concurrent runs would clobber each other's repair map (and
     // double-charge OCR). The FIXING_PARTIAL status is the lock.
+    //
+    // A lock with no owner is a dead end, though. reindex-pages restores the
+    // previous status on both success and throw, but neither runs if the
+    // process holding the lock simply goes away — and that has happened
+    // twice: once when a batch driver was killed, and once when a client's
+    // body timeout aborted the SSE run mid-document. The document then sits
+    // in FIXING_PARTIAL and every subsequent repair is refused with 409
+    // forever, which is precisely the "it says fixing and nothing happens"
+    // report that started this work.
+    //
+    // So: only honour the lock while someone is demonstrably holding it.
+    // Freshness is judged by `updatedAt`, which reindex-pages touches at the
+    // start of every round (rounds are 8 pages, and the slowest single page
+    // measured 107s) — so a genuinely active repair is never this quiet.
     if (doc.status === FIXING_STATUS) {
-      return NextResponse.json(
-        { error: 'A repair is already running for this document', status: doc.status },
-        { status: 409 },
-      );
+      const heldForMs = Date.now() - new Date(doc.updatedAt).getTime();
+      const STALE_LOCK_MS = Number(process.env.FIX_PARTIAL_STALE_LOCK_MS) || 10 * 60_000;
+      if (!Number.isFinite(heldForMs) || heldForMs < STALE_LOCK_MS) {
+        return NextResponse.json(
+          {
+            error: 'A repair is already running for this document',
+            status: doc.status,
+            heldForMs: Number.isFinite(heldForMs) ? heldForMs : undefined,
+          },
+          { status: 409 },
+        );
+      }
+      logger.warn('Reclaiming a stale FIXING_PARTIAL lock — no progress for longer than the stale window', {
+        documentId: id,
+        heldForMinutes: Math.round(heldForMs / 60_000),
+        staleWindowMinutes: Math.round(STALE_LOCK_MS / 60_000),
+      });
+      // Hand the rest of the route an INDEXED document, so the normal path
+      // (including restoring the status afterwards) applies unchanged.
+      doc.status = REPAIRABLE_STATUS;
     }
     if (doc.status !== REPAIRABLE_STATUS) {
       return NextResponse.json(
