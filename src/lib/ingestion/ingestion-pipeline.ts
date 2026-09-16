@@ -1240,7 +1240,8 @@ export class IngestionPipeline {
         // whose render is faithful, OCRs to empty, and carries no ink is a
         // separator/back page, not an extraction failure. Bounded to a small
         // gap count — this renders + OCRs each candidate.
-        if (verification.gapPages.length > 0 && verification.gapPages.length <= 25) {
+        const BLANK_CLASSIFY_GAP_LIMIT = 25;
+        if (verification.gapPages.length > 0 && verification.gapPages.length <= BLANK_CLASSIFY_GAP_LIMIT) {
           try {
             await this.classifyBlankGapPages(documentId, filePath, verification);
           } catch (blankErr) {
@@ -1249,6 +1250,22 @@ export class IngestionPipeline {
               error: blankErr instanceof Error ? blankErr.message : String(blankErr),
             });
           }
+        } else if (verification.gapPages.length > BLANK_CLASSIFY_GAP_LIMIT) {
+          // The bound is defensible — this renders AND OCRs every candidate —
+          // but it used to be silent, and it skips exactly the documents that
+          // need it most. A 1220-page volume arrived with 420 gaps and 3
+          // classified blanks: the 3 came from an earlier run under the
+          // limit, and the 420 were never examined, so an unknown number of
+          // them are separator pages that would report as missing forever.
+          //
+          // Say so. Fix Partial performs the same ink check per page, so the
+          // recovery path exists — but nobody goes looking for a recovery
+          // they were never told they needed.
+          this.logger.warn(
+            `Blank-page classification SKIPPED: ${verification.gapPages.length} gap pages exceeds the limit of ${BLANK_CLASSIFY_GAP_LIMIT}. `
+            + 'Separator/back pages among them will report as missing until a repair runs, which re-checks ink per page.',
+            { documentId, gapPages: verification.gapPages.length, limit: BLANK_CLASSIFY_GAP_LIMIT },
+          );
         }
 
         // AI Readiness Score — must run HERE, before clearCheckpoint wipes
