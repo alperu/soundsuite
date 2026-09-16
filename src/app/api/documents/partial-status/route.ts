@@ -1,73 +1,61 @@
 import { NextResponse } from 'next/server';
 import * as lancedb from '@lancedb/lancedb';
 import { prisma } from '@/lib/db/prisma';
+import { computePartialDocumentIds } from '@/lib/ingestion/partial-detection';
 
 const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
-const TABLE_NAME = 'chunks';
 
 /**
  * GET /api/documents/partial-status
- * Returns IDs of INDEXED documents that have incomplete page coverage
- * (fewer distinct pages in LanceDB than the document's pageCount).
+ * Returns IDs of documents whose indexed page coverage falls short of
+ * pageCount, ignoring pages that are blank by design.
+ *
+ * This route used to carry its own copy of the distinct-pages-vs-pageCount
+ * comparison. `partial-detection.ts` was extracted precisely because that
+ * comparison existed twice with the same gap (see that module's header), but
+ * only `src/app/page.tsx` was migrated — this copy was left behind and kept
+ * both defects:
+ *
+ *  1. No blank-by-design allowance, so a document with legitimately blank
+ *     pages reported partial forever. There is no text on a blank page to
+ *     embed, so no amount of re-indexing could ever clear it.
+ *
+ *  2. `status: 'INDEXED'` only. A document mid-repair is FIXING_PARTIAL, so
+ *     it dropped out of this list entirely — the moment a repair stalled or
+ *     failed, the document became invisible to the very list that would flag
+ *     it, and a stuck repair looked like a fixed document. `page.tsx` already
+ *     scopes to `['INDEXED', 'FIXING_PARTIAL']` and explains why; this route
+ *     disagreed with the dashboard it was supposed to mirror.
+ *
+ * Both are fixed by delegating. Keep it delegating.
  */
 export async function GET() {
   try {
-    // 1. Get all INDEXED documents with a known pageCount
-    const indexedDocs = await prisma.document.findMany({
+    const docs = await prisma.document.findMany({
+      // Same scope as the dashboard (src/app/page.tsx): a repair in flight
+      // does not make the coverage gap go away.
       where: {
-        status: 'INDEXED',
-        pageCount: { not: null, gt: 0 },
+        status: { in: ['INDEXED', 'FIXING_PARTIAL'] },
+        pageCount: { gt: 0 },
       },
       select: { id: true, pageCount: true },
     });
 
-    if (indexedDocs.length === 0) {
+    if (docs.length === 0) {
       return NextResponse.json({ partialDocumentIds: [] });
     }
 
-    // 2. Query LanceDB for distinct page numbers per document
-    const db = await lancedb.connect(LANCEDB_PATH);
-    const tableNames = await db.tableNames();
+    const partial = await computePartialDocumentIds(
+      docs.map((d) => ({ id: d.id, pageCount: d.pageCount! })),
+      {
+        prisma: prisma as unknown as Parameters<typeof computePartialDocumentIds>[1]['prisma'],
+        lancedb: lancedb as unknown as Parameters<typeof computePartialDocumentIds>[1]['lancedb'],
+        lancedbPath: LANCEDB_PATH,
+        tableName: process.env.LANCEDB_TABLE || 'chunks',
+      },
+    );
 
-    if (!tableNames.includes(TABLE_NAME)) {
-      // No chunks table means all indexed docs are partial
-      return NextResponse.json({
-        partialDocumentIds: indexedDocs.map(d => d.id),
-      });
-    }
-
-    const table = await db.openTable(TABLE_NAME);
-
-    // Build IN clause for all indexed document IDs
-    const docIds = indexedDocs.map(d => d.id);
-    const escaped = docIds.map(id => `'${id.replace(/'/g, "''")}'`).join(', ');
-
-    const rows = await table.query()
-      .select(['document_id', 'page_number'])
-      .where(`document_id IN (${escaped})`)
-      .toArray();
-
-    // 3. Count distinct pages per document
-    const pagesByDoc = new Map<string, Set<number>>();
-    for (const row of rows) {
-      const docId = row.document_id as string;
-      const pageNum = row.page_number as number;
-      if (!pagesByDoc.has(docId)) {
-        pagesByDoc.set(docId, new Set());
-      }
-      pagesByDoc.get(docId)!.add(pageNum);
-    }
-
-    // 4. Compare against expected pageCount
-    const partialDocumentIds: string[] = [];
-    for (const doc of indexedDocs) {
-      const distinctPages = pagesByDoc.get(doc.id)?.size ?? 0;
-      if (distinctPages < doc.pageCount!) {
-        partialDocumentIds.push(doc.id);
-      }
-    }
-
-    return NextResponse.json({ partialDocumentIds });
+    return NextResponse.json({ partialDocumentIds: [...partial] });
   } catch (error) {
     console.error('Partial status error:', error);
     return NextResponse.json(
