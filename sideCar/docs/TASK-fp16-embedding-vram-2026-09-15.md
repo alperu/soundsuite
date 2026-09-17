@@ -48,7 +48,7 @@ believing an 8.05 GB model needs 2 GB. That number is not decorative:
   figure.
 - `vram-accountant.ts` uses `def.vram` as the static budget for planning.
 
-On BASWS35 (24 GB TITAN RTX) this is recoverable. On the Macs, where unified
+On a 24 GB TITAN RTX host this is recoverable. On the Macs, where unified
 memory is shared and three models have been resident at once, it is not.
 
 ## What to build

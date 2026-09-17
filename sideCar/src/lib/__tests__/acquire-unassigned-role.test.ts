@@ -25,7 +25,7 @@ const savedRegistry = { ...state.registry };
 
 beforeEach(() => {
   // A host that runs ocr and the sandbox — and NOT the reranker. This is the
-  // shape of 10.10.20.134 on the live fleet.
+  // shape of one real host on the live fleet.
   for (const k of Object.keys(state.registry)) delete state.registry[k];
   state.registry['ocr'] = { ...savedRegistry['ocr'] };
   state.registry['rlm-sandbox'] = { ...savedRegistry['rlm-sandbox'] };
