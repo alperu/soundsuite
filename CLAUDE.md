@@ -34,6 +34,11 @@ mode; the rule stands regardless:
   Noisy shell: `ctx_batch_execute` / `ctx_execute(language: "shell")`. File analysis:
   `ctx_execute_file`. Plain Bash is fine for short output (git, ls, mv). Author files only
   with native `Write`/`Edit`.
+- **Firecrawl** (MCP `firecrawl` in `.mcp.json`, key stays local) plus the `firecrawl-*`
+  skills: use for live-web work beyond one static page — web search with full page content
+  (`firecrawl-search`), JS-rendered pages (`firecrawl-scrape`), site maps/crawls, pages needing
+  clicks or login (`firecrawl-interact`), change monitoring, structured multi-page extraction
+  (`firecrawl-agent`). A single static page still goes through `ctx_fetch_and_index`.
 - **fantom-mcp** indexes this repo (project `SoundSuite`, id 271). For "how does X work",
   "who calls Y", blast radius: `askCodebase`, `searchFantomCode`, `getCallers`, `getCodeImpact`
   before grepping. For any Fantom/Axon/SkySpark/Haystack API question use it first
