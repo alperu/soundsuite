@@ -154,17 +154,21 @@ export async function POST(request: NextRequest) {
         TOOL_NOT_READY: 503,
         RATE_LIMITED: 429,
         INVALID_PARAMS: 400,
+        PROFILE_MISMATCH: 409,
         INVALID_REGEX: 400,
         NOT_IMPLEMENTED: 501,
       };
       const status = statusMap[result.errorCode || ''] || 500;
       return NextResponse.json(
         { error: { code: result.errorCode || 'EXECUTION_FAILED', message: result.error } },
-        { status },
+        { status, headers: profileHeader(result) },
       );
     }
 
-    return NextResponse.json(result.data);
+    // The data profile rides on a header for every shape of `data`, and is
+    // also folded into object-shaped payloads so a tool consumer that only
+    // reads the body still sees it (docs/tasks/54-profiles.md).
+    return NextResponse.json(withProfileField(result.data, result.profile), { headers: profileHeader(result) });
   } catch (error) {
     console.error('Error executing MCP tool:', error);
     return NextResponse.json(
@@ -172,4 +176,15 @@ export async function POST(request: NextRequest) {
       { status: 500 },
     );
   }
+}
+
+/** `x-ss-profile: <name>` — the data profile the tool ran against. */
+function profileHeader(result: { profile?: string }): Record<string, string> {
+  return result.profile ? { 'x-ss-profile': result.profile } : {};
+}
+
+function withProfileField<T>(data: T, profile: string | undefined): T {
+  if (!profile || !data || typeof data !== 'object' || Array.isArray(data)) return data;
+  if ('profile' in (data as Record<string, unknown>)) return data;
+  return { ...(data as Record<string, unknown>), profile } as T;
 }

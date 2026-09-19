@@ -1,6 +1,5 @@
 import { VectorStore } from '../vector/vector-store';
-
-const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
+import { lancedbPath } from '@/lib/profiles';
 
 export function chatTableName(chatId: string): string {
   const safe = chatId.replace(/[^a-zA-Z0-9_]/g, '_');
@@ -9,7 +8,7 @@ export function chatTableName(chatId: string): string {
 
 export async function getChatVectorStore(chatId: string): Promise<VectorStore> {
   const vs = new VectorStore({
-    dbPath: LANCEDB_PATH,
+    dbPath: lancedbPath(),
     tableName: chatTableName(chatId),
   });
   await vs.initialize();
@@ -18,7 +17,7 @@ export async function getChatVectorStore(chatId: string): Promise<VectorStore> {
 
 export async function dropChatTable(chatId: string): Promise<void> {
   const lancedb = await import('@lancedb/lancedb');
-  const db = await lancedb.connect(LANCEDB_PATH);
+  const db = await lancedb.connect(lancedbPath());
   const names = await db.tableNames();
   const name = chatTableName(chatId);
   if (names.includes(name)) {
@@ -33,7 +32,7 @@ export async function dropChatTable(chatId: string): Promise<void> {
  */
 export async function getChatTableVectorWidth(chatId: string): Promise<number | null> {
   const lancedb = await import('@lancedb/lancedb');
-  const db = await lancedb.connect(LANCEDB_PATH);
+  const db = await lancedb.connect(lancedbPath());
   const name = chatTableName(chatId);
   if (!(await db.tableNames()).includes(name)) return null;
   try {

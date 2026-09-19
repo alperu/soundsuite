@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { VectorStore } from '@/lib/vector/vector-store';
 import { publishDocumentEvent } from '@/lib/sse-events';
+import { lancedbPath } from '@/lib/profiles';
 
 /**
  * POST /api/documents/[id]/clear-index
@@ -21,7 +22,7 @@ export async function POST(
 
     // Clear vector index for this document
     const vectorStore = new VectorStore({
-      dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+      dbPath: lancedbPath(),
       tableName: 'chunks',
     });
     await vectorStore.initialize();

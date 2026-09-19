@@ -219,7 +219,13 @@ export class MCPServer {
       return;
     }
 
-    this.sendSuccess(res, result.data);
+    const data = result.data;
+    const stamped =
+      result.profile && data && typeof data === 'object' && !Array.isArray(data) && !('profile' in data)
+        ? { ...data, profile: result.profile }
+        : data;
+    if (result.profile) res.setHeader('x-ss-profile', result.profile);
+    this.sendSuccess(res, stamped);
   }
 
   // -------------------------------------------------------------------------

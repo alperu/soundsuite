@@ -132,6 +132,9 @@ export interface ToolExecutionResult<T = any> {
   error?: string;
   errorCode?: string;
   executionTimeMs: number;
+  /** The data profile the call ran against (docs/tasks/54-profiles.md).
+   *  Stamped by the registry on every result, success or failure. */
+  profile?: string;
 }
 
 // ---------------------------------------------------------------------------

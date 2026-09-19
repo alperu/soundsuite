@@ -2,8 +2,7 @@ import { NextResponse } from 'next/server';
 import * as lancedb from '@lancedb/lancedb';
 import { prisma } from '@/lib/db/prisma';
 import { computeDocumentCoverage } from '@/lib/ingestion/partial-detection';
-
-const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
+import { lancedbPath } from '@/lib/profiles';
 
 /**
  * GET /api/documents/partial-status
@@ -50,7 +49,7 @@ export async function GET() {
       {
         prisma: prisma as unknown as Parameters<typeof computeDocumentCoverage>[1]['prisma'],
         lancedb: lancedb as unknown as Parameters<typeof computeDocumentCoverage>[1]['lancedb'],
-        lancedbPath: LANCEDB_PATH,
+        lancedbPath: lancedbPath(),
         tableName: process.env.LANCEDB_TABLE || 'chunks',
       },
     );

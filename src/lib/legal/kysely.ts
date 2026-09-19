@@ -15,6 +15,7 @@
  * an err grid.
  */
 import path from 'node:path'
+import { activeProfile, activeProfileName } from '@/lib/profiles/registry'
 // better-sqlite3 ships no .d.ts in this repo; type as any to avoid TS2307.
  
 const Database: any = require('better-sqlite3')
@@ -130,13 +131,20 @@ function resolveSqlitePath(url: string): string {
 }
 
 const globalForKysely = globalThis as unknown as {
-  kyselyDb: Kysely<DB> | undefined
-  kyselyHandle: any | undefined
+  kyselyClients: Map<string, { dbPath: string; db: Kysely<DB>; handle: any }> | undefined
 }
 
-function makeKysely(): Kysely<DB> {
-  const url = process.env.DATABASE_URL ?? 'file:./data/sound-suite.db'
-  const dbPath = resolveSqlitePath(url)
+const kyselyClients: Map<string, { dbPath: string; db: Kysely<DB>; handle: any }> =
+  globalForKysely.kyselyClients ?? new Map()
+globalForKysely.kyselyClients = kyselyClients
+
+function activeSqlitePath(): string {
+  const p = activeProfile()
+  if (!p.legacy) return p.sqlite
+  return resolveSqlitePath(process.env.DATABASE_URL ?? 'file:./data/sound-suite.db')
+}
+
+function makeKysely(dbPath: string): { db: Kysely<DB>; handle: any } {
   const handle = new Database(dbPath, { fileMustExist: false })
   // Match Prisma's pragmas so we don't fight WAL.
   try {
@@ -145,11 +153,39 @@ function makeKysely(): Kysely<DB> {
   } catch {
     /* ignore */
   }
-  globalForKysely.kyselyHandle = handle
-  return new Kysely<DB>({
-    dialect: new SqliteDialect({ database: handle }),
-  })
+  return { db: new Kysely<DB>({ dialect: new SqliteDialect({ database: handle }) }), handle }
 }
 
-export const db: Kysely<DB> = globalForKysely.kyselyDb ?? makeKysely()
-if (process.env.NODE_ENV !== 'production') globalForKysely.kyselyDb = db
+function kyselyForActiveProfile(): Kysely<DB> {
+  const name = activeProfileName()
+  const dbPath = activeSqlitePath()
+  const cached = kyselyClients.get(name)
+  if (cached && cached.dbPath === dbPath) return cached.db
+  const made = makeKysely(dbPath)
+  kyselyClients.set(name, { dbPath, ...made })
+  return made.db
+}
+
+/**
+ * The Kysely read lane — a proxy over the active profile's connection, the
+ * same way `lib/db/prisma.ts` exports `prisma`. Importers keep `import { db }`.
+ */
+export const db: Kysely<DB> = new Proxy({} as Kysely<DB>, {
+  get(_target, prop) {
+    const real = kyselyForActiveProfile() as unknown as Record<PropertyKey, unknown>
+    const value = real[prop]
+    return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(real) : value
+  },
+})
+
+/** Close and forget the connection for `profileName` (profile switch). */
+export function releaseKysely(profileName: string): void {
+  const entry = kyselyClients.get(profileName)
+  if (!entry) return
+  kyselyClients.delete(profileName)
+  try {
+    entry.handle.close()
+  } catch {
+    /* already closed */
+  }
+}

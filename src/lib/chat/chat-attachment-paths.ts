@@ -1,6 +1,8 @@
 import * as path from 'path';
+import { activeProfile } from '@/lib/profiles';
 
-export const ATTACHMENT_ROOT = path.join(process.cwd(), 'data', 'chat-attachments');
+/** The active profile's attachment root. A function, not a constant: the profile can change at runtime. */
+export const ATTACHMENT_ROOT = () => activeProfile().chatAttachments;
 
 /** Map a mimeType to its on-disk file extension. */
 export function extForMimeType(mimeType: string | null | undefined): string {
@@ -41,7 +43,7 @@ export function sanitizeChatId(chatId: string): string {
 }
 
 export function chatAttachmentDir(chatId: string): string {
-  return path.join(ATTACHMENT_ROOT, sanitizeChatId(chatId));
+  return path.join(ATTACHMENT_ROOT(), sanitizeChatId(chatId));
 }
 
 /**

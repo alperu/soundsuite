@@ -26,10 +26,10 @@ import { computeReadiness } from '@/lib/ingestion/readiness/score';
 import { READINESS_MODEL_VERSION } from '@/lib/ingestion/readiness/types';
 import type { VerificationResult } from '@/lib/ingestion/indexing-verifier';
 import { requireAdminApiAccess } from '@/lib/api/route-guard';
+import { lancedbPath } from '@/lib/profiles';
 
 const logger = createLogger('ReadinessBackfill');
 
-const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
 const TABLE_NAME = process.env.LANCEDB_TABLE || 'chunks';
 const DEFAULT_LIMIT = 200;
 
@@ -109,7 +109,7 @@ export async function POST(req: NextRequest) {
     let table: Awaited<ReturnType<Awaited<ReturnType<typeof lancedb.connect>>['openTable']>> | null = null;
     let hasScoreColumn = false;
     try {
-      const db = await lancedb.connect(LANCEDB_PATH);
+      const db = await lancedb.connect(lancedbPath());
       if ((await db.tableNames()).includes(TABLE_NAME)) {
         table = await db.openTable(TABLE_NAME);
         const schema = await table.schema();

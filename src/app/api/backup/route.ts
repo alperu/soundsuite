@@ -12,11 +12,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { BackupManager } from '@/lib/backup';
 import { logger } from '@/lib/logger';
 import path from 'path';
+import { lancedbPath } from '@/lib/profiles';
+import { activeProfile, sqlitePath } from '@/lib/profiles';
 
 // Default paths from environment or fallback to defaults
-const DATABASE_PATH = process.env.DATABASE_URL?.replace('file:', '') || './data/sound-suite.db';
-const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
-const BACKUP_DIR = process.env.BACKUP_DIR || './data/backups';
+// Resolved per request: the active profile owns all three paths.
+const DATABASE_PATH = () => sqlitePath();
+const BACKUP_DIR = () => activeProfile().backups;
 
 /**
  * POST /api/backup
@@ -31,11 +33,11 @@ export async function POST(request: NextRequest) {
     const { includeLanceDB = true, includeDatabase = true } = body;
 
     // Create backup manager
-    const backupManager = new BackupManager(DATABASE_PATH, LANCEDB_PATH);
+    const backupManager = new BackupManager(DATABASE_PATH(), lancedbPath());
 
     // Create backup
     const result = await backupManager.createBackup({
-      outputDir: BACKUP_DIR,
+      outputDir: BACKUP_DIR(),
       includeLanceDB,
       includeDatabase,
     });
@@ -80,15 +82,15 @@ export async function GET() {
     logger.info('Backup API: Listing backups');
 
     // Create backup manager
-    const backupManager = new BackupManager(DATABASE_PATH, LANCEDB_PATH);
+    const backupManager = new BackupManager(DATABASE_PATH(), lancedbPath());
 
     // List backups
-    const backups = await backupManager.listBackups(BACKUP_DIR);
+    const backups = await backupManager.listBackups(BACKUP_DIR());
 
     return NextResponse.json({
       success: true,
       backups,
-      backupDir: BACKUP_DIR,
+      backupDir: BACKUP_DIR(),
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -131,7 +133,7 @@ export async function PUT(request: NextRequest) {
     }
 
     // Create backup manager
-    const backupManager = new BackupManager(DATABASE_PATH, LANCEDB_PATH);
+    const backupManager = new BackupManager(DATABASE_PATH(), lancedbPath());
 
     // Restore backup
     const result = await backupManager.restoreBackup({

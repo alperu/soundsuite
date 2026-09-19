@@ -59,7 +59,7 @@ const MAX_JITTER_MS = 1_000; // random jitter added to each retry delay
 function rejectCaptureDir(): string | null {
   try {
     const dir = process.env.OCR_REJECT_CAPTURE_DIR
-      ?? require('path').join(process.cwd(), 'data', 'ocr-captures');
+      ?? (require('@/lib/profiles/registry') as typeof import('@/lib/profiles/registry')).activeProfile().ocrCaptures;
     return require('fs').existsSync(dir) ? dir : null;
   } catch {
     return null;

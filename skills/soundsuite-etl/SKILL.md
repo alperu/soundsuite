@@ -14,6 +14,14 @@ without a deploy. (Design: `docs/PLAN-haystack-mcp-agentic-etl.md`.)
 stop at the review gate. The operator asked for an ETL run, not for unattended writes to
 litigation records.
 
+## -1. Which profile
+
+Sound Suite runs one **data profile** at a time (`profile_list` shows them, with their cases;
+`profile_use(name)` switches the whole server). Every result carries `profile`. When the operator
+names a profile ("ingest this into Demo"), call `profile_list`, switch if needed, and pass
+`expectProfile: "<name>"` on the calls that follow so a wrong-profile call is refused instead of
+answered.
+
 ## 0. What you can and cannot do
 
 | Tool | Profile | Writes? |

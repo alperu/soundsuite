@@ -9,8 +9,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import * as lancedb from '@lancedb/lancedb';
+import { lancedbPath } from '@/lib/profiles';
 
-const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
 const TABLE_NAME = 'chunks';
 
 export const dynamic = 'force-dynamic';
@@ -27,7 +27,7 @@ export async function GET(
       return NextResponse.json({ error: 'page query param required' }, { status: 400 });
     }
 
-    const db = await lancedb.connect(LANCEDB_PATH);
+    const db = await lancedb.connect(lancedbPath());
     if (!(await db.tableNames()).includes(TABLE_NAME)) {
       return NextResponse.json({ chunks: [] });
     }

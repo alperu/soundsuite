@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db/prisma';
 import { getConfig } from '@/lib/db/config';
 import { VectorStore } from '@/lib/vector/vector-store';
 import { commitEntity } from '@/app/api/haystack/[op]/route';
+import { lancedbPath } from '@/lib/profiles';
 import {
   loadFilingTargets,
   loadChunks,
@@ -392,7 +393,7 @@ export async function POST(
     let vectorStore: VectorStore | null = null;
     try {
       vectorStore = new VectorStore({
-        dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+        dbPath: lancedbPath(),
         tableName: 'chunks',
       });
       await vectorStore.initialize();

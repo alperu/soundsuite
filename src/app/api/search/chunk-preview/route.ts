@@ -20,6 +20,7 @@ import path from 'path';
 import { parseBooleanQuery } from '@/lib/search/boolean-query';
 import { extractFieldFilters, resolvePrismaFilters } from '@/lib/search/boolean-to-fts';
 import { prisma } from '@/lib/db/prisma';
+import { lancedbPath } from '@/lib/profiles';
 
 interface Body {
   filter: string;
@@ -82,7 +83,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 500 },
     );
   }
-  const dbPath = path.resolve(process.cwd(), 'data/lancedb');
+  const dbPath = lancedbPath();
   try {
     const db = await lancedb.connect(dbPath);
     const tbl = await db.openTable('chunks');

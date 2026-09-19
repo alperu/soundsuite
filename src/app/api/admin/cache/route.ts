@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { getRedis, isRedisAvailable } from '@/lib/redis';
 import { requireAdminApiAccess } from '@/lib/api/route-guard';
+import { lancedbPath } from '@/lib/profiles';
 
 /**
  * GET /api/admin/cache — Returns cache & document index status.
@@ -167,7 +168,7 @@ export async function POST(req: NextRequest) {
         // 1. Clear vector index for each document
         const { VectorStore } = await import('@/lib/vector/vector-store');
         const vectorStore = new VectorStore({
-          dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+          dbPath: lancedbPath(),
           tableName: 'chunks',
         });
         await vectorStore.initialize();
@@ -221,7 +222,7 @@ export async function POST(req: NextRequest) {
         console.log('[cache/route] clear_all_vectors: starting');
         // Nuclear option: drop the entire LanceDB chunks table and re-queue all docs
         const lancedb = await import('@lancedb/lancedb');
-        const dbPath = process.env.LANCEDB_PATH || './data/lancedb';
+        const dbPath = lancedbPath();
         console.log('[cache/route] clear_all_vectors: connecting to LanceDB at', dbPath);
         const db = await lancedb.connect(dbPath);
         const tables = await db.tableNames();

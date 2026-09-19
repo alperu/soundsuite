@@ -25,6 +25,7 @@
  */
 
 import type { ToolExecutionContext } from './tool-types';
+import { lancedbPath } from '@/lib/profiles';
 
 const CHUNKS_TABLE = 'chunks';
 
@@ -161,7 +162,7 @@ async function countChunks(
 ): Promise<number | null> {
   try {
     const lancedb = await import('@lancedb/lancedb');
-    const conn = await lancedb.connect(process.env.LANCEDB_PATH || './data/lancedb');
+    const conn = await lancedb.connect(lancedbPath());
     const table = await conn.openTable(CHUNKS_TABLE);
 
     const total =

@@ -26,9 +26,13 @@ import { getResearchTools } from './research-tools';
 import { getPresetTools } from './preset-tools';
 import { getRoutedReportTools } from './routed-report-tools';
 import { getHaystackOpTools } from './haystack-ops';
+import { getProfileTools } from './profile-tools';
 
 export function getAllTools(): BaseMCPTool[] {
   return [
+    // Profiles (docs/tasks/54-profiles.md): which data set the server reads,
+    // and the switch. Both profiles, no LLM.
+    ...getProfileTools(),
     // Haystack vendor ops (docs/PLAN-haystack-mcp-agentic-etl.md): generated
     // from the op catalogue. Read ops are both profiles; write and LLM ops are
     // routed-only and writes are further gated by SS_HAYSTACK_WRITE=1.
@@ -101,3 +105,4 @@ export { GetChunkContextTool } from './get-chunk-context';
 export { FleetStatusTool } from './fleet-status';
 export { RoleAssignmentsListTool } from './role-assignments-list';
 export { HaystackOpTool, getHaystackOpTools } from './haystack-ops';
+export { ProfileListTool, ProfileUseTool, getProfileTools } from './profile-tools';

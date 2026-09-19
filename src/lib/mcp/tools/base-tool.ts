@@ -45,6 +45,8 @@ export const CALLER_SAFE_ERROR_CODES: ReadonlySet<string> = new Set([
   'JOB_RUNNING',
   'JOB_FAILED',
   'JOB_CANCELLED',
+  // Profiles: names the active data set, never case text.
+  'PROFILE_MISMATCH',
 ]);
 
 /** Caller-facing text for anything not on the allowlist. */

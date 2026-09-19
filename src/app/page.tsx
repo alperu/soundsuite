@@ -6,10 +6,10 @@ import {
   type PartialDetectionPrisma,
 } from '@/lib/ingestion/partial-detection';
 import type { DocumentStatus } from '@/lib/document-status';
+import { lancedbPath } from '@/lib/profiles';
 
 export const dynamic = 'force-dynamic';
 
-const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
 const TABLE_NAME = 'chunks';
 
 interface CaseWithStats {
@@ -65,10 +65,10 @@ async function getDocumentCoverage(): Promise<{ partial: Set<string>; nothingToR
     if (indexedDocs.length === 0) return { partial: new Set(), nothingToRepair: new Set() };
 
     // computePartialDocumentIds returns EVERY input document as partial when the
-    // chunks table is absent (fresh install, moved LANCEDB_PATH). That would badge
+    // chunks table is absent (fresh install, moved lancedbPath()). That would badge
     // the whole corpus PARTIAL and offer a repair that cannot work, so probe first
     // and fail open — which is what this page has always done.
-    const db = await lancedb.connect(LANCEDB_PATH);
+    const db = await lancedb.connect(lancedbPath());
     const tableNames = await db.tableNames();
     if (!tableNames.includes(TABLE_NAME)) return { partial: new Set(), nothingToRepair: new Set() };
 
@@ -80,7 +80,7 @@ async function getDocumentCoverage(): Promise<{ partial: Set<string>; nothingToR
       {
         prisma: prisma as unknown as PartialDetectionPrisma,
         lancedb,
-        lancedbPath: LANCEDB_PATH,
+        lancedbPath: lancedbPath(),
         tableName: TABLE_NAME,
       },
     );

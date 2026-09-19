@@ -3,14 +3,12 @@ import { PrismaClient, Prisma } from '@prisma/client'
 import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
 import { withCacheInvalidation } from './cache-invalidation'
 import { xetoValidate } from '@/lib/legal/prisma-extensions/validate'
+import { activeProfile, activeProfileName } from '@/lib/profiles/registry'
 
-// The exported `prisma` is the extended client (Prisma's
-// `$extends` returns a structurally-distinct type), so we widen the
-// global cache to `unknown` here and rely on the export site to set
-// the type. This keeps the singleton stable across HMR reloads in dev.
+// Per-profile clients live on globalThis so the map survives HMR reloads in
+// dev; the exported `prisma` is a proxy over the active one (see below).
 const globalForPrisma = globalThis as unknown as {
-  prisma: unknown
-  pragmasApplied: boolean | undefined
+  prismaClients: unknown
 }
 
 /**
@@ -44,13 +42,22 @@ function resolveSqlitePath(url: string): string {
  * connection level (see prisma/prisma#2955), so WAL mode and busy_timeout
  * stop being best-effort.
  */
-function makeClient(): PrismaClient {
-  const url = process.env.DATABASE_URL ?? 'file:./data/sound-suite.db'
-  const dbPath = resolveSqlitePath(url)
+function makeClient(dbPath: string): PrismaClient {
   // PrismaBetterSqlite3 expects `url` as a path the better-sqlite3 driver can
   // open directly. We pass the resolved absolute filesystem path.
   const adapter = new PrismaBetterSqlite3({ url: dbPath })
   return new PrismaClient({ adapter })
+}
+
+/**
+ * Where the active profile's database lives. Profiles (`lib/profiles`) own
+ * this once `data/<name>/profile.json` exists; before that, the legacy
+ * `DATABASE_URL` resolution above applies unchanged.
+ */
+function activeSqlitePath(): string {
+  const p = activeProfile()
+  if (!p.legacy) return p.sqlite
+  return resolveSqlitePath(process.env.DATABASE_URL ?? 'file:./data/sound-suite.db')
 }
 
 /**
@@ -62,23 +69,77 @@ function makeClient(): PrismaClient {
  * builds on `prisma` (the extended client) — see
  * `docs/xeto-haystack-research.md §12.2` for the layering rationale.
  */
-function createPrismaClient() {
-  return withCacheInvalidation(makeClient()).$extends(xetoValidate)
+function createPrismaClient(dbPath: string) {
+  return withCacheInvalidation(makeClient(dbPath)).$extends(xetoValidate)
 }
 
 /**
  * The fully-extended client type. `$extends` returns a structurally-distinct
- * type, so we derive it from the factory rather than naming it by hand. The
- * global cache is `unknown` (set above), so we cast it back to this type at the
- * export site — otherwise `unknown ?? client` widens `prisma` to `{}` and every
- * `prisma.<model>` access fails to type-check.
+ * type, so we derive it from the factory rather than naming it by hand.
  */
 export type ExtendedPrismaClient = ReturnType<typeof createPrismaClient>
 
-export const prisma: ExtendedPrismaClient =
-  (globalForPrisma.prisma as ExtendedPrismaClient | undefined) ?? createPrismaClient()
+/**
+ * One client per profile, cached on globalThis so HMR reloads and the
+ * profile switch both reuse an open connection instead of leaking one.
+ */
+const clients: Map<string, { dbPath: string; client: ExtendedPrismaClient; pragmas: boolean }> =
+  (globalForPrisma.prismaClients as Map<string, { dbPath: string; client: ExtendedPrismaClient; pragmas: boolean }> | undefined) ??
+  new Map()
+globalForPrisma.prismaClients = clients
 
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
+function clientForActiveProfile(): ExtendedPrismaClient {
+  const name = activeProfileName()
+  const dbPath = activeSqlitePath()
+  const cached = clients.get(name)
+  // Legacy mode can change its path if DATABASE_URL changes under it (the
+  // migration script does exactly that); a profile's path never moves.
+  if (cached && cached.dbPath === dbPath) return cached.client
+  const client = createPrismaClient(dbPath)
+  clients.set(name, { dbPath, client, pragmas: false })
+  return client
+}
+
+/**
+ * The application's Prisma client — a stable proxy over WHICHEVER profile is
+ * active. The 100+ importers keep `import { prisma }` and never learn about
+ * profiles; a switch (`lib/profiles/switch.ts`) changes what the proxy
+ * forwards to, in-process, with no restart.
+ *
+ * Every property access resolves the active client, so a `$transaction`
+ * callback or a model delegate captured before a switch keeps using the
+ * client it was taken from — which is the correct behaviour mid-write.
+ */
+export const prisma: ExtendedPrismaClient = new Proxy({} as ExtendedPrismaClient, {
+  get(_target, prop) {
+    const client = clientForActiveProfile() as unknown as Record<PropertyKey, unknown>
+    const value = client[prop]
+    return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(client) : value
+  },
+  has(_target, prop) {
+    return prop in (clientForActiveProfile() as unknown as object)
+  },
+})
+
+/**
+ * Disconnect and forget the client for `profileName`. Called by the profile
+ * switch AFTER the registry points elsewhere, so nothing re-creates it.
+ */
+export async function releasePrismaClient(profileName: string): Promise<void> {
+  const entry = clients.get(profileName)
+  if (!entry) return
+  clients.delete(profileName)
+  try {
+    await entry.client.$disconnect()
+  } catch {
+    /* already closed */
+  }
+}
+
+/** The SQLite file the proxy currently forwards to. */
+export function currentSqlitePath(): string {
+  return activeSqlitePath()
+}
 
 /**
  * Apply SQLite PRAGMAs for performance and concurrency.
@@ -91,11 +152,13 @@ if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
  * Quaint driver behavior that ignored them silently.
  */
 export async function applySqlitePragmas(): Promise<void> {
-  if (globalForPrisma.pragmasApplied) return;
+  const entry = clients.get(activeProfileName())
+  if (entry?.pragmas) return;
   try {
     await prisma.$executeRawUnsafe('PRAGMA journal_mode = WAL');
     await prisma.$executeRawUnsafe('PRAGMA busy_timeout = 5000');
-    globalForPrisma.pragmasApplied = true;
+    const after = clients.get(activeProfileName())
+    if (after) after.pragmas = true
   } catch {
     // Ignore — may fail if DB not yet ready
   }

@@ -20,6 +20,7 @@ import { ToolExecutionLogger } from './tool-execution-logger';
 import { ollamaReadiness, type OllamaReadiness } from './shared-dependencies';
 import { enforceProvider, McpError, LOCAL_PROVIDER } from './llm-policy';
 import type { McpProfile } from './research-types';
+import { activeProfileName } from '@/lib/profiles/registry';
 
 /** Generic reason attached to LLM tools hidden from `local` while Ollama is down. */
 export const OLLAMA_UNAVAILABLE_REASON =
@@ -198,6 +199,39 @@ export class ToolRegistry {
     contextOverlay?: Partial<ToolExecutionContext>,
     profile: McpProfile = 'local',
   ): Promise<ToolExecutionResult> {
+    const result = await this.executeInner(toolName, params, contextOverlay, profile);
+    // Every result names the DATA profile it ran against (not the MCP policy
+    // profile) so a client can check it is reading the data set it meant to.
+    return { ...result, profile: activeProfileName() };
+  }
+
+  private async executeInner(
+    toolName: string,
+    params: Record<string, any>,
+    contextOverlay?: Partial<ToolExecutionContext>,
+    profile: McpProfile = 'local',
+  ): Promise<ToolExecutionResult> {
+    // `expectProfile` is accepted on EVERY tool and consumed here: a guard,
+    // not a router. Naming a profile other than the active one refuses the
+    // call instead of answering from data the caller did not mean to read
+    // (docs/tasks/54-profiles.md). Stripped before validation so tools that
+    // reject unknown params never see it.
+    if (params && typeof params === 'object' && 'expectProfile' in params) {
+      const { expectProfile, ...rest } = params;
+      params = rest;
+      if (expectProfile !== undefined && expectProfile !== null) {
+        const active = activeProfileName();
+        if (typeof expectProfile !== 'string' || expectProfile.trim() !== active) {
+          return {
+            success: false,
+            error: `expectProfile "${String(expectProfile)}" does not match the active profile "${active}". Call profile_list, then profile_use to switch.`,
+            errorCode: 'PROFILE_MISMATCH',
+            executionTimeMs: 0,
+          };
+        }
+      }
+    }
+
     const tool = this.tools.get(toolName);
     if (!tool) {
       return { success: false, error: `Tool "${toolName}" not found`, errorCode: 'TOOL_NOT_FOUND', executionTimeMs: 0 };

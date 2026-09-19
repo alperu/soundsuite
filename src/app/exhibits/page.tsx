@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db/prisma';
 import { VectorStore } from '@/lib/vector/vector-store';
 import ExhibitGallery from '@/components/exhibit-gallery';
+import { lancedbPath } from '@/lib/profiles';
 
 interface Exhibit {
   id: string;
@@ -18,7 +19,7 @@ async function getExhibits(): Promise<Exhibit[]> {
   try {
     // Initialize vector store
     const vectorStore = new VectorStore({
-      dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+      dbPath: lancedbPath(),
       tableName: 'chunks',
     });
 

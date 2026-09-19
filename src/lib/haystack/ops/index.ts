@@ -10,6 +10,7 @@
  * Hayson never enters here; the HTTP route encodes the result as a grid.
  */
 import { prisma } from '@/lib/db/prisma';
+import { activeProfileName } from '@/lib/profiles/registry';
 import type { ToolExecutionContext } from '@/lib/mcp/tool-types';
 import { vendorOpSpec, type OpParam, type VendorOpSpec } from './catalogue';
 import { OpError, type OpActor, type OpContext, type OpPrisma, type OpResult } from './types';
@@ -154,5 +155,7 @@ export async function runVendorOp(
   }
 
   const ctx: OpContext = { prisma: options.client ?? prisma, actor: options.actor };
-  return handler(ctx, params, options.llmContext);
+  const result = await handler(ctx, params, options.llmContext);
+  // Every grid names the data profile it was read from (docs/tasks/54-profiles.md).
+  return { ...result, meta: { profile: activeProfileName(), ...result.meta } };
 }

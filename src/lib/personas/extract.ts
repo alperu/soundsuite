@@ -15,6 +15,7 @@
 import { prisma } from '@/lib/db/prisma'
 import { VectorStore } from '@/lib/vector/vector-store'
 import { findDedupMatches, type DedupMatch } from './dedup'
+import { lancedbPath } from '@/lib/profiles';
 import {
   ATTORNEY_FOR_RE,
   ALLCAPS_JUDGE_RE,
@@ -187,7 +188,7 @@ export async function fetchSignatureAndCaptionChunks(
   documentId: string,
 ): Promise<ChunkLite[]> {
   const vectorStore = new VectorStore({
-    dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+    dbPath: lancedbPath(),
     tableName: 'chunks',
   })
   await vectorStore.initialize()

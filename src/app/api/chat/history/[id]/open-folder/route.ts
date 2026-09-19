@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
+import { activeProfile } from '@/lib/profiles';
 
-const DATA_DIR = path.join(process.cwd(), 'data', 'chat', 'history');
+const DATA_DIR = () => activeProfile().chatHistory;
 
 /**
  * POST /api/chat/history/[id]/open-folder
@@ -19,7 +20,7 @@ export async function POST(
   const subDir = caseNumber
     ? caseNumber.replace(/[^a-zA-Z0-9_-]/g, '_')
     : '_general';
-  const filePath = path.join(DATA_DIR, subDir, `${id}.md`);
+  const filePath = path.join(DATA_DIR(), subDir, `${id}.md`);
 
   if (fs.existsSync(filePath)) {
     return NextResponse.json({ path: filePath });
@@ -27,10 +28,10 @@ export async function POST(
 
   // Search all subdirs
   try {
-    const entries = fs.readdirSync(DATA_DIR, { withFileTypes: true });
+    const entries = fs.readdirSync(DATA_DIR(), { withFileTypes: true });
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        const candidate = path.join(DATA_DIR, entry.name, `${id}.md`);
+        const candidate = path.join(DATA_DIR(), entry.name, `${id}.md`);
         if (fs.existsSync(candidate)) {
           return NextResponse.json({ path: candidate });
         }

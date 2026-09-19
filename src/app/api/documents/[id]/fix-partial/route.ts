@@ -70,6 +70,7 @@ import {
 } from '@/lib/ingestion/repair-tracking';
 import { GET as pageReportGET } from '@/app/api/vectors/page-report/route';
 import { POST as reindexPagesPOST } from '@/app/api/documents/[id]/reindex-pages/route';
+import { lancedbPath } from '@/lib/profiles';
 
 const logger = createLogger('fix-partial');
 
@@ -81,7 +82,6 @@ const REPAIRABLE_STATUS = 'INDEXED';
 const DEFAULT_MAX_PAGES = 50;
 const HARD_MAX_PAGES = 200;
 
-const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
 const TABLE_NAME = process.env.LANCEDB_TABLE || 'chunks';
 
 // ---------------------------------------------------------------------------
@@ -213,7 +213,7 @@ async function isStillPartial(documentId: string, pageCount: number): Promise<bo
       // (Prisma's Exact<> generics); the cast is what keeps tsc at baseline.
       prisma: prisma as unknown as PartialDetectionPrisma,
       lancedb,
-      lancedbPath: LANCEDB_PATH,
+      lancedbPath: lancedbPath(),
     });
     return partial.has(documentId);
   } catch (err) {
@@ -239,7 +239,7 @@ async function isStillPartial(documentId: string, pageCount: number): Promise<bo
  */
 async function probeIndexHealth(): Promise<{ ok: true; totalRows: number } | { ok: false; reason: string }> {
   try {
-    const db = await lancedb.connect(LANCEDB_PATH);
+    const db = await lancedb.connect(lancedbPath());
     const tables = await db.tableNames();
     if (!tables.includes(TABLE_NAME)) {
       return {

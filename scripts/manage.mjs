@@ -130,16 +130,46 @@ function runSync(cmd, opts = {}) {
   } catch { return null; }
 }
 
-/** Get the resolved database path from DATABASE_URL. */
+/**
+ * Profiles (docs/tasks/54-profiles.md): `data/<name>/profile.json` marks a
+ * profile; `data/profiles.json` names the active one; `SS_PROFILE` or
+ * `--profile <name>` overrides. With no profile on disk the legacy
+ * DATABASE_URL / LANCEDB_PATH resolution applies.
+ */
+function getProfilePaths() {
+  const dataRoot = path.join(PROJECT_ROOT, 'data');
+  const flagIdx = process.argv.indexOf('--profile');
+  const wanted = (flagIdx >= 0 ? process.argv[flagIdx + 1] : null) || process.env.SS_PROFILE || null;
+  let profiles = [];
+  try {
+    profiles = fs.readdirSync(dataRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && fs.existsSync(path.join(dataRoot, e.name, 'profile.json')))
+      .map((e) => e.name);
+  } catch { /* no data dir yet */ }
+  if (profiles.length === 0) return null;
+  let active = wanted;
+  if (!active || !profiles.includes(active)) {
+    try { active = JSON.parse(fs.readFileSync(path.join(dataRoot, 'profiles.json'), 'utf8')).active; } catch { /* none */ }
+  }
+  if (!active || !profiles.includes(active)) active = profiles[0];
+  const root = path.join(dataRoot, active);
+  return { name: active, root, sqlite: path.join(root, 'sound-suite.db'), lancedb: path.join(root, 'lancedb') };
+}
+
+/** Get the resolved database path: the active profile's, else DATABASE_URL. */
 function getDbPath() {
+  const profile = getProfilePaths();
+  if (profile) return profile.sqlite;
   const raw = process.env.DATABASE_URL || '';
   const relative = raw.replace(/^file:/, '');
   // DATABASE_URL is relative to the prisma/ directory
   return path.resolve(PROJECT_ROOT, 'prisma', relative);
 }
 
-/** Get the LanceDB data path. */
+/** Get the LanceDB data path: the active profile's, else LANCEDB_PATH. */
 function getLanceDbPath() {
+  const profile = getProfilePaths();
+  if (profile) return profile.lancedb;
   return path.resolve(PROJECT_ROOT, process.env.LANCEDB_PATH || './data/lancedb');
 }
 
@@ -460,7 +490,9 @@ function cmdDbMigrate() {
 
   info('Running prisma migrate deploy...');
   try {
-    execSync('npx prisma migrate deploy', { cwd: PROJECT_ROOT, stdio: 'inherit' });
+    // Hand prisma the resolved absolute file so a profile's database — not
+    // the .env DATABASE_URL — is what gets migrated.
+    execSync('npx prisma migrate deploy', { cwd: PROJECT_ROOT, stdio: 'inherit', env: { ...process.env, DATABASE_URL: `file:${dbPath}` } });
     ok('Migrations applied successfully');
   } catch {
     err('Migration failed');

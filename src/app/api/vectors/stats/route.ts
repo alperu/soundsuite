@@ -2,20 +2,20 @@ import { NextResponse } from 'next/server';
 import * as lancedb from '@lancedb/lancedb';
 import { prisma } from '@/lib/db/prisma';
 import { getConfig } from '@/lib/db/config';
+import { lancedbPath } from '@/lib/profiles';
 
-const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
 const TABLE_NAME = 'chunks';
 
 export async function GET() {
   try {
     const config = await getConfig();
-    const db = await lancedb.connect(LANCEDB_PATH);
+    const db = await lancedb.connect(lancedbPath());
     const tableNames = await db.tableNames();
 
     const embeddingInfo = {
       provider: config.embeddingProvider,
       model: config.embeddingModel,
-      dbPath: LANCEDB_PATH,
+      dbPath: lancedbPath(),
     };
 
     if (!tableNames.includes(TABLE_NAME)) {

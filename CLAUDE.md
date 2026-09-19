@@ -97,6 +97,10 @@ npm run db:migrate | db:backup | db:restore
   (catalogue → HTTP adapter → MCP bridge `mcp/tools/haystack-ops.ts`); writes need
   `SS_HAYSTACK_WRITE=1` except from the same-origin proxy. Plan:
   `docs/PLAN-haystack-mcp-agentic-etl.md`; status: `docs/tasks/53-haystack-etl-ops-and-auto-ingest.md`.
+- **Profiles**: one active data set per process, discovered from `data/<name>/profile.json`
+  (`src/lib/profiles`); `prisma`, the Kysely `db`, Redis keys and `lancedbPath()` all follow it.
+  Switch via the sidebar dropdown, `POST /api/profiles/active`, or MCP `profile_use`; every MCP
+  result carries `profile`. Details: `docs/tasks/54-profiles.md`.
 - **Native modules** (`sharp`, `onnxruntime-node`, `@lancedb/lancedb`, `tokenizers`, …) must be
   in `serverExternalPackages` in `next.config.ts`.
 - **Tests** live in colocated `__tests__/`; jsdom by default, `@jest-environment node` for

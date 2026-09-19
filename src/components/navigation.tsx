@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import { ProfileSwitcher } from './profile-switcher';
 
 const LS_KEY = 'nav-collapsed';
 
@@ -85,6 +86,11 @@ export default function Navigation() {
             <img src="/brand/soundsuite-logo.svg" alt="Sound Suite" className="h-7 w-auto" />
           </Link>
         )}
+      </div>
+
+      {/* Profile — which data set every page below reads (docs/tasks/54-profiles.md) */}
+      <div className="border-b border-gray-200 pt-2">
+        <ProfileSwitcher collapsed={collapsed} />
       </div>
 
       {/* Nav links */}

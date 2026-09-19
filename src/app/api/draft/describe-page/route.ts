@@ -3,8 +3,7 @@ import { prisma } from '@/lib/db/prisma';
 import * as lancedb from '@lancedb/lancedb';
 import { streamAI, type AIMessage } from '@/lib/ai/ai-provider';
 import { AI_PROVIDER_KEYS, type AIProviderKey } from '@/lib/ai/models';
-
-const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
+import { lancedbPath } from '@/lib/profiles';
 
 /**
  * POST /api/draft/describe-page
@@ -60,7 +59,7 @@ export async function POST(request: NextRequest) {
       // 2. If no PageCache, get text chunks from LanceDB
       if (!pageText) {
         try {
-          const db = await lancedb.connect(LANCEDB_PATH);
+          const db = await lancedb.connect(lancedbPath());
           const tableNames = await db.tableNames();
           if (tableNames.includes('chunks')) {
             const table = await db.openTable('chunks');

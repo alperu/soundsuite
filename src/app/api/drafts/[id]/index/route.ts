@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { createLogger } from '@/lib/logger';
 import { extractTextFromTiptap } from '@/lib/draft/draft-text-extractor';
+import { lancedbPath } from '@/lib/profiles';
 
 const logger = createLogger('draft-index');
 
@@ -115,7 +116,7 @@ export async function POST(
 
     // 9. Delete old vectors for this draft, then insert new ones
     const vectorStore = new VectorStore({
-      dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+      dbPath: lancedbPath(),
       tableName: process.env.LANCEDB_TABLE || 'chunks',
     });
     await vectorStore.initialize();

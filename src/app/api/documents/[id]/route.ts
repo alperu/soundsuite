@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db/prisma';
 import { publishDocumentEvent } from '@/lib/sse-events';
 import { FilingsCacheService } from '@/services/filings-cache';
 import { VectorStore } from '@/lib/vector/vector-store';
+import { lancedbPath } from '@/lib/profiles';
 
 /**
  * DELETE /api/documents/[id] - Remove a document from the database
@@ -23,7 +24,7 @@ export async function DELETE(
     // Clean up vectors from LanceDB
     try {
       const vectorStore = new VectorStore({
-        dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+        dbPath: lancedbPath(),
         tableName: 'chunks',
       });
       await vectorStore.initialize();
@@ -153,7 +154,7 @@ export async function PATCH(
       // Clear vectors from LanceDB so they get regenerated
       try {
         const vectorStore = new VectorStore({
-          dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+          dbPath: lancedbPath(),
           tableName: 'chunks',
         });
         await vectorStore.initialize();

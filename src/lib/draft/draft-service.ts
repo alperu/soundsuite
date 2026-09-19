@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/db/prisma';
 import type { CreateDraftInput, UpdateDraftInput } from './draft-types';
+import { lancedbPath } from '@/lib/profiles';
 
 function slugify(text: string): string {
   return text
@@ -161,7 +162,7 @@ export async function deleteDraft(id: string) {
   try {
     const { VectorStore } = await import('@/lib/vector/vector-store');
     const vs = new VectorStore({
-      dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+      dbPath: lancedbPath(),
       tableName: process.env.LANCEDB_TABLE || 'chunks',
     });
     await vs.initialize();

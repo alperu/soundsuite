@@ -13,6 +13,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { getRedis, isRedisAvailable } from '@/lib/redis';
 import { createLogger } from '@/lib/logger';
+import { lancedbPath } from '@/lib/profiles';
 
 const logger = createLogger('FilingTypeClassifier');
 
@@ -231,7 +232,7 @@ export class FilingTypeClassifier {
   private async _doInit(): Promise<void> {
     try {
       // Connect to LanceDB
-      const dbPath = process.env.LANCEDB_PATH || 'data/lancedb';
+      const dbPath = lancedbPath();
       this.db = await lancedb.connect(dbPath);
 
       // Initialize embedding model

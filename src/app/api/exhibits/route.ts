@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { VectorStore } from '@/lib/vector/vector-store';
 import { prisma } from '@/lib/db/prisma';
+import { lancedbPath } from '@/lib/profiles';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,7 +24,7 @@ export async function GET(request: NextRequest) {
 
     // Initialize vector store
     const vectorStore = new VectorStore({
-      dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+      dbPath: lancedbPath(),
       tableName: 'chunks',
     });
 

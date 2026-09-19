@@ -33,6 +33,7 @@
  */
 
 import { BaseMCPTool } from './base-tool';
+import { lancedbPath } from '@/lib/profiles';
 import {
   ToolMetadata,
   ToolExecutionContext,
@@ -265,7 +266,7 @@ async function countChunks(
 ): Promise<{ summary: CorpusStatusResult['chunks']; total: number | null }> {
   try {
     const lancedb = await import('@lancedb/lancedb');
-    const dbPath = process.env.LANCEDB_PATH || './data/lancedb';
+    const dbPath = lancedbPath();
     const conn = await lancedb.connect(dbPath);
     const table = await conn.openTable(CHUNKS_TABLE);
     const total: number = await table.countRows();

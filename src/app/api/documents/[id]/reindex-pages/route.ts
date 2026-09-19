@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db/prisma';
 import { createLogger } from '@/lib/logger';
 import { getRedis, isRedisAvailable } from '@/lib/redis';
 import { PIPELINE_STAGES } from '@/lib/pipeline-stages';
+import { lancedbPath } from '@/lib/profiles';
 
 const logger = createLogger('reindex-pages');
 
@@ -543,7 +544,7 @@ export async function POST(
 
       // --- Delete old chunks for these pages, then insert new ones ---
       const vectorStore = new VectorStore({
-        dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+        dbPath: lancedbPath(),
         tableName: process.env.LANCEDB_TABLE || 'chunks',
       });
       await vectorStore.initialize();

@@ -9,6 +9,7 @@ import { ToolExecutionLogger } from './tool-execution-logger';
 import { getAllTools } from './tools';
 import { ToolExecutionContext } from './tool-types';
 import { createLogger } from '../logger';
+import { lancedbPath } from '@/lib/profiles';
 
 const globalForRegistry = globalThis as unknown as {
   __toolRegistry: ToolRegistry | undefined;
@@ -23,6 +24,18 @@ const globalForRegistry = globalThis as unknown as {
 // server restarts. In production the module evaluates once, so the stamp
 // never changes and the singleton behaves exactly as before.
 const MODULE_STAMP = {};
+
+/**
+ * Forget the cached registry so the next `getToolRegistry()` rebuilds it —
+ * used by the profile switch, because the registry's VectorStore is bound
+ * to one profile's LanceDB directory. In-flight calls finish on the old
+ * instance; nothing is torn down under them.
+ */
+export function resetToolRegistry(): void {
+  globalForRegistry.__toolRegistry = undefined;
+  globalForRegistry.__toolRegistryPromise = undefined;
+  globalForRegistry.__toolRegistryModuleStamp = undefined;
+}
 
 export async function getToolRegistry(): Promise<ToolRegistry> {
   if (
@@ -68,7 +81,7 @@ async function initRegistry(): Promise<ToolRegistry> {
     // Initialise VectorStore
     const { VectorStore } = await import('../vector/vector-store');
     const vs = new VectorStore({
-      dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+      dbPath: lancedbPath(),
       tableName: 'chunks',
     });
     await vs.initialize();

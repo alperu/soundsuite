@@ -20,8 +20,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as lancedb from '@lancedb/lancedb';
 import { prisma } from '@/lib/db/prisma';
 import { requireAdminApiAccess } from '@/lib/api/route-guard';
+import { lancedbPath } from '@/lib/profiles';
 
-const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
 const TABLE_NAME = 'chunks';
 
 const STRUCTURE_COLUMNS = ['block_type', 'heading_path', 'speakers', 'block_orders', 'block_bbox', 'table_markdown'] as const;
@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json().catch(() => ({}));
     const onlyDocId: string | undefined = body.documentId;
 
-    const db = await lancedb.connect(LANCEDB_PATH);
+    const db = await lancedb.connect(lancedbPath());
     if (!(await db.tableNames()).includes(TABLE_NAME)) {
       return NextResponse.json({ error: 'chunks table missing' }, { status: 400 });
     }

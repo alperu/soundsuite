@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { activeProfile } from '@/lib/profiles';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -60,13 +61,13 @@ export interface ChatSession extends ChatSessionMeta {
 // Paths
 // ---------------------------------------------------------------------------
 
-const DATA_DIR = path.join(process.cwd(), 'data', 'chat', 'history');
+const DATA_DIR = () => activeProfile().chatHistory;
 
 function sessionDir(caseNumber?: string): string {
   if (caseNumber) {
-    return path.join(DATA_DIR, caseNumber.replace(/[^a-zA-Z0-9_-]/g, '_'));
+    return path.join(DATA_DIR(), caseNumber.replace(/[^a-zA-Z0-9_-]/g, '_'));
   }
-  return path.join(DATA_DIR, '_general');
+  return path.join(DATA_DIR(), '_general');
 }
 
 function sessionFilePath(id: string, caseNumber?: string): string {
@@ -331,7 +332,7 @@ export async function saveSession(session: ChatSession): Promise<void> {
       }
     } catch { /* dir doesn't exist */ }
   }
-  await removeStale(DATA_DIR);
+  await removeStale(DATA_DIR());
 }
 
 export async function listSessions(caseNumber?: string): Promise<ChatSessionMeta[]> {
@@ -370,7 +371,7 @@ export async function listSessions(caseNumber?: string): Promise<ChatSessionMeta
   if (caseNumber) {
     await scanDir(sessionDir(caseNumber));
   } else {
-    await scanDir(DATA_DIR);
+    await scanDir(DATA_DIR());
   }
 
   // Sort newest first
@@ -405,7 +406,7 @@ export async function loadSession(id: string, caseNumber?: string): Promise<Chat
     return null;
   }
 
-  return searchDir(DATA_DIR);
+  return searchDir(DATA_DIR());
 }
 
 export async function deleteSession(id: string, caseNumber?: string): Promise<boolean> {
@@ -433,7 +434,7 @@ export async function deleteSession(id: string, caseNumber?: string): Promise<bo
     return false;
   }
 
-  return searchAndDelete(DATA_DIR);
+  return searchAndDelete(DATA_DIR());
 }
 
 export async function archiveSessions(ids: string[]): Promise<Buffer> {

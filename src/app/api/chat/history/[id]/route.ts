@@ -5,6 +5,7 @@ import { loadSession, deleteSession } from '@/lib/chat/history-service';
 import { dropChatTable } from '@/lib/chat/chat-vector-store';
 import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logger';
+import { chatAttachmentDir } from '@/lib/chat/chat-attachment-paths';
 
 async function cleanupChatAttachments(chatId: string): Promise<void> {
   try {
@@ -16,7 +17,7 @@ async function cleanupChatAttachments(chatId: string): Promise<void> {
     });
   }
   try {
-    const dir = path.join(process.cwd(), 'data', 'chat-attachments', chatId.replace(/[^a-zA-Z0-9_-]/g, '_'));
+    const dir = chatAttachmentDir(chatId);
     await fs.rm(dir, { recursive: true, force: true });
   } catch (err) {
     logger.warn('chat-delete: rm attachments dir failed', {

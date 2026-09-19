@@ -14,6 +14,7 @@ import { ParsingWorkerManager } from './parsing-worker-manager';
 import { prisma } from '@/lib/db/prisma';
 import { createLogger } from '@/lib/logger';
 import { getServicesManager } from '@/lib/services-manager';
+import { lancedbPath } from '@/lib/profiles';
 
 const logger = createLogger('WorkerInit');
 
@@ -86,7 +87,7 @@ async function buildProcessDocumentFn(): Promise<(documentId: string, filePath: 
   });
 
   const vectorStore = new VectorStore({
-    dbPath: process.env.LANCEDB_PATH || 'data/lancedb',
+    dbPath: lancedbPath(),
     tableName: process.env.LANCEDB_TABLE || 'chunks',
   });
   await vectorStore.initialize();
@@ -219,6 +220,52 @@ export async function reinitializePipeline(): Promise<void> {
 }
 
 /**
+ * Profile switch, half one: stop everything that holds a handle on the
+ * current profile's database or watches its case folders. Returns the names
+ * of what was stopped. The GPU relay, sidecar loops and the JobLog reaper are
+ * not profile-bound and stay up.
+ */
+export async function stopProfileBoundServices(): Promise<string[]> {
+  const stopped: string[] = [];
+  const sm = getServicesManager();
+
+  const daemon = (sm as any).backgroundDaemon;
+  if (daemon?.stop) {
+    try { await daemon.stop(); stopped.push('background-daemon'); } catch (err) { logger.warn('daemon stop failed', { err }); }
+    (sm as any).backgroundDaemon = null;
+  }
+  daemonStarted = false;
+
+  if (managerInstance) {
+    try { await managerInstance.stopAll(); stopped.push('parsing-workers'); } catch (err) { logger.warn('parsing manager stop failed', { err }); }
+    managerInstance = null;
+    initPromise = null;
+    (sm as any).parsingWorkerManager = null;
+  }
+
+  const watcher = (sm as any).fileWatcher;
+  if (watcher?.stop) {
+    try { await watcher.stop(); stopped.push('file-watcher'); } catch (err) { logger.warn('watcher stop failed', { err }); }
+    (sm as any).fileWatcher = null;
+  }
+  (sm as any).jobQueue = null;
+  (sm as any).toolRegistry = null;
+  coreServicesStarted = false;
+
+  logger.info('Profile-bound services stopped', { stopped });
+  return stopped;
+}
+
+/**
+ * Profile switch, half two: bring the parsing manager, daemon, watcher, job
+ * queue and tool registry back up against whatever profile is active now.
+ * Same path as first boot, so there is one way services start.
+ */
+export async function startProfileBoundServices(): Promise<void> {
+  await getWorkerManager();
+}
+
+/**
  * Start the BackgroundScannerDaemon if not already running.
  * Runs the PID controller loop, processes UI/BG queues, and seeds background tasks.
  * Fire-and-forget — errors are logged but don't crash the app.
@@ -280,12 +327,17 @@ async function startDaemonIfNeeded(): Promise<void> {
  * Fire-and-forget — errors are logged but don't crash the app.
  */
 let shuttingDown = false;
+let shutdownHandlersRegistered = false;
 
 /**
  * Register signal handlers for graceful shutdown on all platforms.
  * Listens for SIGTERM, SIGINT, and SIGBREAK (Windows).
  */
 function registerShutdownHandlers(): void {
+  // Once per process: a profile switch re-runs getWorkerManager(), and a
+  // second set of SIGTERM listeners would run the shutdown twice.
+  if (shutdownHandlersRegistered) return;
+  shutdownHandlersRegistered = true;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;

@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db/prisma';
 import { publishFilingEvent } from '@/lib/sse-events';
 import { FilingsCacheService } from '@/services/filings-cache';
 import { VectorStore } from '@/lib/vector/vector-store';
+import { lancedbPath } from '@/lib/profiles';
 
 /**
  * GET /api/cases/[id]/filings/[filingId] — get a single filing with documents
@@ -179,7 +180,7 @@ async function restampChunkCase(
       select: { caseNumber: true },
     });
     const vectorStore = new VectorStore({
-      dbPath: process.env.LANCEDB_PATH || './data/lancedb',
+      dbPath: lancedbPath(),
       tableName: 'chunks',
     });
     await vectorStore.initialize();

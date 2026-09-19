@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as lancedb from '@lancedb/lancedb';
 import { prisma } from '@/lib/db/prisma';
+import { lancedbPath } from '@/lib/profiles';
 
-const LANCEDB_PATH = process.env.LANCEDB_PATH || './data/lancedb';
 const TABLE_NAME = 'chunks';
 
 export async function GET(request: NextRequest) {
@@ -73,7 +73,7 @@ export async function GET(request: NextRequest) {
     const chunkCountMap = new Map<number, { count: number; hasExhibit: boolean; firstText: string }>();
 
     try {
-      const db = await lancedb.connect(LANCEDB_PATH);
+      const db = await lancedb.connect(lancedbPath());
       const tableNames = await db.tableNames();
 
       if (tableNames.includes(TABLE_NAME)) {
