@@ -1,5 +1,182 @@
 # Changelog
 
+## [1.4.1](https://github.com/alperu/soundsuite/compare/v1.4.0...v1.4.1) (2026-09-19)
+
+> Requested as "Sound Suite 1.4.01". Semantic versioning has no leading zeros, so the tag and
+> `package.json` carry **1.4.1**; read "1.4.01" and "1.4.1" as the same release.
+
+### Release Notes
+
+Two days, 23 commits, 123 files, +9,742 / −851 lines, 11 new test suites. Three themes:
+**profiles** (several isolated data sets in one install, switchable from the sidebar and over
+MCP), **Haystack vendor ops + model-driven ETL** (the case graph and the ingestion pipeline are
+now callable by an AI client through a catalogued, gated op surface, with a dashboard page that
+lets a model read a folder of PDFs and propose the whole mapping), and **resilience of the
+service layer** under profile switches and dev-server reloads.
+
+#### Profiles — one active data set per install (`docs/tasks/54-profiles.md`)
+
+* **Layout.** `data/<name>/` holds a profile: `profile.json`, `sound-suite.db`, `lancedb/`,
+  `chat/`, `chat-attachments/`, `ocr-captures/`, `backups/`. `data/profiles.json` names the
+  active one. Profiles are **discovered from disk**, never listed in code; `SS_PROFILE` forces one
+  at boot, `SS_DATA_ROOT` relocates `data/`.
+* **Runtime.** `prisma` and the Kysely `db` are proxies over per-profile clients — 119 importers
+  unchanged. `lancedbPath()` replaces every `process.env.LANCEDB_PATH || './data/lancedb'`
+  (27 sites). Chat history, attachments, OCR captures and backups resolve per profile at call time.
+* **Switching** is process-wide (design A, chosen over per-session state for debuggability):
+  registry → stop watcher / parsing workers / scanner daemon → release DB clients → rebuild the
+  MCP tool registry → restart. Measured 45 ms – 3 s. In-flight parses are re-queued by the
+  boot-time orphan recovery.
+* **Sidebar.** A profile dropdown above **Cases** (name · case count), "＋ New profile…" inline
+  with "copy settings from", and an **edit button** opening a panel: display name, description,
+  folder rename (non-active only), delete (non-active only, never the last one). Delete **moves**
+  the folder to `data/.trash/<name>-<timestamp>`; nothing empties it automatically
+  (`docs/tasks/55-profile-crud.md`).
+* **API.** `GET/POST /api/profiles`, `GET/POST /api/profiles/active`,
+  `GET/PATCH/DELETE /api/profiles/[name]`. New profiles clone the **schema** of the active
+  profile's SQLite (`sqlite_master` DDL + the `_prisma_migrations` ledger, no rows) — the Prisma
+  CLI is unreliable on an empty file (`db push` trips on the JSON `@default("{}")` DDL,
+  `migrate deploy` on a data-dependent migration).
+* **MCP.** `profile_list` (every profile, active flag, cases in each) and `profile_use(name)`.
+  **Every** tool result carries `profile`; `/api/mcp/execute` and the `:3001` server also send
+  `x-ss-profile`. An optional `expectProfile` param on **any** tool refuses the call with
+  `PROFILE_MISMATCH` (HTTP 409) when it names a profile other than the active one — a guard, not
+  a router.
+* **Machine state is shared** (`docs/tasks/56-system-db.md`). `HostRoleAssignment`,
+  `HostProvisioning`, `SidecarCommand`, `AdminUser`, `McpSession`, `ModelDownload` route to
+  `data/system.db`, created on first use and seeded from every profile with `INSERT OR IGNORE`.
+  Redis is **not** partitioned: cached case keys are UUID-rooted and never collide, and fleet
+  state must be global. `/api/health` now leads with a `profile` block (active, legacy flag,
+  available profiles, sqlite / lancedb / system paths).
+* **Scripts.** `scripts/profiles-migrate.mjs <name>` moves the pre-profiles layout into
+  `data/<name>/` by rename (refuses while :3000/:3001 listen or the WAL is non-empty) and repoints
+  `.env`. `scripts/manage.mjs` and `prisma.config.ts` resolve the active profile
+  (`--profile <name>` / `SS_PROFILE`), so `db:migrate`, `db:backup`, `db:restore` target it.
+* **Legacy mode.** A checkout with no profile directory runs exactly as before under the
+  synthetic name `legacy`; the dropdown is disabled and says to run the migration.
+
+#### Haystack vendor ops and the MCP bridge (`docs/tasks/53-haystack-etl-ops-and-auto-ingest.md`)
+
+Implements phases 1–3 of `docs/PLAN-haystack-mcp-agentic-etl.md`.
+
+* **One catalogue, three surfaces.** `src/lib/haystack/ops/catalogue.ts` describes each `ss*` op
+  (params, doc, exposure). The Haystack HTTP `ops` grid now emits `params`, `doc` and
+  `ssExposure` per row; the HTTP adapter coerces query/body params against it; the MCP bridge
+  (`mcp/tools/haystack-ops.ts`) generates one tool per op, named as the op.
+* **Read ops** (both MCP profiles): `ssScopeGraph` (summary per case or one case drilled to
+  filings, with a real `unconnected` count), `ssWorklist` (filings whose **defining** link is
+  empty, with the deterministic suggestion and its reasons — the same selection the browser
+  workbench uses, lifted to `src/lib/scope/worklist.ts`), `ssFolderSurvey` (disk vs database by
+  path then SHA-256: known / moved / new / orphaned / ignored, nested-case detection),
+  `ssIngestStatus` (per-case status counts; `DISCOVERED` named separately from `INDEXED`),
+  `ssReadCase` (meta = whole-case truth, rows = documents).
+* **Write ops** (routed only, `dryRun` defaults to true): `ssCaseEnsure`,
+  `ssPromoteDiscovered`, `ssRequeueErrored`, `ssAutoIngestApply`. A `dryRun: false` from MCP or
+  the bearer-key HTTP API is refused unless the server runs with **`SS_HAYSTACK_WRITE=1`**; the
+  same-origin dashboard proxy is exempt — the person at the keyboard is the review gate. The
+  standard `commit` op is deliberately **not** bridged.
+* Every `ss*` grid's meta carries `profile`.
+
+#### Model-driven auto-ingestion (Haystack ETL)
+
+* **`ssAutoIngestPlan(path)`** walks a folder, reads the **first two pages** of each PDF, and asks
+  OpenRouter (default `deepseek/deepseek-v4.1-flash`) for: the case identity from the caption
+  (cause number, court, parties, evidence quote; disagreement between sampled files is
+  **reported, never resolved**); per file **what / who / when** — canonical filing type, clean
+  title, which side filed it and who signed, `filedOn` from the **clerk's file stamp only**
+  (`stampEvidence` verbatim; a signature date is never a filing date), `signedOn` separately,
+  confidence, evidence, and which motion a response / reply / order answers; a target subfolder
+  per file. The regex detector runs beside the model so disagreements are visible. Writes nothing.
+* **`ssAutoIngestApply(plan)`** never re-runs the model. Idempotent steps: Case found by path or
+  created via `commitEntity` (with `ssProvenance`); optional move into per-kind subfolders with the
+  Document row re-pathed **before** the watcher sees the rename; Filing found by slug or created;
+  entity row through `ensure-filing` (never a raw create); `filedOn` / `signedOn` as real spec
+  tags and `filedBy` / `author` / `stampEvidence` under one namespaced `ssEtl` tag; Document
+  attached by hash and `DISCOVERED → QUEUED`; `respondingTo` / `replyingTo` / `resolves` /
+  `motionRef` links only where the target resolved in this run.
+* **Pages.** `/haystack-management` is the rete block view on its Editor tab (what the nav entry
+  always reached); `/haystack-management/etl` is the ETL panel (path → plan → editable review
+  table → dry run → armed apply); `/haystack-management/ops` lists cases with real unconnected
+  counts and the live op catalogue. Nav gained **Haystack ETL** under **Haystack Management**,
+  same typography and icon column as every other entry.
+* **Skill.** `skills/soundsuite-etl/SKILL.md` — the ETL procedure for Claude Desktop: survey,
+  plan, review honestly, apply twice, ingest, work the judgment queue, stop conditions, privacy.
+
+#### Case management
+
+* Three columns — **Cases | Filings | content** — with two draggable splitters. Widths and the
+  **last case / filing selection** persist in IndexedDB (`caseManagement.layout`,
+  `caseManagement.lastSelection`); opening bare `/case-management` restores the last selection
+  when that case still exists. The old `localStorage` sidebar width is read once as a fallback.
+
+#### Service layer
+
+* **Survives dev HMR and profile switches.** `worker-init` state and the `ServicesManager`
+  singleton live on `globalThis`; the file watcher is **always registered** (starts chokidar on
+  the first `addPath`, so a fresh profile discovers its first case); `/api/health` self-heals by
+  kicking the one start path when nothing is registered.
+* **RLM sandbox failover** (`stream-rlm`): a network failure or 5xx on one sandbox host now
+  excludes it and re-resolves the next healthy host instead of skipping RLM for the whole run;
+  4xx (409 master identity, 400, 413) still does not fail over.
+
+#### Documentation, specs, tooling
+
+* `docs/SPEC-saas-hosted-multi-tenant.md` revised: **OCR on the customer's OpenRouter key**
+  (§2.5, prerequisites P9–P11), a **shared `ss-rlm-sandbox` pool** warm for every tenant's data
+  calls (§3.6, Phase 2b), the profiles note (§1.2); totals ~48 → ~60 days.
+* `docs/PLAN-haystack-mcp-agentic-etl.md` status updated; tasks 53–56 written.
+* `CLAUDE.md` split into a lean per-session file, `AGENTS.md` and path-scoped rules
+  (`.claude/rules/`: sidecar release, testing, marketing website); marketing deploy landmines
+  recorded; terse-output rule added.
+* `ast-grep` project config (`sgconfig.yml`, `.ast-grep/rules`) with custom Fantom / Axon /
+  Xeto / trio tree-sitter languages.
+* Sidecar **2.4.15** — two internal network references removed from published text; no code path
+  change.
+
+#### Upgrade notes
+
+1. Stop the dashboard, then `node scripts/profiles-migrate.mjs <name> --display "<Name>"`
+   (`--dry-run` first). It renames `prisma/data/sound-suite.db`, `data/lancedb`, `data/chat`,
+   `data/chat-attachments`, `data/ocr-captures` into `data/<name>/` and rewrites `.env`.
+   Without it the install runs in legacy mode, unchanged.
+2. `data/system.db` appears on first use; nothing to do.
+3. Agent writes through the Haystack ops need `SS_HAYSTACK_WRITE=1` on the server. Dashboard
+   applies do not.
+4. `LANCEDB_PATH`, `DATABASE_URL` in `.env` are now fallbacks for shell scripts only; the running
+   app follows `data/profiles.json`.
+
+#### Known issues
+
+* `src/services/__tests__/file-watcher.test.ts` fails 9/9 before and after this release
+  (constructs a bare `PrismaClient()` without the Prisma 7 driver adapter).
+* Five pre-existing `tsc` errors (`case-management/[caseNumber]/page.tsx`, extended-client
+  assignability in `worker-init.ts` / `get-tool-registry.ts`) are unchanged.
+* `Config` is per profile by design but also carries machine-ish keys (Ollama host, OpenRouter
+  key, worker counts); they are copied at profile creation and drift afterwards.
+* Background parsing runs only for the active profile.
+
+### Features
+
+* **profiles:** one active data set per install, sidebar switcher, MCP `profile_list` / `profile_use`, `expectProfile` guard, profile stamp on every result ([efe20d6](https://github.com/alperu/soundsuite/commit/efe20d69))
+* **profiles:** edit / rename / delete from the sidebar; `PATCH` / `DELETE /api/profiles/[name]` ([8e93755](https://github.com/alperu/soundsuite/commit/8e937552))
+* **profiles:** machine state in shared `data/system.db`; Redis no longer profile-prefixed ([799612f](https://github.com/alperu/soundsuite/commit/799612f2))
+* **haystack:** vendor op catalogue, HTTP adapter, MCP bridge, model-driven auto-ingestion, lifted worklist, Haystack Management + ETL pages, ETL skill ([21e2ecd](https://github.com/alperu/soundsuite/commit/21e2ecd9))
+* **haystack:** Management restores the rete block view; catalogue moves to `/haystack-management/ops` ([f638763](https://github.com/alperu/soundsuite/commit/f6387631))
+* **case-management:** three columns with two splitters; widths and last selection in IndexedDB ([d4c18b7](https://github.com/alperu/soundsuite/commit/d4c18b75))
+* **health:** report the active profile first ([6727565](https://github.com/alperu/soundsuite/commit/6727565b))
+* **rlm:** fail over to the next sandbox host instead of ending the run ([35a3be3](https://github.com/alperu/soundsuite/commit/35a3be34))
+
+### Bug Fixes
+
+* services survive dev HMR and profile switches; watcher always registered; `/api/health` self-heals ([411f812](https://github.com/alperu/soundsuite/commit/411f812d))
+* nav: Haystack ETL entry aligned with sibling links ([b040aaa](https://github.com/alperu/soundsuite/commit/b040aaa9))
+
+### Documentation
+
+* SaaS spec: OCR on the customer's key, shared sandbox pool, profiles note ([6a59fde](https://github.com/alperu/soundsuite/commit/6a59fdeb))
+* CLAUDE.md split into per-session file + AGENTS.md + path-scoped rules; deploy landmines; ast-grep config ([83814b7](https://github.com/alperu/soundsuite/commit/83814b71), [873b267](https://github.com/alperu/soundsuite/commit/873b2677), [feedf13](https://github.com/alperu/soundsuite/commit/feedf13c))
+* Sidecar 2.4.15 — remove two internal network references ([42a9f04](https://github.com/alperu/soundsuite/commit/42a9f04b))
+
 ## [1.4.0](https://github.com/alperu/soundsuite/compare/v1.3.6...v1.4.0) (2026-09-17)
 
 
