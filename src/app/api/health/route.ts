@@ -14,6 +14,8 @@
 
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/db/prisma'
+import { activeProfile, listProfiles, profilesEnabled } from '@/lib/profiles'
+import { systemSqlitePath } from '@/lib/db/prisma'
 import { getServicesManager, type ServiceHealth } from '@/lib/services-manager'
 import { FilingsCacheService } from '@/services/filings-cache'
 import { FolderIndexService } from '@/services/folder-index-service'
@@ -88,5 +90,13 @@ export async function GET() {
   // Determine HTTP status code based on overall health
   const statusCode = systemHealth.overall === 'unhealthy' ? 503 : 200
 
-  return NextResponse.json({ ...systemHealth, cache: cacheStats }, { status: statusCode })
+  // Which data set every number above was read from (docs/tasks/54-profiles.md).
+  const p = activeProfile()
+  const profile = {
+    active: p.name,
+    legacy: !profilesEnabled(),
+    available: listProfiles().map((m) => m.name),
+    paths: { sqlite: p.sqlite, lancedb: p.lancedb, system: p.legacy ? p.sqlite : systemSqlitePath() },
+  }
+  return NextResponse.json({ profile, ...systemHealth, cache: cacheStats }, { status: statusCode })
 }
