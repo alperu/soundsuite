@@ -26,6 +26,16 @@ messages** alike.
 
 ## Tooling notes for Claude
 
+**Terse output (kill output inflation).** Output tokens cost several times more than input
+tokens, and conversational filler is pure waste. The `caveman@caveman` plugin is installed and
+enforces this; the rule stands on its own regardless:
+
+- Be extremely concise. No conversational filler, pleasantries, or speculative summaries.
+- When making changes, output only the required tool calls and a 1-sentence confirmation.
+- Never re-quote unchanged code blocks.
+- Keep technical terms, file paths, commands, and exact error text intact — brevity never
+  drops the specifics a reader needs to act.
+
 **context-mode is installed in this repo.** Use its MCP helpers instead of raw shell or `WebFetch`:
 
 - **Fetching web pages**: use `mcp__plugin_context-mode_context-mode__ctx_fetch_and_index(url, source)` to fetch + index a page, then `mcp__plugin_context-mode_context-mode__ctx_search(queries: [...])` to query it. For one-off scrapes where you only need a small extract, use `mcp__plugin_context-mode_context-mode__ctx_execute(language: "javascript", code: "...")` with a plain `await fetch(...)` and `console.log()` only the relevant slice. **Do not** use `WebFetch`, `curl`, or `wget` for web content — the PreToolUse hook will block them.
