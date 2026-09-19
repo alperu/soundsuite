@@ -80,7 +80,9 @@ where the target resolved in this run. **Apply never re-runs the model.**
 
 ### The pages
 
-- `/haystack-management` — cards (ETL, block-view editor, scope), per-case table with the real
+- `/haystack-management` — the rete block view on its Editor tab (what the nav entry always
+  reached), with header links to the two sub-pages.
+- `/haystack-management/ops` — cards (ETL, editor, scope), per-case table with the real
   `unconnected` count, the live op catalogue with exposure badges.
 - `/haystack-management/etl` — `components/haystack-etl/etl-panel.tsx`: path + model + cap → plan;
   case identity card with disagreement banner; editable file table (type, title, filed-by, stamp
