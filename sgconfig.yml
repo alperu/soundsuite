@@ -9,7 +9,7 @@ languageGlobs:
   tsx: ["*.tsx"]
   javascript: ["*.js", "*.mjs", "*.cjs"]
 
-# Custom tree-sitter languages. Dylibs built from ~/Code/mcpfantom/tree-sitter-{fantom,axon,xeto}:
+# Custom tree-sitter languages. Dylibs built from ~/Code/mcpfantom/tree-sitter-{fantom,axon,xeto,trio}:
 #   cc -shared -fPIC -O2 -I <g>/src <g>/src/parser.c [<g>/src/scanner.c] -o ~/.ast-grep/parsers/<lang>.dylib
 customLanguages:
   fantom:
@@ -18,9 +18,27 @@ customLanguages:
     expandoChar: _
   axon:
     libraryPath: /Users/alper/.ast-grep/parsers/axon.dylib
-    extensions: [axon, trio]
+    extensions: [axon]
+    expandoChar: _
+  trio:
+    libraryPath: /Users/alper/.ast-grep/parsers/trio.dylib
+    extensions: [trio]
     expandoChar: _
   xeto:
     libraryPath: /Users/alper/.ast-grep/parsers/xeto.dylib
     extensions: [xeto]
     expandoChar: _
+
+# Axon source inside the `src:` block of a Trio function record.
+# `ast-grep run -l axon ...` then also searches *.trio files.
+languageInjections:
+  - hostLanguage: trio
+    rule:
+      kind: indented_text
+      pattern: $CONTENT
+      inside:
+        kind: block_tag
+        has:
+          field: name
+          regex: '^src$'
+    injected: axon
