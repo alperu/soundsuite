@@ -48,13 +48,21 @@ import {
   KIND_TO_ATTACHMENT_KIND,
 } from '@/lib/haystack/ensure-filing'
 import { commitEntity } from '@/lib/haystack/commit'
+import {
+  OpError,
+  STANDARD_OP_PARAMS,
+  VENDOR_OPS,
+  runVendorOp,
+  vendorOpSpec,
+  type OpActor,
+} from '@/lib/haystack/ops'
 // Re-exported so the legacy `/api/cases/*` endpoints (fill-haystack-tags,
 // revert) and the commit tests keep importing it from the route path.
 export { commitEntity }
 
 export const dynamic = 'force-dynamic'
 
-const SUPPORTED_OPS = [
+const STANDARD_OPS = [
   'about',
   'ops',
   'libs',
@@ -65,7 +73,16 @@ const SUPPORTED_OPS = [
   'close',
   'commit',
 ] as const
-type Op = (typeof SUPPORTED_OPS)[number]
+type StandardOp = (typeof STANDARD_OPS)[number]
+
+/**
+ * Vendor (`ss*`) ops are registered from the catalogue in `lib/haystack/ops`
+ * so a new op needs one entry there and nothing here. Each is dispatched
+ * through `runVendorOp`, which coerces params, enforces the write gate and
+ * returns plain JSON that `opVendor` encodes as a grid.
+ */
+const SUPPORTED_OPS: readonly string[] = [...STANDARD_OPS, ...VENDOR_OPS.map((o) => o.name)]
+type Op = StandardOp
 
 // ---------- transport helpers ----------------------------------------------
 
@@ -144,13 +161,62 @@ async function opAbout(): Promise<string> {
   })
 }
 
+/**
+ * Self-description. Every row carries `params` (name → type, required,
+ * description) so a client — the MCP bridge in particular — can build a tool
+ * definition from the grid alone (plan §6.1). `ssExposure` says whether the
+ * op reads, writes (gated) or calls a model; standard ops carry none.
+ */
 function opOps(): string {
-  const rows = SUPPORTED_OPS.map((name) => ({
-    name,
-    def: `op:${name}`,
-    dis: name,
-  }))
+  const rows = SUPPORTED_OPS.map((name) => {
+    const vendor = vendorOpSpec(name)
+    if (vendor) {
+      return {
+        name,
+        def: `op:${name}`,
+        dis: vendor.dis,
+        doc: vendor.doc,
+        ssExposure: vendor.exposure,
+        params: vendor.params,
+      }
+    }
+    const std = STANDARD_OP_PARAMS[name]
+    return {
+      name,
+      def: `op:${name}`,
+      dis: name,
+      doc: std?.doc ?? '',
+      params: std?.params ?? {},
+    }
+  })
   return encodeGrid(rows)
+}
+
+/**
+ * Vendor op adapter. Query params (GET) and the body (POST/PUT) merge into one
+ * bag — the body wins — and go through `runVendorOp`. A domain failure is an
+ * `err` grid per Haystack convention; the HTTP status stays 200.
+ */
+async function opVendor(
+  op: string,
+  params: URLSearchParams,
+  body: any,
+  trusted: boolean,
+): Promise<string> {
+  const bag: Record<string, unknown> = {}
+  params.forEach((v, k) => { bag[k] = v })
+  if (body && typeof body === 'object') Object.assign(bag, body)
+  const actor: OpActor = {
+    actor: trusted ? 'human' : 'agent',
+    via: trusted ? 'browser-proxy' : 'haystack-http',
+  }
+  try {
+    const result = await runVendorOp(op, bag, { actor, trusted })
+    return encodeGrid(result.rows, { op, ...(result.meta as any) })
+  } catch (e: any) {
+    if (e instanceof OpError) return errGrid(`${op}: ${e.message}`, e.code)
+    throw e
+  }
 }
 
 async function opLibs(): Promise<string> {
@@ -623,7 +689,7 @@ export async function dispatchHaystack(
     if (!auth.ok) return auth.res
   }
 
-  if (!SUPPORTED_OPS.includes(op as Op)) {
+  if (!SUPPORTED_OPS.includes(op)) {
     return new NextResponse(errGrid(`unknown op: ${op}`), {
       status: 404,
       headers: { 'content-type': HAYSON_MIME },
@@ -647,7 +713,11 @@ export async function dispatchHaystack(
   }
 
   try {
-    // `op` is validated against SUPPORTED_OPS above, so the lookup is total.
+    // `op` is validated against SUPPORTED_OPS above: it is either a standard
+    // op with a handler here or a vendor op the catalogue knows.
+    if (vendorOpSpec(op)) {
+      return jsonResponse(await opVendor(op, url.searchParams, body, skipAuth))
+    }
     return jsonResponse(await HANDLERS[op as Op](url.searchParams, body))
   } catch (e: any) {
     return jsonResponse(errGrid(`op ${op} failed: ${e?.message ?? e}`))

@@ -439,10 +439,13 @@ function extractTitleFromHeader(text: string): string | null {
 }
 
 /**
- * Quick-extract header text from the first 5 pages of a PDF.
- * Lightweight — doesn't do full ingestion, just text extraction.
+ * Quick-extract header text from the first `maxPages` pages of a PDF
+ * (default 5). Lightweight — doesn't do full ingestion, just text extraction.
+ * The ETL planner passes 2: the caption, the clerk's file stamp and the
+ * signature block all sit on the first two pages, and every extra page is
+ * model input paid for nothing.
  */
-export async function quickExtractHeader(filePath: string): Promise<string> {
+export async function quickExtractHeader(filePath: string, maxPagesWanted = 5): Promise<string> {
   try {
     // Polyfill DOMMatrix for Node.js (pdfjs-dist requires it)
     if (typeof globalThis.DOMMatrix === 'undefined') {
@@ -467,7 +470,7 @@ export async function quickExtractHeader(filePath: string): Promise<string> {
     const data = new Uint8Array(fileBuffer);
     const doc = await getDocument({ data, standardFontDataUrl }).promise;
 
-    const maxPages = Math.min(doc.numPages, 5);
+    const maxPages = Math.min(doc.numPages, Math.max(1, Math.floor(maxPagesWanted)));
     const texts: string[] = [];
 
     for (let i = 1; i <= maxPages; i++) {

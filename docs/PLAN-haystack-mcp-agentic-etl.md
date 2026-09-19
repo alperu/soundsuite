@@ -1,6 +1,9 @@
 # PLAN — Haystack MCP: model-driven ETL over a case folder
 
-**Date:** 2026-09-08 · **Status:** PLAN ONLY — no code written
+**Date:** 2026-09-08 · **Status:** phases 1–3 shipped 2026-09-19 plus auto-ingestion; phase 4
+(worklist confirm) open — see [`tasks/53-haystack-etl-ops-and-auto-ingest.md`](./tasks/53-haystack-etl-ops-and-auto-ingest.md)
+for what exists, where, and the decisions taken. Op catalogue: `src/lib/haystack/ops/catalogue.ts`.
+Skill: `skills/soundsuite-etl/SKILL.md`. Dashboard: `/haystack-management` → `/haystack-management/etl`.
 **Related:** [`PLAN-scope-editor-haystack-rete.md`](./PLAN-scope-editor-haystack-rete.md) (the UI that
 does this by hand), [`tasks/02-graph-aware-retrieval-haystack.md`](./tasks/02-graph-aware-retrieval-haystack.md)
 (why the graph matters for retrieval), [`tasks/06-mcp-two-profiles.md`](./tasks/06-mcp-two-profiles.md)

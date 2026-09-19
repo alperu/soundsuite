@@ -53,3 +53,28 @@ curl -H "Authorization: BEARER authToken=$KEY" \
 - `src/lib/legal/haystack-filter-sql.ts` — `HFilter.parse()` → Kysely `Expression<boolean>` visitor that emits `json_extract(tags, '$.x')` paths matching Agent 1's VIRTUAL columns
 - `src/lib/legal/repo.ts` — `findCase` / `findMotion` / … + `navHierarchy` + `writeTagged`
 - `src/lib/legal/hayson.ts` — encoder (`encodeGrid`, `errGrid`, `okGrid`, `singletonGrid`)
+
+## Vendor ops (`ss*`)
+
+Sound Suite's own ops — the ETL surface from `docs/PLAN-haystack-mcp-agentic-etl.md` — are
+registered from the catalogue in `src/lib/haystack/ops/catalogue.ts`. `GET /ops` describes each
+row with `params` (name → type, required, description), `doc` and `ssExposure`
+(`read` | `write` | `llm`), so a client can build a tool definition from the grid alone; the MCP
+bridge (`src/lib/mcp/tools/haystack-ops.ts`) does exactly that.
+
+Parameters go in the query string (GET) or as plain JSON in the body (POST); the body wins. The
+reply is a grid whose `meta` is the op's summary (counts are for the whole set) and whose `rows`
+are the paged detail. Domain failures are `err` grids with `errTrace` set to the error code
+(`INVALID_PARAMS`, `NOT_FOUND`, `WRITE_DISABLED`, `EXECUTION_ERROR`).
+
+```bash
+curl -H "Authorization: BEARER authToken=$KEY" 'http://localhost:3000/api/haystack/ssScopeGraph'
+curl -H "Authorization: BEARER authToken=$KEY" 'http://localhost:3000/api/haystack/ssWorklist?caseId=@<id>&limit=20'
+curl -H "Authorization: BEARER authToken=$KEY" -X POST -H 'content-type: application/json' \
+     -d '{"caseId":"<id>","limit":25}' 'http://localhost:3000/api/haystack/ssPromoteDiscovered'   # dryRun defaults to true
+```
+
+Every `write` op takes `dryRun` (default `true`). A `dryRun: false` call over this bearer API or
+over MCP is refused unless the server runs with `SS_HAYSTACK_WRITE=1`; the same-origin proxy
+(`/api/haystack-proxy/[op]`, what the dashboard uses) is exempt. The standard `commit` op is not
+bridged to MCP.

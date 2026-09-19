@@ -1,9 +1,10 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { primarySlotFor, slotLabel, type LinkPlan } from './link-rules';
+import { slotLabel, type LinkPlan } from './link-rules';
 import { suggestForSlot, type LinkSuggestion } from './suggest-links';
 import { filingKey, type ScopeGraph } from './scope-graph';
+import { definingSlotEmptyFilings } from '@/lib/scope/worklist';
 
 /**
  * The pairing workbench: every filing missing its defining link, in one list,
@@ -37,13 +38,15 @@ interface Props {
   busy?: boolean;
 }
 
-/** The rows worth showing: a filing whose defining slot is still empty. */
+/**
+ * The rows worth showing: a filing whose defining slot is still empty. The
+ * selection is `definingSlotEmptyFilings` in `@/lib/scope/worklist` — the same
+ * one the `ssWorklist` Haystack op serves — so the agent and this panel never
+ * see two different queues.
+ */
 export function buildWorkbenchRows(graph: ScopeGraph): WorkbenchRow[] {
   const rows: WorkbenchRow[] = [];
-  for (const filing of graph.filings) {
-    const slot = primarySlotFor(filing.primaryKind);
-    if (!slot) continue;
-    if (typeof filing.refs?.[slot] === 'string' && filing.refs[slot]) continue;
+  for (const { filing, slot } of definingSlotEmptyFilings(graph)) {
     const suggestion = suggestForSlot(graph, filingKey(filing.id), slot);
     rows.push({
       key: filingKey(filing.id),

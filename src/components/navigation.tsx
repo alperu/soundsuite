@@ -6,7 +6,16 @@ import { usePathname, useRouter } from 'next/navigation';
 
 const LS_KEY = 'nav-collapsed';
 
-const links = [
+interface NavLink {
+  href: string;
+  label: string;
+  icon: string;
+  /** Sub-pages rendered under the parent, same typography, slightly indented;
+   *  icon-only when the sidebar is collapsed, like every other entry. */
+  children?: Array<{ href: string; label: string; icon: string }>;
+}
+
+const links: NavLink[] = [
   { href: '/', label: 'Cases', icon: 'M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z' },
   { href: '/search', label: 'Search', icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z' },
   { href: '/draft', label: 'Draft', icon: 'M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z' },
@@ -15,13 +24,18 @@ const links = [
   { href: '/case-explorer', label: 'Explorer', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
   { href: '/mcp-explorer', label: 'MCP', icon: 'M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z' },
   { href: '/case-management', label: 'Management', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z' },
-  // Directly below Management, and pointing at the route that already exists:
-  // /scope renders the block view full-page over the whole corpus, with both
-  // tabs and no case or preset context required. Until now it was reachable
-  // only from the Settings panel and the case-management embeds.
-  // Opens on the Editor tab: the name says MANAGEMENT, and the mapping
-  // workbench is what that means here. Filtering is one click away in-page.
-  { href: '/scope?tab=editor', label: 'Haystack Management', icon: 'M4 6a2 2 0 012-2h3a2 2 0 012 2v3a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM13 15a2 2 0 012-2h3a2 2 0 012 2v3a2 2 0 01-2 2h-3a2 2 0 01-2-2v-3zM11 7.5h4a2 2 0 012 2V11M9 12.5v2a2 2 0 002 2h2' },
+  // Directly below Management: the Haystack landing page (editor, ETL, op
+  // catalogue), with the ETL page as its one sub-item. The block-view editor
+  // stays one click away from the landing page.
+  {
+    href: '/haystack-management',
+    label: 'Haystack Management',
+    icon: 'M4 6a2 2 0 012-2h3a2 2 0 012 2v3a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM13 15a2 2 0 012-2h3a2 2 0 012 2v3a2 2 0 01-2 2h-3a2 2 0 01-2-2v-3zM11 7.5h4a2 2 0 012 2V11M9 12.5v2a2 2 0 002 2h2',
+    children: [
+      // Funnel-with-arrow: files in, structure out.
+      { href: '/haystack-management/etl', label: 'Haystack ETL', icon: 'M3 4.5h18l-7 8.25V19l-4 2v-8.25L3 4.5z' },
+    ],
+  },
   { href: '/personas', label: 'Personas', icon: 'M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6 5.87a4 4 0 10-8 0M16 3.13a4 4 0 010 7.75M12 7a4 4 0 11-8 0 4 4 0 018 0z' },
   { href: '/courts', label: 'Courts', icon: 'M3 21h18M5 21V9l7-5 7 5v12M9 21v-6h6v6M9 12h.01M15 12h.01' },
   { href: '/admin', label: 'Admin', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z' },
@@ -79,35 +93,67 @@ export default function Navigation() {
           // view opens on its Editor tab), and `pathname` never includes one,
           // so matching the raw href would leave that item permanently unlit.
           const path = link.href.split('?')[0];
+          const childActive = (link.children ?? []).some(
+            (c) => pathname === c.href || pathname?.startsWith(c.href + '/'),
+          );
+          // A parent lights up for its own page only; its sub-item owns the
+          // sub-page, so the two are never lit together.
           const active = path === '/'
             ? pathname === '/'
-            : pathname === path || pathname.startsWith(path + '/');
+            : (pathname === path || pathname.startsWith(path + '/')) && !childActive;
 
           return (
-            <Link
-              key={link.href}
-              href={link.href}
-              title={collapsed ? link.label : undefined}
-              className={`
-                flex items-center rounded-md text-sm font-medium transition-colors overflow-hidden
-                ${collapsed ? 'justify-center px-0 py-2' : 'gap-3 px-3 py-2'}
-                ${active
-                  ? 'bg-blue-50 text-blue-700'
-                  : 'text-gray-700 hover:bg-gray-100'
-                }
-              `}
-            >
-              <svg
-                className={`w-4 h-4 shrink-0 ${active ? 'text-blue-600' : 'text-gray-400'}`}
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-                strokeWidth={1.5}
+            <div key={link.href}>
+              <Link
+                href={link.href}
+                title={collapsed ? link.label : undefined}
+                className={`
+                  flex items-center rounded-md text-sm font-medium transition-colors overflow-hidden
+                  ${collapsed ? 'justify-center px-0 py-2' : 'gap-3 px-3 py-2'}
+                  ${active
+                    ? 'bg-blue-50 text-blue-700'
+                    : 'text-gray-700 hover:bg-gray-100'
+                  }
+                `}
               >
-                <path strokeLinecap="round" strokeLinejoin="round" d={link.icon} />
-              </svg>
-              {!collapsed && <span className="whitespace-nowrap">{link.label}</span>}
-            </Link>
+                <svg
+                  className={`w-4 h-4 shrink-0 ${active ? 'text-blue-600' : 'text-gray-400'}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                  strokeWidth={1.5}
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d={link.icon} />
+                </svg>
+                {!collapsed && <span className="whitespace-nowrap">{link.label}</span>}
+              </Link>
+              {link.children?.map((child) => {
+                const isActive = pathname === child.href || pathname?.startsWith(child.href + '/');
+                return (
+                  <Link
+                    key={child.href}
+                    href={child.href}
+                    title={collapsed ? child.label : undefined}
+                    className={`
+                      flex items-center rounded-md text-sm font-medium transition-colors overflow-hidden mt-0.5
+                      ${collapsed ? 'justify-center px-0 py-2' : 'gap-3 pl-7 pr-3 py-2'}
+                      ${isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-100'}
+                    `}
+                  >
+                    <svg
+                      className={`w-4 h-4 shrink-0 ${isActive ? 'text-blue-600' : 'text-gray-400'}`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                      strokeWidth={1.5}
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d={child.icon} />
+                    </svg>
+                    {!collapsed && <span className="whitespace-nowrap">{child.label}</span>}
+                  </Link>
+                );
+              })}
+            </div>
           );
         })}
       </nav>

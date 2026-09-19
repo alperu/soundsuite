@@ -25,9 +25,14 @@ import { RoleAssignmentsListTool } from './role-assignments-list';
 import { getResearchTools } from './research-tools';
 import { getPresetTools } from './preset-tools';
 import { getRoutedReportTools } from './routed-report-tools';
+import { getHaystackOpTools } from './haystack-ops';
 
 export function getAllTools(): BaseMCPTool[] {
   return [
+    // Haystack vendor ops (docs/PLAN-haystack-mcp-agentic-etl.md): generated
+    // from the op catalogue. Read ops are both profiles; write and LLM ops are
+    // routed-only and writes are further gated by SS_HAYSTACK_WRITE=1.
+    ...getHaystackOpTools(),
     // Profile-scoped tools; see docs/tasks/06-mcp-two-profiles.md.
     // research_* — local evidence engine (both profiles, always local-only).
     ...getResearchTools(),
@@ -95,3 +100,4 @@ export { ResolveReferenceTool } from './resolve-reference';
 export { GetChunkContextTool } from './get-chunk-context';
 export { FleetStatusTool } from './fleet-status';
 export { RoleAssignmentsListTool } from './role-assignments-list';
+export { HaystackOpTool, getHaystackOpTools } from './haystack-ops';

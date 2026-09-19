@@ -93,7 +93,10 @@ npm run db:migrate | db:backup | db:restore
 - **MCP**: `src/lib/mcp` serves 23 tools on `:3001` in two profiles, `local` (fail-closed) and
   `routed`; design in `docs/tasks/06-mcp-two-profiles.md`. Auth: `none | apikey | oauth`.
 - **Haystack**: `src/lib/haystack` + `src/app/api/haystack/[op]` are the entity write/read path
-  (`commitEntity`, `ensure-filing.ts`); the ETL plan is `docs/PLAN-haystack-mcp-agentic-etl.md`.
+  (`commitEntity`, `ensure-filing.ts`). Vendor `ss*` ops live in `src/lib/haystack/ops/`
+  (catalogue → HTTP adapter → MCP bridge `mcp/tools/haystack-ops.ts`); writes need
+  `SS_HAYSTACK_WRITE=1` except from the same-origin proxy. Plan:
+  `docs/PLAN-haystack-mcp-agentic-etl.md`; status: `docs/tasks/53-haystack-etl-ops-and-auto-ingest.md`.
 - **Native modules** (`sharp`, `onnxruntime-node`, `@lancedb/lancedb`, `tokenizers`, …) must be
   in `serverExternalPackages` in `next.config.ts`.
 - **Tests** live in colocated `__tests__/`; jsdom by default, `@jest-environment node` for

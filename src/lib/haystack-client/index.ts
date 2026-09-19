@@ -77,6 +77,21 @@ export async function create(payload: {
   })
 }
 
+/**
+ * Call a vendor (`ss*`) op through the proxy. Parameters go in the body as
+ * plain JSON; the reply is a grid whose `meta` carries the op's summary and
+ * whose `rows` carry the detail (see `src/lib/haystack/ops`). The proxy is
+ * same-origin and counts as a trusted caller, so a `dryRun: false` write is
+ * allowed from here — the person at the dashboard is the review gate.
+ */
+export async function op(name: string, params: Record<string, unknown> = {}): Promise<HaysonGrid> {
+  return jsonFetch(`${BASE}/${name}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+}
+
 // --- defs cache -------------------------------------------------------------
 
 let defsCache: { at: number; data: HaysonGrid } | null = null
