@@ -1,0 +1,10 @@
+# Example: matching a Fantom expression needs a class/method context,
+# because the grammar has no top-level expression statement.
+id: fantom-echo-call
+message: echo() call (example rule for the custom Fantom language)
+severity: hint
+language: fantom
+rule:
+  pattern:
+    context: 'class C { Void m() { echo($A) } }'
+    selector: postfix_expr

@@ -8,3 +8,19 @@ languageGlobs:
   typescript: ["*.ts", "*.mts", "*.cts"]
   tsx: ["*.tsx"]
   javascript: ["*.js", "*.mjs", "*.cjs"]
+
+# Custom tree-sitter languages. Dylibs built from ~/Code/mcpfantom/tree-sitter-{fantom,axon,xeto}:
+#   cc -shared -fPIC -O2 -I <g>/src <g>/src/parser.c [<g>/src/scanner.c] -o ~/.ast-grep/parsers/<lang>.dylib
+customLanguages:
+  fantom:
+    libraryPath: /Users/alper/.ast-grep/parsers/fantom.dylib
+    extensions: [fan, fwt]
+    expandoChar: _
+  axon:
+    libraryPath: /Users/alper/.ast-grep/parsers/axon.dylib
+    extensions: [axon, trio]
+    expandoChar: _
+  xeto:
+    libraryPath: /Users/alper/.ast-grep/parsers/xeto.dylib
+    extensions: [xeto]
+    expandoChar: _
