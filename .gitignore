@@ -71,8 +71,11 @@ tmp-*.js
 tmp-*.mjs
 .mcp.json
 
-# Claude Code (user-specific)
-.claude/
+# Claude Code — user-specific state stays ignored (settings.local.json, hooks, signal
+# files), but rules/ and agents/ are project instructions and must be tracked.
+.claude/*
+!.claude/rules/
+!.claude/agents/
 
 # Local project embedding/runtime cache
 .cache/
