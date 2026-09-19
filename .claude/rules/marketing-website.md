@@ -22,7 +22,7 @@ Both are rsync-based over SSH (helpers `rsync_files` / `rsync_one` / `rsync_tree
 - **`scripts/private/deploy.sh`** — full-site deploy. Builds vite, runs
   `composer install --no-dev`, rsyncs `src/` with `--exclude-from` (no `--delete`, so `.env`,
   `storage/`, `public/exhibits/` are preserved), then cache flush + `statamic:static:clear`.
-  Interactive `y/N` unless `--yes`.
+  Interactive `y/N` prompt; no `--yes` flag exists — pipe `echo y | ./deploy.sh` for non-interactive runs.
 - **`scripts/update-remote.sh`** — composer-only deploy. Rsyncs `composer.json` +
   `composer.lock`, runs `composer install --no-dev --no-scripts` on the server, then
   `package:discover`, cache flush, and an OPcache reset via a token-gated endpoint. Use for
