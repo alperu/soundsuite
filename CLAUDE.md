@@ -35,6 +35,21 @@ messages** alike.
 
 Memory of context-mode tool routing: check `~/.claude/projects/-Users-alper-Code-court-lens-mcp/memory/MEMORY.md` for any user-specific preferences before invoking a tool that might have been overridden.
 
+**TypeSafe / Jev (typed judgments).** The `typesafe@typesafe-ai` plugin is installed and
+`TYPESAFE_API_KEY` is set in the environment. Jev is a System One model: it takes a `state`
+and a map of typed questions (Noul yes/no, Choice, Score) and returns calibrated probabilities
+plus a `confidence`, never free text. **Consider it whenever new code needs classification,
+routing, ranking, verification, or a prompt-and-parse step that could become a structured
+decision** (e.g. filing-type detection, draft-vs-filed judgment, chunk relevance, when to
+escalate to a reasoning model). Invoke `/typesafe:typesafe-ai` to design the questions; it
+reads the live docs at `https://docs.typesafe.ai/llms.txt`. Prefer running cheap live
+experiments with the key before committing a question design. Gate actions on `confidence`,
+with stricter thresholds for riskier operations.
+
+⚠️ Privacy: every `state` sent to Jev leaves this machine. Never send real case text, party
+names, or cause numbers to it from tests or experiments — use synthetic fixtures. Production
+use on real documents is an explicit product decision, not a default.
+
 ## Troubleshooting the app in a browser
 
 When you need to inspect the running Next.js app (DOM, network, console, navigation), use the **chrome-devtools MCP** — never screenshots.
