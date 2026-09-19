@@ -21,6 +21,18 @@ import { FilingsCacheService } from '@/services/filings-cache'
 import { FolderIndexService } from '@/services/folder-index-service'
 
 export async function GET() {
+  // Self-heal: services start lazily (instrumentation → getWorkerManager) and
+  // the manager may be empty after a profile switch or a dev HMR reload. If
+  // nothing is registered and no init is in flight, kick the same start path
+  // and report this call's snapshot; the next call sees them registered.
+  {
+    const sm = getServicesManager()
+    if (!sm.getFileWatcher() && !sm.getToolRegistry() && !sm.getJobQueue()) {
+      import('@/services/worker-init')
+        .then(({ getWorkerManager }) => getWorkerManager())
+        .catch((err) => console.warn('[health] service self-start failed:', (err as Error)?.message))
+    }
+  }
   const servicesManager = getServicesManager()
   
   // Check database connectivity

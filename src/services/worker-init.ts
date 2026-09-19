@@ -18,10 +18,30 @@ import { lancedbPath } from '@/lib/profiles';
 
 const logger = createLogger('WorkerInit');
 
-let managerInstance: ParsingWorkerManager | null = null;
-let initPromise: Promise<ParsingWorkerManager> | null = null;
-let daemonStarted = false;
-let coreServicesStarted = false;
+/**
+ * Module state lives on globalThis. In `next dev`, an HMR re-evaluation of this
+ * module (any edit in its import graph) would otherwise reset these to their
+ * initial values while the real watcher, workers and daemon keep running —
+ * the health page then says "not registered" for services that are up, and a
+ * second `getWorkerManager()` would start a second set. Same reason the
+ * Prisma client map and the profile cache live on globalThis.
+ */
+interface WorkerInitState {
+  managerInstance: ParsingWorkerManager | null;
+  initPromise: Promise<ParsingWorkerManager> | null;
+  daemonStarted: boolean;
+  coreServicesStarted: boolean;
+  shuttingDown: boolean;
+  shutdownHandlersRegistered: boolean;
+}
+const S: WorkerInitState = ((globalThis as unknown as { __ssWorkerInit?: WorkerInitState }).__ssWorkerInit ??= {
+  managerInstance: null,
+  initPromise: null,
+  daemonStarted: false,
+  coreServicesStarted: false,
+  shuttingDown: false,
+  shutdownHandlersRegistered: false,
+});
 
 /**
  * Build a processDocument function that creates a lightweight pipeline
@@ -143,10 +163,10 @@ async function buildProcessDocumentFn(): Promise<(documentId: string, filePath: 
  * Safe to call from any API route — only initializes once.
  */
 export async function getWorkerManager(): Promise<ParsingWorkerManager> {
-  if (managerInstance) return managerInstance;
+  if (S.managerInstance) return S.managerInstance;
 
-  if (!initPromise) {
-    initPromise = (async () => {
+  if (!S.initPromise) {
+    S.initPromise = (async () => {
       try {
         // Recover orphaned PROCESSING documents from previous server run.
         // These documents were mid-pipeline when the server restarted —
@@ -175,7 +195,7 @@ export async function getWorkerManager(): Promise<ParsingWorkerManager> {
         const processDocument = await buildProcessDocumentFn();
         const manager = new ParsingWorkerManager(processDocument, prisma);
         await manager.initialize(); // reads count from Config table
-        managerInstance = manager;
+        S.managerInstance = manager;
         getServicesManager().registerParsingWorkerManager(manager);
         logger.info('ParsingWorkerManager initialized', { workerCount: manager.getWorkerCount() });
 
@@ -191,14 +211,14 @@ export async function getWorkerManager(): Promise<ParsingWorkerManager> {
         return manager;
       } catch (err) {
         // Reset so next call retries instead of returning the failed promise
-        initPromise = null;
+        S.initPromise = null;
         logger.error('Failed to initialize ParsingWorkerManager', err);
         throw err;
       }
     })();
   }
 
-  return initPromise;
+  return S.initPromise;
 }
 
 
@@ -208,14 +228,14 @@ export async function getWorkerManager(): Promise<ParsingWorkerManager> {
  * running workers pick up the new settings without a server restart.
  */
 export async function reinitializePipeline(): Promise<void> {
-  if (!managerInstance) {
+  if (!S.managerInstance) {
     logger.warn('reinitializePipeline called but no manager exists — skipping');
     return;
   }
 
   logger.info('Reinitializing ingestion pipeline with fresh config...');
   const newProcessFn = await buildProcessDocumentFn();
-  await managerInstance.replaceProcessFn(newProcessFn);
+  await S.managerInstance.replaceProcessFn(newProcessFn);
   logger.info('Pipeline reinitialized — workers restarted with new embedding provider');
 }
 
@@ -234,12 +254,12 @@ export async function stopProfileBoundServices(): Promise<string[]> {
     try { await daemon.stop(); stopped.push('background-daemon'); } catch (err) { logger.warn('daemon stop failed', { err }); }
     (sm as any).backgroundDaemon = null;
   }
-  daemonStarted = false;
+  S.daemonStarted = false;
 
-  if (managerInstance) {
-    try { await managerInstance.stopAll(); stopped.push('parsing-workers'); } catch (err) { logger.warn('parsing manager stop failed', { err }); }
-    managerInstance = null;
-    initPromise = null;
+  if (S.managerInstance) {
+    try { await S.managerInstance.stopAll(); stopped.push('parsing-workers'); } catch (err) { logger.warn('parsing manager stop failed', { err }); }
+    S.managerInstance = null;
+    S.initPromise = null;
     (sm as any).parsingWorkerManager = null;
   }
 
@@ -250,7 +270,7 @@ export async function stopProfileBoundServices(): Promise<string[]> {
   }
   (sm as any).jobQueue = null;
   (sm as any).toolRegistry = null;
-  coreServicesStarted = false;
+  S.coreServicesStarted = false;
 
   logger.info('Profile-bound services stopped', { stopped });
   return stopped;
@@ -271,14 +291,14 @@ export async function startProfileBoundServices(): Promise<void> {
  * Fire-and-forget — errors are logged but don't crash the app.
  */
 async function startDaemonIfNeeded(): Promise<void> {
-  if (daemonStarted) return;
-  daemonStarted = true;
+  if (S.daemonStarted) return;
+  S.daemonStarted = true;
 
   try {
     const { isRedisAvailable } = await import('@/lib/redis');
     if (!(await isRedisAvailable())) {
       logger.warn('Redis not available, skipping daemon startup');
-      daemonStarted = false;
+      S.daemonStarted = false;
       return;
     }
 
@@ -296,8 +316,8 @@ async function startDaemonIfNeeded(): Promise<void> {
     });
 
     // Attach parsing manager so daemon can dynamically scale parsing workers
-    if (managerInstance) {
-      daemon.setParsingManager(managerInstance);
+    if (S.managerInstance) {
+      daemon.setParsingManager(S.managerInstance);
     }
 
     // Register pool and daemon with ServicesManager for health checks
@@ -311,13 +331,13 @@ async function startDaemonIfNeeded(): Promise<void> {
     // Run in background — don't await
     daemon.start().catch(err => {
       logger.error('BackgroundScannerDaemon crashed', err);
-      daemonStarted = false; // allow restart on next worker init
+      S.daemonStarted = false; // allow restart on next worker init
     });
 
     logger.info('BackgroundScannerDaemon started');
   } catch (err) {
     logger.error('Failed to start BackgroundScannerDaemon', err);
-    daemonStarted = false;
+    S.daemonStarted = false;
   }
 }
 
@@ -326,8 +346,6 @@ async function startDaemonIfNeeded(): Promise<void> {
  * them with ServicesManager so health checks show green indicators.
  * Fire-and-forget — errors are logged but don't crash the app.
  */
-let shuttingDown = false;
-let shutdownHandlersRegistered = false;
 
 /**
  * Register signal handlers for graceful shutdown on all platforms.
@@ -336,11 +354,11 @@ let shutdownHandlersRegistered = false;
 function registerShutdownHandlers(): void {
   // Once per process: a profile switch re-runs getWorkerManager(), and a
   // second set of SIGTERM listeners would run the shutdown twice.
-  if (shutdownHandlersRegistered) return;
-  shutdownHandlersRegistered = true;
+  if (S.shutdownHandlersRegistered) return;
+  S.shutdownHandlersRegistered = true;
   const shutdown = async (signal: string) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
+    if (S.shuttingDown) return;
+    S.shuttingDown = true;
     logger.info(`Received ${signal}, shutting down gracefully...`);
 
     try {
@@ -353,8 +371,8 @@ function registerShutdownHandlers(): void {
       }
 
       // Stop all parsing workers
-      if (managerInstance) {
-        await managerInstance.stopAll();
+      if (S.managerInstance) {
+        await S.managerInstance.stopAll();
         logger.info('ParsingWorkerManager stopped');
       }
 
@@ -397,8 +415,8 @@ function registerShutdownHandlers(): void {
 async function startCoreServicesIfNeeded(
   processDocument: (documentId: string, filePath: string) => Promise<void>,
 ): Promise<void> {
-  if (coreServicesStarted) return;
-  coreServicesStarted = true;
+  if (S.coreServicesStarted) return;
+  S.coreServicesStarted = true;
 
   try {
     const sm = getServicesManager();
@@ -408,15 +426,16 @@ async function startCoreServicesIfNeeded(
     const cases = await prisma.case.findMany({ select: { path: true } });
     const casePaths = cases.map(c => c.path);
 
-    if (casePaths.length > 0) {
-      const fileWatcher = new FileWatcher({ watchPaths: casePaths }, prisma);
-      await fileWatcher.start();
-      sm.registerFileWatcher(fileWatcher);
-      await sm.trackWorkerPid('file-watcher', process.pid);
-      logger.info('FileWatcher started', { pathCount: casePaths.length });
-    } else {
-      logger.warn('No case paths found — FileWatcher not started');
-    }
+    // Always registered, even with zero paths: `applyCaseSideEffects`
+    // (lib/haystack/commit.ts) reaches the watcher through the ServicesManager
+    // to `addPath()` a newly created case, and a fresh profile has no cases
+    // yet. The watcher starts chokidar on its first `addPath` (task 56).
+    const fileWatcher = new FileWatcher({ watchPaths: casePaths }, prisma);
+    await fileWatcher.start();
+    sm.registerFileWatcher(fileWatcher);
+    await sm.trackWorkerPid('file-watcher', process.pid);
+    if (casePaths.length > 0) logger.info('FileWatcher started', { pathCount: casePaths.length });
+    else logger.info('FileWatcher registered with no case paths — starts on the first case');
 
     // --- JobQueue ---
     const { JobQueue } = await import('./job-queue');
@@ -476,6 +495,6 @@ async function startCoreServicesIfNeeded(
     }
   } catch (err) {
     logger.error('Failed to start core services', err);
-    coreServicesStarted = false; // allow retry on next worker init
+    S.coreServicesStarted = false; // allow retry on next worker init
   }
 }

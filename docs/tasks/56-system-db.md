@@ -59,3 +59,25 @@ machine-level model must be added to `SYSTEM_MODELS` or it silently becomes per-
 - `Config` is per profile on purpose, but it also carries machine-ish keys (Ollama host,
   OpenRouter key, worker counts). They are copied at profile creation and drift afterwards.
   If that bites, split `Config` by key prefix the same way — not by moving the whole table.
+
+## Follow-up (same day): "FileWatcher not registered" on `/api/health`
+
+Three causes, all fixed:
+
+1. **`next dev` HMR reset module state.** `worker-init.ts` kept `managerInstance` /
+   `coreServicesStarted` in module `let`s and `ServicesManager` in a static field; an edit
+   anywhere in their import graph re-evaluated the modules and produced an empty manager while
+   the real watcher kept running. Both now live on `globalThis` (`__ssWorkerInit`,
+   `__ssServicesManager`), like the Prisma client map and the profile cache.
+2. **A profile with zero cases never registered a watcher**, so `applyCaseSideEffects` had no
+   watcher to `addPath()` the first case into — a fresh profile could not discover PDFs until a
+   restart. The watcher is now always registered; `FileWatcher.addPath()` starts chokidar on the
+   first path when it was constructed with none.
+3. **Nothing re-started services after a switch left them unregistered.** `/api/health` now
+   self-heals: if no watcher, job queue or tool registry is registered and no init is in flight,
+   it kicks `getWorkerManager()` (the one start path) and reports this call's snapshot; the next
+   call shows them running.
+
+`src/services/__tests__/file-watcher.test.ts` fails 9/9 before and after this change — it
+constructs a bare `PrismaClient()` without the Prisma 7 driver adapter. Pre-existing; not touched.
+

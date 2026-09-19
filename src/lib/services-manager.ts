@@ -65,10 +65,16 @@ class ServicesManager {
    * Get the singleton instance of ServicesManager
    */
   static getInstance(): ServicesManager {
-    if (!ServicesManager.instance) {
-      ServicesManager.instance = new ServicesManager();
+    // globalThis, not a static field: in `next dev` an HMR re-evaluation of
+    // this module would hand out a new, empty manager while the registered
+    // services keep running — /api/health then reports "not registered" for
+    // a watcher that is watching (task 56).
+    const g = globalThis as unknown as { __ssServicesManager?: ServicesManager };
+    if (!g.__ssServicesManager) {
+      g.__ssServicesManager = ServicesManager.instance ?? new ServicesManager();
     }
-    return ServicesManager.instance;
+    ServicesManager.instance = g.__ssServicesManager;
+    return g.__ssServicesManager;
   }
 
   /**

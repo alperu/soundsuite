@@ -532,6 +532,12 @@ export class FileWatcher {
     if (this.watcher) {
       this.watcher.add(normalized);
       this.logger.info(`Added watch path: ${normalized}`);
+      return;
+    }
+    // Started with no paths (a fresh profile): this is the first case, so
+    // this is where chokidar actually starts.
+    if (!this.isRunning) {
+      await this.start();
     }
   }
 
