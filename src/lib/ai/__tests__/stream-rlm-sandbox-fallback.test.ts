@@ -260,3 +260,70 @@ describe('resolveRlmEndpoint — virtualInference.mode.rlm=cloud-only', () => {
     expect(await resolveRlmEndpoint()).toBeNull();
   });
 });
+
+/**
+ * `excludeHosts` — the failover contract used by streamRlm / runRlmWithTools.
+ *
+ * A sidecar's cached container status is a heartbeat ~5s stale, so a host can
+ * report rlm-sandbox=running while its :8101 is mid-restart. A cloud-only run
+ * picked exactly such a host, got `fetch failed`, and skipped RLM for the
+ * whole report — while three other sandboxes in the fleet were healthy. The
+ * caller now excludes the failed host and re-resolves. These pin that a
+ * resolve honours the exclusion at every discovery phase.
+ *
+ * Still no network: these exercise resolution only. The fetch-level failover
+ * itself is covered in stream-rlm-failover.test.ts, which mocks global.fetch
+ * and therefore lives on its own.
+ */
+describe('resolveRlmEndpoint — excludeHosts (failover contract)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  const sandboxOn = (name: string) =>
+    sidecar({
+      url: `http://${name}:8098`,
+      hostname: name,
+      sidecarStatus: { containers: { rlm: { status: 'exited' }, 'rlm-sandbox': { status: 'running' } } },
+    });
+  const rlmOn = (name: string) =>
+    sidecar({
+      url: `http://${name}:8098`,
+      hostname: name,
+      sidecarStatus: { containers: { rlm: { status: 'running', image: 'vllm/vllm-openai:v0.21.0' } } },
+    });
+
+  it('cloud-only: an excluded sandbox host is passed over even though its cache still says running', async () => {
+    mockGetFleetStatus.mockResolvedValue({ sidecars: [sandboxOn('sidecar-a'), sandboxOn('sidecar-b')] });
+    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'cloud-only', rlmSandboxModel: 'deepseek/deepseek-v4-flash' });
+
+    // Without exclusion the first host wins — the pre-fix behaviour, unchanged.
+    expect((await resolveRlmEndpoint())?.host).toBe('sidecar-a');
+
+    const r = await resolveRlmEndpoint({ excludeHosts: ['sidecar-a'] });
+    expect(r?.endpoint).toBe('http://sidecar-b:8101');
+    expect(r?.sandbox).toBe(true);
+  });
+
+  it('returns null once every sandbox host is excluded — the caller must stop, not spin', async () => {
+    mockGetFleetStatus.mockResolvedValue({ sidecars: [sandboxOn('sidecar-a'), sandboxOn('sidecar-b')] });
+    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'cloud-only', rlmSandboxModel: 'deepseek/deepseek-v4-flash' });
+
+    expect(await resolveRlmEndpoint({ excludeHosts: ['sidecar-a', 'sidecar-b'] })).toBeNull();
+  });
+
+  it('local-first: an excluded ss-rlm host is skipped in Phase 1 and does not seed the live-probe list', async () => {
+    mockGetFleetStatus.mockResolvedValue({ sidecars: [rlmOn('sidecar-a'), rlmOn('sidecar-b')] });
+    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'local-first', rlmSandboxModel: 'deepseek/deepseek-v4-flash' });
+
+    const r = await resolveRlmEndpoint({ excludeHosts: ['sidecar-a'] });
+    expect(r).toEqual({ endpoint: 'http://sidecar-b:8100', host: 'sidecar-b', contextTokens: RLM_CONTEXT_TOKENS });
+  });
+
+  it('local-first: excluding the only ss-rlm host falls through to a sandbox on another host', async () => {
+    mockGetFleetStatus.mockResolvedValue({ sidecars: [rlmOn('sidecar-a'), sandboxOn('sidecar-b')] });
+    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'local-first', rlmSandboxModel: 'deepseek/deepseek-v4-flash' });
+
+    const r = await resolveRlmEndpoint({ excludeHosts: ['sidecar-a'] });
+    expect(r?.endpoint).toBe('http://sidecar-b:8101');
+    expect(r?.sandbox).toBe(true);
+  });
+});

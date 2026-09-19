@@ -338,15 +338,97 @@ interface FleetLike {
  * chosen configuration trains people to ignore the word, and then it fails to
  * warn on the day something really did degrade.
  */
+/**
+ * Options for resolveRlmEndpoint().
+ *
+ * `excludeHosts` — hosts already tried and failed in the CURRENT run. Threaded
+ * through every discovery phase so a re-resolve cannot hand back the dead host
+ * it was just called about. This is the whole failover mechanism; see the
+ * attempt loops in streamRlm() and runRlmWithTools(). Same idiom as
+ * fleet-router.ts's resolveEndpoint(role, { excludeHosts }).
+ */
+export interface ResolveRlmOptions {
+  excludeHosts?: string[];
+}
+
+/** Hostname for a sidecar URL, or the raw URL when it does not parse — the
+ *  same tolerance fleet-router.ts uses, so an odd entry is skipped rather
+ *  than thrown on. */
+function hostOf(url: string): string {
+  try { return new URL(url).hostname; } catch { return url; }
+}
+
+/**
+ * Whether an HTTP status from an RLM endpoint means "try another host".
+ *
+ * 5xx: that host is unwell right now; a different host may be fine.
+ * 4xx: the fault is in OUR request — 409 (master identity header), 400
+ * (`stream=true` on the sandbox), 413 (payload) — and every host would return
+ * the same thing. Retrying only multiplies one error into several and hides
+ * the real bug behind a "tried N hosts" message.
+ */
+function isRetryableStatus(status: number): boolean {
+  return status >= 500;
+}
+
+/** Hard ceiling on failover attempts per run, independent of fleet size. A
+ *  guard against a fleet whose every sidecar's cache says rlm-sandbox=running
+ *  while every :8101 is down — the loop must still terminate. */
+const RLM_MAX_FAILOVER = 6;
+
+/**
+ * Exclude the host that just failed and re-resolve.
+ *
+ * Returns the next endpoint, or null when there is nothing left to try. A
+ * caller-initiated abort also returns null: the user cancelling is not a
+ * reason to go and hit a second host.
+ *
+ * A successful failover is logged as a warning but is NOT a degradation in
+ * the sense this file cares about (see resolveSandboxEndpoint): it is the
+ * same role on a different host, answering with the same model. An operator
+ * should notice a host flapping; they should not be trained to ignore the
+ * word DEGRADED.
+ */
+async function rlmFailover(
+  failed: ResolvedRlmEndpoint,
+  excludeHosts: string[],
+  err: Error,
+  signal?: AbortSignal,
+): Promise<ResolvedRlmEndpoint | null> {
+  if (signal?.aborted) return null;
+  excludeHosts.push(failed.host);
+  if (excludeHosts.length >= RLM_MAX_FAILOVER) {
+    console.warn(`[RLM] failover ceiling (${RLM_MAX_FAILOVER}) reached after ${excludeHosts.join(', ')} — not trying further hosts`);
+    return null;
+  }
+  const next = await resolveRlmEndpoint({ excludeHosts });
+  if (next) {
+    console.warn(`[RLM] failover: ${failed.endpoint} failed (${err.message.slice(0, 80)}) → ${next.endpoint} [tried: ${excludeHosts.join(', ')}]`);
+  } else {
+    console.warn(`[RLM] failover exhausted — every candidate failed: ${excludeHosts.join(', ')} (last: ${err.message.slice(0, 80)})`);
+  }
+  return next;
+}
+
+/** Suffix for the final error when more than one host was tried, so the
+ *  message says "tried 4 hosts" rather than blaming only the last one. */
+function failoverNote(excludeHosts: string[]): string {
+  return excludeHosts.length > 1
+    ? ` (tried ${excludeHosts.length} hosts: ${excludeHosts.join(', ')})`
+    : '';
+}
+
 function resolveSandboxEndpoint(
   fleet: FleetLike,
   sandboxModel: string | undefined,
   primary: boolean,
+  excluded: ReadonlySet<string> = new Set(),
 ): ResolvedRlmEndpoint | null {
   if (!sandboxModel) {
     console.warn('[RLM] sandbox skipped — no rlm.sandboxModel configured on /admin/openrouter.');
     return null;
   }
+  const skipped: string[] = [];
   for (const s of fleet.sidecars) {
     if (s.status !== 'connected') continue;
     const sandboxCS = (s.sidecarStatus as { containers?: Record<string, { status?: string }> } | undefined)
@@ -354,6 +436,12 @@ function resolveSandboxEndpoint(
     if (!sandboxCS || sandboxCS.status !== 'running') continue;
     try {
       const host = new URL(s.url).hostname;
+      // A host this run already tried and found unreachable. Its cached status
+      // almost certainly STILL says 'running' — a heartbeat is ~5s stale and a
+      // container can be mid-restart inside that window — so this exclusion is
+      // the only thing standing between the caller and picking the same dead
+      // host straight back.
+      if (excluded.has(host)) { skipped.push(s.hostname ?? host); continue; }
       const budget = hostedContextBudget(sandboxModel);
       const ctxNote = budget === RLM_CONTEXT_TOKENS
         ? ' — model not in catalogue, using the self-hosted ceiling'
@@ -367,11 +455,15 @@ function resolveSandboxEndpoint(
       return { endpoint: `http://${host}:${RLM_SANDBOX_PORT}`, host, sandbox: true, model: sandboxModel, contextTokens: budget };
     } catch { /* skip */ }
   }
-  console.warn(`[RLM] no sidecar has rlm-sandbox running${primary ? ' (mode=cloud-only, so there is no ss-rlm to fall back to)' : ' either'}.`);
+  const note = skipped.length ? ` (skipped already-failed: ${skipped.join(', ')})` : '';
+  console.warn(`[RLM] no sidecar has rlm-sandbox running${primary ? ' (mode=cloud-only, so there is no ss-rlm to fall back to)' : ' either'}${note}.`);
   return null;
 }
 
-export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> {
+export async function resolveRlmEndpoint(options?: ResolveRlmOptions): Promise<ResolvedRlmEndpoint | null> {
+  // Hosts this run has already failed against. Honoured by every phase below;
+  // an empty set is today's behaviour exactly.
+  const excluded: ReadonlySet<string> = new Set(options?.excludeHosts ?? []);
   try {
     const { getFleetStatus } = await import('@/lib/gpu/fleet-router');
     const fleet = await getFleetStatus();
@@ -389,7 +481,7 @@ export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> 
       const { getConfig } = await import('@/lib/db/config');
       const cfg = await getConfig();
       if (cfg.virtualInferenceModeRlm === 'cloud-only') {
-        return resolveSandboxEndpoint(fleet, cfg.rlmSandboxModel, true);
+        return resolveSandboxEndpoint(fleet, cfg.rlmSandboxModel, true, excluded);
       }
     } catch (err) {
       // A config read failure must not disable RLM — fall through to the
@@ -405,6 +497,10 @@ export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> 
 
     for (const s of fleet.sidecars) {
       if (s.status !== 'connected') { probed.push(`${s.hostname ?? s.url}:skip-not-connected`); continue; }
+      // Skipped here, before the transitional bookkeeping below, so an excluded
+      // host is never re-probed live either — the whole point is not to touch
+      // it again this run.
+      if (excluded.has(hostOf(s.url))) { probed.push(`${s.hostname ?? s.url}:skip-excluded`); continue; }
       const rlmCS = (s.sidecarStatus as { containers?: Record<string, { status?: string; image?: string }> } | undefined)?.containers?.rlm;
       if (!rlmCS) {
         // Sidecar might be alive but cache hasn't recorded the rlm container
@@ -505,7 +601,7 @@ export async function resolveRlmEndpoint(): Promise<ResolvedRlmEndpoint | null> 
         console.warn('[RLM] sandbox fallback skipped — virtualInference.mode.rlm=local-only (default). Set it on /admin/openrouter to allow.');
         return null;
       }
-      return resolveSandboxEndpoint(fleet, cfg.rlmSandboxModel, false);
+      return resolveSandboxEndpoint(fleet, cfg.rlmSandboxModel, false, excluded);
     } catch (err) {
       console.warn(`[RLM] sandbox fallback check failed: ${(err as Error).message}`);
     }
@@ -521,7 +617,14 @@ export async function* streamRlm(opts: {
   temperature?: number;
   signal?: AbortSignal;
 }): AsyncGenerator<StreamRlmEvent> {
-  const resolved = await resolveRlmEndpoint();
+  // Failover across hosts. A sidecar's cached container status is a heartbeat
+  // ~5s stale, so a host can report rlm-sandbox=running while its :8101 is
+  // mid-restart. Before this loop, the first such host ended the whole run —
+  // with three other healthy sandboxes in the fleet never tried. Now a
+  // network-level failure or a 5xx excludes that host and re-resolves; a 4xx
+  // is our request's fault and would reproduce on every host, so it is not.
+  const excludeHosts: string[] = [];
+  let resolved = await resolveRlmEndpoint();
   if (!resolved) {
     yield {
       type: 'error',
@@ -529,46 +632,60 @@ export async function* streamRlm(opts: {
     };
     return;
   }
-  const endpoint = resolved.endpoint;
-
+  // Declared outside the attempt loop: everything after it (the sandbox
+  // non-stream branch, the SSE reader, the `done` event) reads these, and
+  // they must describe the host that actually answered.
+  let endpoint = resolved.endpoint;
   // sandbox: the "model" is the operator-configured OpenRouter chat-model id
   // (rlm.sandboxModel), not the self-hosted RLM fine-tune.
-  const model = resolved.sandbox && resolved.model ? resolved.model : RLM_MODEL_ID;
+  let model = resolved.sandbox && resolved.model ? resolved.model : RLM_MODEL_ID;
   // Same context-budget defense as runRlmWithTools — streamRlm is the
   // tool-less path (synthesis / draft generation). Clamp without trimming
   // since this path has only system+user. The budget comes from the resolved
   // endpoint, so the hosted sandbox model is not held to ss-rlm's ceiling.
-  const ctxBudget = resolved.contextTokens;
-  const clamp = clampOutputTokens(opts.messages, opts.maxTokens ?? 2048, ctxBudget);
-  if (clamp.clamped) {
-    console.warn(`[RLM] streamRlm clamp max_tokens ${opts.maxTokens ?? 2048} → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput}, ctx=${ctxBudget})`);
-  }
+  let ctxBudget = resolved.contextTokens;
   let res: Response;
-  try {
-    res = await fetch(`${endpoint}/v1/chat/completions`, {
-      method: 'POST',
-      headers: await rlmHeaders(resolved),
-      body: JSON.stringify({
-        model,
-        messages: opts.messages,
-        max_tokens: clamp.maxTokens,
-        temperature: opts.temperature ?? 0.3,
-        // The sandbox rejects stream=true with HTTP 400 ("stream is not
-        // supported — request a non-streaming completion"); only the
-        // self-hosted vLLM path streams.
-        stream: !resolved.sandbox,
-      }),
-      signal: opts.signal,
-    });
-  } catch (err) {
-    yield { type: 'error', message: `RLM endpoint ${endpoint} unreachable: ${(err as Error).message}` };
-    return;
-  }
+  for (;;) {
+    endpoint = resolved.endpoint;
+    model = resolved.sandbox && resolved.model ? resolved.model : RLM_MODEL_ID;
+    ctxBudget = resolved.contextTokens;
+    const clamp = clampOutputTokens(opts.messages, opts.maxTokens ?? 2048, ctxBudget);
+    if (clamp.clamped) {
+      console.warn(`[RLM] streamRlm clamp max_tokens ${opts.maxTokens ?? 2048} → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput}, ctx=${ctxBudget})`);
+    }
+    try {
+      res = await fetch(`${endpoint}/v1/chat/completions`, {
+        method: 'POST',
+        headers: await rlmHeaders(resolved),
+        body: JSON.stringify({
+          model,
+          messages: opts.messages,
+          max_tokens: clamp.maxTokens,
+          temperature: opts.temperature ?? 0.3,
+          // The sandbox rejects stream=true with HTTP 400 ("stream is not
+          // supported — request a non-streaming completion"); only the
+          // self-hosted vLLM path streams.
+          stream: !resolved.sandbox,
+        }),
+        signal: opts.signal,
+      });
+    } catch (err) {
+      const next = await rlmFailover(resolved, excludeHosts, err as Error, opts.signal);
+      if (next) { resolved = next; continue; }
+      yield { type: 'error', message: `RLM endpoint ${endpoint} unreachable: ${(err as Error).message}${failoverNote(excludeHosts)}` };
+      return;
+    }
 
-  if (!res.ok || !res.body) {
-    const errBody = await res.text().catch(() => '');
-    yield { type: 'error', message: `RLM HTTP ${res.status}: ${errBody.slice(0, 300)}` };
-    return;
+    if (!res.ok || !res.body) {
+      if (isRetryableStatus(res.status)) {
+        const next = await rlmFailover(resolved, excludeHosts, new Error(`HTTP ${res.status}`), opts.signal);
+        if (next) { resolved = next; continue; }
+      }
+      const errBody = await res.text().catch(() => '');
+      yield { type: 'error', message: `RLM HTTP ${res.status}: ${errBody.slice(0, 300)}${failoverNote(excludeHosts)}` };
+      return;
+    }
+    break;
   }
 
   if (resolved.sandbox) {
@@ -706,7 +823,9 @@ export async function* runRlmWithTools(opts: {
   temperature?: number;
   signal?: AbortSignal;
 }): AsyncGenerator<RlmRunEvent> {
-  const resolved = await resolveRlmEndpoint();
+  // Hosts this run has failed against — see the per-round attempt loop below.
+  const excludeHosts: string[] = [];
+  let resolved = await resolveRlmEndpoint();
   if (!resolved) {
     yield {
       type: 'error',
@@ -714,15 +833,19 @@ export async function* runRlmWithTools(opts: {
     };
     return;
   }
-  const { endpoint, host } = resolved;
+  // `let`, not `const`: a mid-run failover re-points all of these at the host
+  // that is actually answering. That is safe because the sandbox is stateless
+  // per request — the transcript lives in `messages` here, so re-POSTing it
+  // to a different healthy host is the same request, not a different one.
+  let { endpoint, host } = resolved;
   // sandbox: drive the configured hosted chat model instead of the
   // self-hosted RLM fine-tune. See resolveRlmEndpoint()'s Phase 2.
-  const model = resolved.sandbox && resolved.model ? resolved.model : RLM_MODEL_ID;
+  let model = resolved.sandbox && resolved.model ? resolved.model : RLM_MODEL_ID;
   // Budget every round against THIS endpoint's window, not ss-rlm's fixed
   // ceiling. The tool loop is where it matters most: it accumulates chunk
   // payloads across rounds, and on a hosted model that ceiling was throwing
   // away context the provider would happily have taken.
-  const ctxBudget = resolved.contextTokens;
+  let ctxBudget = resolved.contextTokens;
   const maxRounds = opts.maxRounds ?? 4;
   const t0 = Date.now();
 
@@ -772,42 +895,68 @@ export async function* runRlmWithTools(opts: {
     } else if (clamp.clamped) {
       console.warn(`[RLM] round ${round} clamp max_tokens ${requestedMaxTokens} → ${clamp.maxTokens} (estimatedInput=${clamp.estimatedInput}, ctx=${ctxBudget})`);
     }
-    const roundMaxTokens = clamp.maxTokens;
+    let roundMaxTokens = clamp.maxTokens;
 
-    console.log(`[RLM] round ${round}/${maxRounds} POST ${endpoint}/v1/chat/completions promptChars=${promptChars} messages=${messages.length} maxTokens=${roundMaxTokens} estInput=${clamp.estimatedInput}`);
+    // Re-point the run at the host a failover chose. Returns the notice text
+    // for the caller to yield (a closure cannot yield itself). If the new host
+    // has a different context window — only possible when local-first crosses
+    // sandbox↔ss-rlm — re-clamp this round's max_tokens against it, so the
+    // retry cannot exceed the new ceiling with a budget computed for the old.
+    const adopt = (next: ResolvedRlmEndpoint): string => {
+      const from = host;
+      resolved = next;
+      ({ endpoint, host } = next);
+      model = next.sandbox && next.model ? next.model : RLM_MODEL_ID;
+      if (next.contextTokens !== ctxBudget) {
+        ctxBudget = next.contextTokens;
+        roundMaxTokens = clampOutputTokens(messages, requestedMaxTokens, ctxBudget).maxTokens;
+      }
+      return `RLM host ${from} stopped responding — continuing this run on ${host}.`;
+    };
+
     let res: Response;
-    try {
-      res = await fetch(`${endpoint}/v1/chat/completions`, {
-        method: 'POST',
-        headers: await rlmHeaders(resolved),
-        body: JSON.stringify({
-          model,
-          messages,
-          tools: opts.tools,
-          // Last round: forbid further tool calls so the model MUST emit a final
-          // text answer instead of gathering forever. The RLM (an evidence-
-          // gatherer) otherwise issues a fresh tool call every round and never
-          // self-terminates — it would hit maxRounds and bail with no answer,
-          // discarding all the evidence gathered. `tool_choice:'none'` forces a
-          // clean termination on the final round.
-          tool_choice: round === maxRounds ? 'none' : 'auto',
-          max_tokens: roundMaxTokens,
-          temperature: opts.temperature ?? 0.3,
-          stream: false,
-        }),
-        signal: opts.signal,
-      });
-    } catch (err) {
-      console.error(`[RLM] round ${round} fetch failed (elapsed=${Date.now() - roundT0}ms): ${(err as Error).message}`);
-      yield { type: 'error', message: `RLM endpoint ${endpoint} unreachable: ${(err as Error).message}` };
-      return;
-    }
+    for (;;) {
+      console.log(`[RLM] round ${round}/${maxRounds} POST ${endpoint}/v1/chat/completions promptChars=${promptChars} messages=${messages.length} maxTokens=${roundMaxTokens} estInput=${clamp.estimatedInput}`);
+      try {
+        res = await fetch(`${endpoint}/v1/chat/completions`, {
+          method: 'POST',
+          headers: await rlmHeaders(resolved),
+          body: JSON.stringify({
+            model,
+            messages,
+            tools: opts.tools,
+            // Last round: forbid further tool calls so the model MUST emit a final
+            // text answer instead of gathering forever. The RLM (an evidence-
+            // gatherer) otherwise issues a fresh tool call every round and never
+            // self-terminates — it would hit maxRounds and bail with no answer,
+            // discarding all the evidence gathered. `tool_choice:'none'` forces a
+            // clean termination on the final round.
+            tool_choice: round === maxRounds ? 'none' : 'auto',
+            max_tokens: roundMaxTokens,
+            temperature: opts.temperature ?? 0.3,
+            stream: false,
+          }),
+          signal: opts.signal,
+        });
+      } catch (err) {
+        console.error(`[RLM] round ${round} fetch failed (elapsed=${Date.now() - roundT0}ms): ${(err as Error).message}`);
+        const next = await rlmFailover(resolved, excludeHosts, err as Error, opts.signal);
+        if (next) { yield { type: 'notice', message: adopt(next) }; continue; }
+        yield { type: 'error', message: `RLM endpoint ${endpoint} unreachable: ${(err as Error).message}${failoverNote(excludeHosts)}` };
+        return;
+      }
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      console.error(`[RLM] round ${round} HTTP ${res.status} (elapsed=${Date.now() - roundT0}ms): ${body.slice(0, 500)}`);
-      yield { type: 'error', message: `RLM HTTP ${res.status} (round ${round}): ${body.slice(0, 300)}` };
-      return;
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        console.error(`[RLM] round ${round} HTTP ${res.status} (elapsed=${Date.now() - roundT0}ms): ${body.slice(0, 500)}`);
+        if (isRetryableStatus(res.status)) {
+          const next = await rlmFailover(resolved, excludeHosts, new Error(`HTTP ${res.status}`), opts.signal);
+          if (next) { yield { type: 'notice', message: adopt(next) }; continue; }
+        }
+        yield { type: 'error', message: `RLM HTTP ${res.status} (round ${round}): ${body.slice(0, 300)}${failoverNote(excludeHosts)}` };
+        return;
+      }
+      break;
     }
 
     let j: any;
