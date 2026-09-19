@@ -1,6 +1,6 @@
 # SPEC — Hosted Sound Suite (`app.soundsuite.*`) — Feasibility, Architecture, Cost & Task Plan
 
-**Status:** Draft for decision
+**Status:** Draft for decision — **revised 2026-09-19** (see *Revision note*)
 **Date:** 2026-09-18
 **Author:** drafted against the repo at `d62cdb6`
 **Scope:** Turning the single-tenant Sound Suite app into a $10/month hosted product where
@@ -9,6 +9,14 @@ customers sign up on the Statamic marketing site, get their own isolated instanc
 can export their data at any time — including after their subscription lapses.
 
 ---
+
+> **Revision note, 2026-09-19.** Two operator decisions change the plan and are folded in below:
+> (1) **OCR must run on the customer's OpenRouter key** — the "OCR is your CPU bill" caveat becomes a
+> refactor, §2.5, with prerequisites P9–P11 in §9; (2) **a shared pool of `ss-rlm-sandbox` instances,
+> warm and ready for the data calls of every tenant instance** — §3.6, Phase 2b. Both raise the
+> prerequisite estimate (§9: ~7 → ~13 days) and the total (§10: ~48 → ~60 days). Also noted: the
+> profiles work that landed on 2026-09-19 (`docs/tasks/54-profiles.md`, `56-system-db.md`) and what
+> it does and does not change for tenancy — §1.2.
 
 ## 0. Executive summary
 
@@ -24,11 +32,14 @@ The three caveats, in order of how much they move the numbers:
    images). A $10/month plan cannot offer open-ended storage. A hard quota must be a
    *product* decision on the pricing page, not an ops afterthought.
 
-2. **"Customers bring their own API keys" does not remove your compute cost.** It removes
-   embedding and LLM cost. It does **not** remove OCR. `pipeline.ocrProvider` accepts only
-   `'local'` (CPU PaddleOCR in a child process) or `'ollama'` (an HTTP vision model needing a
-   GPU host) — `src/lib/db/config.ts:155`. There is no path where a customer's OpenAI key does
-   their OCR. OCR of scanned pages is therefore **your** CPU bill and must be metered.
+2. **"Customers bring their own API keys" does not remove your compute cost — today.**
+   `pipeline.ocrProvider` accepts only `'local'` (CPU PaddleOCR in a child process) or
+   `'ollama'` (an HTTP vision model needing a GPU host) — `src/lib/db/config.ts:155`. There is
+   no path where a customer's key does their OCR, so OCR of scanned pages is **your** CPU bill.
+   **Decision (2026-09-19): close this gap before launch.** §2.5 specifies a third provider,
+   `openrouter`, that sends page images to a vision model on the customer's own OpenRouter key.
+   Local CPU OCR stays as the no-key fallback and stays metered and capped; the OpenRouter path
+   is the hosted default whenever a key is present.
 
 3. **The app has no tenant isolation whatsoever.** No Prisma model carries a `userId`, `Config`
    is a global key-value table, `AdminUser` is global, and `docs/roadmap-docker-mcp.md`
@@ -119,6 +130,29 @@ existing host/port/password vars) rather than to change three call sites and two
 way this is blocking — see P1.
 
 ---
+
+### 1.2 Profiles (2026-09-19) — what they change, and what they do not
+
+`docs/tasks/54-profiles.md` gave one Sound Suite process several **data sets** (`data/<name>/`:
+SQLite, LanceDB, chat, attachments), one active at a time, switchable from the sidebar and over
+MCP (`profile_list` / `profile_use`), with every MCP result stamped with the profile it read.
+`docs/tasks/56-system-db.md` then split **machine state** out of the profile: fleet role
+assignments, host provisioning, the sidecar command queue, admin users, MCP sessions and model
+downloads live in a shared `data/system.db`.
+
+For this spec that means:
+
+- **Profiles are not tenancy.** One process still holds one admin, one set of keys in `Config`,
+  and switches globally. Caveat 3 (no tenant isolation; the container is the boundary) stands.
+- **The machine/case split is exactly the seam a hosted image wants.** In a tenant container
+  `system.db` describes that container's fleet view and admin; the profile describes the
+  customer's case set. Nothing in Phase 2 has to invent that separation.
+- **Export/import (§6) gets a natural unit:** a profile directory *is* the export. `scripts/
+  profiles-migrate.mjs` already shows the move; the export tarball can be a profile.
+- **`Config` is per profile on purpose** (embedding model ↔ LanceDB dimensions). The
+  machine-ish keys in it — Ollama host, OpenRouter key, worker counts — are copied at profile
+  creation. For hosted tenants there is one profile per container, so this does not bite; it is
+  recorded here so nobody plans a multi-profile tenant without splitting `Config` by key prefix.
 
 ## 2. Feasibility assessment
 
@@ -220,6 +254,53 @@ from the container boundary. This raises the bar on how that boundary is configu
 - Never let a tenant reach the control plane's network. Separate VLAN/network.
 
 ---
+
+### 2.5 OCR on the customer's key: the `openrouter` OCR provider (refactor)
+
+**Where it stands.** The virtual-inference work (`docs/SPEC-openrouter-virtual-inference.md`)
+gave every role but one a cloud fallback through `/admin/openrouter`. Its §7 kept OCR
+local-only, for two stated reasons: PaddleOCR-VL 1.6 is not on OpenRouter, and the output
+quality gate (`assessOcrOutput`, `src/lib/ingestion/ocr-quality-gate.ts`) is tuned to
+PaddleOCR's output shape. Both reasons are about *fidelity to one model*, not about whether
+cloud OCR can work — the catalogue lists **274 models with `image` in
+`architecture.input_modalities`**, and `OllamaOCREngine` already does exactly this job against
+a self-hosted vision model (`src/lib/ingestion/ollama-ocr-engine.ts`: page image in, text out,
+retries, timeouts, capture of rejected output).
+
+**Decision.** The hosted product needs OCR to be **the customer's spend, not ours**, or caveat 2
+sinks the $10 plan. So: a third `pipeline.ocrProvider` value, `openrouter`, and a routing
+mode on `/admin/openrouter` like every other role. The dev fleet keeps `local` / `ollama`; a
+hosted tenant is provisioned with `openrouter` when it has a key and `local` (capped) when it
+does not.
+
+**Design — an engine, not a rewrite.**
+
+| Piece | What | Where |
+|---|---|---|
+| `OpenRouterOCREngine` | `ITaskOCREngine` like `OllamaOCREngine`: base64 page image as an `image_url` content part on `/chat/completions`, the same `OCR_PROMPT`, the same retry/backoff/timeout envelope, the same `assessOcrOutput` gate, the same rejected-output capture (privacy rules unchanged). Concurrency from `ocrConcurrency`; spend recorded through `recordSpend('ocr', usd)` so the existing daily cap applies. | new `src/lib/ingestion/openrouter-ocr-engine.ts` |
+| Config | `ocrProvider: 'local' \| 'ollama' \| 'openrouter'`, `openRouterOcrModel`, `virtualInferenceModeOcr: 'local-only' \| 'openrouter-only' \| 'local-first'` (local-first = try PaddleOCR, fall to cloud on `OcrNotReadyError` or gate rejection). | `src/lib/db/config.ts`, `/api/config` |
+| Wiring | the `ocrProvider === 'ollama'` branches in `worker-init.ts`, `reindex-pages`, `fix-partial` gain the third arm; `ocrRemote: true` for both remote providers. | 3 call sites |
+| Admin | `/admin/openrouter` gains an **OCR** row: routing dropdown + model picker pre-filtered to vision models (the 274). `/admin/ocr` shows the resolved route. | `src/components/admin-openrouter.tsx` |
+| Caps | `ocrModelCaps` gets entries for the shortlisted cloud models (prompt style, max image edge, whether tables come back as `\|`-delimited). | `src/lib/gpu/ocr-model-caps.ts` |
+| Quality gate | generalise `assessOcrOutput`: keep the structure-agnostic checks (empty, garbage ratio, repetition, truncation), move the PaddleOCR-shape checks behind the caps entry. Re-tune against a captured corpus of cloud outputs (`data/<profile>/ocr-captures/` is already the capture point). | `ocr-quality-gate.ts` |
+
+**Sizing and cost (customer side).** A letter-size page at 150 dpi is ~1,500–2,500 image
+tokens on current vision models; output ~500–1,500 tokens. On the cheap end of the catalogue
+that is well under **$0.005/page**; a 1,500-page scan is a few dollars on the customer's key.
+Latency is 5–20 s/page and parallelises freely — cloud OCR is *faster* than our CPU path.
+
+**What it changes elsewhere in this document.**
+
+- §2.2 "Breaks if OCR is uncapped": still true for the **local** path only. The cloud path is
+  bounded by the customer's daily cap, not by our CPU. The 1,500 / 10,000 OCR-page caps in §8
+  apply to local OCR pages; cloud OCR pages count in metering (P4) but are not capped by us.
+- §7 costs: at 10 tenants the OCR CPU line largely disappears; margins move up a few points.
+  Not re-modelled here — measure in 8.3.
+- §12 question 3 (GPU OCR add-on): mostly moot. A GPU add-on is only for customers who refuse
+  any cloud key; park it.
+
+**Prerequisites** → P9, P10, P11 in §9. **Not** optional for launch: without them the $10 plan
+is subsidising scanned-record OCR out of margin.
 
 ## 3. Target architecture
 
@@ -420,6 +501,70 @@ stopping mid-ingestion leaves a `PROCESSING` document row and a partially-writte
 segment. The drain is not optional.
 
 ---
+
+### 3.6 Shared `ss-rlm-sandbox` pool — warm for every tenant's data calls
+
+**What the sandbox is** (`docs/SPEC-ss-rlm-sandbox.md`): RLM is an inference *strategy*, not a
+weight. `ss-rlm-sandbox` is a container that runs the recursive-reasoning loop — context held
+as a variable in a REPL that the model chunks, greps and sub-queries — calling a **hosted chat
+model** for its sub-queries and the master's retrieval tools (`query_case_knowledge`,
+`query_case_graph`) for data. It holds no data at rest; a call is a REPL session that ends.
+The fine-tuned `ss-rlm` needs ~10 GB of VRAM that no provider hosts; the sandbox needs a CPU
+and an OpenRouter key.
+
+**Decision (2026-09-19).** Hosted tenants do not get a sandbox each. There is **one shared
+pool** of sandbox instances, run by us, **pre-warmed and health-checked so that every data
+call from every tenant instance finds a ready slot**. Reasons:
+
+- A per-tenant sandbox is a second container per tenant — doubling the count the control plane
+  manages and the memory we pay for at idle — for a process that is idle 99% of the time.
+- Cold-starting a sandbox on demand puts a container start on the path of an MCP tool call,
+  which §2.3 already ruled out for the tenant app itself.
+- Sandboxes are stateless per call, so pooling costs nothing in isolation *if* the call carries
+  everything tenant-specific and the REPL process dies with the call.
+
+**Topology.**
+
+```
+ tenant container (alice)  ──┐
+ tenant container (bob)    ──┼──► sandbox-router (control-plane host, private network)
+ tenant container (carol)  ──┘          │  per-call envelope: tenantId, tenant base URL,
+                                        │  tenant MCP key, tenant OpenRouter key, model,
+                                        │  domain='legal'
+                                        ▼
+                     sandbox pool: N × ss-rlm-sandbox (each: K REPL slots)
+                                        │
+                     retrieval tools ───┘──► back into THE CALLING TENANT'S container only
+```
+
+- **Router**: one small service on the private network. Receives `POST /rlm/run` from a tenant
+  container (authenticated by the tenant's own MCP key, which the control plane issued in 2.6),
+  picks a free slot, forwards the envelope. Queue with backpressure; a call that cannot get a
+  slot within a bound returns a typed `SANDBOX_BUSY` so the tenant app degrades to plain
+  completion instead of hanging.
+- **Per-call envelope** carries the tenant's OpenRouter key and base URL. The sandbox never
+  stores either: the two-master contract's *per-master config push* (§2.1 of the sandbox spec,
+  keyed by `serverUrl`) generalises to N masters, but the pool does not need to pre-register
+  every tenant — the envelope is the registration, for the life of one call.
+- **Isolation**: one REPL process per call, in its own working directory, killed at end or at
+  a wall-clock cap; no shared filesystem between slots; egress allowed only to OpenRouter and to
+  the calling tenant's container. Cross-tenant reachability is a Phase 8 security-review item.
+- **Readiness = "ready for all data calls from all instances"**: the pool is sized for the
+  expected *concurrent* RLM calls across tenants, not for tenant count. RLM calls are rare and
+  long (tens of seconds to minutes). Start with **4 slots** (one small VM: 2 vCPU / 4 GB, ~$15–
+  30/month), scale slots by queue depth. Health: the router probes every sandbox; a sandbox that
+  fails a probe is drained and recreated; the pool never reports fewer ready slots than it has.
+- **Metering**: RLM calls, wall-clock seconds and sub-query counts per tenant flow into the
+  metering endpoint (P4) — this is *our* CPU, small but real.
+
+**What the app needs** (tenant side): the existing `virtualInferenceModeRlm` /
+`rlmSandboxModel` config already expresses "use the sandbox with this hosted model". Two
+changes: the sandbox endpoint becomes a **pool URL + tenant credentials** instead of a
+sidecar-discovered container (`fleet-router.ts` gets a `pool` runtime beside `host`/`docker`),
+and the retrieval-tool base URL the sandbox calls back to must be the tenant's private address,
+pushed in the envelope.
+
+**Tasks** → Phase 2b (§10). **Risk** → §11.
 
 ## 4. Provisioning platform: build vs. buy
 
@@ -732,8 +877,11 @@ These are in the **application**, not the control plane. All are small; all are 
 | P6 | Graceful drain — `POST /api/admin/drain` that stops accepting jobs and resolves when the queue is idle | §3.5 step 2; prevents corrupt state on suspend | 1 d |
 | P7 | Kill-switch Config rows — `pipeline.ocrEnabled`, `ingestion.enabled` | Enforce caps without stopping the container | 0.5 d |
 | P8 | Remove port 3001 from the container/compose spec | Finding A: nothing listens there | 0.1 d |
+| **P9** | **`OpenRouterOCREngine`** + `ocrProvider: 'openrouter'` + `virtualInferenceModeOcr` + the three call-site arms + `/admin/openrouter` OCR row with vision-filtered model picker | §2.5: OCR on the customer's key, or the $10 plan pays for scanned records | 3 d |
+| **P10** | **Quality gate re-tune**: structure-agnostic `assessOcrOutput`, PaddleOCR-shape checks moved behind `ocrModelCaps`, captured cloud-output corpus (synthetic pages for the test suite; real captures stay in `data/…/ocr-captures/` per the privacy rule) | Without it every cloud page is rejected or every bad page accepted | 2 d |
+| **P11** | **Caps + benchmark** for the shortlisted vision models: prompt style, max image edge, table delimiter behaviour, $/page and s/page measured on a representative scanned set | Feeds §8 pricing copy and the default model choice | 1 d |
 
-**Total prerequisite work: ~7 days.**
+**Total prerequisite work: ~13 days** (was ~7; P9–P11 are the 2026-09-19 OCR decision).
 
 ---
 
@@ -758,6 +906,8 @@ These are in the **application**, not the control plane. All are small; all are 
 - [ ] **1.1** P1–P8 from §9.
 - [ ] **1.2** Publish `@soundsuite/mcp-bridge` to npm with bearer-token support.
 - [ ] **1.3** Build and publish a hosted-profile image to GHCR with a pinned version tag.
+- [ ] **1.4** **OCR on the customer's key** — P9, P10, P11 (§2.5). Blocking for the plan
+      economics, not just for the feature list.
 
 ### Phase 2 — Control plane, core (~12 days)
 
@@ -770,6 +920,18 @@ These are in the **application**, not the control plane. All are small; all are 
 - [ ] **2.6** Provisioning job: create volume → create machine → poll `/api/health` → bootstrap
       admin → seed `pipeline.ocrProvider=local` → generate MCP key → mark active.
 - [ ] **2.7** Deprovision job with the §3.5 ordering (drain → backup → R2 → verify → stop).
+
+### Phase 2b — Shared `ss-rlm-sandbox` pool (~6 days, §3.6)
+
+- [ ] **2.8** Sandbox image (the one `docs/SPEC-ss-rlm-sandbox.md` says does not exist yet):
+      REPL runtime, per-call working dir, wall-clock cap, egress allow-list.
+- [ ] **2.9** `sandbox-router`: slot pool, `POST /rlm/run` with the per-call envelope, tenant
+      MCP-key auth, backpressure + `SANDBOX_BUSY`, health probes, drain/recreate.
+- [ ] **2.10** App side: `pool` runtime in `fleet-router.ts`; envelope carries the tenant's
+      OpenRouter key and private retrieval base URL; `rlmSandboxModel` honoured; typed
+      degradation to plain completion when the pool refuses.
+- [ ] **2.11** Warm-pool sizing and metering: 4 slots to start, scale on queue depth, RLM
+      seconds / sub-queries per tenant into `/api/metering`.
 
 ### Phase 3 — Billing (~6 days)
 
@@ -825,8 +987,14 @@ These are in the **application**, not the control plane. All are small; all are 
       §8 table is a placeholder until this task replaces it with measured numbers.
 - [ ] **8.4** Security review: container escape surface, cross-tenant reachability, key handling.
 - [ ] **8.5** Private beta, 10 external users, free.
+- [ ] **8.6** Pool load test: N tenants issuing RLM calls concurrently; confirm every call
+      finds a slot or a typed refusal, and that no slot can reach a tenant other than its
+      caller (§3.6 isolation).
+- [ ] **8.7** Cloud OCR fidelity check: the P10 corpus against the chosen default model on a
+      representative scanned set; publish the $/page and s/page numbers on the pricing page.
 
-**Total: ~48 engineering days ≈ 10 weeks for one person**, plus elapsed beta time.
+**Total: ~60 engineering days ≈ 12 weeks for one person** (was ~48: +6 for P9–P11, +6 for
+Phase 2b), plus elapsed beta time.
 
 ---
 
@@ -847,6 +1015,19 @@ These are in the **application**, not the control plane. All are small; all are 
 
 ---
 
+- **Cloud OCR fidelity.** Every argument in the virtual-inference spec for keeping OCR local
+  was about matching PaddleOCR's output shape. A generalised gate that is too loose accepts
+  garbage into the index; too tight and cloud OCR is useless. P10's corpus and 8.7's check are
+  the mitigation; the fallback is `local-first` routing, which keeps PaddleOCR's judgement in
+  the loop and only pays the cloud for pages it cannot read.
+- **The sandbox pool is a shared blast radius.** One misbehaving REPL that escapes its
+  working directory or keeps a handle to a tenant URL is a cross-tenant incident. Per-call
+  process, egress allow-list and the 8.6 test are the controls; the pool must be the *only*
+  shared compute in the design.
+- **OpenRouter as a single point of failure** now covers embeddings, LLM, RLM sub-queries and
+  OCR for every tenant. An OpenRouter outage stops ingestion and research fleet-wide. Local
+  fallbacks exist for OCR (`local-first`) and nothing else; say so on the status page.
+
 ## 12. Open questions
 
 1. **Where do tenants' PDFs come from?** The hosted container has no `/watch/cases` bind mount,
@@ -854,8 +1035,14 @@ These are in the **application**, not the control plane. All are small; all are 
    launch? It changes the ingestion story significantly.
 2. **Is the 14-day trial card-required?** Card-required cuts abuse and cuts signups. For a
    resource-heavy product with per-tenant provisioning cost, card-required is the safer default.
-3. **GPU OCR as a paid add-on?** A shared GPU host at ~$300/month breaks even at roughly 15
-   tenants paying a $20 add-on. Worth modelling separately — do not fold it into $10.
+3. **GPU OCR as a paid add-on?** Largely moot after §2.5: OCR runs on the customer's key.
+   A GPU add-on only serves customers who refuse any cloud key; park it until asked for.
+6. **Sandbox pool placement.** One pool on the control-plane host, or one per region the
+   tenants live in? Data-residency (item 5) may force per-region pools, which multiplies the
+   fixed cost. Decide with item 5.
+7. **Who pays for RLM sub-queries?** The envelope carries the tenant's OpenRouter key, so the
+   customer does — but the REPL's CPU seconds are ours. Metered (2.11); decide whether Starter
+   gets RLM at all or it is a Pro feature.
 4. **Team/multi-seat?** The app has a single `AdminUser` per install. Multiple seats per tenant
    means a real user table inside the app. Out of scope here; flag before promising it.
 5. **Data residency.** Litigation documents may carry jurisdictional constraints. Fly and
@@ -872,3 +1059,8 @@ These are in the **application**, not the control plane. All are small; all are 
 - `Dockerfile`, `docker/entrypoint.sh`, `docker-compose.yml` — the container this builds on
 - `scripts/manage.mjs` — `db:backup` / `db:restore`, the basis of §6
 - `scripts/mcp-bridge/` — the client shim to publish in Task 1.2
+- `docs/SPEC-openrouter-virtual-inference.md` §7 — why OCR stayed local-only; §2.5 here reverses it for the hosted product
+- `docs/SPEC-ss-rlm-sandbox.md` — the sandbox and the per-master config contract that §3.6 generalises
+- `docs/tasks/54-profiles.md`, `docs/tasks/56-system-db.md` — profiles and the machine/case split (§1.2)
+- `src/lib/ingestion/ollama-ocr-engine.ts`, `src/lib/ingestion/ocr-quality-gate.ts`, `src/lib/gpu/ocr-model-caps.ts` — what P9–P11 extend
+- `/admin/openrouter` (`src/components/admin-openrouter.tsx`) — where the OCR routing row and the sandbox pool settings land
