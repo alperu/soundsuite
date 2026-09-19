@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { SearchableCombo } from '@/components/searchable-combo';
-import { getCachedCases, setCachedCases, getCachedFilings, setCachedFilings } from '@/lib/indexed-db';
+import { getCachedCases, setCachedCases, getCachedFilings, setCachedFilings, getPreference, setPreference } from '@/lib/indexed-db';
 import { formatFilingLabel } from '@/lib/filings/format-filing-label';
 import { TagPanel } from '@/components/case/tag-panel';
 import { TAG_SPEC_BY_KIND, type EntityKind } from '@/components/case/tag-spec';
@@ -204,32 +204,56 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
     setSelectedOverride(null);
   }, [pathname]);
 
-  // Resizable sidebar state
-  const SIDEBAR_MIN = 240;
-  const SIDEBAR_MAX = 600;
-  const SIDEBAR_DEFAULT = 320;
-  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT);
+  // Three columns: Cases | Filings | content. Both left widths are adjustable
+  // and persisted in IndexedDB under one key, alongside the last selection.
+  const CASE_COL_MIN = 180;
+  const CASE_COL_MAX = 480;
+  const CASE_COL_DEFAULT = 260;
+  const FILING_COL_MIN = 220;
+  const FILING_COL_MAX = 640;
+  const FILING_COL_DEFAULT = 320;
+  const LAYOUT_PREF_KEY = 'caseManagement.layout';
+  const LAST_SELECTION_KEY = 'caseManagement.lastSelection';
+  const [caseColWidth, setCaseColWidth] = useState(CASE_COL_DEFAULT);
+  const [filingColWidth, setFilingColWidth] = useState(FILING_COL_DEFAULT);
   const isResizing = useRef(false);
 
-  // Load persisted sidebar width from localStorage
+  // Load persisted column widths from IndexedDB (localStorage held the old
+  // single-sidebar width; it is read once as a fallback and then ignored).
   useEffect(() => {
-    const saved = localStorage.getItem('case-sidebar-width');
-    if (saved) {
-      const w = parseInt(saved, 10);
-      if (w >= SIDEBAR_MIN && w <= SIDEBAR_MAX) setSidebarWidth(w);
-    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const saved = await getPreference<{ caseWidth?: number; filingWidth?: number }>(LAYOUT_PREF_KEY);
+        if (cancelled) return;
+        if (saved?.caseWidth && saved.caseWidth >= CASE_COL_MIN && saved.caseWidth <= CASE_COL_MAX) setCaseColWidth(saved.caseWidth);
+        if (saved?.filingWidth && saved.filingWidth >= FILING_COL_MIN && saved.filingWidth <= FILING_COL_MAX) setFilingColWidth(saved.filingWidth);
+        if (!saved) {
+          const legacy = parseInt(localStorage.getItem('case-sidebar-width') ?? '', 10);
+          if (legacy >= FILING_COL_MIN && legacy <= FILING_COL_MAX) setFilingColWidth(legacy);
+        }
+      } catch { /* IndexedDB unavailable — defaults stand */ }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+  const persistLayout = useCallback((caseWidth: number, filingWidth: number) => {
+    setPreference(LAYOUT_PREF_KEY, { caseWidth, filingWidth }).catch(() => {});
+  }, []);
+
+  /** One drag handler for both splitters; `which` names the column being resized. */
+  const makeResizeStart = useCallback((which: 'case' | 'filing') => (e: React.MouseEvent) => {
     e.preventDefault();
     isResizing.current = true;
     const startX = e.clientX;
-    const startWidth = sidebarWidth;
+    const startWidth = which === 'case' ? caseColWidth : filingColWidth;
+    const [min, max] = which === 'case' ? [CASE_COL_MIN, CASE_COL_MAX] : [FILING_COL_MIN, FILING_COL_MAX];
+    let latest = startWidth;
 
     const onMouseMove = (ev: MouseEvent) => {
       if (!isResizing.current) return;
-      const newWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startWidth + ev.clientX - startX));
-      setSidebarWidth(newWidth);
+      latest = Math.min(max, Math.max(min, startWidth + ev.clientX - startX));
+      if (which === 'case') setCaseColWidth(latest); else setFilingColWidth(latest);
     };
     const onMouseUp = () => {
       isResizing.current = false;
@@ -237,17 +261,46 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
       document.removeEventListener('mouseup', onMouseUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
-      // Persist on drag end
-      setSidebarWidth(prev => {
-        localStorage.setItem('case-sidebar-width', String(prev));
-        return prev;
-      });
+      // Persist on drag end, both widths together.
+      persistLayout(which === 'case' ? latest : caseColWidth, which === 'filing' ? latest : filingColWidth);
     };
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
-  }, [sidebarWidth]);
+  }, [caseColWidth, filingColWidth, persistLayout]);
+
+  // Last selection → IndexedDB on every navigation inside /case-management;
+  // restored when the bare /case-management is opened and that case still exists.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (!pathname) return;
+    const parts = pathname.split('/').filter(Boolean); // ['case-management', cn?, slug?, exhibit?]
+    if (parts[0] !== 'case-management') return;
+    if (parts.length >= 2) {
+      restoredRef.current = true; // an explicit URL is the selection; never redirect away from it
+      setPreference(LAST_SELECTION_KEY, {
+        caseNumber: decodeURIComponent(parts[1]),
+        filingSlug: parts[2] ? decodeURIComponent(parts[2]) : null,
+        at: Date.now(),
+      }).catch(() => {});
+    }
+  }, [pathname]);
+
+  useEffect(() => {
+    if (restoredRef.current || pathname !== '/case-management' || cases.length === 0) return;
+    restoredRef.current = true;
+    (async () => {
+      try {
+        const last = await getPreference<{ caseNumber?: string; filingSlug?: string | null }>(LAST_SELECTION_KEY);
+        if (!last?.caseNumber) return;
+        const stillThere = cases.some(c => (c.caseNumber || c.id) === last.caseNumber);
+        if (!stillThere) return;
+        const target = `/case-management/${encodeURIComponent(last.caseNumber)}${last.filingSlug ? `/${encodeURIComponent(last.filingSlug)}` : ''}`;
+        router.replace(target);
+      } catch { /* no restore */ }
+    })();
+  }, [pathname, cases, router]);
 
   // Context menu state for sidebar
   const [sidebarContextMenu, setSidebarContextMenu] = useState<{
@@ -862,10 +915,9 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
 
   return (
     <div className="flex h-full">
-      {/* Left panel: Case list + Filings sidebar */}
-      <div style={{ width: sidebarWidth, minWidth: SIDEBAR_MIN, maxWidth: SIDEBAR_MAX }} className="border-r border-gray-200 bg-gray-50 flex flex-col flex-shrink-0 select-none">
-        {/* Case selector header */}
-        <div className="p-3 border-b border-gray-200">
+      {/* Column 1: cases */}
+      <div style={{ width: caseColWidth, minWidth: CASE_COL_MIN, maxWidth: CASE_COL_MAX }} className="border-r border-gray-200 bg-gray-50 flex flex-col flex-shrink-0 select-none">
+        <div className="p-3 flex flex-col min-h-0 flex-1">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Cases</h2>
             <button
@@ -877,8 +929,8 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
               </svg>
             </button>
           </div>
-          {/* Case list as compact items */}
-          <div className="space-y-1 max-h-40 overflow-y-auto">
+          {/* Case list — the whole column, not a 10rem strip */}
+          <div className="space-y-1 flex-1 min-h-0 overflow-y-auto">
             {cases.length === 0 ? (
               <p className="text-xs text-gray-400 py-2 text-center">No cases yet</p>
             ) : (
@@ -912,7 +964,22 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
             )}
           </div>
         </div>
+      </div>
 
+      {/* Splitter: cases | filings */}
+      <div
+        onMouseDown={makeResizeStart('case')}
+        className="w-1 cursor-col-resize hover:bg-blue-400 active:bg-blue-500 transition-colors flex-shrink-0"
+        title="Drag to resize the case column"
+      />
+
+      {/* Column 2: filings of the active case */}
+      <div style={{ width: filingColWidth, minWidth: FILING_COL_MIN, maxWidth: FILING_COL_MAX }} className="border-r border-gray-200 bg-gray-50 flex flex-col flex-shrink-0 select-none">
+        <div className="px-3 pt-3 pb-2 border-b border-gray-200">
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider truncate" title={activeCase ? activeCase.name : undefined}>
+            Filings{activeCase ? ` · ${activeCase.name}` : ''}
+          </h2>
+        </div>
         {/* Filing category tabs - only show when a case is selected */}
         {activeCase && (
           <>
@@ -1107,10 +1174,11 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
         )}
       </div>
 
-      {/* Resize handle */}
+      {/* Splitter: filings | content */}
       <div
-        onMouseDown={handleResizeStart}
+        onMouseDown={makeResizeStart('filing')}
         className="w-1 cursor-col-resize hover:bg-blue-400 active:bg-blue-500 transition-colors flex-shrink-0"
+        title="Drag to resize the filings column"
       />
 
       {/* Middle panel: children (case detail or empty state) */}
