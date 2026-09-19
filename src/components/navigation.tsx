@@ -10,8 +10,9 @@ interface NavLink {
   href: string;
   label: string;
   icon: string;
-  /** Sub-pages rendered under the parent, same typography, slightly indented;
-   *  icon-only when the sidebar is collapsed, like every other entry. */
+  /** Sub-pages rendered directly under the parent with the same geometry as
+   *  every other entry (same padding, icon column and font); icon-only when
+   *  the sidebar is collapsed. */
   children?: Array<{ href: string; label: string; icon: string }>;
 }
 
@@ -136,7 +137,7 @@ export default function Navigation() {
                     title={collapsed ? child.label : undefined}
                     className={`
                       flex items-center rounded-md text-sm font-medium transition-colors overflow-hidden mt-0.5
-                      ${collapsed ? 'justify-center px-0 py-2' : 'gap-3 pl-7 pr-3 py-2'}
+                      ${collapsed ? 'justify-center px-0 py-2' : 'gap-3 px-3 py-2'}
                       ${isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-100'}
                     `}
                   >
