@@ -81,3 +81,11 @@ tmp-*.mjs
 # (openrouter.enc.json). Encrypted at rest, but a usable credential must never
 # reach git regardless.
 sideCar/config/
+
+# Credential backups. .env and .mcp.json are ignored, but their .bak siblings
+# were not — and those hold the same secrets. A `git add -A` would have pushed
+# a live MCP bearer token to a public remote.
+.env.bak*
+.env.*.bak
+.mcp.json.bak
+.mcp.json.*.bak
