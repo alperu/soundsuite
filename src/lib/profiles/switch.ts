@@ -8,8 +8,9 @@
  *   1. registry → the new name is the answer to "which profile" from now on;
  *   2. stop services bound to the old profile (watcher, parsing workers,
  *      scanner daemon) so nothing writes to the old database mid-switch;
- *   3. drop the per-profile clients (Prisma, Kysely, Redis prefix) and the
- *      tool registry (its VectorStore points at the old lancedb);
+ *   3. drop the per-profile clients (Prisma, Kysely) and the tool registry
+ *      (its VectorStore points at the old lancedb). Redis is shared: it holds
+ *      fleet state, and cached case data is keyed by UUID (task 56);
  *   4. start services again — they rebuild from the new profile's Case rows.
  *
  * Serialised: a second switch while one is running waits for it.
@@ -65,12 +66,6 @@ export async function switchProfile(to: string): Promise<SwitchResult> {
       releaseKysely(from);
     } catch (err) {
       warnings.push(`kysely: ${(err as Error).message}`);
-    }
-    try {
-      const { disconnectRedis } = await import('@/lib/redis');
-      await disconnectRedis();
-    } catch (err) {
-      warnings.push(`redis: ${(err as Error).message}`);
     }
     try {
       const { resetToolRegistry } = await import('@/lib/mcp/get-tool-registry');

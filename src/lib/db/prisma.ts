@@ -1,9 +1,10 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import { PrismaClient, Prisma } from '@prisma/client'
 import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
 import { withCacheInvalidation } from './cache-invalidation'
 import { xetoValidate } from '@/lib/legal/prisma-extensions/validate'
-import { activeProfile, activeProfileName } from '@/lib/profiles/registry'
+import { activeProfile, activeProfileName, dataRoot, listProfiles, profilePaths } from '@/lib/profiles/registry'
 
 // Per-profile clients live on globalThis so the map survives HMR reloads in
 // dev; the exported `prisma` is a proxy over the active one (see below).
@@ -101,20 +102,90 @@ function clientForActiveProfile(): ExtendedPrismaClient {
 }
 
 /**
- * The application's Prisma client — a stable proxy over WHICHEVER profile is
- * active. The 100+ importers keep `import { prisma }` and never learn about
- * profiles; a switch (`lib/profiles/switch.ts`) changes what the proxy
- * forwards to, in-process, with no restart.
+ * Models that describe the MACHINE, not a case set — the GPU fleet's role
+ * assignments and provisioning, the sidecar command queue, model downloads,
+ * admin logins and MCP sessions. They live in one shared `data/system.db`
+ * and do not follow the active profile: switching to a demo profile must not
+ * empty the role-assignment page (docs/tasks/56-system-db.md).
  *
- * Every property access resolves the active client, so a `$transaction`
- * callback or a model delegate captured before a switch keeps using the
- * client it was taken from — which is the correct behaviour mid-write.
+ * Everything else — cases, documents, the tag graph, `Config` (embedding
+ * model choice is bound to the profile's LanceDB), chat, presets — is
+ * per-profile.
+ */
+export const SYSTEM_MODELS: ReadonlySet<string> = new Set([
+  'sidecarCommand',
+  'hostProvisioning',
+  'hostRoleAssignment',
+  'adminUser',
+  'mcpSession',
+  'modelDownload',
+])
+
+/** Table names of `SYSTEM_MODELS`, for the one-time seed and the docs. */
+export const SYSTEM_TABLES = ['SidecarCommand', 'HostProvisioning', 'HostRoleAssignment', 'AdminUser', 'McpSession', 'ModelDownload'] as const
+
+export function isSystemModel(prop: PropertyKey): boolean {
+  return typeof prop === 'string' && SYSTEM_MODELS.has(prop)
+}
+
+const SYSTEM_KEY = '__system__'
+
+/**
+ * The shared client. Legacy mode (no profiles on disk) has no split: the one
+ * database holds everything, as it always did. With profiles, the system file
+ * is created on first use by cloning the active profile's schema and seeding
+ * the system tables from EVERY profile (`INSERT OR IGNORE`), so a fleet
+ * configured before this split is not lost whichever profile is active.
+ */
+function systemClient(): ExtendedPrismaClient {
+  const active = activeProfile()
+  if (active.legacy) return clientForActiveProfile()
+  const dbPath = systemSqlitePath()
+  const cached = clients.get(SYSTEM_KEY)
+  if (cached && cached.dbPath === dbPath) return cached.client
+  ensureSystemDatabase(dbPath)
+  const client = createPrismaClient(dbPath)
+  clients.set(SYSTEM_KEY, { dbPath, client, pragmas: false })
+  return client
+}
+
+export function systemSqlitePath(): string {
+  return path.join(dataRoot(), 'system.db')
+}
+
+function ensureSystemDatabase(dbPath: string): void {
+  if (fs.existsSync(dbPath)) return
+  // Lazy require: `lib/profiles/create` pulls better-sqlite3, which is only
+  // needed on this one-time path.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { cloneSchema, copyTableRows } = require('@/lib/profiles/create') as typeof import('@/lib/profiles/create')
+  const sources = listProfiles()
+    .map((p) => profilePaths(p.name).sqlite)
+    .filter((p) => fs.existsSync(p))
+  const template = fs.existsSync(activeProfile().sqlite) ? activeProfile().sqlite : sources[0]
+  if (!template) throw new Error('cannot create system.db: no profile has a database to clone the schema from')
+  cloneSchema(template, dbPath)
+  for (const src of sources) {
+    for (const table of SYSTEM_TABLES) copyTableRows(src, dbPath, table)
+  }
+}
+
+/**
+ * The application's Prisma client — a stable proxy over WHICHEVER profile is
+ * active, with the system models routed to the shared system database. The
+ * 100+ importers keep `import { prisma }` and never learn about profiles; a
+ * switch (`lib/profiles/switch.ts`) changes what the proxy forwards to,
+ * in-process, with no restart.
+ *
+ * Every property access resolves the client, so a `$transaction` callback or
+ * a model delegate captured before a switch keeps using the client it was
+ * taken from — which is the correct behaviour mid-write.
  */
 export const prisma: ExtendedPrismaClient = new Proxy({} as ExtendedPrismaClient, {
   get(_target, prop) {
-    const client = clientForActiveProfile() as unknown as Record<PropertyKey, unknown>
-    const value = client[prop]
-    return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(client) : value
+    const target = (isSystemModel(prop) ? systemClient() : clientForActiveProfile()) as unknown as Record<PropertyKey, unknown>
+    const value = target[prop]
+    return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value
   },
   has(_target, prop) {
     return prop in (clientForActiveProfile() as unknown as object)

@@ -95,6 +95,35 @@ export function cloneSchema(fromSqlite: string, toSqlite: string): { objects: nu
   }
 }
 
+/**
+ * Copy every row of `table` from one SQLite file to another, `INSERT OR
+ * IGNORE` so an existing primary key wins. Used to seed `data/system.db`
+ * from the profiles that existed before the system split.
+ */
+export function copyTableRows(fromSqlite: string, toSqlite: string, table: string): number {
+  const src = new Database(fromSqlite, { readonly: true, fileMustExist: true });
+  const dst = new Database(toSqlite, { fileMustExist: true });
+  try {
+    const exists = src.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    if (!exists) return 0;
+    const rows = src.prepare(`SELECT * FROM "${table}"`).all() as Array<Record<string, unknown>>;
+    if (rows.length === 0) return 0;
+    const cols = Object.keys(rows[0]);
+    const insert = dst.prepare(
+      `INSERT OR IGNORE INTO "${table}" (${cols.map((c) => `"${c}"`).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`,
+    );
+    const tx = dst.transaction((list: typeof rows) => {
+      let n = 0;
+      for (const r of list) n += insert.run(...cols.map((c) => r[c])).changes;
+      return n;
+    });
+    return tx(rows) as number;
+  } finally {
+    src.close();
+    dst.close();
+  }
+}
+
 export function copyConfigRows(fromSqlite: string, toSqlite: string): number {
   const src = new Database(fromSqlite, { readonly: true, fileMustExist: true });
   const dst = new Database(toSqlite, { fileMustExist: true });

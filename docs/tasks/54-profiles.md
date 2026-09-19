@@ -39,6 +39,7 @@ data/
     backups/
   demo/
     …
+  system.db                   machine state shared by every profile (task 56)
   countries.json, us-*.json   static location data — shared, not per profile
   backups/, lancedb-test/, *.bak*   left where they were
 ```
@@ -58,10 +59,11 @@ disabled and says to run the migration. Nothing breaks on a checkout that has no
 |---|---|---|
 | Registry | `src/lib/profiles/registry.ts` | sync, fs-only: `listProfiles`, `activeProfileName` (cached on `globalThis`), `profilePaths`, `setActiveProfileName`, `scaffoldProfile`. `SS_DATA_ROOT` relocates `data/` (tests). |
 | Create | `src/lib/profiles/create.ts` | `createProfile`: skeleton + the SCHEMA cloned from the active profile's SQLite (`sqlite_master` DDL + the `_prisma_migrations` ledger, no rows — the Prisma CLI is unreliable on an empty file: `db push` trips on the JSON `@default("{}")` DDL, `migrate deploy` on a migration that assumes data) + optional `Config` rows copied from another profile (API keys, models). A failed create removes its skeleton. `peekCases(name)` reads a non-active profile's SQLite read-only. |
-| Switch | `src/lib/profiles/switch.ts` | registry → stop watcher / parsing workers / scanner daemon → release Prisma + Kysely clients, quit Redis, reset the tool registry → `getWorkerManager()` again. Serialised. |
+| Switch | `src/lib/profiles/switch.ts` | registry → stop watcher / parsing workers / scanner daemon → release Prisma + Kysely clients, reset the tool registry → `getWorkerManager()` again. Serialised. |
 | Prisma | `src/lib/db/prisma.ts` | `prisma` is a Proxy over a per-profile client map. 119 importers unchanged. `releasePrismaClient(name)`. |
 | Kysely | `src/lib/legal/kysely.ts` | same shape: `db` proxy, `releaseKysely(name)`. |
-| Redis | `src/lib/redis.ts` | `keyPrefix: p:<profile>:` on the shared client (legacy: no prefix). Pub/sub channels unprefixed on purpose — a status event is harmless across profiles and prefixing one side of a pair drops every event. |
+| Redis | `src/lib/redis.ts` | **Shared, not partitioned** (task 56). Fleet state lives there; cached case keys are UUID-rooted and never collide across profiles. |
+| System DB | `src/lib/db/prisma.ts` | machine-level models (`HostRoleAssignment`, `HostProvisioning`, `SidecarCommand`, `AdminUser`, `McpSession`, `ModelDownload`) route to the shared `data/system.db` — task 56. |
 | LanceDB | 27 call sites | `process.env.LANCEDB_PATH \|\| './data/lancedb'` → `lancedbPath()` from `@/lib/profiles`; module-level constants became call-time lookups. |
 | Data dirs | chat history, chat attachments, OCR captures, backups | read `activeProfile().<dir>` at call time. |
 | Services | `src/services/worker-init.ts` | `stopProfileBoundServices()` / `startProfileBoundServices()`; shutdown handlers registered once per process. |
