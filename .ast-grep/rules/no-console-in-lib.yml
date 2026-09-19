@@ -1,0 +1,8 @@
+id: no-console-in-lib
+message: Use the project logger instead of console.* in src/lib
+severity: hint
+language: TypeScript
+files:
+  - src/lib/**
+rule:
+  pattern: console.$METHOD($$$ARGS)

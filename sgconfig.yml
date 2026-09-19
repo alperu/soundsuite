@@ -1,0 +1,10 @@
+# ast-grep project config. Run from repo root: `ast-grep run -p '<pattern>' -l ts`
+# Rules live in .ast-grep/rules; tests in .ast-grep/tests.
+ruleDirs:
+  - .ast-grep/rules
+testConfigs:
+  - testDir: .ast-grep/tests
+languageGlobs:
+  typescript: ["*.ts", "*.mts", "*.cts"]
+  tsx: ["*.tsx"]
+  javascript: ["*.js", "*.mjs", "*.cjs"]
