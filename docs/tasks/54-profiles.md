@@ -69,8 +69,9 @@ disabled and says to run the migration. Nothing breaks on a checkout that has no
 | MCP | `src/lib/mcp/tools/profile-tools.ts` | `profile_list` (profiles, active flag, cases each), `profile_use(name)`. Both MCP profiles, no LLM. |
 | MCP guard | `src/lib/mcp/tool-registry.ts` | `expectProfile` accepted on EVERY tool, consumed before validation; mismatch → `PROFILE_MISMATCH` (HTTP 409). Every `ToolExecutionResult` carries `profile`. `/api/mcp/execute` and the :3001 server send `x-ss-profile` and fold `profile` into object payloads. |
 | Haystack ops | `src/lib/haystack/ops/index.ts` | every `ss*` grid's meta carries `profile`. |
-| API | `src/app/api/profiles/route.ts`, `…/active/route.ts` | list / create; get / switch. |
-| UI | `src/components/profile-switcher.tsx`, `navigation.tsx` | dropdown above **Cases**; "＋ New profile…" inline with "copy settings from"; switching reloads the page. Collapsed sidebar shows the initial. |
+| API | `src/app/api/profiles/route.ts`, `…/active/route.ts`, `…/[name]/route.ts` | list / create; get / switch; get / PATCH (displayName, description, `newName` = folder rename) / DELETE. |
+| Manage | `src/lib/profiles/manage.ts` | `updateProfile`, `deleteProfile`. Rename and delete refuse the ACTIVE profile (switch first); delete refuses the last profile and moves the folder to `data/.trash/<name>-<timestamp>` — the undo. |
+| UI | `src/components/profile-switcher.tsx`, `navigation.tsx` | dropdown above **Cases** with an edit (pencil) button beside it; "＋ New profile…" inline with "copy settings from"; edit panel: display name, description, folder rename (non-active only), delete with inline confirm (non-active only). Switching reloads the page. Collapsed sidebar shows the initial. |
 | Scripts | `scripts/manage.mjs`, `prisma.config.ts` | resolve the active profile (`--profile <name>` / `SS_PROFILE`); `db:migrate`, `db:backup`, `db:restore` target it. `npx prisma migrate deploy` with an absolute `DATABASE_URL` targets that file explicitly. |
 
 ## What a switch costs
@@ -91,12 +92,11 @@ profile-bound and stays up.
 ## Tests
 
 `src/lib/profiles/__tests__/registry.test.ts` (discovery, resolution order, validation, paths over
-a temp `SS_DATA_ROOT`), `src/lib/mcp/__tests__/profile-guard.test.ts` (stamp + guard).
+a temp `SS_DATA_ROOT`), `…/manage.test.ts` (edit, rename, delete rules), `src/lib/mcp/__tests__/profile-guard.test.ts` (stamp + guard).
 
 ## Open
 
-- Deleting or renaming a profile: not built. Remove the directory by hand while the server is
-  stopped.
+- `data/.trash/` is never emptied automatically.
 - Background services run only for the active profile; a non-active profile's `QUEUED` documents
   wait until it is active.
 - `filing-type-classifier.ts` caches its LanceDB connection per process; it reconnects lazily on
