@@ -19,6 +19,7 @@ import { systemSqlitePath } from '@/lib/db/prisma'
 import { getServicesManager, type ServiceHealth } from '@/lib/services-manager'
 import { FilingsCacheService } from '@/services/filings-cache'
 import { FolderIndexService } from '@/services/folder-index-service'
+import { isDevMode } from '@/lib/dev-mode'
 
 export async function GET() {
   // Self-heal: services start lazily (instrumentation → getWorkerManager) and
@@ -110,5 +111,8 @@ export async function GET() {
     available: listProfiles().map((m) => m.name),
     paths: { sqlite: p.sqlite, lancedb: p.lancedb, system: p.legacy ? p.sqlite : systemSqlitePath() },
   }
-  return NextResponse.json({ profile, ...systemHealth, cache: cacheStats }, { status: statusCode })
+  // Developer-mode marker (config/dev-mode on this host). Read by the
+  // /admin/login `#auth=` fragment gate; see src/lib/dev-mode.ts.
+  const devMode = isDevMode()
+  return NextResponse.json({ profile, devMode, ...systemHealth, cache: cacheStats }, { status: statusCode })
 }

@@ -182,3 +182,5 @@ wholesale.
 - `.claude/rules/testing.md` — Jest conventions and the global-mock history.
 - `.claude/rules/cli-corrections.md` — command-line patterns learned by rtk.
 - `docs/PLAN-haystack-mcp-agentic-etl.md` — the model-driven ETL plan and write-path hazards.
+- `docs/jev-browser.md` — autonomous browser agent (`jev_navigate`) setup, limits, and the
+  `config/dev-mode` + `/admin/login#auth=` gate that lets it start signed in on localhost.

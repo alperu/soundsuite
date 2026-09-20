@@ -92,3 +92,7 @@ sideCar/config/
 .env.*.bak
 .mcp.json.bak
 .mcp.json.*.bak
+
+# Developer-mode marker (src/lib/dev-mode.ts). Present only on a developer's
+# machine; enables the /admin/login #auth= fragment for local browser agents.
+/config/dev-mode

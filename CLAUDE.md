@@ -53,6 +53,10 @@ mode; the rule stands regardless:
 - **Browser debugging**: chrome-devtools MCP, never screenshots. If `mcp__chrome-devtools__*`
   is absent, run `./scripts/chromeMcpRun.sh [path]` (registers the server, launches Chrome on
   `:9222` against `:3000`).
+- **jev-browser** (`mcp__jev-browser__jev_navigate`): autonomous "get to X and read Y" runs
+  in headless Chromium. `/admin/*` needs a signed-in session: `touch config/dev-mode`
+  (gitignored) and open `http://localhost:3000/admin/login#auth=<base64 user:pass>`.
+  Details, limits, install: `docs/jev-browser.md`.
 - Auto-memory: `~/.claude/projects/-Users-alper-Code-court-lens-mcp/memory/MEMORY.md`.
 
 ## Safety rails
