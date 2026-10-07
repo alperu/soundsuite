@@ -23,6 +23,10 @@ cd "$PROJECT_ROOT"
 # Homebrew bins first so node/npm/npx resolve under launchd's minimal PATH.
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
+# libuv's default 4 fs threads all block on slow network mounts (Mountain Duck
+# NFS, Google Drive) while the watcher hashes PDFs; the UI then can't read .next.
+export UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-64}"
+
 # Load .env so the integrated services get the SAME config the old start.sh gave
 # them (DATABASE_URL, MCP_PORT, MCP_AUTH_MODE, MIN_UI_WORKERS, PID_KD, …).
 if [ -f "$PROJECT_ROOT/.env" ]; then

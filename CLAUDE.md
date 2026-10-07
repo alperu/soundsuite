@@ -20,8 +20,7 @@ Applies to code, tests, fixtures, docs, plans and **commit messages**.
 
 ## Output discipline
 
-Output tokens cost several times input tokens. The `caveman@caveman` plugin enforces terse
-mode; the rule stands regardless:
+Output tokens cost several times input tokens:
 
 - Extremely concise. No filler, pleasantries or speculative summaries.
 - For changes: the tool calls plus a 1-sentence confirmation. Never re-quote unchanged code.

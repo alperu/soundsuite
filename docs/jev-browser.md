@@ -103,6 +103,19 @@ npx -y @jkudish/jev-browser run "Open the Cases page and stop on it" http://loca
   --format text --max-steps 12 --screenshot /tmp/cases.jpg
 ```
 
+## Measured runs on this dashboard (2026-09-20, CLI)
+
+| Run | Steps | Jev calls | Cost |
+| --- | --- | --- | --- |
+| `/admin/login`, no marker, no fragment (stuck) | 4 | 4 | $0.00012 |
+| `/admin/login#auth=…` with marker, Admin → Users (done) | 3 | 3 | $0.00033 |
+
+The stuck run ends on the login page with four `no visible change` outcomes
+and stuck probability climbing 0.63 → 0.93. The signed-in run lands on
+`/admin/users` with the fragment already stripped from `final_url`; its first
+step reports `action failed` because the agent clicked while the fragment
+sign-in was still in flight, then recovers.
+
 ## Limits that matter
 
 - **Password and file inputs are never offered** to the model, and the agent
