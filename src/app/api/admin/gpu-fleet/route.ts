@@ -304,6 +304,18 @@ export async function POST(request: NextRequest) {
         return NextResponse.json(result);
       }
 
+      case 'updateImage': {
+        // Force-pull the role's Ollama image and recreate its container.
+        // The sidecar runs it in the background (Tasks panel) and answers at once.
+        const { url, role } = body;
+        if (!url || !role) return NextResponse.json({ error: 'URL and role are required' }, { status: 400 });
+        const result = await sendToSidecar(url, '/updateImage', { role }, 'POST', 30_000);
+        if (typeof result?.error === 'string' && result.error.startsWith('Unknown action')) {
+          return NextResponse.json({ error: 'This sidecar is too old for "Update Ollama" — update the sidecar first.' });
+        }
+        return NextResponse.json(result);
+      }
+
       case 'update': {
         const { url } = body;
         if (!url) return NextResponse.json({ error: 'URL is required' }, { status: 400 });

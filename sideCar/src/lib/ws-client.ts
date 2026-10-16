@@ -22,6 +22,7 @@ import WebSocket from 'ws';
 import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, ensureSet, type MasterConnection } from './state';
 import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, handlePullModel, handleLoadModel, getTotalActiveRequests, handleVirtualEmbed, handleVirtualRerank, handleVirtualKeyInfo } from './handlers';
 import { switchMode, provisionContainers, getAllContainerStates, containersForMode } from './containers';
+import { handleUpdateImage } from './ollama-image-update';
 import { discoverGpus } from './gpu';
 import { getContainerState, pullImage, createContainer, startContainer, dockerRequest, getDockerHostName } from './docker';
 import { ollamaList, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
@@ -396,6 +397,7 @@ async function executeCommand(
     case 'health': return { ok: true, uptime: Math.floor((Date.now() - state.startedAt) / 1000) };
     case 'mode': return switchMode(payload.mode as string);
     case 'provision': return provisionContainers();
+    case 'updateImage': return handleUpdateImage(role);
     case 'update': {
       const { available, version } = await checkForUpdate(m.serverUrl);
       if (!available) return { ok: true, message: 'Already up to date' };

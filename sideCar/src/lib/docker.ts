@@ -340,6 +340,9 @@ export interface ContainerState {
   startedAt?: string;
   finishedAt?: string;
   image?: string;
+  /** Image ID (sha256:…) the container was created from — differs from the
+   *  local tag's ID once a newer image has been pulled under the same tag. */
+  imageId?: string;
   cmd?: string[];
   env?: string[];
   // HostConfig fields used by drift detection. Populated by getContainerState
@@ -379,6 +382,7 @@ export async function getContainerState(containerName?: string): Promise<Contain
       startedAt: data.State?.StartedAt,
       finishedAt: data.State?.FinishedAt,
       image: data.Config?.Image,
+      imageId: data.Image || undefined,
       cmd: data.Config?.Cmd || undefined,
       env: data.Config?.Env || undefined,
       hasGpuDeviceRequest,
@@ -1178,7 +1182,7 @@ export async function loadOllamaModel(
  */
 export async function pullImage(
   image: string,
-  opts?: { onProgress?: (progress: number, detail: string) => void },
+  opts?: { onProgress?: (progress: number, detail: string) => void; force?: boolean },
 ): Promise<boolean> {
   if (!image || image.trim() === '' || image === 'host-ollama' || image === 'dmr') {
     throw new Error(
@@ -1196,17 +1200,21 @@ export async function pullImage(
     return ok;
   }
 
-  try {
-    const { status } = await dockerRequest('GET', `/images/${encodeURIComponent(image)}/json`);
-    if (status === 200) {
-      log.debug(`Image ${image} already present — skipping pull`);
-      opts?.onProgress?.(100, 'Complete');
-      return true;
+  // force: re-pull even when present, so a mutable tag (`ollama/ollama` =
+  // :latest) moves to the registry's current image. Still dedupes above.
+  if (!opts?.force) {
+    try {
+      const { status } = await dockerRequest('GET', `/images/${encodeURIComponent(image)}/json`);
+      if (status === 200) {
+        log.debug(`Image ${image} already present — skipping pull`);
+        opts?.onProgress?.(100, 'Complete');
+        return true;
+      }
+    } catch (err) {
+      // Inspect failing is not a reason to skip the pull; fall through and let
+      // the pull itself report a real Docker problem.
+      log.debug(`Image inspect for ${image} failed (${(err as Error).message}) — pulling`);
     }
-  } catch (err) {
-    // Inspect failing is not a reason to skip the pull; fall through and let
-    // the pull itself report a real Docker problem.
-    log.debug(`Image inspect for ${image} failed (${(err as Error).message}) — pulling`);
   }
 
   const pull = pullImageUncached(image, opts).finally(() => {
@@ -1214,6 +1222,13 @@ export async function pullImage(
   });
   G.pullsInFlight.set(image, pull);
   return pull;
+}
+
+/** Local image ID (sha256:…) for an image reference, or null when absent. */
+export async function getImageId(image: string): Promise<string | null> {
+  const { status, body } = await dockerRequest('GET', `/images/${encodeURIComponent(image)}/json`);
+  if (status !== 200) return null;
+  return JSON.parse(body).Id || null;
 }
 
 async function pullImageUncached(

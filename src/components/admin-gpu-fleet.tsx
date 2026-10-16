@@ -411,6 +411,9 @@ export default function GpuFleetPanel() {
   // ("embedding"), value is one of 'host' | 'docker-ollama' | 'docker-vllm'.
   const [runtimeByRole, setRuntimeByRole] = useState<Record<string, string>>({});
   const [ocrVersionCheck, setOcrVersionCheck] = useState<{ model: string; required: string | null; version: string | null; ok: boolean | null } | null>(null);
+  // Ollama version per container port for the selected sidecar (null = unreachable).
+  const [ollamaVersions, setOllamaVersions] = useState<Record<string, string | null>>({});
+  const [ollamaVersionsTick, setOllamaVersionsTick] = useState(0);
 
   const fetchFleet = useCallback(async () => {
     try {
@@ -518,6 +521,19 @@ export default function GpuFleetPanel() {
     if (result) {
       setActionMsg({ type: 'success', text: `${role}: ${result.message || result.status || action + ' sent'}` });
       // Refresh fleet after a delay to pick up new container state from heartbeat
+      setTimeout(fetchFleet, 3000);
+    }
+    setPendingAction(null);
+  };
+
+  const handleUpdateImage = async (url: string, role: string) => {
+    setPendingAction(`updateImage-${role}`);
+    const result = await doAction('updateImage', { url, role });
+    if (result) {
+      setActionMsg({ type: 'success', text: `${role}: ${result.message || 'Ollama update started'}` });
+      // The pull + recreate runs in the background; re-probe versions after it
+      // has had time to finish. The Tasks panel shows live progress.
+      setTimeout(() => setOllamaVersionsTick(t => t + 1), 60_000);
       setTimeout(fetchFleet, 3000);
     }
     setPendingAction(null);
@@ -653,6 +669,12 @@ export default function GpuFleetPanel() {
 
   const selectedSidecar = fleet?.sidecars.find(s => s.url === selectedUrl);
   const cachedStatus = selectedSidecar?.sidecarStatus;
+  const ollamaPorts = cachedStatus?.containers
+    ? Array.from(new Set(Object.values(cachedStatus.containers)
+        .filter(c => (c.type || c.config?.type) === 'ollama')
+        .map(c => c.port || c.config?.port)
+        .filter((p): p is number => typeof p === 'number' && p > 0))).sort().join(',')
+    : '';
   const detailGpus = cachedStatus?.gpus || [];
 
   // Populate per-sidecar timeout inputs when selection changes
@@ -721,6 +743,24 @@ export default function GpuFleetPanel() {
     })();
     return () => { cancelled = true; };
   }, [selectedUrl]);
+
+  // Ollama version per container port. Re-probed every 30s, on sidecar
+  // switch, and after an "Update Ollama" (ollamaVersionsTick).
+  useEffect(() => {
+    if (!selectedUrl || !ollamaPorts) { setOllamaVersions({}); return; }
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        const res = await fetch(`/api/admin/gpu-fleet/ollama-versions?sidecarUrl=${encodeURIComponent(selectedUrl)}&ports=${ollamaPorts}`);
+        if (cancelled || !res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setOllamaVersions(data.versions || {});
+      } catch { /* ignore — version cell shows "—" */ }
+    };
+    probe();
+    const interval = setInterval(probe, 30_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [selectedUrl, ollamaPorts, ollamaVersionsTick]);
 
   const handleSaveSidecarTimeouts = async () => {
     if (!selectedUrl) return;
@@ -1075,7 +1115,18 @@ export default function GpuFleetPanel() {
                                   <ContainerStatusBadge status={c.status} exists={c.exists} />
                                 )}
                               </td>
-                              <td className="py-2 px-3 text-xs text-gray-500">{c.image || c.config?.image || '-'}</td>
+                              <td className="py-2 px-3 text-xs text-gray-500">
+                                {c.image || c.config?.image || '-'}
+                                {(c.type || c.config?.type) === 'ollama' && (() => {
+                                  const port = c.port || c.config?.port;
+                                  const v = port ? ollamaVersions[String(port)] : undefined;
+                                  return (
+                                    <div className="font-mono text-[11px] text-gray-400" title="Ollama version reported by /api/version on this container's port">
+                                      Ollama {v || '—'}
+                                    </div>
+                                  );
+                                })()}
+                              </td>
                               <td className="py-2 px-3"><RuntimeChip label={label} /></td>
                               <td className="py-2 px-3 text-xs text-gray-500 font-mono">
                                 {c.model || c.config?.model || <span className="text-gray-300 italic">none</span>}
@@ -1138,12 +1189,22 @@ export default function GpuFleetPanel() {
                                   }
                                   // Docker / vllm: preserve existing behavior
                                   const isOllamaType = c.type === 'ollama' || c.config?.type === 'ollama';
+                                  const isDockerOllama = isOllamaType && label === 'Docker Ollama';
+                                  const btnUpdateImage = (
+                                    <button key="updateImage" onClick={() => handleUpdateImage(selectedSidecar.url, role)}
+                                      disabled={disabled}
+                                      title={`Pull the newest ${imageForRuntime || 'ollama/ollama'} and recreate ${displayContainerName(c.name)} on it. Models are kept (ollama-models volume). Refused while the role serves requests. Other Ollama containers on this host keep their version until updated too.`}
+                                      className="text-xs px-2 py-1 rounded bg-sky-50 hover:bg-sky-100 text-sky-700 disabled:opacity-50">
+                                      {pendingAction === `updateImage-${role}` ? 'Updating...' : 'Update Ollama'}
+                                    </button>
+                                  );
                                   return (
                                     <>
                                       {btnStart}
                                       {btnStop}
                                       {isOllamaType && btnPullAndLoad}
                                       {isOllamaType && c.status === 'running' && (!c.loadedModels || c.loadedModels.length === 0) && btnLoad}
+                                      {isDockerOllama && btnUpdateImage}
                                     </>
                                   );
                                 })()}

@@ -2,19 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getConfig } from '@/lib/db/config';
 import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
 import { requireAdminApiAccess } from '@/lib/api/route-guard';
+import { cmpVersions, probeOllamaVersion } from '@/lib/gpu/ollama-version';
 
 export const dynamic = 'force-dynamic';
-
-/** Numeric dotted-version compare: negative ⇒ a < b. */
-function cmpVersions(a: string, b: string): number {
-  const pa = a.split('.').map(n => parseInt(n, 10) || 0);
-  const pb = b.split('.').map(n => parseInt(n, 10) || 0);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0);
-    if (d !== 0) return d;
-  }
-  return 0;
-}
 
 /**
  * Check whether a sidecar host's OCR Ollama endpoint meets the configured
@@ -52,17 +42,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ model, required: null, version: null, ok: true });
   }
 
-  try {
-    const res = await fetch(`http://${host}:${port}/api/version`, {
-      signal: AbortSignal.timeout(2500),
-      cache: 'no-store',
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const version = String(data?.version || '');
-    const ok = version.length > 0 && cmpVersions(version, required) >= 0;
-    return NextResponse.json({ model, required, version: version || null, ok: version ? ok : null });
-  } catch {
-    return NextResponse.json({ model, required, version: null, ok: null });
-  }
+  const version = await probeOllamaVersion(host, port);
+  if (!version) return NextResponse.json({ model, required, version: null, ok: null });
+  return NextResponse.json({ model, required, version, ok: cmpVersions(version, required) >= 0 });
 }
