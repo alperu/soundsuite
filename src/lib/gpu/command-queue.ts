@@ -62,7 +62,7 @@ export async function queueSidecarCommand(
 
   // 1. Try WebSocket tunnel (instant if connected)
   const hasWs = wsRelay.hasSidecarConnection(normalized);
-  logger.info(`Command → ${action}`, {
+  logger.debug(`Command → ${action}`, {
     target: normalized,
     transport: hasWs ? 'WS' : 'HTTP-queue',
     timeoutMs,

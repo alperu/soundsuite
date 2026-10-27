@@ -375,7 +375,7 @@ export async function sendToSidecar(
   if (action === 'status' && !body) {
     const cached = statusCache.getSidecarStatus(agentUrl);
     if (cached && (Date.now() - cached.lastSeen) < 15_000) {
-      logger.info(`sendToSidecar: cache hit for /${action}`, {
+      logger.debug(`sendToSidecar: cache hit for /${action}`, {
         agentUrl,
         cacheAge: `${Date.now() - cached.lastSeen}ms`,
       });
@@ -383,12 +383,12 @@ export async function sendToSidecar(
     }
   }
 
-  logger.info(`sendToSidecar: /${action}`, { agentUrl, timeout: `${timeout}ms` });
+  logger.debug(`sendToSidecar: /${action}`, { agentUrl, timeout: `${timeout}ms` });
   const startTime = Date.now();
   try {
     const result = await queueSidecarCommand(agentUrl, action, body, timeout);
     const elapsed = Date.now() - startTime;
-    logger.info(`sendToSidecar: /${action} completed`, { agentUrl, elapsed: `${elapsed}ms` });
+    logger.debug(`sendToSidecar: /${action} completed`, { agentUrl, elapsed: `${elapsed}ms` });
     return result;
   } catch (err) {
     const elapsed = Date.now() - startTime;

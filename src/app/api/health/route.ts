@@ -41,9 +41,6 @@ export async function GET() {
   let databaseDetails: Record<string, any> = {}
   
   try {
-    // Test database connection
-    await prisma.$connect()
-    
     // Get counts from all tables
     const [caseCount, documentCount, jobLogCount, configCount, modelDownloadCount, actionLogCount] =
       await Promise.all([
@@ -76,8 +73,6 @@ export async function GET() {
       status: 'error',
       message: error instanceof Error ? error.message : 'Unknown database error',
     }
-  } finally {
-    await prisma.$disconnect()
   }
 
   // Gather cache stats

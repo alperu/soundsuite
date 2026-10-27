@@ -50,6 +50,25 @@ if [ -n "$STRAY" ]; then
   sleep 1
 fi
 
+# Keep logs/dashboard.log small. launchd holds the file open (O_APPEND), so
+# rename-style rotation does not work; copy the tail back in place instead.
+# Checked on start and then hourly by a background loop that outlives `exec`.
+LOG_FILE="$PROJECT_ROOT/logs/dashboard.log"
+LOG_MAX_BYTES=$((100 * 1024 * 1024))
+LOG_KEEP_BYTES=$((10 * 1024 * 1024))
+trim_log() {
+  [ -f "$LOG_FILE" ] || return 0
+  size=$(stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)
+  if [ "$size" -gt "$LOG_MAX_BYTES" ]; then
+    tmp="$LOG_FILE.trim.$$"
+    tail -c "$LOG_KEEP_BYTES" "$LOG_FILE" > "$tmp" && cat "$tmp" > "$LOG_FILE"
+    rm -f "$tmp"
+    echo "[svc-run] $(date '+%Y-%m-%dT%H:%M:%S') trimmed dashboard.log (was $size bytes)"
+  fi
+}
+trim_log
+( while sleep 3600; do trim_log; done ) &
+
 # Apply any pending migrations. `migrate deploy` NEVER resets (safe for data);
 # non-fatal so a migration hiccup doesn't put us in a restart loop.
 echo "[svc-run] $(date '+%Y-%m-%dT%H:%M:%S') starting in $MODE mode"

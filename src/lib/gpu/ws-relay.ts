@@ -813,7 +813,7 @@ export function sendCommand(agentUrl: string, command: Record<string, any>, time
     pendingCommands.set(id, {
       resolve: (result: any) => {
         const elapsed = Date.now() - startTime;
-        logger.info('WS command completed', { id, action: command.action, elapsed: `${elapsed}ms`, agentUrl: entry.hostname });
+        logger.debug('WS command completed', { id, action: command.action, elapsed: `${elapsed}ms`, agentUrl: entry.hostname });
         resolve(result);
       },
       reject: (error: Error) => {
@@ -824,7 +824,7 @@ export function sendCommand(agentUrl: string, command: Record<string, any>, time
       timer,
     });
 
-    logger.info('WS command sent', { id, action: command.action, agentUrl: entry.hostname });
+    logger.debug('WS command sent', { id, action: command.action, agentUrl: entry.hostname });
     entry.ws.send(JSON.stringify({
       type: 'command',
       id,
