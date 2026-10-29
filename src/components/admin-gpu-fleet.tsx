@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { FsSidecarTable, type FsSidecarRow } from './admin-fs-sidecars';
 
 interface SidecarEntry {
   url: string;
@@ -150,6 +151,8 @@ interface FleetData {
   gpuAutoManage: boolean;
   masterUrl?: string;
   latestBuildVersion: string | null;
+  /** File-system sidecars (fileSystemSideCar link). */
+  fsSidecars?: FsSidecarRow[];
 }
 
 const ROLES = ['embedding', 'code-embedding', 'completion', 'ocr', 'reranker', 'rlm'] as const;
@@ -943,6 +946,8 @@ export default function GpuFleetPanel() {
             </table>
           </div>
         )}
+
+        <FsSidecarTable sidecars={fleet?.fsSidecars ?? []} />
 
         {/* Add Sidecar Form */}
         <div className="mt-4 pt-4 border-t border-gray-200">

@@ -449,6 +449,18 @@ async function startCoreServicesIfNeeded(
     sm.registerToolRegistry(registry);
     logger.info('MCP ToolRegistry registered (served via /api/mcp/execute)');
 
+    // --- File-system sidecar link (fileSystemSideCar, folder-status profile) ---
+    // Off unless FS_SIDECAR_USERS is set. See fileSystemSideCar docs/soundsuite.md.
+    try {
+      const { startFsSidecarLinkFromEnv } = await import('@/lib/fs-sidecar/start');
+      const link = await startFsSidecarLinkFromEnv((level, msg, meta) =>
+        level === 'warn' ? logger.warn(msg, meta) : logger.info(msg, meta),
+      );
+      if (link) logger.info(`File-system sidecar link started on port ${link.port}`);
+    } catch (err) {
+      logger.warn('Failed to start file-system sidecar link', { error: (err as Error).message });
+    }
+
     // --- GPU WebSocket Relay (sidecars connect here for tunneled communication) ---
     try {
       const { startWsRelay } = await import('@/lib/gpu/ws-relay');

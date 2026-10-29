@@ -20,6 +20,7 @@ import {
 import { getAggregatedPeakDemand } from '@/lib/gpu/status-cache';
 import { getGpuLogs } from '@/lib/logger';
 import { requireAdminApiAccess } from '@/lib/api/route-guard';
+import { getFsSidecarStatuses } from '@/lib/fs-sidecar/status';
 
 function getLatestBuildVersion(): string | null {
   try {
@@ -82,6 +83,8 @@ export async function GET(request: NextRequest) {
       gpuAutoManage: config.gpuAutoManage,
       masterUrl: config.masterUrl,
       latestBuildVersion: getLatestBuildVersion(),
+      // File-system sidecars (fileSystemSideCar link): mode, heartbeat, version.
+      fsSidecars: getFsSidecarStatuses(),
     });
   } catch (error: any) {
     return NextResponse.json({ error: error.message?.slice(0, 300) }, { status: 500 });

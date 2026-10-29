@@ -832,3 +832,27 @@ model McpSession {
   @@index([lastActivity])
   @@index([revokedAt])
 }
+
+// Folder totals from file-system sidecars (fileSystemSideCar `folder-status`
+// profile). One row per (sidecar, root, folder). `path` is relative to the
+// root, "" = the root itself. `caseId` is set when the folder is a Case.path
+// (root mapped through FS_SIDECAR_ROOTS). No FK: a case delete must not
+// depend on sidecar data.
+model FolderStat {
+  id               String   @id @default(uuid())
+  sidecarId        String
+  root             String
+  path             String
+  caseId           String?
+  fileCount        Int      @default(0)
+  totalBytes       BigInt   @default(0)
+  latestMtimeNs    BigInt   @default(0)
+  dirCount         Int      @default(0)
+  recFileCount     Int      @default(0)
+  recTotalBytes    BigInt   @default(0)
+  recLatestMtimeNs BigInt   @default(0)
+  updatedAt        DateTime @updatedAt
+
+  @@unique([sidecarId, root, path])
+  @@index([caseId])
+}
