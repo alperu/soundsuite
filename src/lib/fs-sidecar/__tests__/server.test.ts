@@ -26,8 +26,8 @@ function env(type: Message, build: (b: flatbuffers.Builder) => flatbuffers.Offse
   return b.asUint8Array().slice();
 }
 
-const login = (user: string, pass: string, id = 'mac-1') =>
-  env(Message.Login, (b) => Login.createLogin(b, 1, b.createString(user), b.createString(pass), b.createString(id)));
+const login = (user: string, pass: string, id = 'mac-1', proto = 2) =>
+  env(Message.Login, (b) => Login.createLogin(b, proto, b.createString(user), b.createString(pass), b.createString(id)));
 
 const ping = (id: number) => env(Message.Ping, (b) => Ping.createPing(b, B(Date.now())), id);
 
@@ -60,8 +60,8 @@ let srv: FsLinkServer;
 let store: MemStore;
 const base = () => `http://127.0.0.1:${srv.port}`;
 
-async function doLogin(user = 'mac', pass = 'pw') {
-  const r = await fetch(`${base()}/v1/login`, { method: 'POST', headers: { 'content-type': CONTENT_TYPE }, body: Buffer.from(login(user, pass)) });
+async function doLogin(user = 'mac', pass = 'pw', proto = 2) {
+  const r = await fetch(`${base()}/v1/login`, { method: 'POST', headers: { 'content-type': CONTENT_TYPE }, body: Buffer.from(login(user, pass, 'mac-1', proto)) });
   const e = parseEnvelope(new Uint8Array(await r.arrayBuffer()));
   const lr = e.message(new LoginReply()) as LoginReply;
   return { status: r.status, ok: lr.ok(), token: lr.sessionToken() ?? '', key: lr.sessionKeyArray() ?? new Uint8Array(0), error: lr.error() };
@@ -90,6 +90,13 @@ describe('fs-sidecar link (master side)', () => {
     expect(good.status).toBe(200);
     expect(good.ok).toBe(true);
     expect(good.key.length).toBe(32);
+  });
+
+  test('login with protocol 1 is refused with 426 and a clear error', async () => {
+    const old = await doLogin('mac', 'pw', 1);
+    expect(old.status).toBe(426);
+    expect(old.ok).toBe(false);
+    expect(old.error).toBe('protocol 1 is too old (need 2): update the sidecar/receiver');
   });
 
   test('HTTP send: FolderStatBatch is stored and acked by seq; mode = http', async () => {

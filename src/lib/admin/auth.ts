@@ -53,7 +53,7 @@ export async function getSessionUser(token: string): Promise<AuthUser | null> {
   }
 
   const user = await prisma.adminUser.findUnique({ where: { username: session.userId } });
-  if (!user || !user.enabled) return null;
+  if (!user || !user.enabled || user.dashboardLogin === false) return null;
 
   await prisma.mcpSession.update({
     where: { id: session.id },

@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
+import { ReceiverAccountTable, type SyncAccount } from '@/components/admin/receiver-accounts';
 
 interface AdminUserRow {
   id: string;
@@ -9,6 +10,21 @@ interface AdminUserRow {
   enabled: boolean;
   createdAt: string;
   lastLoginAt: string | null;
+  dashboardLogin: boolean;
+  syncEnabled: boolean;
+  syncRoots: string[];
+  syncLastLoginAt: string | null;
+}
+
+
+interface SyncInfo {
+  configured: boolean;
+  settings: { receiverUrl: string; receiverToken: string };
+  accounts: SyncAccount[];
+  /** Every root name the receiver knows. */
+  roots?: string[];
+  linked: string[];
+  error: string | null;
 }
 
 function formatDate(iso: string | null): string {
@@ -28,8 +44,17 @@ export default function UsersPanel() {
   const [newRole, setNewRole] = useState<'admin' | 'viewer'>('viewer');
   const [creating, setCreating] = useState(false);
 
+  const [sync, setSync] = useState<SyncInfo | null>(null);
+  const [syncEdit, setSyncEdit] = useState<string | null>(null);
+  const [syncPassword, setSyncPassword] = useState('');
+  const [syncRoots, setSyncRoots] = useState<string[]>([]);
+  const [syncRootsText, setSyncRootsText] = useState('');
+
   const load = useCallback(async () => {
     try {
+      // Receiver accounts first: this links them to users (by username).
+      const sres = await fetch('/api/admin/users/sync').catch(() => null);
+      if (sres?.ok) setSync(await sres.json());
       const res = await fetch('/api/admin/users');
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -87,6 +112,56 @@ export default function UsersPanel() {
       setBusy(null);
     }
   };
+
+  const putSync = async (user: AdminUserRow, body: Record<string, unknown>) => {
+    setBusy(user.id);
+    setError(null);
+    try {
+      const res = await fetch(`/api/admin/users/${user.id}/sync`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setSyncEdit(null);
+      setSyncPassword('');
+      await load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const openSyncEdit = (user: AdminUserRow) => {
+    setSyncEdit(syncEdit === user.id ? null : user.id);
+    setSyncPassword('');
+    setSyncRoots(user.syncRoots);
+    setSyncRootsText(user.syncRoots.join(', '));
+  };
+
+  // Root choices: every root the receiver knows, plus this user's account roots.
+  const rootChoices = (user: AdminUserRow): string[] => {
+    const acct = accountFor(user);
+    const all = new Set([...(sync?.roots ?? []), ...(acct?.roots ?? []), ...user.syncRoots]);
+    return [...all].sort((a, b) => a.localeCompare(b));
+  };
+
+  const toggleRoot = (root: string) =>
+    setSyncRoots(r => (r.includes(root) ? r.filter(x => x !== root) : [...r, root]));
+
+  const saveSync = (user: AdminUserRow) => {
+    const roots = rootChoices(user).length
+      ? syncRoots
+      : syncRootsText.split(',').map(r => r.trim()).filter(Boolean);
+    const body: Record<string, unknown> = { enabled: true, roots };
+    if (syncPassword) body.password = syncPassword;
+    putSync(user, body);
+  };
+
+  const accountFor = (user: AdminUserRow) =>
+    sync?.accounts.find(a => a.userId === user.id || a.username.toLowerCase() === user.username);
 
   const resetPassword = async (user: AdminUserRow) => {
     const password = window.prompt(`New password for "${user.username}" (min 8 characters):`);
@@ -176,19 +251,23 @@ export default function UsersPanel() {
                 <th className="px-4 py-2.5">Role</th>
                 <th className="px-4 py-2.5">Status</th>
                 <th className="px-4 py-2.5">Last Login</th>
+                <th className="px-4 py-2.5">Sidecar Sync Login</th>
                 <th className="px-4 py-2.5 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               {users.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-6 text-center text-gray-400">
+                  <td colSpan={6} className="px-4 py-6 text-center text-gray-400">
                     No users yet — create the first one above.
                   </td>
                 </tr>
               )}
-              {users.map(user => (
-                <tr key={user.id} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+              {users.map(user => {
+                const acct = accountFor(user);
+                return (
+                <Fragment key={user.id}>
+                <tr className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
                   <td className="px-4 py-2.5 font-medium text-gray-900">{user.username}</td>
                   <td className="px-4 py-2.5">
                     <span
@@ -208,8 +287,42 @@ export default function UsersPanel() {
                       {user.enabled ? 'Enabled' : 'Disabled'}
                     </span>
                   </td>
-                  <td className="px-4 py-2.5 text-gray-500">{formatDate(user.lastLoginAt)}</td>
+                  <td className="px-4 py-2.5 text-gray-500">
+                    {user.dashboardLogin ? formatDate(user.lastLoginAt) : <span title="Sync-only user: no dashboard sign-in">Dashboard login off</span>}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    {user.syncEnabled ? (
+                      <div className="space-y-0.5">
+                        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-700">
+                          <span className={`w-2 h-2 rounded-full ${acct?.connected ? 'bg-green-500' : 'bg-gray-300'}`} />
+                          On{acct ? (acct.connected ? ' · connected' : ' · not connected') : ' · not in receiver'}
+                        </span>
+                        <div className="text-xs text-gray-500">
+                          Roots: {user.syncRoots.length ? user.syncRoots.join(', ') : 'all'} · last login{' '}
+                          {formatDate(acct?.lastLoginMs ? new Date(acct.lastLoginMs).toISOString() : user.syncLastLoginAt)}
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-gray-400">Off</span>
+                    )}
+                  </td>
                   <td className="px-4 py-2.5 text-right space-x-2 whitespace-nowrap">
+                    <button
+                      onClick={() => patchUser(user.id, { dashboardLogin: !user.dashboardLogin })}
+                      disabled={busy === user.id}
+                      className="text-xs font-medium text-gray-600 hover:text-gray-900 disabled:opacity-50"
+                      title="Allow or block sign-in to this dashboard"
+                    >
+                      {user.dashboardLogin ? 'Dashboard Off' : 'Dashboard On'}
+                    </button>
+                    <button
+                      onClick={() => openSyncEdit(user)}
+                      disabled={busy === user.id || !sync?.configured}
+                      className="text-xs font-medium text-blue-600 hover:text-blue-800 disabled:opacity-50"
+                      title={sync?.configured ? 'Sidecar sync login' : 'Receiver not set up'}
+                    >
+                      Sync Login
+                    </button>
                     <button
                       onClick={() => patchUser(user.id, { enabled: !user.enabled })}
                       disabled={busy === user.id}
@@ -233,11 +346,105 @@ export default function UsersPanel() {
                     </button>
                   </td>
                 </tr>
-              ))}
+                {syncEdit === user.id && (
+                  <tr className="bg-blue-50/40 border-b border-gray-100">
+                    <td colSpan={6} className="px-4 py-3">
+                      <div className="flex flex-wrap items-end gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-600 mb-1">
+                            Sync password {user.syncEnabled ? '(leave empty to keep)' : ''}
+                          </label>
+                          <input
+                            type="password"
+                            autoComplete="new-password"
+                            value={syncPassword}
+                            onChange={e => setSyncPassword(e.target.value)}
+                            className="border border-gray-300 rounded-md px-2.5 py-1.5 text-sm w-48"
+                            placeholder="min 8 characters"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-600 mb-1">
+                            Allowed roots (none ticked = all roots)
+                          </label>
+                          {rootChoices(user).length ? (
+                            <div className="flex flex-wrap gap-x-3 gap-y-1 pb-1.5">
+                              {rootChoices(user).map(root => (
+                                <label key={root} className="inline-flex items-center gap-1 text-xs text-gray-700">
+                                  <input
+                                    type="checkbox"
+                                    checked={syncRoots.includes(root)}
+                                    onChange={() => toggleRoot(root)}
+                                  />
+                                  {root}
+                                </label>
+                              ))}
+                            </div>
+                          ) : (
+                            <input
+                              value={syncRootsText}
+                              onChange={e => setSyncRootsText(e.target.value)}
+                              className="border border-gray-300 rounded-md px-2.5 py-1.5 text-sm w-56"
+                              placeholder="Root1, Root2 (empty = all)"
+                            />
+                          )}
+                        </div>
+                        <button
+                          onClick={() => saveSync(user)}
+                          disabled={busy === user.id || (!user.syncEnabled && !syncPassword)}
+                          className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-md"
+                        >
+                          {user.syncEnabled ? 'Save' : 'Turn On'}
+                        </button>
+                        {user.syncEnabled && (
+                          <button
+                            onClick={() => {
+                              if (window.confirm(`Turn off the sync login for "${user.username}"? Its sidecar will be logged out.`)) {
+                                putSync(user, { enabled: false });
+                              }
+                            }}
+                            disabled={busy === user.id}
+                            className="px-3 py-1.5 text-sm font-medium text-red-700 bg-white border border-red-200 hover:bg-red-50 disabled:opacity-50 rounded-md"
+                          >
+                            Turn Off
+                          </button>
+                        )}
+                        <button onClick={() => setSyncEdit(null)} className="text-xs text-gray-500 hover:text-gray-800">
+                          Cancel
+                        </button>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        The sync password is write only. The sidecar receiver keeps it; SoundSuite does not store it.
+                      </p>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
+
+      <div className="p-4 border border-gray-200 rounded-lg space-y-2">
+        <h3 className="text-sm font-semibold text-gray-900">Sidecar sync login</h3>
+        {!sync || !sync.configured ? (
+          <p className="text-sm text-gray-500">
+            Receiver not set up. Set SIDECAR_RECEIVER_URL and SIDECAR_RECEIVER_TOKEN (URL {sync?.settings.receiverUrl ?? 'not set'}, token{' '}
+            {sync?.settings.receiverToken ?? 'not set'}).
+          </p>
+        ) : (
+          <>
+            <p className="text-xs text-gray-500">
+              Receiver accounts. Each sync login belongs to a user above (linked by username). Use Sync Login on a user to change it.
+            </p>
+            {sync.error && <p className="text-sm text-red-700">Receiver: {sync.error}</p>}
+            {sync.linked.length > 0 && <p className="text-xs text-blue-700">Linked to users: {sync.linked.join(', ')}</p>}
+            <ReceiverAccountTable accounts={sync.accounts} />
+          </>
+        )}
+      </div>
     </div>
   );
 }

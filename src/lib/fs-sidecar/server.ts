@@ -21,6 +21,7 @@ import {
   CONTENT_TYPE,
   MAX_BODY_BYTES,
   MAX_FRAME_BYTES,
+  MIN_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
   decodeBody,
   decodeSingle,
@@ -245,7 +246,7 @@ export function startFsSidecarLink(opts: FsLinkOptions): Promise<FsLinkServer> {
 
   async function login(req: http.IncomingMessage, res: http.ServerResponse) {
     const fail = (code: number, error: string) => reply(res, code, encodeLoginReply({ ok: false, serverVersion: version, error }));
-    let user = '', pass = '', sidecarId = '';
+    let user = '', pass = '', sidecarId = '', proto = 0;
     try {
       const env = decodeSingle(await readBody(req, MAX_LOGIN_BODY), isZstd(req), MAX_LOGIN_BODY);
       const l = env.messageType() === Message.Login ? (env.message(new Login()) as Login | null) : null;
@@ -253,8 +254,13 @@ export function startFsSidecarLink(opts: FsLinkOptions): Promise<FsLinkServer> {
       user = l.username() ?? '';
       pass = l.password() ?? '';
       sidecarId = l.sidecarId() || user;
+      proto = l.protocolVersion();
     } catch (err) {
       return text(res, 400, (err as Error).message);
+    }
+    if (proto < MIN_PROTOCOL_VERSION) {
+      log('warn', 'fs-sidecar: old protocol', { user, proto });
+      return fail(426, `protocol ${proto} is too old (need ${MIN_PROTOCOL_VERSION}): update the sidecar/receiver`);
     }
     const ip = req.socket.remoteAddress || '';
     if (guard.blocked(ip, user)) return fail(423, 'locked');

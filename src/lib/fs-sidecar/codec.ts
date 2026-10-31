@@ -17,7 +17,9 @@ import { Ping } from './proto/sidecar/ping';
 import { LoginReply } from './proto/sidecar/login-reply';
 
 export const CONTENT_TYPE = 'application/x-sidecar-frames';
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
+/** Oldest sidecar protocol a login accepts (no backward compatibility). */
+export const MIN_PROTOCOL_VERSION = 2;
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const MAX_BODY_BYTES = 32 * 1024 * 1024;
 /** Same threshold idea as the Rust `Limits::compress_over`. */

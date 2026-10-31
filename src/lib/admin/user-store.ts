@@ -16,13 +16,16 @@ export interface AdminUserPublic {
   createdAt: Date;
   updatedAt: Date;
   lastLoginAt: Date | null;
+  /** false = sync-only user: no dashboard sign-in. */
+  dashboardLogin: boolean;
+  /** "Sidecar sync login" (the password lives only in the sidecar-receiver). */
+  syncEnabled: boolean;
+  /** Allowed root names; [] = every root the receiver maps. */
+  syncRoots: string[];
+  syncLastLoginAt: Date | null;
 }
 
-const BCRYPT_ROUNDS = 10;
-const USERNAME_RE = /^[a-zA-Z0-9_-]{3,32}$/;
-const MIN_PASSWORD_LENGTH = 8;
-
-function toPublic(user: {
+export interface AdminUserRow {
   id: string;
   username: string;
   role: string;
@@ -30,7 +33,26 @@ function toPublic(user: {
   createdAt: Date;
   updatedAt: Date;
   lastLoginAt: Date | null;
-}): AdminUserPublic {
+  dashboardLogin?: boolean | null;
+  syncEnabled?: boolean | null;
+  syncRoots?: string | null;
+  syncLastLoginAt?: Date | null;
+}
+
+export function parseRoots(raw: string | null | undefined): string[] {
+  try {
+    const v = JSON.parse(raw || '[]');
+    return Array.isArray(v) ? v.map(String).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+const BCRYPT_ROUNDS = 10;
+const USERNAME_RE = /^[a-zA-Z0-9_-]{3,32}$/;
+const MIN_PASSWORD_LENGTH = 8;
+
+export function toPublic(user: AdminUserRow): AdminUserPublic {
   return {
     id: user.id,
     username: user.username,
@@ -39,10 +61,14 @@ function toPublic(user: {
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
     lastLoginAt: user.lastLoginAt,
+    dashboardLogin: user.dashboardLogin !== false,
+    syncEnabled: user.syncEnabled === true,
+    syncRoots: parseRoots(user.syncRoots),
+    syncLastLoginAt: user.syncLastLoginAt ?? null,
   };
 }
 
-function validateUsername(username: string): void {
+export function validateUsername(username: string): void {
   if (!USERNAME_RE.test(username)) {
     throw new Error('Username must be 3-32 characters (letters, digits, _ or -)');
   }
@@ -119,9 +145,9 @@ export async function createUser(input: {
 
 export async function updateUser(
   id: string,
-  patch: { password?: string; role?: AdminRole; enabled?: boolean },
+  patch: { password?: string; role?: AdminRole; enabled?: boolean; dashboardLogin?: boolean },
 ): Promise<AdminUserPublic> {
-  const data: { passwordHash?: string; role?: string; enabled?: boolean } = {};
+  const data: { passwordHash?: string; role?: string; enabled?: boolean; dashboardLogin?: boolean } = {};
 
   if (patch.password !== undefined) {
     validatePassword(patch.password);
@@ -133,6 +159,9 @@ export async function updateUser(
   }
   if (patch.enabled !== undefined) {
     data.enabled = patch.enabled;
+  }
+  if (patch.dashboardLogin !== undefined) {
+    data.dashboardLogin = patch.dashboardLogin === true;
   }
   if (Object.keys(data).length === 0) {
     throw new Error('Nothing to update');
@@ -157,7 +186,7 @@ export async function verifyPassword(
   const user = await prisma.adminUser.findUnique({
     where: { username: username.trim().toLowerCase() },
   });
-  if (!user || !user.enabled) return null;
+  if (!user || !user.enabled || user.dashboardLogin === false) return null;
 
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) return null;

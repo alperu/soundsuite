@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { ReceiverAccountsPanel } from '@/components/admin/receiver-accounts';
 
 /** Shape of `fsSidecars` in GET /api/admin/gpu-fleet (see lib/fs-sidecar/status.ts). */
 export interface FsSidecarRow {
@@ -69,8 +70,10 @@ export function FsSidecarTable({ sidecars }: { sidecars: FsSidecarRow[] }) {
     };
   }, [open]);
 
-  if (!sidecars.length) return null;
+  if (!sidecars.length) return <ReceiverAccountsPanel />;
   return (
+    <>
+    <ReceiverAccountsPanel />
     <div className="mt-4 pt-4 border-t border-gray-200">
       <h3 className="text-sm font-medium text-gray-700 mb-2">File-System Sidecars</h3>
       <div className="overflow-x-auto">
@@ -140,5 +143,6 @@ export function FsSidecarTable({ sidecars }: { sidecars: FsSidecarRow[] }) {
         </div>
       )}
     </div>
+    </>
   );
 }

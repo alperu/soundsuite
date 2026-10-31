@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { updateUser, deleteUser, getUser, type AdminRole } from '@/lib/admin/user-store';
 import { requireAdminAuth } from '@/lib/admin/auth';
+import { removeSyncLoginFor, SyncLoginError } from '@/lib/admin/sync-login';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,7 +11,8 @@ interface Params {
 
 /**
  * PATCH /api/admin/users/[id] — update a user.
- * Body: { password?, role?, enabled? } (password resets the credential).
+ * Body: { password?, role?, enabled?, dashboardLogin? } (password resets the
+ * dashboard credential; the sync login has its own route: ./sync).
  */
 export async function PATCH(req: NextRequest, { params }: Params) {
   try {
@@ -19,17 +21,18 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     }
     const { id } = await params;
     const body = await req.json().catch(() => ({}));
-    const { password, role, enabled } = body as {
+    const { password, role, enabled, dashboardLogin } = body as {
       password?: string;
       role?: AdminRole;
       enabled?: boolean;
+      dashboardLogin?: boolean;
     };
 
     if (!(await getUser(id))) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
-    const user = await updateUser(id, { password, role, enabled });
+    const user = await updateUser(id, { password, role, enabled, dashboardLogin });
     return NextResponse.json({ user });
   } catch (error: any) {
     const msg = error?.message || String(error);
@@ -47,6 +50,13 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     const { id } = await params;
     if (!(await getUser(id))) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+    // Drop the receiver account first, so no sync login is left behind.
+    try {
+      await removeSyncLoginFor(id);
+    } catch (e) {
+      if (e instanceof SyncLoginError) return NextResponse.json({ error: e.message }, { status: e.status });
+      throw e;
     }
     await deleteUser(id);
     return NextResponse.json({ ok: true });
