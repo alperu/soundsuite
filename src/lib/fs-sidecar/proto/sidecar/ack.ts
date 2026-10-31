@@ -4,6 +4,9 @@
 
 import * as flatbuffers from 'flatbuffers';
 
+import { BundleFailure } from '../sidecar/bundle-failure';
+
+
 /**
  * Master confirms everything up to and including `seq` (events, folder stats, content).
  */
@@ -30,12 +33,47 @@ seq():bigint {
   return offset ? this.bb!.readUint64(this.bb_pos + offset) : BigInt('0');
 }
 
+failed(index: number, obj?:BundleFailure):BundleFailure|null {
+  const offset = this.bb!.__offset(this.bb_pos, 6);
+  return offset ? (obj || new BundleFailure()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+failedLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 6);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+bundleId():bigint {
+  const offset = this.bb!.__offset(this.bb_pos, 8);
+  return offset ? this.bb!.readUint64(this.bb_pos + offset) : BigInt('0');
+}
+
 static startAck(builder:flatbuffers.Builder) {
-  builder.startObject(1);
+  builder.startObject(3);
 }
 
 static addSeq(builder:flatbuffers.Builder, seq:bigint) {
   builder.addFieldInt64(0, seq, BigInt('0'));
+}
+
+static addFailed(builder:flatbuffers.Builder, failedOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(1, failedOffset, 0);
+}
+
+static createFailedVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startFailedVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
+static addBundleId(builder:flatbuffers.Builder, bundleId:bigint) {
+  builder.addFieldInt64(2, bundleId, BigInt('0'));
 }
 
 static endAck(builder:flatbuffers.Builder):flatbuffers.Offset {
@@ -43,9 +81,11 @@ static endAck(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
-static createAck(builder:flatbuffers.Builder, seq:bigint):flatbuffers.Offset {
+static createAck(builder:flatbuffers.Builder, seq:bigint, failedOffset:flatbuffers.Offset, bundleId:bigint):flatbuffers.Offset {
   Ack.startAck(builder);
   Ack.addSeq(builder, seq);
+  Ack.addFailed(builder, failedOffset);
+  Ack.addBundleId(builder, bundleId);
   return Ack.endAck(builder);
 }
 }

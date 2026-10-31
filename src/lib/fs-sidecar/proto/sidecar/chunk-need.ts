@@ -59,8 +59,13 @@ wholeFile():boolean {
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
 }
 
+offset():bigint {
+  const offset = this.bb!.__offset(this.bb_pos, 12);
+  return offset ? this.bb!.readUint64(this.bb_pos + offset) : BigInt('0');
+}
+
 static startChunkNeed(builder:flatbuffers.Builder) {
-  builder.startObject(4);
+  builder.startObject(5);
 }
 
 static addRoot(builder:flatbuffers.Builder, rootOffset:flatbuffers.Offset) {
@@ -91,17 +96,22 @@ static addWholeFile(builder:flatbuffers.Builder, wholeFile:boolean) {
   builder.addFieldInt8(3, +wholeFile, +false);
 }
 
+static addOffset(builder:flatbuffers.Builder, offset:bigint) {
+  builder.addFieldInt64(4, offset, BigInt('0'));
+}
+
 static endChunkNeed(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createChunkNeed(builder:flatbuffers.Builder, rootOffset:flatbuffers.Offset, pathOffset:flatbuffers.Offset, hashesOffset:flatbuffers.Offset, wholeFile:boolean):flatbuffers.Offset {
+static createChunkNeed(builder:flatbuffers.Builder, rootOffset:flatbuffers.Offset, pathOffset:flatbuffers.Offset, hashesOffset:flatbuffers.Offset, wholeFile:boolean, offset:bigint):flatbuffers.Offset {
   ChunkNeed.startChunkNeed(builder);
   ChunkNeed.addRoot(builder, rootOffset);
   ChunkNeed.addPath(builder, pathOffset);
   ChunkNeed.addHashes(builder, hashesOffset);
   ChunkNeed.addWholeFile(builder, wholeFile);
+  ChunkNeed.addOffset(builder, offset);
   return ChunkNeed.endChunkNeed(builder);
 }
 }

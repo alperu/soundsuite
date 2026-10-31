@@ -125,7 +125,7 @@ function envelope(b: flatbuffers.Builder, msgId: bigint, replyTo: bigint, type: 
 
 export function encodeAck(msgId: bigint, seq: bigint): Uint8Array {
   const b = new flatbuffers.Builder(64);
-  return envelope(b, msgId, BigInt(0), Message.Ack, Ack.createAck(b, seq));
+  return envelope(b, msgId, BigInt(0), Message.Ack, Ack.createAck(b, seq, 0, BigInt(0)));
 }
 
 export function encodePing(msgId: bigint, replyTo: bigint): Uint8Array {

@@ -112,6 +112,9 @@ describe('fs-sidecar link (master side)', () => {
     expect(replies).toHaveLength(1);
     expect(replies[0].messageType()).toBe(Message.Ack);
     expect((replies[0].message(new Ack()) as Ack).seq()).toBe(B(7));
+    // Protocol 2 Ack: no failed files, no walk bundle.
+    expect((replies[0].message(new Ack()) as Ack).failedLength()).toBe(0);
+    expect((replies[0].message(new Ack()) as Ack).bundleId()).toBe(B(0));
     expect(store.rows.get('a')?.recFileCount).toBe(2);
     expect(getFsSidecar('mac-1')).toMatchObject({ connectionMode: 'http', confirmedSeq: 7 });
   });

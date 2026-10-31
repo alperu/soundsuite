@@ -3,6 +3,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any, @typescript-eslint/no-non-null-assertion */
 
 import { Ack } from '../sidecar/ack';
+import { BundleNeed } from '../sidecar/bundle-need';
 import { ChunkData } from '../sidecar/chunk-data';
 import { ChunkNeed } from '../sidecar/chunk-need';
 import { Command } from '../sidecar/command';
@@ -10,6 +11,7 @@ import { DownloadChunk } from '../sidecar/download-chunk';
 import { DownloadStart } from '../sidecar/download-start';
 import { ErrorReply } from '../sidecar/error-reply';
 import { EventBatch } from '../sidecar/event-batch';
+import { FileBundle } from '../sidecar/file-bundle';
 import { FileContent } from '../sidecar/file-content';
 import { FileDelete } from '../sidecar/file-delete';
 import { FileRename } from '../sidecar/file-rename';
@@ -65,13 +67,15 @@ export enum Message {
   TransferStatus = 27,
   ErrorReply = 28,
   TransferTicketRequest = 29,
-  TransferTicket = 30
+  TransferTicket = 30,
+  FileBundle = 31,
+  BundleNeed = 32
 }
 
 export function unionToMessage(
   type: Message,
-  accessor: (obj:Ack|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart) => Ack|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart|null
-): Ack|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart|null {
+  accessor: (obj:Ack|BundleNeed|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileBundle|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart) => Ack|BundleNeed|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileBundle|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart|null
+): Ack|BundleNeed|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileBundle|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart|null {
   switch(Message[type]) {
     case 'NONE': return null; 
     case 'EventBatch': return accessor(new EventBatch())! as EventBatch;
@@ -104,15 +108,17 @@ export function unionToMessage(
     case 'ErrorReply': return accessor(new ErrorReply())! as ErrorReply;
     case 'TransferTicketRequest': return accessor(new TransferTicketRequest())! as TransferTicketRequest;
     case 'TransferTicket': return accessor(new TransferTicket())! as TransferTicket;
+    case 'FileBundle': return accessor(new FileBundle())! as FileBundle;
+    case 'BundleNeed': return accessor(new BundleNeed())! as BundleNeed;
     default: return null;
   }
 }
 
 export function unionListToMessage(
   type: Message, 
-  accessor: (index: number, obj:Ack|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart) => Ack|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart|null, 
+  accessor: (index: number, obj:Ack|BundleNeed|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileBundle|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart) => Ack|BundleNeed|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileBundle|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart|null, 
   index: number
-): Ack|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart|null {
+): Ack|BundleNeed|ChunkData|ChunkNeed|Command|DownloadChunk|DownloadStart|ErrorReply|EventBatch|FileBundle|FileContent|FileDelete|FileRename|FolderListing|FolderStatBatch|HashQuery|HashReply|Hello|ListRequest|Login|LoginReply|MasterProfile|MerkleNode|Ping|Status|TransferCancel|TransferStatus|TransferTicket|TransferTicketRequest|UploadChunk|UploadDone|UploadStart|null {
   switch(Message[type]) {
     case 'NONE': return null; 
     case 'EventBatch': return accessor(index, new EventBatch())! as EventBatch;
@@ -145,6 +151,8 @@ export function unionListToMessage(
     case 'ErrorReply': return accessor(index, new ErrorReply())! as ErrorReply;
     case 'TransferTicketRequest': return accessor(index, new TransferTicketRequest())! as TransferTicketRequest;
     case 'TransferTicket': return accessor(index, new TransferTicket())! as TransferTicket;
+    case 'FileBundle': return accessor(index, new FileBundle())! as FileBundle;
+    case 'BundleNeed': return accessor(index, new BundleNeed())! as BundleNeed;
     default: return null;
   }
 }

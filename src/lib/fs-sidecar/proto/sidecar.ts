@@ -3,6 +3,9 @@
 /* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any, @typescript-eslint/no-non-null-assertion */
 
 export { Ack } from './sidecar/ack';
+export { BundleEntry } from './sidecar/bundle-entry';
+export { BundleFailure } from './sidecar/bundle-failure';
+export { BundleNeed } from './sidecar/bundle-need';
 export { ChunkData } from './sidecar/chunk-data';
 export { ChunkNeed } from './sidecar/chunk-need';
 export { Command } from './sidecar/command';
@@ -14,6 +17,7 @@ export { ErrorCode } from './sidecar/error-code';
 export { ErrorReply } from './sidecar/error-reply';
 export { EventBatch } from './sidecar/event-batch';
 export { EventKind } from './sidecar/event-kind';
+export { FileBundle } from './sidecar/file-bundle';
 export { FileContent } from './sidecar/file-content';
 export { FileDelete } from './sidecar/file-delete';
 export { FileId } from './sidecar/file-id';

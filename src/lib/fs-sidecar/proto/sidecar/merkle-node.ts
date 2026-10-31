@@ -69,8 +69,13 @@ mtimeNs():bigint {
   return offset ? this.bb!.readInt64(this.bb_pos + offset) : BigInt('0');
 }
 
+seq():bigint {
+  const offset = this.bb!.__offset(this.bb_pos, 16);
+  return offset ? this.bb!.readUint64(this.bb_pos + offset) : BigInt('0');
+}
+
 static startMerkleNode(builder:flatbuffers.Builder) {
-  builder.startObject(6);
+  builder.startObject(7);
 }
 
 static addRoot(builder:flatbuffers.Builder, rootOffset:flatbuffers.Offset) {
@@ -109,12 +114,16 @@ static addMtimeNs(builder:flatbuffers.Builder, mtimeNs:bigint) {
   builder.addFieldInt64(5, mtimeNs, BigInt('0'));
 }
 
+static addSeq(builder:flatbuffers.Builder, seq:bigint) {
+  builder.addFieldInt64(6, seq, BigInt('0'));
+}
+
 static endMerkleNode(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createMerkleNode(builder:flatbuffers.Builder, rootOffset:flatbuffers.Offset, pathOffset:flatbuffers.Offset, hashOffset:flatbuffers.Offset, isDir:boolean, size:bigint, mtimeNs:bigint):flatbuffers.Offset {
+static createMerkleNode(builder:flatbuffers.Builder, rootOffset:flatbuffers.Offset, pathOffset:flatbuffers.Offset, hashOffset:flatbuffers.Offset, isDir:boolean, size:bigint, mtimeNs:bigint, seq:bigint):flatbuffers.Offset {
   MerkleNode.startMerkleNode(builder);
   MerkleNode.addRoot(builder, rootOffset);
   MerkleNode.addPath(builder, pathOffset);
@@ -122,6 +131,7 @@ static createMerkleNode(builder:flatbuffers.Builder, rootOffset:flatbuffers.Offs
   MerkleNode.addIsDir(builder, isDir);
   MerkleNode.addSize(builder, size);
   MerkleNode.addMtimeNs(builder, mtimeNs);
+  MerkleNode.addSeq(builder, seq);
   return MerkleNode.endMerkleNode(builder);
 }
 }
