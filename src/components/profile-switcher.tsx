@@ -11,8 +11,14 @@ import { useCallback, useEffect, useState } from 'react';
  * from the old profile's database, and a reload is the honest way to drop it.
  *
  * The edit panel is the CRUD surface: display name and description for any
- * profile; rename (directory name) and delete only for a profile that is not
- * active — switch away first. Delete moves the folder to `data/.trash/`.
+ * profile (the active one and the default included); folder rename and
+ * delete only for a profile that is not active — switch away first. Delete
+ * asks to confirm and moves the folder to `data/.trash/`; the adopted
+ * default (data outside its folder) cannot be deleted.
+ *
+ * A server on the pre-profiles layout lists one `legacy` row. The first
+ * rename or create turns it into a real profile on the server side
+ * (lib/profiles/adopt.ts), so nothing here is disabled for it.
  */
 
 interface ProfileRow {
@@ -20,6 +26,7 @@ interface ProfileRow {
   displayName: string;
   description?: string;
   active: boolean;
+  adopted?: boolean;
   cases: Array<{ id: string }>;
 }
 
@@ -32,8 +39,25 @@ interface Listing {
 type Mode = 'idle' | 'create' | 'edit';
 
 async function readError(res: Response): Promise<string> {
-  const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
-  return body?.error?.message ?? `HTTP ${res.status}`;
+  const body = (await res.json().catch(() => null)) as { error?: string | { message?: string } } | null;
+  const e = body?.error;
+  if (typeof e === 'string' && e) return e;
+  if (e && typeof e === 'object' && e.message) return e.message;
+  if (res.status === 401) return 'Sign in as an admin to change profiles';
+  if (res.status === 403) return 'Only admins can change profiles';
+  return `HTTP ${res.status}`;
+}
+
+/** Folder name from a display name: "Test profile" → "test-profile". */
+export function slugifyProfileName(displayName: string): string {
+  return displayName
+    .trim()
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^[-_]+|-+$/g, '')
+    .slice(0, 40);
 }
 
 export function ProfileSwitcher({ collapsed }: { collapsed: boolean }) {
@@ -44,6 +68,7 @@ export function ProfileSwitcher({ collapsed }: { collapsed: boolean }) {
 
   // create
   const [newName, setNewName] = useState('');
+  const [newDisplay, setNewDisplay] = useState('');
   const [copySettings, setCopySettings] = useState(true);
 
   // edit
@@ -86,9 +111,17 @@ export function ProfileSwitcher({ collapsed }: { collapsed: boolean }) {
   }, [listing]);
 
   const create = useCallback(async () => {
-    const name = newName.trim().toLowerCase();
-    if (!name) return;
-    setBusy(`Creating ${name}…`);
+    const display = newDisplay.trim();
+    const name = (newName.trim() || slugifyProfileName(display)).toLowerCase();
+    if (!name) {
+      setError('Enter a profile name');
+      return;
+    }
+    if (listing?.profiles.some((p) => p.name === name || p.displayName.trim().toLowerCase() === (display || name).toLowerCase())) {
+      setError(`A profile named "${display || name}" already exists`);
+      return;
+    }
+    setBusy(`Creating ${display || name}…`);
     setError(null);
     try {
       const res = await fetch('/api/profiles', {
@@ -96,12 +129,14 @@ export function ProfileSwitcher({ collapsed }: { collapsed: boolean }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name,
-          copySettingsFrom: copySettings && listing && !listing.legacy ? listing.active : undefined,
+          ...(display ? { displayName: display } : {}),
+          copySettingsFrom: copySettings && listing ? listing.active : undefined,
         }),
       });
       if (!res.ok) throw new Error(await readError(res));
       setMode('idle');
       setNewName('');
+      setNewDisplay('');
       await load();
       await switchTo(name);
     } catch (err) {
@@ -109,7 +144,7 @@ export function ProfileSwitcher({ collapsed }: { collapsed: boolean }) {
     } finally {
       setBusy(null);
     }
-  }, [newName, copySettings, listing, load, switchTo]);
+  }, [newName, newDisplay, copySettings, listing, load, switchTo]);
 
   const openEdit = useCallback((name: string) => {
     const row = listing?.profiles.find((p) => p.name === name);
@@ -193,21 +228,31 @@ export function ProfileSwitcher({ collapsed }: { collapsed: boolean }) {
         <div className="mt-1 space-y-1">
           <input
             autoFocus
+            aria-label="Profile name"
+            value={newDisplay}
+            onChange={(e) => setNewDisplay(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void create();
+              if (e.key === 'Escape') setMode('idle');
+            }}
+            placeholder="Profile name"
+            className={input}
+          />
+          <input
+            aria-label="Folder name"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') void create();
               if (e.key === 'Escape') setMode('idle');
             }}
-            placeholder="new-profile-name"
+            placeholder={slugifyProfileName(newDisplay) || 'folder-name'}
             className={`${input} font-mono`}
           />
-          {!listing.legacy && (
-            <label className="flex items-center gap-1 text-[10px] text-gray-600">
-              <input type="checkbox" checked={copySettings} onChange={(e) => setCopySettings(e.target.checked)} />
-              copy settings from {listing.active}
-            </label>
-          )}
+          <label className="flex items-center gap-1 text-[10px] text-gray-600">
+            <input type="checkbox" checked={copySettings} onChange={(e) => setCopySettings(e.target.checked)} />
+            copy settings from {active?.displayName ?? listing.active}
+          </label>
           <div className="flex gap-2 text-[11px]">
             <button onClick={() => void create()} className="text-blue-700 hover:underline">create</button>
             <button onClick={() => setMode('idle')} className="text-gray-500 hover:underline">cancel</button>
@@ -236,7 +281,7 @@ export function ProfileSwitcher({ collapsed }: { collapsed: boolean }) {
             <button onClick={() => void save()} className="text-blue-700 hover:underline">save</button>
             <button onClick={() => setMode('idle')} className="text-gray-500 hover:underline">cancel</button>
           </div>
-          {!editingActive && listing.profiles.length > 1 && (
+          {!editingActive && !editing.adopted && listing.profiles.length > 1 && (
             <div className="border-t border-gray-100 pt-1.5">
               {deleteArmed === editTarget ? (
                 <div className="space-y-1">
@@ -264,8 +309,8 @@ export function ProfileSwitcher({ collapsed }: { collapsed: boolean }) {
               if (e.target.value === '__new__') setMode('create');
               else void switchTo(e.target.value);
             }}
-            disabled={listing.legacy}
-            title={listing.legacy ? 'Run scripts/profiles-migrate.mjs to enable profiles' : 'Switch profile (reloads the page)'}
+            aria-label="Profile"
+            title="Switch profile (reloads the page)"
             className="min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-2 py-1 text-sm font-medium text-gray-800"
           >
             {listing.profiles.map((p) => (
@@ -273,11 +318,10 @@ export function ProfileSwitcher({ collapsed }: { collapsed: boolean }) {
                 {p.displayName} · {p.cases.length} case{p.cases.length === 1 ? '' : 's'}
               </option>
             ))}
-            {!listing.legacy && <option value="__new__">＋ New profile…</option>}
+            <option value="__new__">＋ New profile…</option>
           </select>
           <button
             onClick={() => openEdit(listing.active)}
-            disabled={listing.legacy}
             title="Edit profiles"
             aria-label="Edit profiles"
             className="shrink-0 rounded-md border border-gray-300 bg-white p-1.5 text-gray-500 hover:bg-gray-50 hover:text-gray-700 disabled:opacity-40"

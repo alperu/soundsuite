@@ -5,18 +5,25 @@
  * The switch is global (design A): dashboard, MCP and every API read the new
  * profile from the moment it returns. Services bound to the old profile are
  * restarted; the response says which.
+ *
+ * GET: loopback, API key or a dashboard session. POST: admin role.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { requireApiAccess } from '@/lib/api/route-guard';
 import { activeProfileName, profilesEnabled, readManifest } from '@/lib/profiles';
 import { switchProfile } from '@/lib/profiles/switch';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const denied = await requireApiAccess(req, { label: 'profiles active GET', allowAdminSession: true });
+  if (denied) return denied;
   return NextResponse.json({ active: activeProfileName(), legacy: !profilesEnabled() });
 }
 
 export async function POST(req: NextRequest) {
+  const denied = await requireApiAccess(req, { label: 'profiles active POST', allowAdminSession: true, requireAdminRole: true });
+  if (denied) return denied;
   let body: { name?: unknown };
   try {
     body = await req.json();

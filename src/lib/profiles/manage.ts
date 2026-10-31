@@ -5,7 +5,9 @@
  *   - display name and description change freely, active or not;
  *   - the directory name (the identity) changes only for a NON-active profile,
  *     because every open handle in the process is keyed by it;
- *   - delete only a NON-active profile, and never the last one;
+ *   - display names are unique (case-insensitive) — 409 on a clash;
+ *   - delete only a NON-active profile, never the last one, never the
+ *     adopted default (its data lives outside its folder);
  *   - delete moves the directory to `data/.trash/<name>-<timestamp>` rather
  *     than removing it. A profile is gigabytes of litigation data; the trash
  *     is the undo. The operator empties it by hand.
@@ -13,13 +15,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  PROFILE_FILE,
   activeProfileName,
   dataRoot,
+  displayNameTaken,
+  forgetProfileStorageCache,
   isValidProfileName,
   listProfiles,
   profilePaths,
   readManifest,
+  writeManifestFile,
   type ProfileManifest,
 } from './registry';
 
@@ -30,11 +34,7 @@ export interface UpdateProfileInput {
   newName?: string;
 }
 
-function writeManifest(name: string, manifest: ProfileManifest): void {
-  const file = path.join(dataRoot(), name, PROFILE_FILE);
-  const { name: _n, ...rest } = manifest;
-  fs.writeFileSync(file, JSON.stringify({ ...rest, name }, null, 2) + '\n');
-}
+const writeManifest = writeManifestFile;
 
 export function updateProfile(name: string, input: UpdateProfileInput): ProfileManifest {
   const current = readManifest(name);
@@ -44,6 +44,8 @@ export function updateProfile(name: string, input: UpdateProfileInput): ProfileM
   if (input.displayName !== undefined) {
     const dn = input.displayName.trim();
     if (!dn) throw new Error('displayName cannot be empty');
+    const clash = displayNameTaken(dn, name);
+    if (clash) throw new Error(`profile already exists with the name "${clash.displayName}"`);
     next.displayName = dn.slice(0, 80);
   }
   if (input.description !== undefined) {
@@ -51,14 +53,21 @@ export function updateProfile(name: string, input: UpdateProfileInput): ProfileM
     if (d) next.description = d.slice(0, 400);
     else delete next.description;
   }
-  writeManifest(name, next);
-
+  // Check the folder rename BEFORE writing anything, so a refused rename
+  // does not half-apply the display name.
   const newName = input.newName?.trim().toLowerCase();
-  if (newName && newName !== name) {
+  const renaming = !!newName && newName !== name;
+  if (renaming) {
     if (!isValidProfileName(newName)) throw new Error(`invalid profile name: ${newName} (lowercase letters, digits, - and _, max 40)`);
     if (readManifest(newName)) throw new Error(`profile already exists: ${newName}`);
-    if (activeProfileName() === name) throw new Error('cannot rename the active profile — switch to another profile first');
+    if (fs.existsSync(path.join(dataRoot(), newName))) throw new Error(`invalid profile name: ${newName} (a data folder with that name already exists)`);
+    if (activeProfileName() === name) throw new Error('cannot rename the active profile folder — switch to another profile first (the display name can change)');
+  }
+  writeManifest(name, next);
+
+  if (renaming) {
     fs.renameSync(profilePaths(name).root, profilePaths(newName).root);
+    forgetProfileStorageCache();
     writeManifest(newName, { ...next, name: newName });
     return readManifest(newName)!;
   }
@@ -74,11 +83,15 @@ export function deleteProfile(name: string): DeleteProfileResult {
   if (!readManifest(name)) throw new Error(`profile not found: ${name}`);
   if (activeProfileName() === name) throw new Error('cannot delete the active profile — switch to another profile first');
   if (listProfiles().length <= 1) throw new Error('cannot delete the last profile');
+  // The adopted profile's data lives outside its folder (lib/profiles/adopt.ts);
+  // trashing the folder would orphan it, not delete it.
+  if (readManifest(name)?.storage) throw new Error('cannot delete the default profile: its data lives outside data/<name>/');
 
   const trashRoot = path.join(dataRoot(), '.trash');
   fs.mkdirSync(trashRoot, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const trashedTo = path.join(trashRoot, `${name}-${stamp}`);
   fs.renameSync(profilePaths(name).root, trashedTo);
+  forgetProfileStorageCache();
   return { name, trashedTo };
 }

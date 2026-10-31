@@ -11,7 +11,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { activeProfile, listProfiles, profilePaths, readManifest, scaffoldProfile, type ProfileManifest, type ProfilePaths } from './registry';
+import { activeProfile, dataRoot, displayNameTaken, listProfiles, profilePaths, readManifest, scaffoldProfile, type ProfileManifest, type ProfilePaths } from './registry';
 
 // better-sqlite3 ships no .d.ts in this repo (same as lib/legal/kysely.ts).
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any
@@ -124,11 +124,16 @@ export function copyTableRows(fromSqlite: string, toSqlite: string, table: strin
   }
 }
 
-export function copyConfigRows(fromSqlite: string, toSqlite: string): number {
+/**
+ * Copy `Config` rows. `keyPrefix` limits the copy to keys that start with it
+ * (e.g. `fleet.` — the sidecarmaster follow settings).
+ */
+export function copyConfigRows(fromSqlite: string, toSqlite: string, keyPrefix?: string): number {
   const src = new Database(fromSqlite, { readonly: true, fileMustExist: true });
   const dst = new Database(toSqlite, { fileMustExist: true });
   try {
-    const rows = src.prepare('SELECT id, key, value, updatedAt FROM "Config"').all() as Array<{ id: string; key: string; value: string; updatedAt: number | string }>;
+    const all = src.prepare('SELECT id, key, value, updatedAt FROM "Config"').all() as Array<{ id: string; key: string; value: string; updatedAt: number | string }>;
+    const rows = keyPrefix ? all.filter((r) => r.key.startsWith(keyPrefix)) : all;
     const insert = dst.prepare('INSERT OR REPLACE INTO "Config" (id, key, value, updatedAt) VALUES (?, ?, ?, ?)');
     const tx = dst.transaction((list: typeof rows) => {
       for (const r of list) insert.run(r.id, r.key, r.value, r.updatedAt);
@@ -144,12 +149,18 @@ export function copyConfigRows(fromSqlite: string, toSqlite: string): number {
 export async function createProfile(opts: CreateProfileOptions): Promise<{ manifest: ProfileManifest; paths: ProfilePaths; copiedSettings: number }> {
   const name = opts.name.trim().toLowerCase();
   if (readManifest(name)) throw new Error(`profile already exists: ${name}`);
+  // data/ also holds non-profile folders (db, chat, backups, lancedb …):
+  // never write a manifest into one of them.
+  if (fs.existsSync(path.join(dataRoot(), name))) throw new Error(`invalid profile name: ${name} (a data folder with that name already exists)`);
+  const displayName = opts.displayName?.trim() || name;
+  const clash = displayNameTaken(displayName);
+  if (clash) throw new Error(`profile already exists with the name "${clash.displayName}"`);
   if (opts.copySettingsFrom && !readManifest(opts.copySettingsFrom)) {
     throw new Error(`copySettingsFrom profile not found: ${opts.copySettingsFrom}`);
   }
   const schemaSource = pickSchemaSource(opts.schemaFrom);
   const paths = scaffoldProfile(name, {
-    displayName: opts.displayName?.trim() || name,
+    displayName: displayName.slice(0, 80),
     createdAt: new Date().toISOString(),
     ...(opts.description ? { description: opts.description } : {}),
   });
@@ -159,6 +170,11 @@ export async function createProfile(opts: CreateProfileOptions): Promise<{ manif
     let copiedSettings = 0;
     if (opts.copySettingsFrom) {
       copiedSettings = copyConfigRows(profilePaths(opts.copySettingsFrom).sqlite, paths.sqlite);
+    } else {
+      // Fleet source (follow sidecarmaster or not) describes the machine, not
+      // the case set: a new profile must not silently stop following.
+      const from = activeProfile().sqlite;
+      if (fs.existsSync(from)) copiedSettings = copyConfigRows(from, paths.sqlite, 'fleet.');
     }
     return { manifest: readManifest(name)!, paths, copiedSettings };
   } catch (err) {

@@ -4,15 +4,26 @@
  *
  * Profiles are Chrome-style: one active per process, discovered from
  * `data/<name>/profile.json`. See docs/tasks/54-profiles.md.
+ *
+ * On a server still on the pre-profiles layout, the first create adopts the
+ * existing data as profile `default` first (lib/profiles/adopt.ts), so the
+ * new profile has a sibling to switch back to.
+ *
+ * Reads: loopback, API key or a dashboard session. Writes: admin role.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { requireApiAccess } from '@/lib/api/route-guard';
 import { listProfilesWithCases } from '@/lib/profiles/service';
 import { createProfile } from '@/lib/profiles/create';
+import { adoptLegacyIfNeeded } from '@/lib/profiles/adopt';
 import { isValidProfileName } from '@/lib/profiles';
+import { profileErrorStatus } from '@/lib/profiles/errors';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
+  const denied = await requireApiAccess(req, { label: 'profiles GET', allowAdminSession: true });
+  if (denied) return denied;
   try {
     const includeCases = req.nextUrl.searchParams.get('cases') !== '0';
     return NextResponse.json(await listProfilesWithCases({ includeCases }));
@@ -22,6 +33,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const denied = await requireApiAccess(req, { label: 'profiles POST', allowAdminSession: true, requireAdminRole: true });
+  if (denied) return denied;
   let body: { name?: unknown; displayName?: unknown; description?: unknown; copySettingsFrom?: unknown };
   try {
     body = await req.json();
@@ -36,15 +49,22 @@ export async function POST(req: NextRequest) {
     );
   }
   try {
+    const adopted = await adoptLegacyIfNeeded();
+    const rawFrom = typeof body.copySettingsFrom === 'string' && body.copySettingsFrom ? body.copySettingsFrom : undefined;
+    // The client may still name `legacy` (it listed before the adoption).
+    const copySettingsFrom = rawFrom === 'legacy' ? adopted.name : rawFrom;
     const created = await createProfile({
       name,
       displayName: typeof body.displayName === 'string' ? body.displayName : undefined,
       description: typeof body.description === 'string' ? body.description : undefined,
-      copySettingsFrom: typeof body.copySettingsFrom === 'string' && body.copySettingsFrom ? body.copySettingsFrom : undefined,
+      copySettingsFrom,
     });
-    return NextResponse.json({ profile: created.manifest, root: created.paths.root, copiedSettings: created.copiedSettings }, { status: 201 });
+    return NextResponse.json(
+      { profile: created.manifest, root: created.paths.root, copiedSettings: created.copiedSettings, adopted: adopted.adopted },
+      { status: 201 },
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : 'failed to create profile';
-    return NextResponse.json({ error: { message } }, { status: /already exists|not found/.test(message) ? 409 : 500 });
+    return NextResponse.json({ error: { message } }, { status: profileErrorStatus(message) });
   }
 }

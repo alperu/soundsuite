@@ -18,8 +18,10 @@ export interface ProfileCaseSummary {
   documents: number;
 }
 
-export interface ProfileView extends ProfileManifest {
+export interface ProfileView extends Omit<ProfileManifest, 'storage'> {
   active: boolean;
+  /** Pre-profiles data adopted in place (lib/profiles/adopt.ts): not deletable. */
+  adopted: boolean;
   root: string;
   cases: ProfileCaseSummary[];
 }
@@ -52,9 +54,10 @@ export async function listProfilesWithCases(opts: { includeCases?: boolean } = {
       profiles: [
         {
           name: LEGACY_PROFILE,
-          displayName: 'Default (pre-profiles layout)',
+          displayName: 'Default',
           createdAt: '',
           active: true,
+          adopted: true,
           root: profilePaths(LEGACY_PROFILE).root,
           cases: includeCases ? await activeCases() : [],
         },
@@ -73,7 +76,8 @@ export async function listProfilesWithCases(opts: { includeCases?: boolean } = {
         cases = [];
       }
     }
-    profiles.push({ ...m, active: isActive, root: profilePaths(m.name).root, cases });
+    const { storage, ...rest } = m;
+    profiles.push({ ...rest, active: isActive, adopted: !!storage, root: profilePaths(m.name).root, cases });
   }
   return { active, legacy: false, profiles };
 }

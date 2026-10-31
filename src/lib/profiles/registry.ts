@@ -33,11 +33,28 @@ export const REGISTRY_FILE = 'profiles.json';
 export const LEGACY_PROFILE = 'legacy';
 export const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9-_]{0,39}$/;
 
+/**
+ * Absolute data locations for a profile whose data does NOT live under
+ * `data/<name>/` — the pre-profiles data adopted in place
+ * (`lib/profiles/adopt.ts`). Nothing is moved; the manifest points at it.
+ */
+export interface ProfileStorage {
+  sqlite: string;
+  lancedb: string;
+  chat: string;
+  chatAttachments: string;
+  ocrCaptures: string;
+  backups: string;
+}
+
+const STORAGE_KEYS = ['sqlite', 'lancedb', 'chat', 'chatAttachments', 'ocrCaptures', 'backups'] as const;
+
 export interface ProfileManifest {
   name: string;
   displayName: string;
   createdAt: string;
   description?: string;
+  storage?: ProfileStorage;
 }
 
 export interface ProfilePaths {
@@ -61,7 +78,41 @@ interface Registry {
 const g = globalThis as unknown as {
   __ssProfileActive?: string;
   __ssProfileBootOverride?: string | null;
+  /** name → storage override (null = standard layout). `profilePaths` runs on
+   *  every Prisma property access, so the manifest is read once, not per call. */
+  __ssProfileStorage?: Map<string, ProfileStorage | null>;
 };
+
+function storageCache(): Map<string, ProfileStorage | null> {
+  if (!g.__ssProfileStorage) g.__ssProfileStorage = new Map();
+  return g.__ssProfileStorage;
+}
+
+function storageFor(name: string): ProfileStorage | null {
+  const cache = storageCache();
+  const key = `${dataRoot()}\0${name}`;
+  if (cache.has(key)) return cache.get(key) ?? null;
+  const s = readManifest(name)?.storage ?? null;
+  cache.set(key, s);
+  return s;
+}
+
+/** Forget cached storage overrides. Called after any manifest write or move. */
+export function forgetProfileStorageCache(): void {
+  g.__ssProfileStorage = undefined;
+}
+
+function parseStorage(v: unknown): ProfileStorage | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  const out: Partial<ProfileStorage> = {};
+  for (const k of STORAGE_KEYS) {
+    const p = o[k];
+    if (typeof p !== 'string' || !path.isAbsolute(p)) return undefined;
+    out[k] = p;
+  }
+  return out as ProfileStorage;
+}
 
 /** `data/` under the project, or `SS_DATA_ROOT` (tests, relocated installs). */
 export function dataRoot(): string {
@@ -104,6 +155,21 @@ export function legacyPaths(): ProfilePaths {
 export function profilePaths(name: string): ProfilePaths {
   if (name === LEGACY_PROFILE) return legacyPaths();
   const root = path.join(dataRoot(), name);
+  const storage = storageFor(name);
+  if (storage) {
+    return {
+      name,
+      root,
+      sqlite: storage.sqlite,
+      lancedb: storage.lancedb,
+      chat: storage.chat,
+      chatHistory: path.join(storage.chat, 'history'),
+      chatAttachments: storage.chatAttachments,
+      ocrCaptures: storage.ocrCaptures,
+      backups: storage.backups,
+      legacy: false,
+    };
+  }
   return {
     name,
     root,
@@ -122,15 +188,32 @@ export function readManifest(name: string): ProfileManifest | null {
   try {
     const raw = fs.readFileSync(path.join(dataRoot(), name, PROFILE_FILE), 'utf8');
     const m = JSON.parse(raw) as Partial<ProfileManifest>;
+    const storage = parseStorage(m.storage);
     return {
       name,
       displayName: typeof m.displayName === 'string' && m.displayName.trim() ? m.displayName : name,
       createdAt: typeof m.createdAt === 'string' ? m.createdAt : '',
       ...(typeof m.description === 'string' ? { description: m.description } : {}),
+      ...(storage ? { storage } : {}),
     };
   } catch {
     return null;
   }
+}
+
+/** Write `data/<name>/profile.json` (the directory must exist). */
+export function writeManifestFile(name: string, manifest: ProfileManifest): void {
+  const file = path.join(dataRoot(), name, PROFILE_FILE);
+  const { name: _n, ...rest } = manifest;
+  void _n;
+  fs.writeFileSync(file, JSON.stringify({ ...rest, name }, null, 2) + '\n');
+  forgetProfileStorageCache();
+}
+
+/** Another profile already shows this display name (case-insensitive)? */
+export function displayNameTaken(displayName: string, exceptName?: string): ProfileManifest | null {
+  const want = displayName.trim().toLowerCase();
+  return listProfiles().find((p) => p.name !== exceptName && p.displayName.trim().toLowerCase() === want) ?? null;
 }
 
 /** Every directory under data/ that carries a manifest, sorted by name. */
@@ -216,6 +299,7 @@ export function setActiveProfileName(name: string): ProfilePaths {
 /** Forget the cached choice (tests, and the migration script). */
 export function resetActiveProfileCache(): void {
   g.__ssProfileActive = undefined;
+  forgetProfileStorageCache();
 }
 
 /** Make the directory skeleton and the manifest. Idempotent. */

@@ -72,6 +72,23 @@ log "Applying migrations: prisma migrate deploy"
 # prisma.config.ts supplies the datasource URL from DATABASE_URL.
 npx prisma migrate deploy
 
+# Profiles (docs/tasks/54-profiles.md): every other profile database and the
+# shared system.db must follow the same migrations, or a switch lands on an
+# old schema. The adopted default profile IS DATABASE_URL (done above).
+PROFILE_ROOT="${SS_DATA_ROOT:-${V_DIR}}"
+for manifest in "${PROFILE_ROOT}"/*/profile.json; do
+  [ -f "${manifest}" ] || continue
+  pdb="$(dirname "${manifest}")/sound-suite.db"
+  [ -f "${pdb}" ] || continue
+  [ "${pdb}" = "${DB_FILE}" ] && continue
+  log "Applying migrations to profile database ${pdb}"
+  DATABASE_URL="file:${pdb}" npx prisma migrate deploy || log "WARNING: migrate deploy failed for ${pdb}"
+done
+if [ -f "${PROFILE_ROOT}/system.db" ]; then
+  log "Applying migrations to ${PROFILE_ROOT}/system.db"
+  DATABASE_URL="file:${PROFILE_ROOT}/system.db" npx prisma migrate deploy || log "WARNING: migrate deploy failed for system.db"
+fi
+
 # --- 3. Start the app --------------------------------------------------------
 log "Starting Sound Suite (APP_VERSION=${APP_VERSION:-dev}) on ${HOSTNAME:-0.0.0.0}:${PORT:-3000}"
 exec "$@"
