@@ -1,0 +1,108 @@
+diff -ruN a/src/lib/db/fleet-source.ts b/src/lib/db/fleet-source.ts
+--- a/src/lib/db/fleet-source.ts	1969-12-31 18:00:00
++++ b/src/lib/db/fleet-source.ts	2026-10-30 16:55:11
+@@ -0,0 +1,62 @@
++/**
++ * Task 57 / 3.6: where Sound Suite reads its fleet policy (role assignments).
++ *   SS_FLEET_SOURCE=local  (default) — the local HostRoleAssignment table, as today.
++ *   SS_FLEET_SOURCE=follow           — sidecarmaster GET /api/v1/apps/soundsuite/fleet
++ *                                      (SM_URL + SM_TOKEN, scope fleet:read).
++ * In follow mode the local table is read-only for the admin UI; a fetch failure keeps the
++ * last good copy (cache, 30 s TTL) and falls back to the local table when there is none.
++ */
++import type { HostRoleAssignment } from '@prisma/client';
++
++export type FleetSource = 'local' | 'follow';
++export function fleetSource(): FleetSource {
++  return process.env.SS_FLEET_SOURCE === 'follow' ? 'follow' : 'local';
++}
++
++interface SmRole { mode: string; enabled: boolean; minOnline: number; idleTimeoutMin: number; modelOverride: string | null; runtime: string }
++interface SmHost { hostId: string; agentUrl: string | null; roles: SmRole[] }
++interface SmFleet { hosts: SmHost[] }
++
++const TTL_MS = 30_000;
++let cache: { at: number; rows: HostRoleAssignment[] } | null = null;
++
++function toRows(f: SmFleet): HostRoleAssignment[] {
++  const now = new Date();
++  const out: HostRoleAssignment[] = [];
++  for (const h of f.hosts) {
++    if (!h.agentUrl) continue;
++    const url = h.agentUrl.replace(/\/+$/, '');
++    for (const r of h.roles) {
++      out.push({
++        id: `sm:${h.hostId}:${r.mode}`, sidecarUrl: url, mode: r.mode, enabled: r.enabled,
++        minOnline: r.minOnline, idleTimeoutMin: r.idleTimeoutMin, modelOverride: r.modelOverride,
++        runtime: r.runtime, createdAt: now, updatedAt: now,
++      } as HostRoleAssignment);
++    }
++  }
++  return out;
++}
++
++/** All role rows from sidecarmaster, or null when follow mode is off or unreachable with no cache. */
++export async function followedAssignments(): Promise<HostRoleAssignment[] | null> {
++  if (fleetSource() !== 'follow') return null;
++  if (cache && Date.now() - cache.at < TTL_MS) return cache.rows;
++  const base = process.env.SM_URL, token = process.env.SM_TOKEN;
++  if (!base || !token) return cache?.rows ?? null;
++  try {
++    const r = await fetch(`${base.replace(/\/+$/, '')}/api/v1/apps/soundsuite/fleet`, {
++      headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5_000),
++    });
++    if (!r.ok) throw new Error(`sidecarmaster ${r.status}`);
++    cache = { at: Date.now(), rows: toRows((await r.json()) as SmFleet) };
++    return cache.rows;
++  } catch (e) {
++    console.warn('[fleet-source] follow fetch failed, using', cache ? 'cached copy' : 'local table', e instanceof Error ? e.message : e);
++    return cache?.rows ?? null;
++  }
++}
++
++/** Throw in follow mode: policy edits belong in sidecarmaster. */
++export function assertLocalWrites(): void {
++  if (fleetSource() === 'follow') throw new Error('Fleet policy follows sidecarmaster (SS_FLEET_SOURCE=follow). Edit roles there.');
++}
+diff -ruN a/src/lib/db/role-registry.ts b/src/lib/db/role-registry.ts
+--- a/src/lib/db/role-registry.ts	2026-10-30 16:55:11
++++ b/src/lib/db/role-registry.ts	2026-10-30 16:55:11
+@@ -15,6 +15,7 @@
+  */
+ 
+ import { prisma } from './prisma';
++import { assertLocalWrites, followedAssignments } from './fleet-source';
+ import type { HostRoleAssignment } from '@prisma/client';
+ 
+ // ─── Public types ───────────────────────────────────────────────────────
+@@ -101,6 +102,8 @@
+   sidecarUrl: string,
+ ): Promise<AssignmentRow[]> {
+   const url = normalizeUrl(sidecarUrl);
++  const followed = await followedAssignments();
++  if (followed) return followed.filter(r => r.sidecarUrl === url).sort((a, b) => a.mode.localeCompare(b.mode));
+   return prisma.hostRoleAssignment.findMany({
+     where: { sidecarUrl: url },
+     orderBy: { mode: 'asc' },
+@@ -108,10 +111,13 @@
+ }
+ 
+ export async function listAllAssignments(): Promise<AssignmentRow[]> {
++  const followed = await followedAssignments();
++  if (followed) return followed;
+   return prisma.hostRoleAssignment.findMany();
+ }
+ 
+ export async function setAssignment(input: AssignmentInput): Promise<AssignmentRow> {
++  assertLocalWrites();
+   if (!isModeName(input.mode)) {
+     throw new Error(
+       `Unknown mode "${input.mode}". Must be one of: ${ALL_MODES.join(', ')}`,
+@@ -209,6 +215,7 @@
+ }
+ 
+ export async function removeAssignment(sidecarUrl: string, mode: string): Promise<void> {
++  assertLocalWrites();
+   const url = normalizeUrl(sidecarUrl);
+   await prisma.hostRoleAssignment.deleteMany({
+     where: { sidecarUrl: url, mode },

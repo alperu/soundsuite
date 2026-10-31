@@ -7,13 +7,22 @@
 # whatever working master it already had. If the NetBird master turns out to
 # be unreachable, the sidecar still has its old master and stays connected.
 #
-#   - Sidecars on 192.168.88.0/24 → http://100.114.170.238:3000, :3848
-#   - Sidecars on 10.10.20.0/24    → http://100.114.170.238:3000, :3848
+#   - Sidecars on 192.168.88.0/24 → http://100.114.170.238:3000, :3848, + LLM spam filter
+#   - Sidecars on 10.10.20.0/24    → http://100.114.170.238:3000, :3848, + LLM spam filter
 #     (NetBird 100.114.170.238/16 now routes both ways, so all hosts reach it)
+#   LLM spam filter (whmEmailSpam worker on BASWS41): $SPAM_MASTER_URL,
+#   default http://100.114.83.26:8265. Set SPAM_MASTER_URL= (empty) to skip it.
+#   QuickBooks MCP server (qbmcpserver, sidecar API port): $QBMCP_MASTER_URL,
+#   default http://qbmcpserver.vpn.bas.co:3005. Set QBMCP_MASTER_URL= to skip.
+#   It needs a token: $QBMCP_SIDECAR_TOKEN, or (if empty) the script reads
+#   SIDECAR_AUTH_TOKEN from /srv/qbmcp/env/app.env over `ssh root@$QBMCP_SSH`
+#   (default 10.10.20.41). The token is never printed.
 #
 # WebSocket-port mapping (derived from the URL port, not hard-coded per URL):
-#   URL port 3000 → wsPort 3002
-#   URL port 3848 → wsPort 3003
+#   URL port 3000 → wsPort 3002   (Sound Suite)
+#   URL port 3848 → wsPort 3003   (Fantom MCP server)
+#   URL port 8265 → wsPort 3004   (LLM spam filter)
+#   URL port 3005 → wsPort 3005   (QuickBooks MCP server: HTTP and WS share 3005)
 #
 # For each (sidecar, master-url) pair the script:
 #   1. GETs /api/masters on the sidecar to see what's already there.
@@ -31,16 +40,18 @@ set -euo pipefail
 
 FLEET_URL="${FLEET_URL:-http://localhost:3000}"
 DRY_RUN=0
-for arg in "$@"; do
+while [[ $# -gt 0 ]]; do
+  arg="$1"; shift
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
-    --fleet-url) shift; FLEET_URL="$1" ;;
+    --fleet-url) FLEET_URL="${1:?--fleet-url needs a value}"; shift ;;
     --fleet-url=*) FLEET_URL="${arg#*=}" ;;
-    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
   esac
 done
 
 # Master URLs per subnet. wsPort is derived from URL port below.
+SPAM_MASTER_URL="${SPAM_MASTER_URL-http://100.114.83.26:8265}"
 MASTERS_88=(
   "http://100.114.170.238:3000"
   "http://100.114.170.238:3848"
@@ -49,6 +60,34 @@ MASTERS_10=(
   "http://100.114.170.238:3000"
   "http://100.114.170.238:3848"
 )
+if [[ -n "$SPAM_MASTER_URL" ]]; then
+  MASTERS_88+=("$SPAM_MASTER_URL")
+  MASTERS_10+=("$SPAM_MASTER_URL")
+fi
+
+# QuickBooks MCP server. Its sidecar API requires a bearer token.
+QBMCP_MASTER_URL="${QBMCP_MASTER_URL-http://qbmcpserver.vpn.bas.co:3005}"
+QBMCP_SSH="${QBMCP_SSH:-10.10.20.41}"
+QBMCP_SIDECAR_TOKEN="${QBMCP_SIDECAR_TOKEN:-}"
+if [[ -n "$QBMCP_MASTER_URL" ]]; then
+  if [[ -z "$QBMCP_SIDECAR_TOKEN" ]]; then
+    QBMCP_SIDECAR_TOKEN="$(ssh -o BatchMode=yes -o ConnectTimeout=8 "root@$QBMCP_SSH" \
+      'sed -n "s/^SIDECAR_AUTH_TOKEN=//p" /srv/qbmcp/env/app.env' 2>/dev/null || true)"
+  fi
+  if [[ -z "$QBMCP_SIDECAR_TOKEN" ]]; then
+    echo "WARN: no SIDECAR_AUTH_TOKEN for $QBMCP_MASTER_URL (set QBMCP_SIDECAR_TOKEN); skipping that master." >&2
+  else
+    MASTERS_88+=("$QBMCP_MASTER_URL")
+    MASTERS_10+=("$QBMCP_MASTER_URL")
+  fi
+fi
+
+# Token to send with a master, if it needs one (empty = none).
+token_for() {
+  if [[ -n "$QBMCP_MASTER_URL" && "$1" == "$QBMCP_MASTER_URL" ]]; then
+    printf '%s' "$QBMCP_SIDECAR_TOKEN"
+  fi
+}
 
 # Map URL port → expected wsPort. Add to this table if more pairs come up.
 ws_port_for() {
@@ -58,6 +97,8 @@ ws_port_for() {
   case "$port" in
     3000) echo 3002 ;;
     3848) echo 3003 ;;
+    8265) echo 3004 ;;
+    3005) echo 3005 ;;
     *)
       # Unknown URL port — fail loudly so the operator notices.
       echo "ERROR: no wsPort mapping for URL port $port (url=$url)" >&2
@@ -112,7 +153,7 @@ while IFS=$'\t' read -r HOSTNAME SIDECAR_URL; do
       | head -1)
 
     if [[ -n "$EXISTING_WS" && "$EXISTING_WS" != "null" ]]; then
-      if [[ "$EXISTING_WS" == "$WS_PORT" ]]; then
+      if [[ "$EXISTING_WS" == "$WS_PORT" && -z "$(token_for "$MASTER_URL")" ]]; then
         printf '%-26s %-32s %-14s %-30s %-7s %s\n' \
           "$HOSTNAME" "$SIDECAR_URL" "$SUBNET" "$MASTER_URL" "$WS_PORT" "exist"
         continue
@@ -128,7 +169,9 @@ while IFS=$'\t' read -r HOSTNAME SIDECAR_URL; do
       RESP=$(curl -s --max-time 6 \
         -X PATCH "$SIDECAR_URL/api/masters/$ENCODED" \
         -H 'Content-Type: application/json' \
-        -d "$(jq -n --argjson p "$WS_PORT" '{wsPort: $p}')" || echo '{"error":"curl-failed"}')
+        -d "$(jq -n --argjson p "$WS_PORT" --arg t "$(token_for "$MASTER_URL")" \
+              '{wsPort: $p} + (if $t != "" then {authToken: $t} else {} end)')" \
+        || echo '{"error":"curl-failed"}')
       ERR=$(echo "$RESP" | jq -r '.error // empty')
       if [[ -n "$ERR" ]]; then
         printf '%-26s %-32s %-14s %-30s %-7s %s\n' \
@@ -147,8 +190,8 @@ while IFS=$'\t' read -r HOSTNAME SIDECAR_URL; do
         "$HOSTNAME" "$SIDECAR_URL" "$SUBNET" "$MASTER_URL" "$WS_PORT" "DRY add"
       continue
     fi
-    BODY=$(jq -n --arg s "$MASTER_URL" --argjson p "$WS_PORT" \
-      '{serverUrl: $s, wsPort: $p}')
+    BODY=$(jq -n --arg s "$MASTER_URL" --argjson p "$WS_PORT" --arg t "$(token_for "$MASTER_URL")" \
+      '{serverUrl: $s, wsPort: $p} + (if $t != "" then {authToken: $t} else {} end)')
     RESP=$(curl -s --max-time 6 \
       -X POST "$SIDECAR_URL/api/masters" \
       -H 'Content-Type: application/json' \

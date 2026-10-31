@@ -28,6 +28,7 @@ import { createLogger } from '@/lib/logger';
 import { getConfig } from '@/lib/db/config';
 import { getFleetStatus, sendToSidecar } from '@/lib/gpu/fleet-router';
 import { listAllAssignments } from '@/lib/db/role-registry';
+import { followSkip, isFollowMode } from '@/lib/db/fleet-source';
 
 const logger = createLogger('reranker-watchdog');
 
@@ -142,6 +143,11 @@ async function deepProbe(rerankUrl: string, model: string): Promise<{ ok: boolea
 
 /** Issue stop+start to the host's sidecar. */
 async function restartHost(rec: HostRecord): Promise<{ ok: boolean; error?: string }> {
+  // Follow mode: sidecarmaster starts and stops containers; the probe result is only reported.
+  if (await isFollowMode()) {
+    followSkip('reranker restart', rec.sidecarUrl);
+    return { ok: false, error: 'Managed by sidecarmaster' };
+  }
   pruneRestarts(rec);
   if (rec.restarts.length > CHRONIC_RESTART_THRESHOLD) {
     rec.state = 'chronic-unhealthy';

@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { settingsPageForMode } from '@/lib/gpu/mode-catalog';
+import ManagedByBanner, { type ManagedBy } from '@/components/admin/managed-by-banner';
 
 /* ─────────────────────────── Public types ─────────────────────────── */
 
@@ -116,6 +117,8 @@ export default function AdminRoleTypes() {
   const [loading, setLoading] = useState(true);
   const [backendOffline, setBackendOffline] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** fleet.source = follow: the catalog is sidecarmaster's; show where to edit it. */
+  const [managedBy, setManagedBy] = useState<ManagedBy | null>(null);
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -128,6 +131,7 @@ export default function AdminRoleTypes() {
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      setManagedBy(data?.fleetSource === 'follow' && data?.managedBy ? data.managedBy : null);
       const modes: ModeCatalogEntry[] = Array.isArray(data?.modes) ? data.modes : [];
       if (modes.length > 0) {
         setCatalog(modes);
@@ -161,6 +165,7 @@ export default function AdminRoleTypes() {
 
   return (
     <div className="space-y-4">
+      {managedBy && <ManagedByBanner managedBy={managedBy} page="roletypes" />}
       <div className="bg-blue-50 border border-blue-200 rounded-md p-3 text-sm text-blue-900">
         <strong>Mode Types</strong> are a fixed catalog. The default model for
         each mode is configured on its own settings page — click the chip in

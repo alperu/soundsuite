@@ -613,6 +613,12 @@ export function startWsRelay(): WebSocketServer {
         // Fire-and-forget — don't block registration on config push.
         import('@/lib/gpu/fleet-router').then(async ({ pushFullConfig }) => {
           try {
+            // Follow mode: sidecarmaster pushes config to the sidecar; a second master must not.
+            const { isFollowMode } = await import('@/lib/db/fleet-source');
+            if (await isFollowMode()) {
+              logger.info('Follow mode: config push to the new sidecar left to sidecarmaster', { agentUrl: msg.agentUrl });
+              return;
+            }
             const { getConfig } = await import('@/lib/db/config');
             const config = await getConfig();
             const timeouts = {
@@ -661,6 +667,8 @@ export function startWsRelay(): WebSocketServer {
               openRouterRepushAt.set(registeredUrl, Date.now());
               const url = registeredUrl;
               import('@/lib/gpu/fleet-router').then(async ({ pushFullConfig }) => {
+                const { isFollowMode } = await import('@/lib/db/fleet-source');
+                if (await isFollowMode()) return; // sidecarmaster owns config pushes
                 const { getConfig } = await import('@/lib/db/config');
                 const c = await getConfig();
                 if (!c.openRouterEnabled || !c.openRouterApiKey) return;

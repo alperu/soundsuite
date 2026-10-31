@@ -28,6 +28,7 @@
 import { createLogger } from '@/lib/logger';
 import { getConfig } from '@/lib/db/config';
 import { resolveMasterUrlForHost } from '@/lib/gpu/resolve-master-url-for-host';
+import { followSkip, isFollowMode } from '@/lib/db/fleet-source';
 
 const logger = createLogger('SidecarReconnectWatchdog');
 
@@ -182,6 +183,11 @@ function classify(entry: SidecarEntry, now: number): 'healthy' | 'stale' | 'dorm
 }
 
 async function tick(): Promise<void> {
+  // Follow mode: sidecarmaster asserts the master URL on the sidecars.
+  if (await isFollowMode()) {
+    followSkip('master-URL reassert watchdog');
+    return;
+  }
   let sidecars: SidecarEntry[] = [];
   try {
     const cfg = await getConfig();
@@ -257,6 +263,10 @@ export async function triggerReassertNow(
   fallbackMasterUrl?: string | null,
 ): Promise<boolean> {
   if (!agentUrl) return false;
+  if (await isFollowMode()) {
+    followSkip('master-URL reassert', agentUrl);
+    return false;
+  }
   let masterUrl: string | null = null;
   try {
     masterUrl = await resolveMasterUrlForHost(agentUrl);

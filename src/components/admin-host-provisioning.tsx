@@ -21,6 +21,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ManagedByBanner, { type ManagedBy } from '@/components/admin/managed-by-banner';
 
 type HostOs = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux';
 
@@ -35,6 +36,8 @@ interface HostProvisioningRecord {
 interface ProvisioningResponse {
   provisioning: HostProvisioningRecord[];
   defaultWsPort: number;
+  fleetSource?: 'local' | 'follow';
+  managedBy?: ManagedBy | null;
 }
 
 interface FleetSidecar {
@@ -113,6 +116,8 @@ export default function AdminHostProvisioning() {
   const [toast, setToast] = useState<Toast>(null);
   const [dismissedInfo, setDismissedInfo] = useState<Record<string, boolean>>({});
   const [now, setNow] = useState(Date.now());
+  /** fleet.source = follow: rows come from sidecarmaster and are read only. */
+  const [managedBy, setManagedBy] = useState<ManagedBy | null>(null);
 
   // Reload triggers timer
   const reloadTimer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -171,6 +176,7 @@ export default function AdminHostProvisioning() {
         };
       }
       setRecordsByUrl(map);
+      setManagedBy(data.fleetSource === 'follow' && data.managedBy ? data.managedBy : null);
       if (typeof data.defaultWsPort === 'number') setDefaultWsPort(data.defaultWsPort);
     } catch (e: any) {
       setError(e?.message || String(e));
@@ -321,6 +327,8 @@ export default function AdminHostProvisioning() {
         </div>
       )}
 
+      {managedBy && <ManagedByBanner managedBy={managedBy} page="hostprov" />}
+
       {/* Header / context block */}
       <div className="bg-blue-50 border border-blue-200 rounded-md p-3 text-sm text-blue-900 space-y-2">
         <p>
@@ -366,7 +374,7 @@ export default function AdminHostProvisioning() {
           No sidecars registered. Add one in the <strong>GPU Fleet</strong> tab.
         </div>
       ) : (
-        <div className="space-y-3">
+        <fieldset disabled={!!managedBy} className="space-y-3 min-w-0">
           {sortedFleet.map((s) => {
             const d = draftFor(s.url);
             const saved = recordsByUrl[s.url];
@@ -524,7 +532,7 @@ export default function AdminHostProvisioning() {
               </div>
             );
           })}
-        </div>
+        </fieldset>
       )}
     </div>
   );

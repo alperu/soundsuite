@@ -21,6 +21,8 @@ import UsersPanel from '@/components/admin/users-panel';
 import SessionsPanel from '@/components/admin/sessions-panel';
 import AdminUserMenu from '@/components/admin/admin-user-menu';
 import CloudflarePanel from '@/components/admin/cloudflare-panel';
+import NetbirdPanel from '@/components/admin/netbird-panel';
+import SidecarMasterPanel from '@/components/admin/sidecar-master-panel';
 import WeightSection from '@/components/admin/weight-section';
 import { CopyButton } from '@/components/copy-button';
 import { PublicConfig, ModelDownloadInfo } from '@/lib/db/config';
@@ -32,13 +34,14 @@ interface Props {
   initialTab?: TabKey;
 }
 
-type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'gpu' | 'roletypes' | 'roleassign' | 'hostprov' | 'ocr' | 'localai' | 'rlm' | 'aikeys' | 'aiservices' | 'openrouter' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts' | 'cloudflare' | 'users' | 'sessions';
+type TabKey = 'general' | 'health' | 'embedding' | 'reranking' | 'sidecarmaster' | 'gpu' | 'roletypes' | 'roleassign' | 'hostprov' | 'ocr' | 'localai' | 'rlm' | 'aikeys' | 'aiservices' | 'openrouter' | 'workers' | 'redis' | 'cache' | 'filings' | 'jobs' | 'actionlog' | 'drafts' | 'cloudflare' | 'netbird' | 'users' | 'sessions';
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
   { key: 'general', label: 'General', icon: '⊞' },
   { key: 'health', label: 'System Health', icon: '♥' },
   { key: 'embedding', label: 'Embedding', icon: '⬡' },
   { key: 'reranking', label: 'Reranking', icon: '⇅' },
+  { key: 'sidecarmaster', label: 'Sidecar master', icon: '◈' },
   { key: 'gpu', label: 'GPU Fleet', icon: '⊛' },
   { key: 'roletypes', label: 'Mode Types', icon: '◆' },
   { key: 'roleassign', label: 'Role Assignments', icon: '⇆' },
@@ -63,6 +66,7 @@ const TABS: { key: TabKey; label: string; icon: string }[] = [
 { key: 'users', label: 'Users', icon: '☺' },
 { key: 'sessions', label: 'Sessions', icon: '⛓' },
   { key: 'cloudflare', label: 'Cloudflare', icon: '☁' },
+  { key: 'netbird', label: 'NetBird', icon: '⌘' },
 ];
 
 const TAB_DOCS: Record<TabKey, { title: string; description: string; details: string[]; extras?: () => React.ReactNode }> = {
@@ -108,6 +112,19 @@ const TAB_DOCS: Record<TabKey, { title: string; description: string; details: st
       'Start vLLM: vllm serve Qwen/Qwen3-Reranker-8B --host 0.0.0.0 --port 8099',
       'Uses /v1/rerank endpoint (Jina/Cohere-compatible)',
       'Top N controls how many results survive reranking (default: 10)',
+    ],
+  },
+  sidecarmaster: {
+    title: 'Sidecar master',
+    description: 'Let sidecarmaster manage the GPU fleet. Sound Suite then only reads the fleet and routes its own work.',
+    details: [
+      'Master URL: where this server reads the fleet (LAN address or http://host.docker.internal:3010 on basws42)',
+      'App token: issued in sidecarmaster (Apps → soundsuite → Issue token, scope fleet:read); write-only, last 4 shown',
+      'Follow sidecarmaster ON: GPU Fleet, Mode Types, Role Assignments and Host Provisioning become read only',
+      'Sound Suite stops: role edits, provisioning, config pushes, OpenRouter re-push, master-URL reassert, min-online loop, container start/stop, sidecar updates',
+      'Sound Suite keeps: the relay on 3002 (sidecars still connect here) and routing of embedding / OCR / completion / rerank calls',
+      'The last good fleet copy is kept in system.db, so routing keeps working when sidecarmaster is down',
+      'Every save and test writes an Action Log row (no token in it). Admin role only.',
     ],
   },
   gpu: {
@@ -364,6 +381,17 @@ const TAB_DOCS: Record<TabKey, { title: string; description: string; details: st
       'Secrets are stored server-side and shown masked (last 4 characters)',
     ],
   },
+  netbird: {
+    title: 'NetBird',
+    description: 'Join this server to the NetBird VPN and serve it over HTTPS on its NetBird name.',
+    details: [
+      'Setup key, hostname (default soundsuite) and management URL; Enable switch',
+      'Advanced: WireGuard port (0 = NetBird picks a free port)',
+      'HTTPS: Caddy gets a certificate for <hostname>.<domain> with a Cloudflare DNS token',
+      'Settings go to /netbird-ctl/config.json, read by the soundsuite-netbird and soundsuite-caddy containers',
+      'Keys and tokens are write-only: only the last 4 characters are shown. Admin role only.',
+    ],
+  },
   users: {
     title: 'Users',
     description: 'Manage admin dashboard accounts, roles, and access.',
@@ -430,6 +458,7 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
           {activeTab === 'health' && <SystemHealthPanel />}
           {activeTab === 'embedding' && <AdminSettings initialConfig={initialConfig} initialModelDownloads={initialModelDownloads} />}
           {activeTab === 'reranking' && <AdminRerankingSettings initialConfig={initialConfig} />}
+          {activeTab === 'sidecarmaster' && <SidecarMasterPanel />}
           {activeTab === 'gpu' && <GpuFleetPanel />}
           {activeTab === 'roletypes' && <AdminRoleTypes />}
           {activeTab === 'roleassign' && <AdminRoleAssignments />}
@@ -450,6 +479,7 @@ export default function AdminDashboard({ initialConfig, initialModelDownloads, i
           {activeTab === 'users' && <UsersPanel />}
           {activeTab === 'sessions' && <SessionsPanel />}
           {activeTab === 'cloudflare' && <CloudflarePanel />}
+          {activeTab === 'netbird' && <NetbirdPanel />}
         </div>
 
         {/* Right: Documentation panel */}

@@ -15,6 +15,7 @@
  */
 
 import { prisma } from './prisma';
+import { assertLocalWrites, followedAssignments } from './fleet-source';
 import type { HostRoleAssignment } from '@prisma/client';
 
 // ─── Public types ───────────────────────────────────────────────────────
@@ -101,6 +102,8 @@ export async function listAssignmentsForHost(
   sidecarUrl: string,
 ): Promise<AssignmentRow[]> {
   const url = normalizeUrl(sidecarUrl);
+  const followed = await followedAssignments();
+  if (followed) return followed.filter(r => r.sidecarUrl === url).sort((a, b) => a.mode.localeCompare(b.mode));
   return prisma.hostRoleAssignment.findMany({
     where: { sidecarUrl: url },
     orderBy: { mode: 'asc' },
@@ -108,10 +111,13 @@ export async function listAssignmentsForHost(
 }
 
 export async function listAllAssignments(): Promise<AssignmentRow[]> {
+  const followed = await followedAssignments();
+  if (followed) return followed;
   return prisma.hostRoleAssignment.findMany();
 }
 
 export async function setAssignment(input: AssignmentInput): Promise<AssignmentRow> {
+  await assertLocalWrites('The role assignment');
   if (!isModeName(input.mode)) {
     throw new Error(
       `Unknown mode "${input.mode}". Must be one of: ${ALL_MODES.join(', ')}`,
@@ -209,6 +215,7 @@ export async function setAssignment(input: AssignmentInput): Promise<AssignmentR
 }
 
 export async function removeAssignment(sidecarUrl: string, mode: string): Promise<void> {
+  await assertLocalWrites('The role assignment');
   const url = normalizeUrl(sidecarUrl);
   await prisma.hostRoleAssignment.deleteMany({
     where: { sidecarUrl: url, mode },

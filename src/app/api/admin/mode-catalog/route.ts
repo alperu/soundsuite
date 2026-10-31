@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getModeCatalog } from '@/lib/gpu/mode-catalog-server';
 import { requireAdminApiAccess } from '@/lib/api/route-guard';
+import { fleetSourcePublic } from '@/lib/db/fleet-source';
 
 /**
  * GET /api/admin/mode-catalog
@@ -34,6 +35,7 @@ export async function GET(request: NextRequest) {
 
   const modes = await getModeCatalog();
   return NextResponse.json({
+    ...(await fleetSourcePublic()),
     modes,
     runtimes: ['host', 'docker-ollama', 'docker-vllm'],
     runtimeAvailability: RUNTIME_AVAILABILITY,

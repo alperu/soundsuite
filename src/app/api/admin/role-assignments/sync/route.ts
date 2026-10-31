@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdminApiAccess } from '@/lib/api/route-guard';
+import { refuseWriteInFollowMode } from '@/lib/api/follow-mode-response';
 
 /**
  * POST /api/admin/role-assignments/sync?sidecarUrl=...
@@ -11,6 +12,8 @@ import { requireAdminApiAccess } from '@/lib/api/route-guard';
 export async function POST(req: NextRequest) {
   const denied = await requireAdminApiAccess(req, 'role-assignments/sync');
   if (denied) return denied;
+  const refused = await refuseWriteInFollowMode('The role sync push');
+  if (refused) return refused;
 
   try {
     const sidecarUrl = req.nextUrl.searchParams.get('sidecarUrl');

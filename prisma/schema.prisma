@@ -538,6 +538,20 @@ model HostRoleAssignment {
   @@index([sidecarUrl])
 }
 
+// Last good copy of sidecarmaster's fleet view (fleet.source = follow, task 57 / 3.6).
+// One row per app id ("soundsuite"). `payload` is the JSON answer of
+// GET /api/v1/apps/soundsuite/fleet. Read only when sidecarmaster does not
+// answer, so routing and the read-only admin pages keep working during an
+// outage. System table (lives in system.db, see src/lib/db/prisma.ts).
+model FleetSnapshot {
+  id          String    @id
+  masterUrl   String
+  payload     String
+  hostCount   Int       @default(0)
+  generatedAt DateTime?
+  fetchedAt   DateTime  @default(now())
+}
+
 // ─── XETO v1 foundation ─────────────────────────────────────────────────
 //
 // New entities for the XETO/Haystack work documented in
@@ -813,6 +827,13 @@ model AdminUser {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   lastLoginAt  DateTime?
+  // false = no dashboard sign-in (sync-only user, e.g. linked from a receiver account)
+  dashboardLogin  Boolean   @default(true)
+  // "Sidecar sync login". The sync password lives only in the sidecar-receiver
+  // (Argon2 hash there); SoundSuite stores no hash of it.
+  syncEnabled     Boolean   @default(false)
+  syncRoots       String    @default("[]") // JSON array of allowed root names; [] = all
+  syncLastLoginAt DateTime? // last login seen in the receiver (cached)
 }
 
 // MCP / dashboard client sessions (Sessions tab). Captured by the MCP execute route.

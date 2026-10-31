@@ -23,6 +23,7 @@ import Link from 'next/link';
 import { ConfirmDialog, type ModeCatalogEntry, type ModeOs } from '@/components/admin-role-types';
 import { settingsPageForMode } from '@/lib/gpu/mode-catalog';
 import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
+import ManagedByBanner, { type ManagedBy } from '@/components/admin/managed-by-banner';
 
 /* ─────────────────────────── Types ─────────────────────────── */
 
@@ -383,6 +384,8 @@ export default function AdminRoleAssignments() {
   const [toast, setToast] = useState<Toast>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<Record<string, number>>({});
   const [now, setNow] = useState(Date.now());
+  /** fleet.source = follow: sidecarmaster owns the assignments; this page is read only. */
+  const [managedBy, setManagedBy] = useState<ManagedBy | null>(null);
 
   /** key = `${sidecarUrl}::${mode}` — open per-mode panel */
   const [openPanel, setOpenPanel] = useState<string | null>(null);
@@ -410,6 +413,7 @@ export default function AdminRoleAssignments() {
       ]);
       if (!fleetRes.ok) throw new Error(`gpu-fleet HTTP ${fleetRes.status}`);
       const data = await fleetRes.json();
+      setManagedBy(data?.fleetSource === 'follow' && data?.managedBy ? data.managedBy : null);
       const overrideByUrl: Record<string, string | null> = {};
       if (provRes && provRes.ok) {
         try {
@@ -569,6 +573,8 @@ export default function AdminRoleAssignments() {
 
   useEffect(() => {
     if (sidecars.length === 0) return;
+    // Follow mode: sidecarmaster pushes the config; no sync calls from here.
+    if (managedBy) return;
 
     const tick = async () => {
       // Snapshot current state under closure to avoid stale-state races.
@@ -607,7 +613,7 @@ export default function AdminRoleAssignments() {
       clearInterval(interval);
     };
      
-  }, [sidecars, assignmentsByUrl, computeAssignmentHash, silentSync]);
+  }, [sidecars, assignmentsByUrl, computeAssignmentHash, silentSync, managedBy]);
 
   /* ─────────────────────────── Mutations ─────────────────────────── */
 
@@ -771,6 +777,8 @@ export default function AdminRoleAssignments() {
         </div>
       )}
 
+      {managedBy && <ManagedByBanner managedBy={managedBy} page="roleassign" />}
+
       <div className="bg-blue-50 border border-blue-200 rounded-md p-3 text-sm text-blue-900">
         Pick which modes each sidecar should run. The sidecar auto-resolves the
         underlying model / image / port based on its OS. Click the gear on an
@@ -798,7 +806,7 @@ export default function AdminRoleAssignments() {
           No sidecars registered. Add one in the <strong>GPU Fleet</strong> tab.
         </div>
       ) : (
-        <div className="space-y-3">
+        <fieldset disabled={!!managedBy} className="space-y-3 min-w-0">
           {sidecars.map((sidecar) => {
             const assigns = assignmentsByUrl[sidecar.url] || [];
             const lastSync = lastSyncedAt[sidecar.url];
@@ -1088,7 +1096,7 @@ export default function AdminRoleAssignments() {
               </div>
             );
           })}
-        </div>
+        </fieldset>
       )}
 
       {confirmReset && (

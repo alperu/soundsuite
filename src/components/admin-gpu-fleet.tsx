@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { FsSidecarTable, type FsSidecarRow } from './admin-fs-sidecars';
+import ManagedByBanner, { type ManagedBy } from './admin/managed-by-banner';
+import SidecarMasterFleet from './admin/sidecar-master-fleet';
+import type { SmHost, FollowStatus } from '@/lib/db/fleet-source';
 
 interface SidecarEntry {
   url: string;
@@ -153,6 +156,10 @@ interface FleetData {
   latestBuildVersion: string | null;
   /** File-system sidecars (fileSystemSideCar link). */
   fsSidecars?: FsSidecarRow[];
+  /** fleet.source = follow: sidecarmaster owns the fleet (task 57 / 3.6). */
+  fleetSource?: 'local' | 'follow';
+  managedBy?: ManagedBy | null;
+  master?: { status: FollowStatus; hosts: SmHost[] } | null;
 }
 
 const ROLES = ['embedding', 'code-embedding', 'completion', 'ocr', 'reranker', 'rlm'] as const;
@@ -809,6 +816,8 @@ export default function GpuFleetPanel() {
     </div>
   );
 
+  const following = fleet?.fleetSource === 'follow';
+
   return (
     <div className="space-y-6">
       {actionMsg && (
@@ -817,6 +826,11 @@ export default function GpuFleetPanel() {
         }`}>{actionMsg.text}</div>
       )}
 
+      {following && <ManagedByBanner managedBy={fleet?.managedBy} page="gpu" />}
+      {following && <SidecarMasterFleet hosts={fleet?.master?.hosts ?? []} status={fleet?.master?.status ?? null} />}
+
+      {/* Follow mode: sections 1-4 are management; a disabled fieldset makes every control inside read only. */}
+      <fieldset disabled={following} className="space-y-6 min-w-0">
       {/* Section 1: Sidecar Fleet */}
       <div className="bg-white shadow rounded-lg p-6">
         <div className="flex items-center justify-between mb-4">
@@ -1378,6 +1392,8 @@ export default function GpuFleetPanel() {
         )}
       </div>
 
+      </fieldset>
+
       {/* Section 5: Fleet Settings + Connection Info */}
       <div className="bg-white shadow rounded-lg p-6">
         <h2 className="text-xl font-semibold text-gray-900 mb-4">Fleet Settings</h2>
@@ -1420,19 +1436,19 @@ export default function GpuFleetPanel() {
           </button>
         </div>
 
-        {/* Sync Models */}
-        <div className="flex items-center justify-between mb-6 p-4 bg-gray-50 rounded-lg">
+        {/* Sync Models (sidecarmaster pushes config in follow mode) */}
+        <fieldset disabled={following} className="flex items-center justify-between mb-6 p-4 bg-gray-50 rounded-lg min-w-0">
           <div>
             <div className="font-medium text-gray-900 text-sm">Sync Models to Sidecars</div>
             <div className="text-xs text-gray-500 mt-0.5">
-              Push current model names from admin settings to all connected sidecars.
+              {following ? 'Managed by sidecarmaster while Follow is on.' : 'Push current model names from admin settings to all connected sidecars.'}
             </div>
           </div>
           <button onClick={handleSyncModels} disabled={actionLoading !== null}
             className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700 disabled:opacity-50">
             {actionLoading === 'syncModels' ? 'Syncing...' : 'Sync Models'}
           </button>
-        </div>
+        </fieldset>
 
         {/* Connection info */}
         <div className="space-y-3 text-sm">

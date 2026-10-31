@@ -35,16 +35,22 @@ import {
   upsertProvisioning,
 } from '@/lib/db/host-provisioning';
 import { moveProvisioningAddress } from '@/lib/gpu/provisioning-address-move';
+import { fleetSourcePublic, followedProvisioning } from '@/lib/db/fleet-source';
+import { followModeResponse, refuseWriteInFollowMode } from '@/lib/api/follow-mode-response';
 
 export async function GET(request: NextRequest) {
   const denied = await requireAdminApiAccess(request, 'host-provisioning');
   if (denied) return denied;
 
   try {
-    const provisioning = await listProvisioning();
+    // Follow mode: the rows are sidecarmaster's per-host OS / master URL / port (read only).
+    const source = await fleetSourcePublic();
+    const provisioning = (await followedProvisioning()) ?? (await listProvisioning());
     const defaultWsPort = parseInt(process.env.GPU_WS_PORT || '3002', 10);
-    return NextResponse.json({ provisioning, defaultWsPort });
+    return NextResponse.json({ ...source, provisioning, defaultWsPort });
   } catch (error: any) {
+    const following = followModeResponse(error);
+    if (following) return following;
     return NextResponse.json(
       { error: (error?.message || String(error)).slice(0, 300) },
       { status: 500 },
@@ -55,6 +61,8 @@ export async function GET(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   const denied = await requireAdminApiAccess(request, 'host-provisioning');
   if (denied) return denied;
+  const refused = await refuseWriteInFollowMode('Host provisioning');
+  if (refused) return refused;
 
   try {
     const body = await request.json();
@@ -114,6 +122,8 @@ export async function PUT(request: NextRequest) {
     });
     return NextResponse.json(saved);
   } catch (error: any) {
+    const following = followModeResponse(error);
+    if (following) return following;
     return NextResponse.json(
       { error: (error?.message || String(error)).slice(0, 300) },
       { status: 500 },
@@ -134,6 +144,8 @@ export async function PUT(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   const denied = await requireAdminApiAccess(request, 'host-provisioning');
   if (denied) return denied;
+  const refused = await refuseWriteInFollowMode('Host provisioning');
+  if (refused) return refused;
 
   try {
     const body = await request.json();
@@ -184,6 +196,8 @@ export async function PATCH(request: NextRequest) {
 
     return NextResponse.json({ ok: true, from, to, provisioning, removedOld });
   } catch (error: any) {
+    const following = followModeResponse(error);
+    if (following) return following;
     return NextResponse.json(
       { error: (error?.message || String(error)).slice(0, 300) },
       { status: 500 },
@@ -194,6 +208,8 @@ export async function PATCH(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   const denied = await requireAdminApiAccess(request, 'host-provisioning');
   if (denied) return denied;
+  const refused = await refuseWriteInFollowMode('Host provisioning');
+  if (refused) return refused;
 
   try {
     const sidecarUrl = normalizeSidecarUrl(
@@ -205,6 +221,8 @@ export async function DELETE(request: NextRequest) {
     await deleteProvisioning(sidecarUrl);
     return NextResponse.json({ ok: true, sidecarUrl });
   } catch (error: any) {
+    const following = followModeResponse(error);
+    if (following) return following;
     return NextResponse.json(
       { error: (error?.message || String(error)).slice(0, 300) },
       { status: 500 },

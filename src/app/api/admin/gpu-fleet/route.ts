@@ -21,6 +21,24 @@ import { getAggregatedPeakDemand } from '@/lib/gpu/status-cache';
 import { getGpuLogs } from '@/lib/logger';
 import { requireAdminApiAccess } from '@/lib/api/route-guard';
 import { getFsSidecarStatuses } from '@/lib/fs-sidecar/status';
+import { fleetSourcePublic, getFollowedFleet, getFollowStatus } from '@/lib/db/fleet-source';
+import { followModeResponse, refuseWriteInFollowMode } from '@/lib/api/follow-mode-response';
+
+/**
+ * Actions sidecarmaster owns in follow mode (fleet.source = follow). They answer 409.
+ * Reads (test, gpu, containers, logs), the local note and Sound Suite's own routing
+ * switches (saveConfig: gpu.mode, gpu.autoManage, *.useOrchestrator) stay allowed.
+ */
+const MANAGED_ACTIONS: Record<string, string> = {
+  add: 'The sidecar list', remove: 'The sidecar list',
+  start: 'Container start', stop: 'Container stop',
+  config: 'The idle-timeout push', syncModels: 'The model sync push',
+  saveTimeouts: 'The idle-timeout policy', saveMinOnline: 'The minimum-online policy',
+  mode: 'The sidecar mode switch', provision: 'Host provisioning', saveMasterUrl: 'The master URL',
+  pullModel: 'The model pull', pullModelOnly: 'The model pull', loadModel: 'The model load',
+  updateImage: 'The image update', update: 'The sidecar update',
+  saveSidecarTimeouts: 'The per-sidecar idle-timeout policy', clearSidecarTimeouts: 'The per-sidecar idle-timeout policy',
+};
 
 function getLatestBuildVersion(): string | null {
   try {
@@ -59,8 +77,16 @@ export async function GET(request: NextRequest) {
 
     const sidecarTimeoutOverrides = await getAllSidecarIdleTimeouts(fleet.sidecars.map((s: any) => s.url));
 
+    // Follow mode: who manages the fleet, plus sidecarmaster's view of it for the read-only page.
+    const source = await fleetSourcePublic();
+    const master = source.fleetSource === 'follow'
+      ? { status: await getFollowStatus(), hosts: (await getFollowedFleet())?.hosts ?? [] }
+      : null;
+
     return NextResponse.json({
       ...fleet,
+      ...source,
+      master,
       idleTimeouts: {
         embedding: config.gpuIdleEmbeddingMin,
         'code-embedding': config.gpuIdleCodeEmbeddingMin,
@@ -102,6 +128,11 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { action } = body;
+
+    if (typeof action === 'string' && MANAGED_ACTIONS[action]) {
+      const refused = await refuseWriteInFollowMode(MANAGED_ACTIONS[action]);
+      if (refused) return refused;
+    }
 
     switch (action) {
       case 'add': {
@@ -374,6 +405,8 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
     }
   } catch (error: any) {
+    const following = followModeResponse(error);
+    if (following) return following;
     return NextResponse.json({ error: error.message?.slice(0, 300) }, { status: 500 });
   }
 }

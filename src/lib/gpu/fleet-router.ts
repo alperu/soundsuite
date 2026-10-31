@@ -26,6 +26,7 @@ import { resolveModelFromConfig, type ModeName } from '@/lib/gpu/mode-catalog';
 import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
 import { seedAssignmentsForHost } from '@/lib/db/role-registry-seed';
 import { getProvisioning } from '@/lib/db/host-provisioning';
+import { followSkip, isFollowMode, refuseInFollowMode } from '@/lib/db/fleet-source';
 import {
   resolveSidecarAddress,
   peekAddressChoice,
@@ -645,6 +646,7 @@ export async function controlContainer(
   action: 'start' | 'stop',
   role?: string,
 ): Promise<any> {
+  await refuseInFollowMode(`Container ${action}`);
   const timeout = action === 'start' ? 15_000 : 30_000;
   const body = role ? { role } : undefined;
   return sendToSidecar(agentUrl, `/${action}`, body, 'POST', timeout);
@@ -663,6 +665,7 @@ function markSelfConfigPush(agentUrl: string): void {
 
 /** Push idle timeout configuration to a sidecar (converts minutes to ms). */
 export async function pushIdleTimeouts(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {
+  if (await isFollowMode()) return followSkip('idle-timeout push', agentUrl);
   const result = await sendToSidecar(agentUrl, '/config', {
     idleTimeouts: {
       embedding: timeouts.embedding * 60_000,
@@ -868,6 +871,8 @@ function buildGpuMemUtils(cfg: Awaited<ReturnType<typeof getConfig>>): Record<st
  *      Newer sidecars prefer the new shape and ignore `registry`.
  */
 export async function pushModelRegistry(agentUrl: string): Promise<any> {
+  // Follow mode: sidecarmaster pushes the registry; a second master must not.
+  if (await isFollowMode()) return followSkip('model-registry push', agentUrl);
   // Seed on demand for fresh sidecars so the first push isn't empty.
   const hostOs = detectHostOs(agentUrl);
   try {
@@ -1060,6 +1065,8 @@ export function buildOpenRouterPush(cfg: AppConfig): {
 }
 
 export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {
+  // Follow mode: sidecarmaster pushes config; a second master must not.
+  if (await isFollowMode()) return followSkip('full-config push', agentUrl);
   // Seed on demand for fresh sidecars so the first push isn't empty.
   const hostOs = detectHostOs(agentUrl);
   try {
@@ -1138,6 +1145,10 @@ export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): 
 export async function restartRerankerOnAssignedSidecars(): Promise<{ restarted: string[]; failed: string[] }> {
   const restarted: string[] = [];
   const failed: string[] = [];
+  if (await isFollowMode()) {
+    followSkip('reranker restart');
+    return { restarted, failed };
+  }
   let urls: string[];
   try {
     const { listAllAssignments } = await import('@/lib/db/role-registry');
@@ -1695,11 +1706,13 @@ export async function getSidecarGpus(agentUrl: string): Promise<GpuInfo[]> {
 
 /** Switch a sidecar's mode. */
 export async function switchSidecarMode(agentUrl: string, mode: 'indexing' | 'searching'): Promise<any> {
+  await refuseInFollowMode('The sidecar mode switch');
   return sendToSidecar(agentUrl, '/mode', { mode }, 'POST', 30_000);
 }
 
 /** Trigger provisioning on a sidecar. */
 export async function provisionSidecar(agentUrl: string): Promise<any> {
+  await refuseInFollowMode('Host provisioning');
   return sendToSidecar(agentUrl, '/provision', {}, 'POST', 120_000);
 }
 
@@ -1816,6 +1829,11 @@ export function startMinOnlineEnforcement(): void {
 }
 
 async function runEnforcementTick(): Promise<void> {
+  // 0. Follow mode: sidecarmaster runs min-online and mode distribution. Nothing to do here.
+  if (await isFollowMode()) {
+    followSkip('min-online enforcement');
+    return;
+  }
   // 1. Distribute modes across fleet (if 2+ sidecars)
   await distributeFleetModes();
   // 2. Enforce minimum online instances per role

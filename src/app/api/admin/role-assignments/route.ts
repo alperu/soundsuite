@@ -11,6 +11,8 @@ import { getConfig } from '@/lib/db/config';
 import { resolveModelFromConfig } from '@/lib/gpu/mode-catalog';
 import { ocrModelCaps } from '@/lib/gpu/ocr-model-caps';
 import { requireAdminApiAccess } from '@/lib/api/route-guard';
+import { fleetSourcePublic } from '@/lib/db/fleet-source';
+import { followModeResponse, refuseWriteInFollowMode } from '@/lib/api/follow-mode-response';
 
 /**
  * Mode names ("ss-ocr") → role keys used in CachedSidecarStatus.containers
@@ -46,9 +48,11 @@ export async function GET(req: NextRequest) {
 
   try {
     const sidecarUrl = req.nextUrl.searchParams.get('sidecarUrl');
+    const source = await fleetSourcePublic();
     if (sidecarUrl) {
       const rows = await listAssignmentsForHost(sidecarUrl);
       return NextResponse.json({
+        ...source,
         assignments: rows.map(r => ({
           mode: r.mode,
           enabled: r.enabled,
@@ -60,8 +64,10 @@ export async function GET(req: NextRequest) {
       });
     }
     const rows = await listAllAssignments();
-    return NextResponse.json({ assignments: rows });
+    return NextResponse.json({ ...source, assignments: rows });
   } catch (err) {
+    const following = followModeResponse(err);
+    if (following) return following;
     return NextResponse.json(
       { error: (err as Error).message },
       { status: 500 },
@@ -77,6 +83,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const denied = await requireAdminApiAccess(req, 'role-assignments');
   if (denied) return denied;
+  const refused = await refuseWriteInFollowMode('The role assignment');
+  if (refused) return refused;
 
   try {
     const body = (await req.json()) as Partial<AssignmentInput> & { roleTypeName?: string };
@@ -138,6 +146,8 @@ export async function POST(req: NextRequest) {
     }
     return NextResponse.json({ assignment: row });
   } catch (err) {
+    const following = followModeResponse(err);
+    if (following) return following;
     return NextResponse.json(
       { error: (err as Error).message },
       { status: 500 },
@@ -152,6 +162,8 @@ export async function POST(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const denied = await requireAdminApiAccess(req, 'role-assignments');
   if (denied) return denied;
+  const refused = await refuseWriteInFollowMode('The role assignment');
+  if (refused) return refused;
 
   try {
     const sidecarUrl = req.nextUrl.searchParams.get('sidecarUrl');
@@ -174,6 +186,8 @@ export async function DELETE(req: NextRequest) {
     void syncSidecar(sidecarUrl);
     return NextResponse.json({ ok: true });
   } catch (err) {
+    const following = followModeResponse(err);
+    if (following) return following;
     return NextResponse.json(
       { error: (err as Error).message },
       { status: 500 },
