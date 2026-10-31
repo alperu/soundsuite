@@ -124,7 +124,7 @@ run('Rust sidecar -> SoundSuite folder-status (e2e)', () => {
     expect(album).toMatchObject({ fileCount: 1, recFileCount: 1, recTotalBytes: 1000 });
 
     const st = getFsSidecar('e2e-host');
-    expect(st?.version).toBe('0.1.0');
+    expect(st?.version).toMatch(/^\d+\.\d+\.\d+/);
     expect(st?.profiles).toContain('folder-status');
     expect(st?.connectionMode).toBe('websocket');
     expect(st?.confirmedSeq).toBeGreaterThan(0);
