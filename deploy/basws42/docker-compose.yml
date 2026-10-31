@@ -1,0 +1,90 @@
+# Sound Suite on basws42 with NetBird + HTTPS (fileSystemSideCar docs/https-netbird.md).
+#   cd C:\sidecar-deploy\soundsuite && docker compose -p soundsuite up -d
+# Containers: soundsuite (app), soundsuite-netbird, soundsuite-caddy (+ soundsuite-redis).
+# netbird and caddy share the app's network namespace, so the NetBird IP reaches
+# 3000 (UI/API), 3002 (sidecar WS relay) and 443 (Caddy -> 127.0.0.1:3000).
+# Restart the three together:
+#   docker compose -p soundsuite up -d --force-recreate soundsuite soundsuite-netbird soundsuite-caddy
+# soundsuite.env holds SS_ADMIN_BOOTSTRAP_PASSWORD (first-run admin) and other secrets.
+services:
+  soundsuite:
+    image: soundsuite:latest
+    container_name: soundsuite
+    restart: unless-stopped
+    env_file: soundsuite.env
+    environment:
+      SOUND_SUITE_DATA_DIR: /data
+      DATABASE_URL: file:/data/v1/db/sound-suite.db
+      SS_DATA_ROOT: /data/v1
+      LANCEDB_PATH: /data/v1/lancedb
+      BACKUP_DIR: /data/v1/backups
+      REDIS_URL: redis://soundsuite-redis:6379
+      WATCH_PATHS: /watch/cases
+      NETBIRD_CTL_DIR: /netbird-ctl
+      NODE_ENV: production
+    volumes:
+      - soundsuite-data:/data
+      - soundsuite-exhibits:/app/public/exhibits
+      - soundsuite-watch:/watch/cases
+      - netbird-ctl:/netbird-ctl
+    ports:
+      - "3000:3000"   # UI / API
+      - "3002:3002"   # sidecar WebSocket relay
+    depends_on: [soundsuite-redis]
+    networks: [soundsuite]
+
+  soundsuite-redis:
+    image: redis:7-alpine
+    container_name: soundsuite-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - soundsuite-redis:/data
+    networks: [soundsuite]
+
+  soundsuite-netbird:
+    image: netbirdio/netbird:latest
+    container_name: soundsuite-netbird
+    restart: unless-stopped
+    network_mode: "service:soundsuite"
+    cap_add: [NET_ADMIN, SYS_ADMIN, SYS_RESOURCE]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    entrypoint: ["/bin/bash", "/netbird-entrypoint.sh"]
+    environment:
+      NETBIRD_CTL_DIR: /netbird-ctl
+    volumes:
+      - ./netbird-entrypoint.sh:/netbird-entrypoint.sh:ro
+      - netbird-ctl:/netbird-ctl
+      - netbird-state:/var/lib/netbird
+    depends_on: [soundsuite]
+
+  soundsuite-caddy:
+    image: sidecar-caddy:latest
+    container_name: soundsuite-caddy
+    restart: unless-stopped
+    network_mode: "service:soundsuite"
+    entrypoint: ["/bin/sh", "/caddy-entrypoint.sh"]
+    environment:
+      NETBIRD_CTL_DIR: /netbird-ctl
+      CADDY_UPSTREAM: 127.0.0.1:3000
+    volumes:
+      - ./caddy-entrypoint.sh:/caddy-entrypoint.sh:ro
+      - netbird-ctl:/netbird-ctl
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [soundsuite]
+
+volumes:
+  soundsuite-data:
+  soundsuite-exhibits:
+  soundsuite-watch:
+  soundsuite-redis:
+  netbird-ctl:
+  netbird-state:
+  caddy-data:
+  caddy-config:
+
+networks:
+  soundsuite:
+    name: soundsuite

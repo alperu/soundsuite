@@ -35,9 +35,12 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV NPM_CONFIG_PRODUCTION=false
 
 # Install dependencies first for better layer caching.
-# .npmrc carries legacy-peer-deps=true (apache-arrow vs @lancedb/lancedb peer
-# range) so this npm ci resolves the same way CI and local installs do.
-COPY package.json package-lock.json .npmrc ./
+# legacy-peer-deps=true (apache-arrow vs @lancedb/lancedb peer range) so this
+# npm ci resolves the same way CI and local installs do (.npmrc sets the same).
+# Set by env, not by copying .npmrc: deploy packers leave .npmrc out as a
+# possible secret file, which broke the build.
+ENV NPM_CONFIG_LEGACY_PEER_DEPS=true
+COPY package.json package-lock.json ./
 RUN npm ci
 
 # Copy the rest of the source needed to generate the client and build.
@@ -56,6 +59,15 @@ RUN npx prisma generate
 # in the runner stage). This DB is never shipped.
 RUN mkdir -p /tmp/build-db \
     && DATABASE_URL="file:/tmp/build-db/build.db" npm run build
+
+# Full Prisma CLI tree (with its own deps: effect, c12, ...) for
+# `prisma migrate deploy` in the runner. Copying only node_modules/prisma and
+# @prisma misses those deps ("Cannot find module 'effect'"). The runner
+# merges them into /app/node_modules (no overwrite).
+RUN mkdir -p /opt/prisma-cli && cd /opt/prisma-cli \
+    && echo '{"private":true}' > package.json \
+    && npm install --no-audit --no-fund --omit=optional \
+       "prisma@$(node -p "require('/app/node_modules/prisma/package.json').version")"
 
 ############################
 # Stage 2 — runner
@@ -101,6 +113,24 @@ COPY --from=builder /app/node_modules/@prisma/adapter-better-sqlite3 ./node_modu
 # otherwise the app boots and throws "Prisma client did not initialize" on the
 # first query. Idempotent if tracing already included it.
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+# onnxruntime-node (used by @xenova/transformers for local embeddings).
+# Next's output file tracing follows require() and keeps
+# onnxruntime_binding.node, but the binding loads libonnxruntime.so.1.14.0 with
+# dlopen at run time, which tracing cannot see, so the .so was dropped and the
+# embedding worker failed with "libonnxruntime.so.1.14.0: cannot open shared
+# object file". Copy the whole package from the builder (same npm ci, same
+# version as @xenova/transformers resolves) and fail the build if the lib is
+# missing.
+COPY --from=builder /app/node_modules/onnxruntime-node ./node_modules/onnxruntime-node
+RUN v="$(node -p "require('./node_modules/onnxruntime-node/package.json').version")" \
+    && rm -rf node_modules/onnxruntime-node/bin/napi-v3/darwin node_modules/onnxruntime-node/bin/napi-v3/win32 \
+    && ls -l "node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime.so.${v}" \
+    && ls -l node_modules/onnxruntime-node/bin/napi-v3/linux/x64/onnxruntime_binding.node
+COPY --from=builder /opt/prisma-cli/node_modules /opt/prisma-cli/node_modules
+# Add the CLI's missing deps (c12, effect, ...) next to the app's modules.
+# -n never overwrites a file the app already ships. ESM imports ignore
+# NODE_PATH, so the deps must sit in /app/node_modules.
+RUN cp -rn /opt/prisma-cli/node_modules/. ./node_modules/ && rm -rf /opt/prisma-cli
 # Recreate the `prisma` CLI bin symlink in the runner. Copying the symlink
 # itself across stages is fragile (Docker may dereference it, breaking the
 # CLI's __dirname-relative requires); recreate it so `npx prisma` resolves.

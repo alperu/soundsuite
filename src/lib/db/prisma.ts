@@ -119,10 +119,11 @@ export const SYSTEM_MODELS: ReadonlySet<string> = new Set([
   'adminUser',
   'mcpSession',
   'modelDownload',
+  'fleetSnapshot',
 ])
 
 /** Table names of `SYSTEM_MODELS`, for the one-time seed and the docs. */
-export const SYSTEM_TABLES = ['SidecarCommand', 'HostProvisioning', 'HostRoleAssignment', 'AdminUser', 'McpSession', 'ModelDownload'] as const
+export const SYSTEM_TABLES = ['SidecarCommand', 'HostProvisioning', 'HostRoleAssignment', 'AdminUser', 'McpSession', 'ModelDownload', 'FleetSnapshot'] as const
 
 export function isSystemModel(prop: PropertyKey): boolean {
   return typeof prop === 'string' && SYSTEM_MODELS.has(prop)

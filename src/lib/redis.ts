@@ -1,8 +1,9 @@
 /**
  * Redis client singleton using ioredis.
  *
- * Connects to Redis using REDIS_HOST / REDIS_PORT / REDIS_PASSWORD from .env.
- * Falls back to 127.0.0.1:6379 with no password.
+ * Connects to Redis using REDIS_URL (redis://[:password@]host:port[/db]) when
+ * set, else REDIS_HOST / REDIS_PORT / REDIS_PASSWORD. REDIS_HOST/REDIS_PORT win
+ * over the URL when both are set. Falls back to 127.0.0.1:6379, no password.
  *
  * Usage:
  *   import { getRedis, isRedisAvailable } from '@/lib/redis';
@@ -28,17 +29,41 @@ let available: boolean | null = null;
  * profile copies the schema, never rows. The one real overlap, the
  * filename-keyed classifier cache, yields the same answer for the same file.
  */
+export interface RedisConnOptions {
+  host: string;
+  port: number;
+  password?: string;
+  db?: number;
+}
+
+/** Connection options from env. See the module header for the order. */
+export function redisOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): RedisConnOptions {
+  let url: URL | null = null;
+  if (env.REDIS_URL) {
+    try {
+      url = new URL(env.REDIS_URL);
+    } catch {
+      logger.warn('Ignoring invalid REDIS_URL', { REDIS_URL: env.REDIS_URL });
+    }
+  }
+  const host = env.REDIS_HOST || url?.hostname || '127.0.0.1';
+  const port = parseInt(env.REDIS_PORT || url?.port || '6379', 10);
+  const password = env.REDIS_PASSWORD || (url?.password ? decodeURIComponent(url.password) : undefined) || undefined;
+  const dbPath = url?.pathname?.replace(/^\//, '');
+  const db = dbPath ? parseInt(dbPath, 10) : undefined;
+  return { host, port, password, ...(db !== undefined && !Number.isNaN(db) ? { db } : {}) };
+}
+
 export function getRedis(): Redis {
   if (instance) return instance;
 
-  const host = process.env.REDIS_HOST || '127.0.0.1';
-  const port = parseInt(process.env.REDIS_PORT || '6379', 10);
-  const password = process.env.REDIS_PASSWORD || undefined;
+  const { host, port, password, db } = redisOptionsFromEnv();
 
   instance = new Redis({
     host,
     port,
     password,
+    db,
     maxRetriesPerRequest: 3,
     retryStrategy(times) {
       if (times > 5) return null; // stop retrying after 5 attempts

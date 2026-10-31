@@ -159,6 +159,22 @@ async function buildProcessDocumentFn(): Promise<(documentId: string, filePath: 
 }
 
 /**
+ * Process function for the JobQueue when the worker failed to start: builds
+ * the pipeline on first use and keeps it; a failed build is retried next time.
+ */
+let lazyPipeline: Promise<(documentId: string, filePath: string) => Promise<void>> | null = null;
+async function lazyProcessDocument(documentId: string, filePath: string): Promise<void> {
+  if (!lazyPipeline) {
+    lazyPipeline = buildProcessDocumentFn().catch((err) => {
+      lazyPipeline = null;
+      throw err;
+    });
+  }
+  const fn = await lazyPipeline;
+  await fn(documentId, filePath);
+}
+
+/**
  * Get (or create) the singleton ParsingWorkerManager.
  * Safe to call from any API route — only initializes once.
  */
@@ -212,7 +228,17 @@ export async function getWorkerManager(): Promise<ParsingWorkerManager> {
       } catch (err) {
         // Reset so next call retries instead of returning the failed promise
         S.initPromise = null;
-        logger.error('Failed to initialize ParsingWorkerManager', err);
+        const e = err as Error;
+        logger.error(
+          'Embedding/parsing worker failed to start. Starting the GPU relay (3002), FileWatcher and JobQueue without it; documents will fail to parse until this is fixed.',
+          { error: e?.message ?? String(err), stack: e?.stack },
+        );
+        // The relay, watcher and queue do not need the worker. Before this,
+        // a worker failure (e.g. a missing libonnxruntime.so) left all of
+        // them down. The queue gets a lazy process function that retries the
+        // pipeline build per document.
+        await startCoreServicesIfNeeded(lazyProcessDocument);
+        registerShutdownHandlers();
         throw err;
       }
     })();
@@ -412,15 +438,17 @@ function registerShutdownHandlers(): void {
   }
 }
 
-async function startCoreServicesIfNeeded(
+export async function startCoreServicesIfNeeded(
   processDocument: (documentId: string, filePath: string) => Promise<void>,
 ): Promise<void> {
   if (S.coreServicesStarted) return;
   S.coreServicesStarted = true;
 
-  try {
-    const sm = getServicesManager();
+  const sm = getServicesManager();
 
+  // Each block has its own try: a failure in one (e.g. the DB query for case
+  // paths) must not stop the GPU relay or the others from starting.
+  try {
     // --- FileWatcher ---
     const { FileWatcher } = await import('./file-watcher');
     const cases = await prisma.case.findMany({ select: { path: true } });
@@ -436,18 +464,31 @@ async function startCoreServicesIfNeeded(
     await sm.trackWorkerPid('file-watcher', process.pid);
     if (casePaths.length > 0) logger.info('FileWatcher started', { pathCount: casePaths.length });
     else logger.info('FileWatcher registered with no case paths — starts on the first case');
+  } catch (err) {
+    logger.error('Failed to start FileWatcher', err);
+  }
 
+  try {
     // --- JobQueue ---
     const { JobQueue } = await import('./job-queue');
     const jobQueue = new JobQueue({}, processDocument, prisma);
     sm.registerJobQueue(jobQueue);
     logger.info('JobQueue registered');
+  } catch (err) {
+    logger.error('Failed to start JobQueue', err);
+  }
 
+  try {
     // --- MCP ToolRegistry (tools served via Next.js API at /api/mcp/execute) ---
     const { getToolRegistry } = await import('@/lib/mcp/get-tool-registry');
     const registry = await getToolRegistry();
     sm.registerToolRegistry(registry);
     logger.info('MCP ToolRegistry registered (served via /api/mcp/execute)');
+  } catch (err) {
+    logger.error('Failed to register MCP ToolRegistry', err);
+  }
+
+  {
 
     // --- File-system sidecar link (fileSystemSideCar, folder-status profile) ---
     // Off unless FS_SIDECAR_USERS is set. See fileSystemSideCar docs/soundsuite.md.
@@ -488,6 +529,14 @@ async function startCoreServicesIfNeeded(
       logger.warn('Failed to start min-online enforcement', { error: (err as Error).message });
     }
 
+    // --- Fleet follower (fleet.source = follow: keeps the sidecarmaster fleet copy fresh; idle in local mode) ---
+    try {
+      const { startFleetFollower } = await import('@/lib/gpu/fleet-follower');
+      startFleetFollower();
+    } catch (err) {
+      logger.warn('Failed to start fleet follower', { error: (err as Error).message });
+    }
+
     // --- Sidecar Reconnect Watchdog (reverse-pushes canonical master URL to stale sidecars) ---
     try {
       const { startSidecarReconnectWatchdog } = await import('@/lib/gpu/sidecar-reconnect-watchdog');
@@ -505,8 +554,5 @@ async function startCoreServicesIfNeeded(
     } catch (err) {
       logger.warn('Failed to start JobLog reaper', { error: (err as Error).message });
     }
-  } catch (err) {
-    logger.error('Failed to start core services', err);
-    S.coreServicesStarted = false; // allow retry on next worker init
   }
 }

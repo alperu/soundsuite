@@ -36,7 +36,7 @@ yarn-error.log*
 next-env.d.ts
 
 # prisma
-/prisma/migrations
+# /prisma/migrations is tracked: the Docker image needs every migration (fresh DBs).
 /prisma/data/
 
 # data (databases, vectors, backups)

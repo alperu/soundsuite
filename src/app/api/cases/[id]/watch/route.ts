@@ -102,10 +102,8 @@ export async function GET(
         try {
           // Create a separate connection for subscribing
           const Redis = (await import('ioredis')).default;
-          const host = process.env.REDIS_HOST || '127.0.0.1';
-          const port = parseInt(process.env.REDIS_PORT || '6379', 10);
-          const password = process.env.REDIS_PASSWORD || undefined;
-          subscriber = new Redis({ host, port, password, maxRetriesPerRequest: 3 }) as ReturnType<typeof getRedis>;
+          const { redisOptionsFromEnv } = await import('@/lib/redis');
+          subscriber = new Redis({ ...redisOptionsFromEnv(), maxRetriesPerRequest: 3 }) as ReturnType<typeof getRedis>;
 
           subscriber.subscribe(
             SSE_CHANNELS.DOC_STATUS,
