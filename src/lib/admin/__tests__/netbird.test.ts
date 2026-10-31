@@ -18,6 +18,7 @@ import {
   validHostname,
   validManagementUrl,
   validWireguardPort,
+  validExternalIpMap,
   NetbirdError,
 } from '../netbird';
 
@@ -36,6 +37,11 @@ describe('netbird helpers', () => {
     expect(validWireguardPort(51820)).toBe(true);
     expect(validWireguardPort(70000)).toBe(false);
     expect(validWireguardPort(1.5)).toBe(false);
+    expect(validExternalIpMap('')).toBe(true);
+    expect(validExternalIpMap('99.92.186.153')).toBe(true);
+    expect(validExternalIpMap('1.2.3.4/10.0.0.1,5.6.7.8/eth1')).toBe(true);
+    expect(validExternalIpMap('999.1.1.1')).toBe(false);
+    expect(validExternalIpMap('1.2.3.4;rm')).toBe(false);
   });
 
   it('parses netbird status --json and marks old files as not connected', () => {
@@ -96,8 +102,17 @@ describe('netbird settings', () => {
     const file = path.join(ctl, 'config.json');
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
-    expect(Object.keys(cfg)).toEqual(['setupKey', 'hostname', 'managementUrl', 'wireguardPort', 'enabled', 'https', 'updatedAt']);
+    expect(Object.keys(cfg)).toEqual(['setupKey', 'hostname', 'managementUrl', 'wireguardPort', 'externalIpMap', 'enabled', 'https', 'updatedAt']);
     expect(cfg.setupKey).toBe(KEY);
+  });
+
+  it('saves the advertised public IP right after wireguardPort (sed reads it)', () => {
+    const v = updateNetbirdSettings({ wireguardPort: 52003, externalIpMap: ' 99.92.186.153 ' }, opts);
+    expect(v).toMatchObject({ wireguardPort: 52003, externalIpMap: '99.92.186.153' });
+    const raw = fs.readFileSync(path.join(ctl, 'config.json'), 'utf8');
+    expect(raw).toMatch(/^  "wireguardPort": 52003,\n  "externalIpMap": "99.92.186.153",$/m);
+    expect(() => updateNetbirdSettings({ externalIpMap: 'not an ip' }, opts)).toThrow(/public IP/);
+    expect(updateNetbirdSettings({ externalIpMap: '' }, opts).externalIpMap).toBe('');
   });
 
   it('keeps the saved key when a later save leaves it out', () => {

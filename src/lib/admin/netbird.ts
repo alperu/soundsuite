@@ -37,6 +37,8 @@ export interface NetbirdConfig {
   hostname: string;
   managementUrl: string;
   wireguardPort: number;
+  /** netbird up --external-ip-map, e.g. "99.92.186.153". Empty = not set. */
+  externalIpMap: string;
   enabled: boolean;
   https: HttpsConfig;
   updatedAt: string;
@@ -77,6 +79,7 @@ export interface NetbirdView {
   hasKey: boolean;
   keyHint: string | null;
   wireguardPort: number;
+  externalIpMap: string;
   status: NetbirdStatus | null;
   https: HttpsView;
 }
@@ -125,6 +128,14 @@ export function validDomain(d: unknown): d is string {
 
 export function validWireguardPort(p: unknown): p is number {
   return typeof p === 'number' && Number.isInteger(p) && p >= 0 && p <= 65535;
+}
+
+const IPV4 = '(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}';
+const IP_MAP_ENTRY_RE = new RegExp(`^${IPV4}(/(${IPV4}|[A-Za-z0-9_.-]{1,15}))?$`);
+
+/** "" or a comma list of IP, IP/localIP or IP/interface (netbird up --external-ip-map). */
+export function validExternalIpMap(m: unknown): m is string {
+  return typeof m === 'string' && m.length <= 500 && (m === '' || m.split(',').every(e => IP_MAP_ENTRY_RE.test(e)));
 }
 
 export function keyHint(key: string): string | null {
@@ -194,6 +205,7 @@ function readConfig(dir: string): NetbirdConfig {
     hostname: validHostname(r.hostname) ? r.hostname : DEFAULT_HOSTNAME,
     managementUrl: validManagementUrl(r.managementUrl) ? r.managementUrl : DEFAULT_MANAGEMENT_URL,
     wireguardPort: validWireguardPort(r.wireguardPort) ? r.wireguardPort : 0,
+    externalIpMap: validExternalIpMap(r.externalIpMap) ? r.externalIpMap : '',
     enabled: r.enabled === true,
     https: {
       enabled: h.enabled === true,
@@ -238,6 +250,7 @@ export function getNetbirdView(opts: NetbirdOptions = {}): NetbirdView {
     hasKey: !!cfg.setupKey,
     keyHint: keyHint(cfg.setupKey),
     wireguardPort: cfg.wireguardPort,
+    externalIpMap: cfg.externalIpMap,
     status: nb ? parseNetbirdStatus(nb.raw, nb.mtimeMs, now) : null,
     https: {
       enabled: cfg.https.enabled,
@@ -253,7 +266,7 @@ export function getNetbirdView(opts: NetbirdOptions = {}): NetbirdView {
 
 /**
  * Partial update. Body:
- *   { setupKey?, hostname?, managementUrl?, wireguardPort?, enabled?,
+ *   { setupKey?, hostname?, managementUrl?, wireguardPort?, externalIpMap?, enabled?,
  *     https?: { enabled?, domain?, cloudflareToken?, email? } }
  * Throws NetbirdError on bad input (nothing is written then).
  */
@@ -282,6 +295,13 @@ export function updateNetbirdSettings(body: unknown, opts: NetbirdOptions = {}):
       throw new NetbirdError('WireGuard port must be a whole number from 0 to 65535 (0 = NetBird picks)');
     }
     cfg.wireguardPort = b.wireguardPort;
+  }
+  if (b.externalIpMap !== undefined) {
+    const m = typeof b.externalIpMap === 'string' ? b.externalIpMap.replace(/\s+/g, '') : b.externalIpMap;
+    if (!validExternalIpMap(m)) {
+      throw new NetbirdError('Advertised public IP must be empty or an IPv4 address like 99.92.186.153 (or IP/local-IP, comma separated)');
+    }
+    cfg.externalIpMap = m;
   }
   if (b.enabled !== undefined) {
     if (typeof b.enabled !== 'boolean') throw new NetbirdError('enabled must be true or false');

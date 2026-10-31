@@ -3,13 +3,15 @@
 # netbirdio/netbird:latest (see deploy/basws42/docker-compose.yml).
 #
 # Settings > NetBird (/dashboard/config/#netbird) writes $CTL/config.json:
-#   { "setupKey", "hostname", "managementUrl", "wireguardPort", "enabled",
+#   { "setupKey", "hostname", "managementUrl", "wireguardPort", "externalIpMap", "enabled",
 #     "https": {...}, "updatedAt" }   (https is read by docker/caddy-entrypoint.sh)
 # This script:
 #   - starts the NetBird daemon (`netbird service run`), as the image does;
 #   - waits for config.json with enabled=true and a setupKey, then runs
 #     `netbird up --setup-key-file ... --management-url ... --hostname ...
-#      --wireguard-port ...` (port 0 = NetBird picks a free port);
+#      --wireguard-port ... --external-ip-map ...` (port 0 = NetBird picks a
+#      free port; externalIpMap, else env NB_EXTERNAL_IP_MAP, is the public IP
+#      peers should use, e.g. 99.92.186.153; empty clears it);
 #   - writes `netbird status --json` to $CTL/status.json every 10 s;
 #   - on a new updatedAt: `netbird down`, then up again with the new values;
 #   - on enabled=false: `netbird down`;
@@ -32,6 +34,16 @@ log() { printf '%s netbird-ctl: %s\n' "$(date -Isec)" "$*" >&2; }
 # server writes (2-space indent; nested "https" fields have 4 and never match).
 field() {
   sed -n "s/^  \"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",]*\)\"\{0,1\}[[:space:]]*,\{0,1\}[[:space:]]*\$/\1/p" "$CFG" 2>/dev/null | head -n 1
+}
+
+# externalIpMap may hold commas ("IP/IP,IP/eth0"), which field() does not allow.
+# Only IPs, interface names, "/", "," are kept; anything else makes it empty.
+ipmap_field() {
+  local v
+  v="$(sed -n 's/^  "externalIpMap"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' "$CFG" 2>/dev/null | head -n 1)"
+  [ -z "$v" ] && v="${NB_EXTERNAL_IP_MAP:-}"
+  case "$v" in *[!0-9A-Za-z./,_-]*) v="" ;; esac
+  printf '%s' "$v"
 }
 
 # The shared network namespace, as seen at start. When the app container is
@@ -62,16 +74,16 @@ applied=""   # updatedAt of the config now in force
 is_up=0
 
 bring_up() {
-  local key host url port keyfile
-  key="$(field setupKey)"; host="$(field hostname)"; url="$(field managementUrl)"; port="$(field wireguardPort)"
+  local key host url port ipmap keyfile
+  key="$(field setupKey)"; host="$(field hostname)"; url="$(field managementUrl)"; port="$(field wireguardPort)"; ipmap="$(ipmap_field)"
   [ -z "$host" ] && host="soundsuite"
   [ -z "$url" ] && url="https://vpn.bas.co:443"
   case "$port" in ''|*[!0-9]*) port=0 ;; esac
   keyfile="$(mktemp /tmp/nbkey.XXXXXX)"
   chmod 600 "$keyfile"
   printf '%s' "$key" > "$keyfile"
-  log "netbird up (hostname=$host, management=$url, wireguard-port=$port)"
-  if "$NB" up --setup-key-file "$keyfile" --management-url "$url" --hostname "$host" --wireguard-port "$port" >/dev/null 2>&1; then
+  log "netbird up (hostname=$host, management=$url, wireguard-port=$port, external-ip-map=${ipmap:-none})"
+  if "$NB" up --setup-key-file "$keyfile" --management-url "$url" --hostname "$host" --wireguard-port "$port" --external-ip-map "$ipmap" >/dev/null 2>&1; then
     is_up=1; log "connected"
   else
     is_up=0; log "netbird up failed; will retry"
@@ -94,7 +106,10 @@ while true; do
     enabled="$(field enabled)"; updated="$(field updatedAt)"; key="$(field setupKey)"
     if [ "$enabled" = "true" ] && [ -n "$key" ]; then
       if [ "$updated" != "$applied" ]; then
-        [ "$is_up" = 1 ] && bring_down
+        # Always down first: at start the daemon reconnects from its saved
+        # profile, and `up` on a live connection ignores new flags
+        # (--wireguard-port, --external-ip-map).
+        bring_down
         bring_up
         [ "$is_up" = 1 ] && applied="$updated"
       fi

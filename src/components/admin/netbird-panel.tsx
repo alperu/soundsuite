@@ -3,7 +3,7 @@
 /**
  * Admin → NetBird tab. Same design as mcpfantom dashboard/src/app/netbird/page.tsx:
  * setup key (last-4 hint), hostname, management URL, enabled, Advanced
- * (WireGuard port) and HTTPS (Cloudflare token last-4 hint, certificate status).
+ * (WireGuard port, advertised public IP) and HTTPS (Cloudflare token last-4 hint, certificate status).
  * Secrets are write-only: the API returns only hasKey/hasToken + last 4 chars.
  */
 
@@ -49,6 +49,7 @@ export default function NetbirdPanel() {
   const [managementUrl, setManagementUrl] = useState('https://vpn.bas.co:443');
   const [enabled, setEnabled] = useState(false);
   const [wireguardPort, setWireguardPort] = useState('0');
+  const [externalIpMap, setExternalIpMap] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [httpsEnabled, setHttpsEnabled] = useState(false);
   const [domain, setDomain] = useState('vpn.bas.co');
@@ -60,7 +61,7 @@ export default function NetbirdPanel() {
 
   const fill = (v: NetbirdView) => {
     setHostname(v.hostname); setManagementUrl(v.managementUrl); setEnabled(v.enabled);
-    setWireguardPort(String(v.wireguardPort));
+    setWireguardPort(String(v.wireguardPort)); setExternalIpMap(v.externalIpMap ?? '');
     setHttpsEnabled(v.https.enabled); setDomain(v.https.domain); setEmail(v.https.email);
   };
 
@@ -110,6 +111,7 @@ export default function NetbirdPanel() {
       hostname: hostname.trim(),
       managementUrl: managementUrl.trim(),
       wireguardPort: port,
+      externalIpMap: externalIpMap.trim(),
       enabled,
       https: {
         enabled: httpsEnabled,
@@ -196,7 +198,13 @@ export default function NetbirdPanel() {
                 type="number" min={0} max={65535} value={wireguardPort}
                 onChange={e => setWireguardPort(e.target.value)} className={`${INPUT} max-w-[10rem]`}
               />
-              <p className="text-xs text-gray-500 mt-1">0 = NetBird picks a free port.</p>
+              <p className="text-xs text-gray-500 mt-1">0 = NetBird picks a free port. Set a fixed port to forward it on the firewall (UDP) for direct peer-to-peer links.</p>
+              <label className="block text-sm font-medium text-gray-700 mb-1 mt-3">Advertised public IP (optional)</label>
+              <input
+                type="text" value={externalIpMap} placeholder="99.92.186.153"
+                onChange={e => setExternalIpMap(e.target.value)} className={`${INPUT} max-w-[20rem]`}
+              />
+              <p className="text-xs text-gray-500 mt-1">The public IP that forwards the WireGuard port (UDP) to this host. Peers then connect here directly instead of through the relay. Empty = not set. Passed as netbird up --external-ip-map.</p>
             </div>
           )}
         </div>

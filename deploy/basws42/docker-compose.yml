@@ -30,6 +30,9 @@ services:
     ports:
       - "3000:3000"   # UI / API
       - "3002:3002"   # sidecar WebSocket relay
+      # NetBird WireGuard (UDP). soundsuite-netbird shares this network, so its port is
+      # published here. Same port as Admin > NetBird > Advanced; forward it on the firewall.
+      - "${SOUNDSUITE_NETBIRD_WG_PORT:-52003}:${SOUNDSUITE_NETBIRD_WG_PORT:-52003}/udp"
     depends_on: [soundsuite-redis]
     networks: [soundsuite]
 

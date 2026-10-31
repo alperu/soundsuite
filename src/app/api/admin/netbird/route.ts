@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
 
 /**
  * PUT /api/admin/netbird — partial update. Body:
- *   { setupKey?, hostname?, managementUrl?, wireguardPort?, enabled?,
+ *   { setupKey?, hostname?, managementUrl?, wireguardPort?, externalIpMap?, enabled?,
  *     https?: { enabled?, domain?, cloudflareToken?, email? } }
  */
 export async function PUT(req: NextRequest) {
