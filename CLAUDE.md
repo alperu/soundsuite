@@ -1,5 +1,22 @@
 # CLAUDE.md
 
+## Tools for search and shell output
+
+1. **context-mode first** (the gateway). Use its tools for every search and
+   every read that may return more than a few dozen lines: `ctx_batch_execute`
+   / `ctx_execute` to search, `ctx_execute_file` to analyse a large file,
+   `ctx_fetch_and_index` + `ctx_search` for web pages. Print only what you
+   need. Use the Read tool only for a file you are about to edit.
+2. **If context-mode is not available**, or for a quick one-off command:
+   - Search with **ripgrep** (`rg`), never `grep`: `rg -n "pattern" src/`,
+     `rg -l "name"`, `rg -c "error" app.log`.
+   - Run shell commands through **rtk** for token savings: `rtk git status`,
+     `rtk git log`, `rtk ls`, `rtk find`, test and build commands. If a hook
+     already rewrites commands to rtk, plain commands are fine.
+   - Keep output small (`head`, `tail -n 20`, `rg -c`, `wc -l`). Never print
+     whole logs, generated files, `node_modules/` or build folders.
+
+
 Sound Suite (`court-lens-mcp`): local, self-hosted document intelligence for legal case
 management. Watches folders of court PDFs → OCR/vector ingestion → MCP tools for AI clients
 + a Next.js dashboard. This file holds only what every session needs. Reference material is in
