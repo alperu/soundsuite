@@ -1,16 +1,42 @@
 # Sound Suite on basws42 with NetBird + HTTPS (fileSystemSideCar docs/https-netbird.md).
 #   cd C:\sidecar-deploy\soundsuite && docker compose -p soundsuite up -d
 # Containers: soundsuite (app), soundsuite-netbird, soundsuite-caddy (+ soundsuite-redis).
-# netbird and caddy share the app's network namespace, so the NetBird IP reaches
-# 3000 (UI/API), 3002 (sidecar WS relay) and 443 (Caddy -> 127.0.0.1:3000).
-# Restart the three together:
-#   docker compose -p soundsuite up -d --force-recreate soundsuite soundsuite-netbird soundsuite-caddy
+# app, netbird and caddy share the network namespace of soundsuite-net, so the NetBird IP
+# reaches 3000 (UI/API), 3002 (sidecar WS relay) and 443 (Caddy -> 127.0.0.1:3000).
+# soundsuite-net owns the network namespace, the ports and the DNS name "soundsuite".
+# soundsuite, soundsuite-netbird and soundsuite-caddy join it (network_mode: container:soundsuite-net),
+# so the app can restart or be recreated alone and netbird + caddy keep working:
+#   docker compose -p soundsuite up -d --no-deps --force-recreate soundsuite
+# If soundsuite-net itself is recreated, recreate the three that join it too:
+#   docker compose -p soundsuite up -d --no-deps --force-recreate soundsuite-net soundsuite soundsuite-netbird soundsuite-caddy
+# container: and not service:, because docker compose v2.2.3 (basws42) fails
+# `up --no-deps <svc>` with "no such service" when the network is service:<other>.
+# The task SidecarStackWatchdog (C:\sidecar-deploy\watchdog.ps1, log watchdog.log) repairs it if not.
 # soundsuite.env holds SS_ADMIN_BOOTSTRAP_PASSWORD (first-run admin) and other secrets.
 services:
+  # Network owner: namespace, ports, DNS name "soundsuite".
+  soundsuite-net:
+    image: alpine:3.20
+    container_name: soundsuite-net
+    init: true
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+    mem_limit: 32m
+    ports:
+      - "3000:3000"   # UI / API
+      - "3002:3002"   # sidecar WebSocket relay
+      # NetBird WireGuard (UDP). soundsuite-netbird shares this network, so its port is
+      # published here. Same port as Admin > NetBird > Advanced; forward it on the firewall.
+      - "${SOUNDSUITE_NETBIRD_WG_PORT:-52003}:${SOUNDSUITE_NETBIRD_WG_PORT:-52003}/udp"
+    networks:
+      soundsuite:
+        aliases: [soundsuite]
+
   soundsuite:
     image: soundsuite:latest
     container_name: soundsuite
     restart: unless-stopped
+    network_mode: "container:soundsuite-net"
     env_file: soundsuite.env
     environment:
       SOUND_SUITE_DATA_DIR: /data
@@ -27,14 +53,7 @@ services:
       - soundsuite-exhibits:/app/public/exhibits
       - soundsuite-watch:/watch/cases
       - netbird-ctl:/netbird-ctl
-    ports:
-      - "3000:3000"   # UI / API
-      - "3002:3002"   # sidecar WebSocket relay
-      # NetBird WireGuard (UDP). soundsuite-netbird shares this network, so its port is
-      # published here. Same port as Admin > NetBird > Advanced; forward it on the firewall.
-      - "${SOUNDSUITE_NETBIRD_WG_PORT:-52003}:${SOUNDSUITE_NETBIRD_WG_PORT:-52003}/udp"
-    depends_on: [soundsuite-redis]
-    networks: [soundsuite]
+    depends_on: [soundsuite-net, soundsuite-redis]
 
   soundsuite-redis:
     image: redis:7-alpine
@@ -49,7 +68,7 @@ services:
     image: netbirdio/netbird:latest
     container_name: soundsuite-netbird
     restart: unless-stopped
-    network_mode: "service:soundsuite"
+    network_mode: "container:soundsuite-net"
     cap_add: [NET_ADMIN, SYS_ADMIN, SYS_RESOURCE]
     devices:
       - /dev/net/tun:/dev/net/tun
@@ -60,13 +79,13 @@ services:
       - ./netbird-entrypoint.sh:/netbird-entrypoint.sh:ro
       - netbird-ctl:/netbird-ctl
       - netbird-state:/var/lib/netbird
-    depends_on: [soundsuite]
+    depends_on: [soundsuite-net]
 
   soundsuite-caddy:
     image: sidecar-caddy:latest
     container_name: soundsuite-caddy
     restart: unless-stopped
-    network_mode: "service:soundsuite"
+    network_mode: "container:soundsuite-net"
     entrypoint: ["/bin/sh", "/caddy-entrypoint.sh"]
     environment:
       NETBIRD_CTL_DIR: /netbird-ctl
@@ -76,7 +95,7 @@ services:
       - netbird-ctl:/netbird-ctl
       - caddy-data:/data
       - caddy-config:/config
-    depends_on: [soundsuite]
+    depends_on: [soundsuite-net]
 
 volumes:
   soundsuite-data:

@@ -333,8 +333,9 @@ can then drop most of its own registry (`mcpfantom/src/sidecars/registry.ts`) la
 
 Same model as `fileSystemSideCar/docs/https-netbird.md` and `mcpfantom/docker/{netbird,caddy}-entrypoint.sh`:
 
-- Stack on basws42: `C:\sidecar-deploy\sidecarmaster\` with `sidecarmaster`, `sidecarmaster-netbird`,
-  `sidecarmaster-caddy` (all `network_mode: service:sidecarmaster`).
+- Stack on basws42: `C:\sidecar-deploy\sidecarmaster\` with `sidecarmaster-net` (network owner:
+  ports and DNS name), `sidecarmaster`, `sidecarmaster-netbird`, `sidecarmaster-caddy`
+  (all three `network_mode: container:sidecarmaster-net`, so the app can restart alone).
 - NetBird name `sidecarmaster` → `https://sidecarmaster.vpn.bas.co`.
 - Settings page: NetBird tab (setup key, hostname, management URL, WireGuard port under Advanced)
   and HTTPS part (on/off, domain `vpn.bas.co`, Cloudflare token masked, cert status). Writes
