@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import { loginUrlForCurrentPage } from '@/lib/admin/login-redirect';
 import dynamic from 'next/dynamic';
 import TemplateEditorHeader from '@/components/workflow/template-editor-header';
 import { getPreference, setPreference } from '@/lib/indexed-db';
@@ -279,8 +280,15 @@ export default function WorkflowPage() {
   // Load cases
   useEffect(() => {
     fetch('/api/cases')
-      .then(r => r.json())
-      .then(data => setCases(data.cases || []))
+      .then(r => {
+        if (r.status === 401) {
+          // No dashboard session on a remote deployment: sign in, then come back.
+          router.replace(loginUrlForCurrentPage());
+          return null;
+        }
+        return r.json();
+      })
+      .then(data => { if (data) setCases(data.cases || []); })
       .catch(() => {});
   }, []);
 

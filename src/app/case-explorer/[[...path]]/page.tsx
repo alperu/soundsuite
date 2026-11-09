@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { loginUrlForCurrentPage } from '@/lib/admin/login-redirect';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { getCachedCases, setCachedCases, getCachedFilings, setCachedFilings, setPreference, getPreference } from '@/lib/indexed-db';
 import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
@@ -508,6 +509,11 @@ export default function CaseExplorerPage() {
 
       // Step 2: Fetch from API (background if cache was used)
       const casesRes = await fetch('/api/cases');
+      if (casesRes.status === 401) {
+        // No dashboard session on a remote deployment: sign in, then come back.
+        window.location.assign(loginUrlForCurrentPage());
+        return;
+      }
       if (!casesRes.ok) return;
       const casesData = await casesRes.json();
       const cases: CaseRecord[] = casesData.cases || [];

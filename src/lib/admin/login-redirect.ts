@@ -13,18 +13,32 @@
 export const LOGIN_PATH = '/admin/login';
 export const DEFAULT_AFTER_LOGIN = '/admin/general';
 
+/** Origin used only to resolve a candidate path; never dereferenced. */
+const PROBE_ORIGIN = 'https://next-path.invalid';
+
 /**
  * Accept only a same-origin path: exactly one leading `/`, no scheme, no
- * protocol-relative `//host`, no backslash tricks, no header-splitting
- * characters, and never the login page itself (that would loop).
+ * protocol-relative `//host`, no backslash, no control characters (URL
+ * parsers strip tabs and newlines, so `/\t/host` would resolve to `//host`),
+ * and never the login page itself (that would loop). The value is resolved
+ * against a probe origin and must stay on it; the normalised
+ * `pathname + search` is returned.
  */
 export function safeNextPath(raw: string | string[] | null | undefined): string | null {
   const v = Array.isArray(raw) ? raw[0] : raw;
   if (!v || typeof v !== 'string') return null;
-  if (!v.startsWith('/') || v.startsWith('//') || v.startsWith('/\\')) return null;
-  if (/[\r\n\0]/.test(v)) return null;
-  if (v === LOGIN_PATH || v.startsWith(`${LOGIN_PATH}?`) || v.startsWith(`${LOGIN_PATH}/`)) return null;
-  return v;
+  if (!v.startsWith('/') || v.startsWith('//')) return null;
+  if (/[\u0000-\u001f\u007f\\]/.test(v)) return null;
+  let u: URL;
+  try {
+    u = new URL(v, PROBE_ORIGIN);
+  } catch {
+    return null;
+  }
+  if (u.origin !== PROBE_ORIGIN) return null;
+  const path = u.pathname + u.search;
+  if (path === LOGIN_PATH || path.startsWith(`${LOGIN_PATH}?`) || path.startsWith(`${LOGIN_PATH}/`)) return null;
+  return path;
 }
 
 /** Destination after a successful sign-in. */

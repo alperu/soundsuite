@@ -113,6 +113,20 @@ describe('<LoginForm> fragment sign-in', () => {
     expect(push).not.toHaveBeenCalled();
   });
 
+  it('returns to a validated `next` path after sign-in', async () => {
+    setHash(`#auth=${FRAG}`);
+    mockFetch(true);
+    render(<LoginForm next="/case-management/00-0000-XX/motion?doc=1" />);
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/case-management/00-0000-XX/motion?doc=1'));
+  });
+
+  it('ignores an off-origin `next` and falls back to the dashboard', async () => {
+    setHash(`#auth=${FRAG}`);
+    mockFetch(true);
+    render(<LoginForm next="//evil.example/x" />);
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/general'));
+  });
+
   it('renders the plain form without a fragment and touches no network', async () => {
     setHash('');
     const fetchMock = mockFetch(true);

@@ -16,6 +16,16 @@ describe('safeNextPath', () => {
     expect(safeNextPath(['/a', '/b'])).toBe('/a');
   });
 
+  it('drops a fragment and keeps the normalised path', () => {
+    expect(safeNextPath('/case-management/x#frag')).toBe('/case-management/x');
+  });
+
+  it('never resolves off the probe origin', () => {
+    // Belt and braces: anything the regex misses must still fail the origin check.
+    expect(safeNextPath('/%09/evil.example')).toBe('/%09/evil.example');
+    expect(new URL('/%09/evil.example', 'https://h.test').host).toBe('h.test');
+  });
+
   it.each([
     [undefined],
     [null],
@@ -24,7 +34,10 @@ describe('safeNextPath', () => {
     ['https://evil.example/x'],
     ['//evil.example/x'],
     ['/\\evil.example'],
+    ['/\t/evil.example'],
+    ['/\n/evil.example'],
     ['/ok\r\nSet-Cookie: x'],
+    ['/a\\b'],
     [LOGIN_PATH],
     [`${LOGIN_PATH}?next=/x`],
     [`${LOGIN_PATH}/deeper`],
