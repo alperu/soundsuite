@@ -6,6 +6,7 @@ import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
 import { SearchableCombo } from '@/components/searchable-combo';
 import { getCachedCases, setCachedCases, getCachedFilings, setCachedFilings, getPreference, setPreference } from '@/lib/indexed-db';
 import { formatFilingLabel } from '@/lib/filings/format-filing-label';
+import { loginUrlForCurrentPage } from '@/lib/admin/login-redirect';
 import { TagPanel } from '@/components/case/tag-panel';
 import { TAG_SPEC_BY_KIND, type EntityKind } from '@/components/case/tag-spec';
 import {
@@ -369,6 +370,12 @@ const [copiedFilings, setCopiedFilings] = useState<Set<string>>(new Set());
     } catch { /* IndexedDB unavailable */ }
     // Fetch fresh from API
     const res = await fetch('/api/cases');
+    if (res.status === 401) {
+      // No dashboard session on a remote deployment: every case API call will
+      // 401, so send the browser to sign in and back to this URL afterwards.
+      router.replace(loginUrlForCurrentPage());
+      return;
+    }
     if (res.ok) {
       const data = await res.json();
       setCases(data.cases);

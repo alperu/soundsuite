@@ -2,6 +2,10 @@
 
 import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import SignInRedirect, { isAuthRequired } from '@/components/admin/sign-in-redirect';
+
+/** Sentinel threaded through the fetch chain when the case API answered 401. */
+const AUTH_REQUIRED = Symbol('auth-required');
 
 interface DocumentRecord {
   id: string;
@@ -26,14 +30,20 @@ export default function ExhibitDetailPage() {
   const [document, setDocument] = useState<DocumentRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // 401 from the case API: no dashboard session on a remote deployment.
+  const [authRequired, setAuthRequired] = useState(false);
 
   useEffect(() => {
     setLoading(true);
     setNotFound(false);
 
     fetch(`/api/cases?caseNumber=${encodeURIComponent(caseNumberParam)}`)
-      .then(res => res.ok ? res.json() : null)
+      .then(res => {
+        if (isAuthRequired(res)) return AUTH_REQUIRED;
+        return res.ok ? res.json() : null;
+      })
       .then(data => {
+        if (data === AUTH_REQUIRED) { setAuthRequired(true); setLoading(false); return; }
         if (!data?.case) { setNotFound(true); setLoading(false); return; }
         const caseId = data.case.id;
         return fetch(`/api/cases/${caseId}/filings`).then(r => r.json()).then(fd => {
@@ -57,6 +67,8 @@ export default function ExhibitDetailPage() {
       </div>
     );
   }
+
+  if (authRequired) return <SignInRedirect />;
 
   if (notFound || !document) {
     return (

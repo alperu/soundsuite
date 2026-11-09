@@ -3,7 +3,11 @@
 import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
+import SignInRedirect, { isAuthRequired } from '@/components/admin/sign-in-redirect';
 import { formatFilingLabel } from '@/lib/filings/format-filing-label';
+
+/** Sentinel threaded through the fetch chain when the case API answered 401. */
+const AUTH_REQUIRED = Symbol('auth-required');
 import { classifyFilingEntityKind } from '@/lib/filings/classify-entity-kind';
 import { TAG_SPEC_BY_KIND, type EntityKind } from '@/components/case/tag-spec';
 import {
@@ -115,6 +119,9 @@ export default function FilingDetailPage() {
   const [caseId, setCaseId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // 401 from the case API: no dashboard session on a remote deployment.
+  // Rendered as a sign-in redirect, never as "Filing not found".
+  const [authRequired, setAuthRequired] = useState(false);
 
   // Edit filing dialog
   const [showEditDialog, setShowEditDialog] = useState(false);
@@ -178,8 +185,12 @@ export default function FilingDetailPage() {
     setLoading(true);
     setNotFound(false);
     fetch(`/api/cases?caseNumber=${encodeURIComponent(caseNumberParam)}`)
-      .then(res => res.ok ? res.json() : null)
+      .then(res => {
+        if (isAuthRequired(res)) return AUTH_REQUIRED;
+        return res.ok ? res.json() : null;
+      })
       .then(data => {
+        if (data === AUTH_REQUIRED) { setAuthRequired(true); setLoading(false); return; }
         if (!data?.case) { setNotFound(true); setLoading(false); return; }
         setCaseId(data.case.id);
         return fetch(`/api/cases/${data.case.id}/filings`).then(r => r.json()).then(fd => {
@@ -684,6 +695,8 @@ export default function FilingDetailPage() {
       </div>
     );
   }
+
+  if (authRequired) return <SignInRedirect />;
 
   if (notFound || !filing) {
     return (

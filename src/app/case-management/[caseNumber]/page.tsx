@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useParams, useSearchParams, useRouter } from 'next/navigation';
 import { ContextMenu, type ContextMenuItem } from '@/components/context-menu';
+import SignInRedirect, { isAuthRequired } from '@/components/admin/sign-in-redirect';
 import { getSharedDocumentMenuItems, type DocumentTarget, type DocumentContextMenuActions } from '@/components/document-context-menu';
 import { getFiles, setFiles as idbSetFiles, getCachedFilings, setCachedFilings, getCachedTrackedFiles, setCachedTrackedFiles, setPreference, getPreference } from '@/lib/indexed-db';
 import { persistActionLog } from '@/lib/action-log';
@@ -141,6 +142,8 @@ export default function CaseDetailPage() {
   const [caseRecord, setCaseRecord] = useState<CaseRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // 401 from the case API: no dashboard session on a remote deployment.
+  const [authRequired, setAuthRequired] = useState(false);
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [trackedFiles, setTrackedFiles] = useState<Record<string, { status: string; fileName: string; documentId: string; filingId?: string; filingSlug?: string; filingTitle?: string }>>({});
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
@@ -410,7 +413,11 @@ export default function CaseDetailPage() {
     setLoading(true);
     setNotFound(false);
     fetch(`/api/cases?caseNumber=${encodeURIComponent(caseNumberParam)}`)
-      .then(res => { if (!res.ok) { setNotFound(true); setLoading(false); return null; } return res.json(); })
+      .then(res => {
+        if (isAuthRequired(res)) { setAuthRequired(true); setLoading(false); return null; }
+        if (!res.ok) { setNotFound(true); setLoading(false); return null; }
+        return res.json();
+      })
       .then(data => {
         if (data?.case) setCaseRecord(data.case);
         else setNotFound(true);
@@ -1813,6 +1820,7 @@ export default function CaseDetailPage() {
   };
 
   if (loading) return <div className="flex-1 flex items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div></div>;
+  if (authRequired) return <SignInRedirect />;
   if (notFound) return <div className="flex-1 flex items-center justify-center"><div className="text-center"><p className="text-gray-500 text-lg">Case not found</p><p className="text-gray-400 text-sm mt-1">No case with number &quot;{caseNumberParam}&quot;</p></div></div>;
   if (!caseRecord) return null;
 

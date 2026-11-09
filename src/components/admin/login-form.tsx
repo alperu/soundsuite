@@ -16,6 +16,7 @@
  */
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { afterLoginPath } from '@/lib/admin/login-redirect';
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1']);
 const HEALTH_URL = '/api/health';
@@ -52,7 +53,14 @@ export function isLocalHost(hostname: string): boolean {
   return LOCAL_HOSTS.has(hostname);
 }
 
-export default function LoginForm({ showBootstrapHint = false }: { showBootstrapHint?: boolean }) {
+export default function LoginForm({
+  showBootstrapHint = false,
+  next = null,
+}: {
+  showBootstrapHint?: boolean;
+  /** Same-origin path to return to after sign-in (`?next=`); validated. */
+  next?: string | null;
+}) {
   const router = useRouter();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -70,7 +78,7 @@ export default function LoginForm({ showBootstrapHint = false }: { showBootstrap
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      router.push('/admin/general');
+      router.push(afterLoginPath(next));
       router.refresh();
     } catch (err: any) {
       setError(err.message);
