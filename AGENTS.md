@@ -46,7 +46,9 @@ Short, targeted shell commands are fine: `git status`, `git log --oneline -5`,
 Never search these folders: node_modules/, .next/, data/ (case files and databases), coverage/.
 
 Several agents may work in this repo at once: work in your own git worktree
-under `.worktrees/<name>` (ignored by git), commit only your own files, and
+under `.worktrees/<name>` (ignored by git). Use worktrunk (`wt`): `wt switch -c <name>`
+creates and enters it, `wt list` shows all worktrees, `wt merge` merges it back
+and removes it, `wt remove` drops it. Commit only your own files, and
 never print secrets (tokens, passwords, keys, `.env` values).
 
 ## What it is
