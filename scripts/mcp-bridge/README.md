@@ -24,7 +24,8 @@ cd ~/sound-suite-bridge && npm install
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SOUND_SUITE_URL` | `http://127.0.0.1:3000` | Sound Suite master base URL |
+| `SOUND_SUITE_URL` | (required) | Sound Suite master base URL. Missing or invalid: exit 2. A loopback host (`localhost`, `127.x`, `::1`) is refused unless `SOUND_SUITE_ALLOW_LOCAL=1`. |
+| `SOUND_SUITE_ALLOW_LOCAL` | (unset) | Set to `1` to allow a local master URL. |
 | `SOUND_SUITE_PROFILE` | (required) | `local` or `routed`. Missing or any other value: the bridge logs the problem to stderr and exits with status 2. |
 | `MCP_API_KEY` | (none) | Sent as `Authorization: Bearer …` when the server runs in `apikey` auth mode |
 

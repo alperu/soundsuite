@@ -43,7 +43,7 @@ Bridge environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SOUND_SUITE_URL` | `http://127.0.0.1:3000` | Sound Suite master base URL |
+| `SOUND_SUITE_URL` | (required) | Sound Suite master base URL. A loopback host is refused unless `SOUND_SUITE_ALLOW_LOCAL=1`. |
 | `SOUND_SUITE_PROFILE` | (required) | `local` or `routed`. If it is missing or anything else the bridge prints an error to stderr and exits with status 2 instead of starting. |
 | `MCP_API_KEY` | (none) | Sent as `Authorization: Bearer …` when auth mode is `apikey` |
 

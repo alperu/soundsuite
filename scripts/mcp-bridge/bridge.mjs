@@ -19,7 +19,33 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-const BASE_URL = (process.env.SOUND_SUITE_URL || "http://127.0.0.1:3000").replace(/\/+$/, "");
+// SOUND_SUITE_URL is REQUIRED: no silent fallback to a local instance. A
+// loopback URL is refused unless SOUND_SUITE_ALLOW_LOCAL=1 is set, so a client
+// meant for a remote master can never quietly talk to a local copy.
+const RAW_URL = (process.env.SOUND_SUITE_URL || "").trim();
+if (!RAW_URL) {
+  console.error(
+    "[sound-suite-bridge] fatal: SOUND_SUITE_URL is not set. Set it to the Sound Suite " +
+      "master URL in the MCP client's \"env\" block and restart.",
+  );
+  process.exit(2);
+}
+let parsedUrl;
+try {
+  parsedUrl = new URL(RAW_URL);
+} catch {
+  console.error(`[sound-suite-bridge] fatal: SOUND_SUITE_URL "${RAW_URL}" is not a valid URL.`);
+  process.exit(2);
+}
+const LOOPBACK = /^(localhost|127(?:\.\d{1,3}){3}|\[?::1\]?|0\.0\.0\.0)$/i;
+if (LOOPBACK.test(parsedUrl.hostname) && process.env.SOUND_SUITE_ALLOW_LOCAL !== "1") {
+  console.error(
+    `[sound-suite-bridge] fatal: SOUND_SUITE_URL points at a local instance (${parsedUrl.hostname}). ` +
+      "Use the remote master URL, or set SOUND_SUITE_ALLOW_LOCAL=1 to allow a local one.",
+  );
+  process.exit(2);
+}
+const BASE_URL = RAW_URL.replace(/\/+$/, "");
 const API_KEY = process.env.MCP_API_KEY || "";
 // The profile is REQUIRED and must be exactly "local" or "routed". The bridge
 // refuses to start otherwise: a missing/typo'd profile must never silently run
