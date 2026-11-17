@@ -59,6 +59,11 @@ const G = processGlobal('ws-client', () => ({
 
 const PORT = parseInt(process.env.AGENT_PORT || process.env.PORT || '8098', 10);
 const HEARTBEAT_INTERVAL = 5_000;  // 5s heartbeat
+// A socket that has had no pong and no message for this long is dead, even if
+// it still says OPEN. Seen after NetBird restarted under an open socket: the
+// socket kept the Docker bridge address, every send queued in the kernel, and
+// the master showed the host offline while this side kept reporting connected.
+const WS_DEAD_MS = 45_000;
 const POLL_INTERVAL = 3_000;       // 3s poll when WS is down
 // Once the reconnect backoff has grown past this, the master is REPORTED
 // unreachable: it shows as such in /api/status and stops logging an error every
@@ -1422,6 +1427,10 @@ export function connectMaster(m: MasterConnection): void {
       if (m.heartbeatTimer) clearInterval(m.heartbeatTimer);
       m.wsHeartbeatFailCount = 0;
 
+      let aliveAt = Date.now();
+      ws.on('pong', () => { aliveAt = Date.now(); });
+      ws.on('message', () => { aliveAt = Date.now(); });
+
       // Heartbeat ONCE immediately, then on the interval.
       //
       // The interval below is 5s and every new socket resets it, so a connection
@@ -1461,6 +1470,12 @@ export function connectMaster(m: MasterConnection): void {
           log.warn(`[${m.serverUrl}] WS heartbeat: socket not open, skipping`);
           return;
         }
+        if (Date.now() - aliveAt > WS_DEAD_MS) {
+          log.warn(`[${m.serverUrl}] WS: no reply for ${Math.round((Date.now() - aliveAt) / 1000)}s, forcing reconnect`);
+          ws.terminate();
+          return;
+        }
+        try { ws.ping(); } catch { /* the check above ends it */ }
         try {
           const statusData = await buildFullStatus();
           ws.send(JSON.stringify({
@@ -1824,6 +1839,20 @@ export function disconnectAllMasters(): void {
   }
   if (G.watchdogTimer) { clearInterval(G.watchdogTimer); G.watchdogTimer = null; }
   stopUpdateChecks();
+}
+
+/**
+ * Drop every open master socket so each reconnects at once. Called after the
+ * NetBird companion (re)starts: sockets opened before its tunnel came up are
+ * bound to the Docker bridge address and cannot reach a NetBird master.
+ */
+export function reconnectAllMasters(reason: string): void {
+  for (const m of state.masters.values()) {
+    if (m.retired || !m.ws) continue;
+    log.info(`[${m.serverUrl}] Reconnecting: ${reason}`);
+    m.wsReconnectDelay = 1000;
+    try { m.ws.terminate(); } catch { /* ignore */ }
+  }
 }
 
 // ─── Back-compat shims for legacy single-master callsites ────────────────

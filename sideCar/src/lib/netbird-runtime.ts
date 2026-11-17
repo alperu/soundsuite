@@ -97,6 +97,7 @@ const G = processGlobal('netbird', () => ({
   last: null as ReconcileReport | null,
   status: null as { at: number; value: NetbirdStatus | null } | null,
   builds: {} as Record<string, { running: boolean; error: string | null; at: number }>,
+  reconnectPending: false,
 }));
 
 /** Run one reconcile; concurrent callers share the run in flight. */
@@ -112,10 +113,37 @@ export function runReconcile(): Promise<ReconcileReport> {
         }
       }
       if (!r.supported && prev?.reason !== r.reason) log.info(`NetBird not available: ${r.reason}`);
+      const nb = r.netbird;
+      if (nb && (nb.state === 'created' || nb.state === 'started' || nb.state === 'restarted')) {
+        void reconnectMastersWhenUp(nb.name);
+      }
       return r;
     })
     .finally(() => { G.running = null; });
   return G.running;
+}
+
+/**
+ * After NetBird (re)starts, wait until its tunnel is up, then reconnect every
+ * master socket. Sockets opened earlier keep the Docker bridge address and
+ * cannot reach a master on the NetBird network; they stay OPEN and silent.
+ */
+async function reconnectMastersWhenUp(name: string): Promise<void> {
+  if (G.reconnectPending) return;
+  G.reconnectPending = true;
+  try {
+    for (let i = 0; i < 24; i++) {
+      await new Promise((res) => setTimeout(res, 5_000));
+      const st = await readNetbirdStatus(dockerDeps, name);
+      if (st?.connected) break;
+    }
+    const { reconnectAllMasters } = await import('./ws-client');
+    reconnectAllMasters('NetBird (re)started, so sockets move to the NetBird address');
+  } catch (e) {
+    log.warn(`reconnect after NetBird start failed: ${(e as Error).message}`);
+  } finally {
+    G.reconnectPending = false;
+  }
 }
 
 export function startNetbirdLoop(): void {
