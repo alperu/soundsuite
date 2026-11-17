@@ -28,7 +28,7 @@ import { getContainerState, pullImage, createContainer, startContainer, dockerRe
 import { ollamaList, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
 import { saveConfig } from './config';
 import { createLogger } from './logger';
-import { checkForUpdate, performUpdate } from './self-update';
+import { checkForUpdate, findUpdateSource, performUpdate } from './self-update';
 import { tasks } from './task-tracker';
 import { emitBootEvent } from './boot-events';
 import { processGlobal } from './process-global';
@@ -1218,22 +1218,21 @@ function stopHttpHeartbeat(m: MasterConnection): void {
 
 function startUpdateChecks(): void {
   if (G.updateCheckInterval) return;
+  // Every master in order, not only the first: the first one that serves a
+  // sidecar release wins (a master with no builds answers 404 and is skipped).
+  const urls = () => [...state.masters.values()].filter((m) => !m.retired).map((m) => m.serverUrl);
   G.updateCheckInterval = setInterval(async () => {
-    const first = state.masters.values().next().value as MasterConnection | undefined;
-    if (!first) return;
-    const { available, version } = await checkForUpdate(first.serverUrl);
-    if (available) {
-      log.info(`Auto-updating to v${version}...`);
-      await performUpdate(first.serverUrl);
+    const src = await findUpdateSource(urls());
+    if (src?.available) {
+      log.info(`Auto-updating to v${src.version} from ${src.serverUrl}...`);
+      await performUpdate(src.serverUrl);
     }
   }, 5 * 60 * 1000);
 
   (async () => {
-    const first = state.masters.values().next().value as MasterConnection | undefined;
-    if (!first) return;
-    const { available, version } = await checkForUpdate(first.serverUrl);
-    if (available) {
-      log.info(`Update available (v${version}), will apply on next check cycle`);
+    const src = await findUpdateSource(urls());
+    if (src?.available) {
+      log.info(`Update available (v${src.version}) from ${src.serverUrl}, will apply on next check cycle`);
     }
   })();
 }

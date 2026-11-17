@@ -46,7 +46,7 @@ function httpGet(url: string): Promise<{ statusCode: number; headers: Record<str
   });
 }
 
-export async function checkForUpdate(serverUrl: string): Promise<{ available: boolean; version?: string }> {
+export async function checkForUpdate(serverUrl: string): Promise<{ available: boolean; version?: string; served?: boolean }> {
   const currentVersion = getCurrentVersion();
   try {
     const versionUrl = `${serverUrl}/api/admin/gpu/sidecars/version`;
@@ -54,15 +54,32 @@ export async function checkForUpdate(serverUrl: string): Promise<{ available: bo
     if (statusCode !== 200) return { available: false };
 
     const manifest = JSON.parse(body.toString());
-    if (manifest.version && manifest.version !== currentVersion) {
-      log.info(`Update available: ${currentVersion} -> ${manifest.version}`);
-      return { available: true, version: manifest.version };
+    if (!manifest.version) return { available: false };
+    if (manifest.version !== currentVersion) {
+      log.info(`Update available from ${serverUrl}: ${currentVersion} -> ${manifest.version}`);
+      return { available: true, version: manifest.version, served: true };
     }
-    return { available: false };
+    return { available: false, version: manifest.version, served: true };
   } catch (err) {
     log.error(`Update check failed: ${(err as Error).message}`);
     return { available: false };
   }
+}
+
+/**
+ * Ask each master in order and return the first one that serves a sidecar release
+ * (HTTP 200 on /version). A master that offers no builds (404) or is down is skipped,
+ * so updates work whichever master is first in the list.
+ */
+export async function findUpdateSource(
+  serverUrls: string[],
+  check: (url: string) => Promise<{ available: boolean; version?: string; served?: boolean }> = checkForUpdate,
+): Promise<{ serverUrl: string; available: boolean; version?: string } | null> {
+  for (const url of serverUrls) {
+    const r = await check(url);
+    if (r.served) return { serverUrl: url, available: r.available, version: r.version };
+  }
+  return null;
 }
 
 export async function performUpdate(serverUrl: string): Promise<boolean> {
