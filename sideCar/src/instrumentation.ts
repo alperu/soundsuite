@@ -50,6 +50,15 @@ export async function register() {
 
     // Detect Docker connection (socket vs TCP) before anything else
     await initDocker();
+
+    // NetBird / HTTPS companion containers (the /netbird page). Off until a
+    // setup key is saved; the loop then keeps them in line every 60 s.
+    try {
+      const { startNetbirdLoop } = await import('./lib/netbird-runtime');
+      startNetbirdLoop();
+    } catch (err) {
+      log.warn(`NetBird loop not started: ${(err as Error).message}`);
+    }
     log.info(`Managed roles: ${Object.keys(state.registry).join(', ')}`);
     log.info(`Default mode: ${state.currentMode}`);
     log.info(`Idle timeouts: ${JSON.stringify(state.idleTimeouts)}`);

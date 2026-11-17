@@ -617,6 +617,13 @@ export default function Home() {
               </span>
             )}
             <a
+              href="/netbird"
+              className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100"
+              title="Join this sidecar to NetBird"
+            >
+              NetBird
+            </a>
+            <a
               href="/setup"
               className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100"
               title="Configure host runtime backend"
