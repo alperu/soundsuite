@@ -16,7 +16,7 @@ import {
   type NetbirdStatus,
 } from './netbird';
 import {
-  RECONCILE_INTERVAL_MS, effectiveHostname, lastLoggedError, fqdnOf, probeCertificate, readNetbirdStatus, reconcile,
+  CADDY_BUILT_IMAGE, RECONCILE_INTERVAL_MS, effectiveHostname, lastLoggedError, fqdnOf, probeCertificate, readNetbirdStatus, reconcile,
   type CertInfo, type CompanionDeps, type ReconcileReport,
 } from './netbird-companion';
 
@@ -53,7 +53,11 @@ export const dockerDeps: CompanionDeps = {
   restart: (n) => ok(dockerRequest('POST', `/containers/${enc(n)}/restart?t=5`), `restart ${n}`, [204]),
   // v=false: keep the named volumes (NetBird peer identity, certificates).
   remove: (n) => ok(dockerRequest('DELETE', `/containers/${enc(n)}?force=true&v=false`), `remove ${n}`, [204, 404]),
-  pull: (image) => pullImage(image),
+  // The host's own platform, never the amd64 default: on Apple Silicon an
+  // amd64 NetBird runs under emulation and cannot set up WireGuard
+  // ("wgctl: socket: protocol not supported"). Force re-pull so a cached
+  // amd64 image is replaced; the Caddy image is built here, not pulled.
+  pull: (image) => pullImage(image, { platform: null, force: image !== CADDY_BUILT_IMAGE }),
   exec: (n, cmd) => execInContainer(n, cmd, { timeoutMs: 10_000 }),
   async buildImage(tag, dockerfile) {
     const b = G.builds[tag];

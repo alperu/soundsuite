@@ -1244,7 +1244,9 @@ export async function loadOllamaModel(
  */
 export async function pullImage(
   image: string,
-  opts?: { onProgress?: (progress: number, detail: string) => void; force?: boolean },
+  // platform: null pulls the Docker host's own platform. The default stays
+  // linux/amd64 for the GPU role images.
+  opts?: { onProgress?: (progress: number, detail: string) => void; force?: boolean; platform?: string | null },
 ): Promise<boolean> {
   if (!image || image.trim() === '' || image === 'host-ollama' || image === 'dmr') {
     throw new Error(
@@ -1295,8 +1297,9 @@ export async function getImageId(image: string): Promise<string | null> {
 
 async function pullImageUncached(
   image: string,
-  opts?: { onProgress?: (progress: number, detail: string) => void },
+  opts?: { onProgress?: (progress: number, detail: string) => void; platform?: string | null },
 ): Promise<boolean> {
+  const platform = opts?.platform === undefined ? 'linux/amd64' : opts.platform;
   // Split image:tag — Docker API requires separate fromImage and tag params.
   // Without explicit tag, Docker pulls ALL tags (dozens of versions).
   let imgName = image;
@@ -1314,7 +1317,7 @@ async function pullImageUncached(
     const reqOpts = {
       ...dockerConnectionOpts(),
       method: 'POST',
-      path: `/images/create?fromImage=${encodeURIComponent(imgName)}&tag=${encodeURIComponent(imgTag)}&platform=linux%2Famd64`,
+      path: `/images/create?fromImage=${encodeURIComponent(imgName)}&tag=${encodeURIComponent(imgTag)}${platform ? `&platform=${encodeURIComponent(platform)}` : ''}`,
     };
     const req = http.request(reqOpts, (res) => {
       if (res.statusCode !== 200) {

@@ -138,7 +138,9 @@ export function netbirdSpec(
     Binds: [bind, `${selfName}-netbird-state:/var/lib/netbird`],
     RestartPolicy: { Name: 'no' },
   };
-  const h = hash({ image: NETBIRD_IMAGE, env, host: { ...host, NetworkMode: 'self' }, keyFp });
+  // native: bumps the hash once, so NetBird containers made from an amd64
+  // image (pulled under emulation on Apple Silicon) are made again.
+  const h = hash({ image: NETBIRD_IMAGE, env, host: { ...host, NetworkMode: 'self' }, keyFp, native: 1 });
   return {
     hash: h,
     body: {
