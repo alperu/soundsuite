@@ -132,6 +132,27 @@ export default function NetbirdPage() {
           ))}
           <dt className="text-slate-500">Last check</dt><dd>{v.lastReconcileAt ? new Date(v.lastReconcileAt).toLocaleTimeString() : '—'}</dd>
         </dl>
+        {st?.peers?.length ? (
+          <table className="mt-3 w-full text-sm">
+            <thead><tr className="text-left text-slate-500">
+              <th className="font-normal py-1">Peer</th><th className="font-normal">IP</th><th className="font-normal">Status</th>
+              <th className="font-normal">Connection</th><th className="font-normal">Latency</th>
+            </tr></thead>
+            <tbody>
+              {st.peers.map((p) => (
+                <tr key={p.ip || p.fqdn} className="border-t border-slate-100">
+                  <td className="font-mono py-1">{p.fqdn || '—'}</td>
+                  <td className="font-mono">{p.ip || '—'}</td>
+                  <td>{p.status || '—'}</td>
+                  <td>{p.type === 'P2P' ? <span className="text-green-700">P2P (direct)</span>
+                    : p.type === 'Relayed' ? <span className="text-amber-700">Relayed</span>
+                    : p.type ?? '—'}</td>
+                  <td>{p.latencyMs !== null ? `${p.latencyMs} ms` : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
       </section>
 
       <section className={card}>
@@ -196,6 +217,11 @@ export default function NetbirdPage() {
           certificate (Cloudflare DNS check, no open port). Needs NetBird on and the domain set above.
         </p>
         {cert && <p className="text-xs text-slate-500">Certificate: {cert.names.join(', ')} · {cert.issuer} · until {cert.notAfter?.slice(0, 10)}</p>}
+        {v.https.enabled && !cert?.trusted && (() => {
+          const c = v.companions.find((x) => x?.name.endsWith('-caddy'));
+          if (c?.state === 'building') return <p className="text-sm text-slate-600">Building the Caddy image with the Cloudflare module (first time only, a few minutes)…</p>;
+          return c?.error ? <p className="text-sm text-red-700">Caddy: {c.error}</p> : null;
+        })()}
         <div>
           <label className={label}>Cloudflare API token</label>
           <input className={input} type="password" placeholder={v.https.hasToken ? `saved (…${v.https.tokenHint})` : 'paste the token'}

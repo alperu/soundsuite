@@ -310,6 +310,68 @@ export function getContainerLogs(containerName: string, tail = 200): Promise<{ s
   });
 }
 
+/** A one-file tar archive (ustar), enough for a Docker build context. */
+export function tarOneFile(name: string, content: string): Buffer {
+  const data = Buffer.from(content, 'utf8');
+  const h = Buffer.alloc(512, 0);
+  const put = (str: string, off: number, len: number) => h.write(str, off, len, 'ascii');
+  put(name, 0, 100);
+  put('0000644\0', 100, 8);
+  put('0000000\0', 108, 8);
+  put('0000000\0', 116, 8);
+  put(data.length.toString(8).padStart(11, '0') + '\0', 124, 12);
+  put(Math.floor(Date.now() / 1000).toString(8).padStart(11, '0') + '\0', 136, 12);
+  put('        ', 148, 8);
+  put('0', 156, 1);
+  put('ustar\0', 257, 6);
+  put('00', 263, 2);
+  let sum = 0;
+  for (const b of h) sum += b;
+  put(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8);
+  const pad = Buffer.alloc((512 - (data.length % 512)) % 512, 0);
+  return Buffer.concat([h, data, pad, Buffer.alloc(1024, 0)]);
+}
+
+/**
+ * `docker build -t <tag>` from an inline Dockerfile. Resolves when the build
+ * ends; rejects with Docker's error. Builds can take minutes (timeout 30 min).
+ */
+export function buildImageFromDockerfile(tag: string, dockerfile: string): Promise<void> {
+  assertDockerAvailable();
+  const ctx = tarOneFile('Dockerfile', dockerfile);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        ...dockerConnectionOpts(),
+        method: 'POST',
+        path: `/build?t=${encodeURIComponent(tag)}&rm=1&forcerm=1`,
+        headers: { 'Content-Type': 'application/x-tar', 'Content-Length': ctx.length },
+      },
+      (res) => {
+        let buf = '';
+        let err: string | null = res.statusCode === 200 ? null : `HTTP ${res.statusCode}`;
+        res.on('data', (c: Buffer) => {
+          buf += c.toString('utf8');
+          let i: number;
+          while ((i = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, i).trim();
+            buf = buf.slice(i + 1);
+            if (!line) continue;
+            try {
+              const j = JSON.parse(line);
+              if (j.error || j.errorDetail) err = String(j.error || j.errorDetail?.message);
+            } catch { if (err && err.startsWith('HTTP')) err += `: ${line.slice(0, 300)}`; }
+          }
+        });
+        res.on('end', () => (err ? reject(new Error(err)) : resolve()));
+      },
+    );
+    req.on('error', reject);
+    req.setTimeout(30 * 60_000, () => { req.destroy(); reject(new Error('build timeout')); });
+    req.end(ctx);
+  });
+}
+
 export function dockerRequestWithBody(method: string, reqPath: string, body: unknown): Promise<DockerResponse> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);

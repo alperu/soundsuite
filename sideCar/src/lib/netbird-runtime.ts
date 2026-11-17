@@ -7,7 +7,7 @@ import path from 'path';
 import { getConfigPath } from './config';
 import {
   dockerRequest, dockerRequestWithBody, execInContainer, getDockerHostName, isDockerAvailable,
-  pullImage, resolveSelfContainer,
+  buildImageFromDockerfile, pullImage, resolveSelfContainer,
 } from './docker';
 import { createLogger } from './logger';
 import { processGlobal } from './process-global';
@@ -16,7 +16,7 @@ import {
   type NetbirdStatus,
 } from './netbird';
 import {
-  RECONCILE_INTERVAL_MS, effectiveHostname, fqdnOf, probeCertificate, readNetbirdStatus, reconcile,
+  RECONCILE_INTERVAL_MS, effectiveHostname, lastLoggedError, fqdnOf, probeCertificate, readNetbirdStatus, reconcile,
   type CertInfo, type CompanionDeps, type ReconcileReport,
 } from './netbird-companion';
 
@@ -55,6 +55,30 @@ export const dockerDeps: CompanionDeps = {
   remove: (n) => ok(dockerRequest('DELETE', `/containers/${enc(n)}?force=true&v=false`), `remove ${n}`, [204, 404]),
   pull: (image) => pullImage(image),
   exec: (n, cmd) => execInContainer(n, cmd, { timeoutMs: 10_000 }),
+  async buildImage(tag, dockerfile) {
+    const b = G.builds[tag];
+    if (b?.running) return 'building';
+    const r = await dockerRequest('GET', `/images/${enc(tag)}/json`);
+    if (r.status === 200) return 'ready';
+    // After a failed build, wait 10 minutes before the next try.
+    if (b?.error && Date.now() - b.at < 10 * 60_000) return b.error;
+    const entry = { running: true, error: null as string | null, at: Date.now() };
+    G.builds[tag] = entry;
+    log.info(`building ${tag}`);
+    buildImageFromDockerfile(tag, dockerfile)
+      .then(() => { log.info(`built ${tag}`); runReconcile().catch(() => {}); })
+      .catch((e: Error) => { entry.error = e.message; log.warn(`build ${tag} failed: ${e.message}`); })
+      .finally(() => { entry.running = false; entry.at = Date.now(); });
+    return 'building';
+  },
+  async lastError(n) {
+    const c = await dockerDeps.inspect(n);
+    const since = Math.floor(Date.parse(c?.State?.StartedAt || '') / 1000);
+    if (!c || !Number.isFinite(since)) return null;
+    const r = await dockerRequest('GET', `/containers/${enc(n)}/logs?stdout=1&stderr=1&tail=200&since=${since - 1}`);
+    if (r.status !== 200) return null;
+    return lastLoggedError(r.body);
+  },
   async self() {
     if (!isDockerAvailable()) return { ok: false, detail: 'The Docker API is not reachable.' };
     const r = await resolveSelfContainer();
@@ -68,6 +92,7 @@ const G = processGlobal('netbird', () => ({
   running: null as Promise<ReconcileReport> | null,
   last: null as ReconcileReport | null,
   status: null as { at: number; value: NetbirdStatus | null } | null,
+  builds: {} as Record<string, { running: boolean; error: string | null; at: number }>,
 }));
 
 /** Run one reconcile; concurrent callers share the run in flight. */

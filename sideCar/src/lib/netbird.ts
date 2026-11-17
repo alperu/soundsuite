@@ -294,6 +294,16 @@ export interface NetbirdStatus {
   managementConnected: boolean;
   peersConnected: number;
   peersTotal: number;
+  peers: NetbirdPeer[];
+}
+
+/** One peer from `netbird status --json`. `type` is 'P2P' or 'Relayed' once connected. */
+export interface NetbirdPeer {
+  fqdn: string;
+  ip: string;
+  status: string;
+  type: string | null;
+  latencyMs: number | null;
 }
 
 /** Map `netbird status --json` to the small status the page shows. */
@@ -310,6 +320,14 @@ export function parseNetbirdStatus(raw: unknown): NetbirdStatus | null {
     managementConnected: mgmt,
     peersConnected: Number(peers.connected) || 0,
     peersTotal: Number(peers.total) || 0,
+    peers: (Array.isArray(peers.details) ? peers.details : []).filter(isObj).map((d) => ({
+      fqdn: typeof d.fqdn === 'string' ? d.fqdn : '',
+      ip: typeof d.netbirdIp === 'string' ? d.netbirdIp.split('/')[0] : '',
+      status: typeof d.status === 'string' ? d.status : '',
+      type: typeof d.connectionType === 'string' && d.connectionType && d.connectionType !== '-' ? d.connectionType : null,
+      // latency is in nanoseconds
+      latencyMs: typeof d.latency === 'number' && d.latency > 0 ? Math.round(d.latency / 1e6) : null,
+    })),
   };
 }
 
@@ -318,7 +336,9 @@ export function buildCaddyfile(fqdn: string, upstreamPort: number, email: string
   const global = email ? `{\n\temail ${email}\n}\n\n` : '';
   return (
     `${global}${fqdn} {\n` +
-    `\ttls {\n\t\tdns cloudflare {env.CF_API_TOKEN}\n\t}\n` +
+    // Public resolvers: NetBird DNS answers the NetBird domain itself, so the
+    // Cloudflare zone lookup must not go through it.
+    `\ttls {\n\t\tdns cloudflare {env.CF_API_TOKEN}\n\t\tresolvers 1.1.1.1 1.0.0.1\n\t}\n` +
     `\treverse_proxy 127.0.0.1:${upstreamPort}\n` +
     `}\n`
   );

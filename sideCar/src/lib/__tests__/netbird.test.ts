@@ -6,7 +6,7 @@ import {
   readSecret, readSettings, removeSecret, updateSettings, writeHandoff,
 } from '../netbird';
 import {
-  HANDOFF_TTL_MS, LABEL_HASH, LABEL_OWNER, clearHandoff, configBind, fqdnOf, ensureCompanion, netbirdSpec, reconcile, type CompanionDeps,
+  HANDOFF_TTL_MS, LABEL_HASH, lastLoggedError, LABEL_OWNER, clearHandoff, configBind, fqdnOf, ensureCompanion, netbirdSpec, reconcile, type CompanionDeps,
 } from '../netbird-companion';
 import { requireAdmin } from '../auth';
 
@@ -71,14 +71,23 @@ describe('settings store', () => {
 
   test('parses netbird status --json', () => {
     const s = parseNetbirdStatus({ netbirdIp: '100.114.1.2/16', fqdn: 'x.nb.example.com', management: { connected: true }, peers: { connected: 3, total: 9 } });
-    expect(s).toEqual({ connected: true, fqdn: 'x.nb.example.com', ip: '100.114.1.2', managementConnected: true, peersConnected: 3, peersTotal: 9 });
+    expect(s).toEqual({ connected: true, fqdn: 'x.nb.example.com', ip: '100.114.1.2', managementConnected: true, peersConnected: 3, peersTotal: 9, peers: [] });
     expect(parseNetbirdStatus('nope')).toBeNull();
+    const d = parseNetbirdStatus({ peers: { details: [
+      { fqdn: 'a.nb', netbirdIp: '100.1.1.1', status: 'Connected', connectionType: 'P2P', latency: 12000000 },
+      { fqdn: 'b.nb', netbirdIp: '100.1.1.2', status: 'Idle', connectionType: '-', latency: 0 },
+    ] } });
+    expect(d?.peers).toEqual([
+      { fqdn: 'a.nb', ip: '100.1.1.1', status: 'Connected', type: 'P2P', latencyMs: 12 },
+      { fqdn: 'b.nb', ip: '100.1.1.2', status: 'Idle', type: null, latencyMs: null },
+    ]);
   });
 
   test('Caddyfile proxies the fqdn to the sidecar port with Cloudflare DNS', () => {
     const c = buildCaddyfile('x.nb.example.com', 8098, 'ops@example.com');
     expect(c).toContain('x.nb.example.com {');
     expect(c).toContain('dns cloudflare {env.CF_API_TOKEN}');
+    expect(c).toContain('resolvers 1.1.1.1 1.0.0.1');
     expect(c).toContain('reverse_proxy 127.0.0.1:8098');
     expect(c).toContain('email ops@example.com');
   });
@@ -129,6 +138,8 @@ function fakeDeps(over: Partial<CompanionDeps> = {}): CompanionDeps & { calls: s
     async remove(n: string) { calls.push(`remove ${n}`); containers.delete(n); },
     async pull() { return true; },
     async exec() { return { exitCode: 1, output: '' }; },
+    async buildImage() { return 'ready' as const; },
+    async lastError() { return null; },
     async self() { return { ok: true as const, id: 'selfid', name: 'ss-sidecar' }; },
     dockerHostName: () => 'GPU-Box',
     ...over,
@@ -158,6 +169,21 @@ describe('reconcile', () => {
     expect(r.caddy?.state).toBe('created');
     expect(fs.readFileSync(path.join(dir, 'Caddyfile'), 'utf8')).toContain('gpu-box-sidecar.nb.example.com');
     expect(d.calls).toEqual(['create ss-sidecar-netbird', 'start ss-sidecar-netbird', 'create ss-sidecar-caddy', 'start ss-sidecar-caddy']);
+  });
+
+  test('Caddy waits for its image build and reports build and log errors', async () => {
+    process.env.SIDECAR_NETBIRD_DOMAIN = 'nb.example.com';
+    let img: string = 'building';
+    const d = fakeDeps({ async buildImage() { return img; }, async lastError() { return 'Invalid token'; } });
+    updateSettings(dir, { setupKey: KEY, enabled: true, https: { enabled: true, cloudflareToken: CF } });
+    expect((await reconcile(d, dir, 8098)).caddy?.state).toBe('building');
+    expect(d.calls).not.toContain('create ss-sidecar-caddy');
+    img = 'no network';
+    expect((await reconcile(d, dir, 8098)).caddy?.error).toContain('no network');
+    img = 'ready';
+    const r = await reconcile(d, dir, 8098);
+    expect(r.caddy?.state).toBe('created');
+    expect(r.caddy?.error).toBe('Invalid token');
   });
 
   test('a new key or a new sidecar container recreates; turning off removes', async () => {
@@ -235,5 +261,19 @@ describe('secrets at rest', () => {
     expect(fs.existsSync(path.join(dir, 'run', SETUP_KEY_FILE))).toBe(true);
     clearHandoff(dir, SETUP_KEY_FILE, 'running', Date.now() + HANDOFF_TTL_MS + 1000);
     expect(fs.existsSync(path.join(dir, 'run', SETUP_KEY_FILE))).toBe(false);
+  });
+});
+
+describe('caddy image and errors', () => {
+  test('lastLoggedError picks the last Caddy error and hides tokens', () => {
+    const log = [
+      '{"level":"info","msg":"requesting build"}',
+      '{"level":"error","msg":"download failed: server gave HTTP response to HTTPS client"}',
+      '{"level":"error","msg":"obtaining certificate","error":"Invalid token abcdefghijklmnopqrstuvwxyz0123456789ABCD"}',
+      '{"level":"info","msg":"done"}',
+    ].join('\n');
+    expect(lastLoggedError(log)).toBe('obtaining certificate: Invalid token <hidden>');
+    expect(lastLoggedError('{"level":"info","msg":"ok"}')).toBeNull();
+    expect(lastLoggedError('no Cloudflare token hand-off; the sidecar starts me again')).toContain('no Cloudflare token');
   });
 });

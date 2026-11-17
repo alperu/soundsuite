@@ -43,11 +43,24 @@ import {
 } from './netbird';
 
 export const NETBIRD_IMAGE = process.env.SIDECAR_NETBIRD_IMAGE || 'netbirdio/netbird:latest';
-export const CADDY_IMAGE = process.env.SIDECAR_CADDY_IMAGE || 'caddy:2';
+/**
+ * Caddy with the Cloudflare DNS module, built on this host by the sidecar.
+ * `caddy add-package` at start needs caddyserver.com, which some networks
+ * block; building pulls the module from GitHub/Go instead, once per host.
+ * Bump the tag when the Dockerfile changes. SIDECAR_CADDY_IMAGE skips the
+ * build and pulls that image instead.
+ */
+export const CADDY_BUILT_IMAGE = 'sidecar-caddy-cf:1';
+export const CADDY_DOCKERFILE =
+  'FROM caddy:2-builder AS build\n' +
+  'RUN xcaddy build --with github.com/caddy-dns/cloudflare\n' +
+  'FROM caddy:2\n' +
+  'COPY --from=build /usr/bin/caddy /usr/bin/caddy\n';
+export const CADDY_IMAGE = process.env.SIDECAR_CADDY_IMAGE || CADDY_BUILT_IMAGE;
 export const RECONCILE_INTERVAL_MS = 60_000;
 
 export type CompanionState =
-  | 'off' | 'removed' | 'created' | 'started' | 'restarted' | 'running' | 'waiting' | 'error';
+  | 'off' | 'removed' | 'created' | 'started' | 'restarted' | 'running' | 'waiting' | 'building' | 'error';
 
 export interface CompanionResult { name: string; state: CompanionState; error: string | null }
 
@@ -77,6 +90,10 @@ export interface CompanionDeps {
   remove(name: string): Promise<void>;
   pull(image: string): Promise<boolean>;
   exec(name: string, cmd: string[]): Promise<{ exitCode: number; output: string }>;
+  /** 'ready' when the image exists; 'building' while a build runs (starts one); else the build error. */
+  buildImage(tag: string, dockerfile: string): Promise<'ready' | 'building' | string>;
+  /** The last error a container logged since it last started, or null. */
+  lastError(name: string): Promise<string | null>;
   self(): Promise<{ ok: true; id: string; name: string } | { ok: false; detail: string }>;
   dockerHostName(): string | null;
 }
@@ -162,6 +179,30 @@ export function caddySpec(
   };
 }
 
+/**
+ * The last error in a container log: Caddy JSON lines ({"level":"error","msg":…})
+ * or a plain line with "error". Tokens are hidden. Null when none.
+ */
+export function lastLoggedError(log: string): string | null {
+  let found: string | null = null;
+  for (const raw of log.split('\n')) {
+    const line = raw.replace(/[\x00-\x08\x0e-\x1f]/g, '').trim();
+    const j = line.indexOf('{');
+    if (j >= 0) {
+      try {
+        const o = JSON.parse(line.slice(j));
+        if (o.level === 'error' || o.level === 'fatal') {
+          found = [o.msg, o.error].filter(Boolean).join(': ');
+          continue;
+        }
+        if (o.level) continue;
+      } catch { /* not JSON */ }
+    }
+    if (/\berror\b|no Cloudflare token/i.test(line)) found = line.replace(/^\S*\d{4}-\d\d-\d\dT\S+\s+/, '');
+  }
+  return found ? found.replace(/[A-Za-z0-9_-]{35,}/g, '<hidden>').slice(0, 400) : null;
+}
+
 /** Bring one companion to the wanted state. Never throws. */
 export async function ensureCompanion(
   deps: CompanionDeps, name: string, want: { body: Record<string, unknown>; hash: string } | null,
@@ -241,9 +282,23 @@ export async function reconcile(deps: CompanionDeps, dir: string, upstreamPort: 
     writeCaddyfile(dir, caddyfile);
     caddyWant = caddySpec(me.id, me.name, bind, dir, caddyfile, secretFingerprint(dir, CF_TOKEN_FILE));
   }
-  const caddy = await ensureCompanion(deps, `${me.name}-caddy`, caddyWant, me.id, selfStartedAt,
-    () => { writeHandoff(dir, CF_TOKEN_FILE); });
-  clearHandoff(dir, CF_TOKEN_FILE, caddy.state);
+  const caddyName = `${me.name}-caddy`;
+  let caddy: CompanionResult;
+  const img = caddyWant && CADDY_IMAGE === CADDY_BUILT_IMAGE
+    ? await deps.buildImage(CADDY_BUILT_IMAGE, CADDY_DOCKERFILE).catch((e: Error) => e.message)
+    : 'ready';
+  if (img === 'building') {
+    caddy = { name: caddyName, state: 'building', error: null };
+  } else if (img !== 'ready') {
+    caddy = { name: caddyName, state: 'error', error: `Could not build ${CADDY_BUILT_IMAGE}: ${img}` };
+  } else {
+    caddy = await ensureCompanion(deps, caddyName, caddyWant, me.id, selfStartedAt,
+      () => { writeHandoff(dir, CF_TOKEN_FILE); });
+    clearHandoff(dir, CF_TOKEN_FILE, caddy.state);
+    if (caddy.state !== 'off' && caddy.state !== 'removed' && !caddy.error) {
+      caddy.error = await deps.lastError(caddyName).catch(() => null);
+    }
+  }
 
   return { ...base, supported: true, reason: null, netbird, caddy };
 }
