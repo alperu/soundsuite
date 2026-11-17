@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server';
 import { state } from '@/lib/state';
 import { saveConfig } from '@/lib/config';
+import { requireAdmin } from '@/lib/auth';
 
 export async function POST(request: Request) {
+  const denied = requireAdmin(request);
+  if (denied) return denied;
   try {
     const body = await request.json().catch(() => ({}));
 

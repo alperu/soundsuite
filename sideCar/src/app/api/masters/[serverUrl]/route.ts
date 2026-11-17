@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { state, removeMaster, rekeyMaster } from '@/lib/state';
 import { saveConfig , blockMaster, persistedOnlyMasters } from '@/lib/config';
 import { disconnectMaster, connectMaster, retireMaster, refreshUpdateSource } from '@/lib/ws-client';
+import { requireAdmin } from '@/lib/auth';
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
 
@@ -24,9 +25,11 @@ function masterPayload(m: ReturnType<typeof state.masters.get> & object) {
 }
 
 export async function DELETE(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ serverUrl: string }> },
 ) {
+  const denied = requireAdmin(request);
+  if (denied) return denied;
   try {
     const { serverUrl: encoded } = await context.params;
     const serverUrl = decodeURIComponent(encoded);
@@ -88,6 +91,8 @@ export async function PATCH(
   request: Request,
   context: { params: Promise<{ serverUrl: string }> },
 ) {
+  const denied = requireAdmin(request);
+  if (denied) return denied;
   try {
     const { serverUrl: encoded } = await context.params;
     const currentUrl = decodeURIComponent(encoded);

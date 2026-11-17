@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { resolveSelfContainer, restartContainer } from '@/lib/docker';
 import { createLogger } from '@/lib/logger';
+import { requireAdmin } from '@/lib/auth';
 
 const log = createLogger('restart');
 
@@ -64,7 +65,9 @@ export async function GET() {
   );
 }
 
-export async function POST() {
+export async function POST(req: Request) {
+  const denied = requireAdmin(req);
+  if (denied) return denied;
   let self;
   try {
     self = await resolveSelfContainer();

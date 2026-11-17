@@ -9,8 +9,10 @@
  *
  * Storage: one folder (default /app/config/netbird, on the config volume):
  *   settings.json  non-secret settings
- *   setup-key      NetBird setup key   (mode 600, read by the companion as NB_SETUP_KEY_FILE)
- *   cf-token       Cloudflare API token (mode 600, read by the Caddy companion)
+ *   setup-key      NetBird setup key,    encrypted (secret-box.ts), mode 600
+ *   cf-token       Cloudflare API token, encrypted (secret-box.ts), mode 600
+ *   run/<name>     plain-text hand-off copy for a companion, written only just
+ *                  before the sidecar starts it, then deleted (see netbird-companion.ts)
  *   Caddyfile      written by netbird-companion.ts
  * Secrets never leave this folder: the view carries only the last 4 characters.
  *
@@ -19,6 +21,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { decryptSecret, encryptSecret, isEncrypted } from './secret-box';
 
 /** NetBird's public cloud, unless SIDECAR_NETBIRD_MANAGEMENT_URL names a self-hosted server. */
 export const defaultManagementUrl = (env: NodeJS.ProcessEnv = process.env): string =>
@@ -122,10 +125,49 @@ export function readSettings(dir: string): NetbirdSettings {
   };
 }
 
+/**
+ * Decrypted secret, or null when missing or not readable. A plain-text file from
+ * sidecar 2.5.x is encrypted in place on first read.
+ */
 export function readSecret(dir: string, file: string): string | null {
+  const p = path.join(dir, file);
+  let v: string;
   try {
-    const v = fs.readFileSync(path.join(dir, file), 'utf8').trim();
-    return v || null;
+    v = fs.readFileSync(p, 'utf8').trim();
+  } catch {
+    return null;
+  }
+  if (!v) return null;
+  try {
+    if (!isEncrypted(v)) {
+      writeAtomic(p, encryptSecret(v) + '\n', 0o600);
+      return v;
+    }
+    return decryptSecret(v) || null;
+  } catch {
+    return null;
+  }
+}
+
+export const RUN_DIR = 'run';
+export const handoffPath = (dir: string, file: string): string => path.join(dir, RUN_DIR, file);
+
+/** Plain-text copy for a companion that is about to start. False when the secret is missing. */
+export function writeHandoff(dir: string, file: string): boolean {
+  const v = readSecret(dir, file);
+  if (!v) return false;
+  writeAtomic(handoffPath(dir, file), v + '\n', 0o600);
+  return true;
+}
+
+export function removeHandoff(dir: string, file: string): void {
+  fs.rmSync(handoffPath(dir, file), { force: true });
+}
+
+/** Age of a hand-off file in ms, or null when there is none. */
+export function handoffAgeMs(dir: string, file: string, now = Date.now()): number | null {
+  try {
+    return now - fs.statSync(handoffPath(dir, file)).mtimeMs;
   } catch {
     return null;
   }
@@ -225,8 +267,8 @@ export function updateSettings(dir: string, body: unknown, now: () => Date = () 
     throw new NetbirdInputError('Paste a Cloudflare token before you turn HTTPS on.');
   }
 
-  if (setupKey) writeAtomic(path.join(dir, SETUP_KEY_FILE), setupKey + '\n', 0o600);
-  if (cfToken) writeAtomic(path.join(dir, CF_TOKEN_FILE), cfToken + '\n', 0o600);
+  if (setupKey) writeAtomic(path.join(dir, SETUP_KEY_FILE), encryptSecret(setupKey) + '\n', 0o600);
+  if (cfToken) writeAtomic(path.join(dir, CF_TOKEN_FILE), encryptSecret(cfToken) + '\n', 0o600);
   s.updatedAt = now().toISOString();
   writeSettings(dir, s);
   return s;
@@ -237,6 +279,7 @@ export function removeSecret(dir: string, which: 'setupKey' | 'cloudflareToken',
   const s = readSettings(dir);
   const file = which === 'setupKey' ? SETUP_KEY_FILE : CF_TOKEN_FILE;
   fs.rmSync(path.join(dir, file), { force: true });
+  removeHandoff(dir, file);
   if (which === 'setupKey') s.enabled = false;
   else s.https.enabled = false;
   s.updatedAt = now().toISOString();

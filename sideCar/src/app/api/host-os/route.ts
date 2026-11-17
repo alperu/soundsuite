@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { persistAndApplyHostOs } from '@/lib/setup-overrides';
 import type { HostOsValue } from '@/lib/sidecar-config';
+import { requireAdmin } from '@/lib/auth';
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
 
 export async function POST(request: NextRequest) {
+  const denied = requireAdmin(request);
+  if (denied) return denied;
   try {
     const body = await request.json();
     const os = body?.os;

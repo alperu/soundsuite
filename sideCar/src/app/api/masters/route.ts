@@ -3,6 +3,7 @@ import { state, ensureMaster } from '@/lib/state';
 import { saveConfig, persistedOnlyMasters, isMasterBlocked } from '@/lib/config';
 import { connectMaster } from '@/lib/ws-client';
 import { createLogger } from '@/lib/logger';
+import { requireAdmin } from '@/lib/auth';
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
 const log = createLogger('api/masters');
@@ -53,6 +54,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const denied = requireAdmin(request);
+  if (denied) return denied;
   let serverUrl = '';
   try {
     const body = await request.json().catch(() => ({} as Record<string, unknown>));

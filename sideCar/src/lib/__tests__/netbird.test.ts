@@ -3,12 +3,12 @@ import os from 'os';
 import path from 'path';
 import {
   CF_TOKEN_FILE, NetbirdInputError, defaultDomain, defaultManagementUrl, SETUP_KEY_FILE, buildCaddyfile, defaultHostname, parseNetbirdStatus,
-  readSecret, readSettings, removeSecret, updateSettings,
+  readSecret, readSettings, removeSecret, updateSettings, writeHandoff,
 } from '../netbird';
 import {
-  LABEL_HASH, LABEL_OWNER, configBind, fqdnOf, ensureCompanion, netbirdSpec, reconcile, type CompanionDeps,
+  HANDOFF_TTL_MS, LABEL_HASH, LABEL_OWNER, clearHandoff, configBind, fqdnOf, ensureCompanion, netbirdSpec, reconcile, type CompanionDeps,
 } from '../netbird-companion';
-import { netbirdGate } from '../netbird-auth';
+import { requireAdmin } from '../auth';
 
 const KEY = 'ABCDEF01-2345-6789-ABCD-EF0123456789';
 const CF = 'cf_token_abcdefghijklmnopqrstuvwxyz';
@@ -100,7 +100,7 @@ describe('companion specs', () => {
     expect(host.NetworkMode).toBe('container:abc');
     expect(host.PortBindings).toBeUndefined();
     expect(body.Env).toEqual(expect.arrayContaining([
-      'NB_SETUP_KEY_FILE=/app/config/netbird/setup-key', 'NB_HOSTNAME=h-sidecar',
+      'NB_SETUP_KEY_FILE=/app/config/netbird/run/setup-key', 'NB_HOSTNAME=h-sidecar',
     ]));
     expect((body.Env as string[]).some((e) => e.startsWith('NB_WIREGUARD_PORT'))).toBe(false);
   });
@@ -201,13 +201,39 @@ describe('reconcile', () => {
   });
 });
 
-describe('gate', () => {
+describe('admin gate', () => {
   const req = (auth?: string) => new Request('http://x/api/netbird', { headers: auth ? { authorization: auth } : {} });
-  test('open when no token is set', () => { expect(netbirdGate(req(), {} as NodeJS.ProcessEnv)).toBeNull(); });
-  test('401 without the right bearer token', () => {
+  test('closed when no token and no session', () => { expect(requireAdmin(req(), {} as NodeJS.ProcessEnv)?.status).toBe(401); });
+  test('the bearer token opens it', () => {
     const env = { SIDECAR_ADMIN_TOKEN: 'secret-token' } as unknown as NodeJS.ProcessEnv;
-    expect(netbirdGate(req(), env)?.status).toBe(401);
-    expect(netbirdGate(req('Bearer wrong'), env)?.status).toBe(401);
-    expect(netbirdGate(req('Bearer secret-token'), env)).toBeNull();
+    expect(requireAdmin(req(), env)?.status).toBe(401);
+    expect(requireAdmin(req('Bearer wrong'), env)?.status).toBe(401);
+    expect(requireAdmin(req('Bearer secret-token'), env)).toBeNull();
+  });
+});
+
+describe('secrets at rest', () => {
+  test('setup key and Cloudflare token are encrypted on disk', () => {
+    updateSettings(dir, { setupKey: KEY, enabled: true, https: { enabled: true, domain: 'nb.example.com', email: 'ops@example.com', cloudflareToken: CF } });
+    for (const [f, v] of [[SETUP_KEY_FILE, KEY], [CF_TOKEN_FILE, CF]]) {
+      const raw = fs.readFileSync(path.join(dir, f), 'utf8');
+      expect(raw.startsWith('enc:v1:')).toBe(true);
+      expect(raw).not.toContain(v);
+      expect(readSecret(dir, f)).toBe(v);
+    }
+  });
+  test('an old plain-text file is encrypted on first read', () => {
+    fs.writeFileSync(path.join(dir, SETUP_KEY_FILE), KEY + '\n');
+    expect(readSecret(dir, SETUP_KEY_FILE)).toBe(KEY);
+    expect(fs.readFileSync(path.join(dir, SETUP_KEY_FILE), 'utf8').startsWith('enc:v1:')).toBe(true);
+  });
+  test('hand-off copy is written before start and deleted after 2 minutes', () => {
+    updateSettings(dir, { setupKey: KEY, enabled: true });
+    expect(writeHandoff(dir, SETUP_KEY_FILE)).toBe(true);
+    expect(fs.readFileSync(path.join(dir, 'run', SETUP_KEY_FILE), 'utf8').trim()).toBe(KEY);
+    clearHandoff(dir, SETUP_KEY_FILE, 'running', Date.now() + 1000);
+    expect(fs.existsSync(path.join(dir, 'run', SETUP_KEY_FILE))).toBe(true);
+    clearHandoff(dir, SETUP_KEY_FILE, 'running', Date.now() + HANDOFF_TTL_MS + 1000);
+    expect(fs.existsSync(path.join(dir, 'run', SETUP_KEY_FILE))).toBe(false);
   });
 });

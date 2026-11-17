@@ -7,6 +7,7 @@ import { createLogger } from './logger';
 import { loadSidecarConfig, saveSidecarConfig } from './sidecar-config';
 import { emitBootEvent } from './boot-events';
 import { processGlobal } from './process-global';
+import { decryptSecret, encryptSecret } from './secret-box';
 
 const log = createLogger('config');
 
@@ -28,7 +29,13 @@ function parseMastersField(raw: unknown): MasterEntry[] {
         const obj = item as Record<string, unknown>;
         if (typeof obj.serverUrl === 'string' && obj.serverUrl) {
           const entry: MasterEntry = { serverUrl: obj.serverUrl };
-          if (typeof obj.authToken === 'string') entry.authToken = obj.authToken;
+          if (typeof obj.authToken === 'string' && obj.authToken) {
+            try {
+              entry.authToken = decryptSecret(obj.authToken);
+            } catch (err) {
+              log.warn(`Cannot decrypt the auth token for ${obj.serverUrl}; enter it again in Setup. (${(err as Error).message})`);
+            }
+          }
           if (typeof obj.wsPort === 'number' && obj.wsPort > 0) entry.wsPort = obj.wsPort;
           out.push(entry);
         }
@@ -206,7 +213,7 @@ export function saveConfig(): void {
       const entry: { serverUrl: string; authToken?: string; wsPort?: number } = {
         serverUrl: m.serverUrl,
       };
-      if (m.authToken) entry.authToken = m.authToken;
+      if (m.authToken) entry.authToken = encryptSecret(m.authToken);
       if (m.wsPort) entry.wsPort = m.wsPort;
       return entry;
     });

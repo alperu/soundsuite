@@ -17,6 +17,9 @@ jest.mock('@/lib/logger', () => ({
 
 import { GET, POST } from '@/app/api/restart/route';
 
+process.env.SIDECAR_ADMIN_TOKEN = 'test-admin-token';
+const adminReq = () => new Request('http://x/api/restart', { method: 'POST', headers: { authorization: 'Bearer test-admin-token' } });
+
 const SELF_ID = 'aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888';
 
 const resolvedOk = {
@@ -66,7 +69,7 @@ describe('POST /api/restart — respond first, restart after', () => {
     jest.useFakeTimers();
     resolveSelfContainer.mockResolvedValue(resolvedOk);
 
-    const res = await POST();
+    const res = await POST(adminReq());
 
     expect(res.status).toBe(202);
     // The ordering guarantee: nothing has been killed yet.
@@ -90,7 +93,7 @@ describe('POST /api/restart — respond first, restart after', () => {
     resolveSelfContainer.mockResolvedValue(resolvedOk);
     restartContainer.mockRejectedValue(new Error('socket hang up'));
 
-    const res = await POST();
+    const res = await POST(adminReq());
     expect(res.status).toBe(202);
     jest.advanceTimersByTime(1000);
     // An unhandled rejection here would fail the suite; reaching this line is the assertion.
@@ -109,7 +112,7 @@ describe('POST /api/restart — refusals never restart anything', () => {
         'container this sidecar manages (managed set: ss-reranker, ss-ocr). Refusing.',
     });
 
-    const res = await POST();
+    const res = await POST(adminReq());
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.restarting).toBe(false);
@@ -127,7 +130,7 @@ describe('POST /api/restart — refusals never restart anything', () => {
     'sources-disagree',
   ])('refuses %s with its own reason code and no restart', async (reason) => {
     resolveSelfContainer.mockResolvedValue({ ok: false, reason, detail: `refused: ${reason}` });
-    const res = await POST();
+    const res = await POST(adminReq());
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.reason).toBe(reason);
@@ -137,7 +140,7 @@ describe('POST /api/restart — refusals never restart anything', () => {
 
   it('reports a reason rather than a bare 500 if resolution itself throws', async () => {
     resolveSelfContainer.mockRejectedValue(new Error('mountinfo exploded'));
-    const res = await POST();
+    const res = await POST(adminReq());
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.reason).toBe('self-unresolvable');

@@ -5,6 +5,7 @@
  */
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useEffect } from 'react';
 
 const DASHBOARD = [
   { id: 'overview', label: 'Overview' },
@@ -19,12 +20,31 @@ const DASHBOARD = [
 const PAGES = [
   { href: '/setup', label: 'Setup' },
   { href: '/netbird', label: 'NetBird & HTTPS' },
+  { href: '/account', label: 'Account' },
 ];
+
+async function signOut() {
+  await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'logout' }) });
+  window.location.href = '/login';
+}
 
 const item = 'block rounded-md px-3 py-1.5 text-sm';
 
-export default function SideMenu() {
+export default function SideMenu({ user }: { user: string }) {
   const path = usePathname();
+  // When the session ends, any page's call to a protected /api route gets 401: go to /login.
+  useEffect(() => {
+    const orig = window.fetch;
+    window.fetch = async (input, init) => {
+      const res = await orig(input, init);
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+      if (res.status === 401 && /^(\/|https?:\/\/[^/]+\/)api\//.test(url) && !url.includes('/api/auth')) {
+        window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+      }
+      return res;
+    };
+    return () => { window.fetch = orig; };
+  }, []);
   return (
     <nav className="hidden md:block w-56 shrink-0 border-r border-slate-200 bg-white">
       <div className="sticky top-0 max-h-screen overflow-y-auto p-4">
@@ -45,6 +65,10 @@ export default function SideMenu() {
             </li>
           ))}
         </ul>
+        <div className="mt-6 border-t border-slate-200 px-3 pt-3 text-xs text-slate-500">
+          Signed in as <span className="font-medium text-slate-700">{user}</span>
+          <button type="button" onClick={signOut} className="mt-2 block text-sm text-blue-700 hover:underline">Sign out</button>
+        </div>
       </div>
     </nav>
   );

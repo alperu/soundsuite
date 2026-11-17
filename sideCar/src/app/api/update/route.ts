@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { performUpdate } from '@/lib/self-update';
 import { refreshUpdateSource } from '@/lib/ws-client';
+import { requireAdmin } from '@/lib/auth';
 
 /**
  * GET /api/update — which master supplies updates, and is one available
@@ -13,7 +14,9 @@ export async function GET() {
   return NextResponse.json(src);
 }
 
-export async function POST() {
+export async function POST(req: Request) {
+  const denied = requireAdmin(req);
+  if (denied) return denied;
   const src = await refreshUpdateSource();
   if (!src) return NextResponse.json({ error: 'No master serves sidecar updates' }, { status: 400 });
   if (!src.available) {

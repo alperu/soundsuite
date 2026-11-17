@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { persistAndApplyBackend, type HostBackendPatch } from '@/lib/setup-overrides';
 import { state } from '@/lib/state';
+import { requireAdmin } from '@/lib/auth';
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
 
 export async function POST(request: NextRequest) {
+  const denied = requireAdmin(request);
+  if (denied) return denied;
   try {
     const body = (await request.json()) as Record<string, unknown>;
 

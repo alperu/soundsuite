@@ -8,12 +8,8 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import type { NetbirdView } from '@/lib/netbird-runtime';
 
-const TOKEN_KEY = 'sidecarAdminToken';
-
-function headers(): Record<string, string> {
-  const t = typeof window !== 'undefined' ? window.localStorage.getItem(TOKEN_KEY) : null;
-  return { 'Content-Type': 'application/json', ...(t ? { Authorization: `Bearer ${t}` } : {}) };
-}
+const headers = (): Record<string, string> => ({ 'Content-Type': 'application/json' });
+const toLogin = () => { window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`; };
 
 const card = 'bg-white rounded-lg border border-slate-200 p-5 space-y-4';
 const input = 'w-full rounded border border-slate-300 px-3 py-2 text-sm font-mono';
@@ -31,8 +27,6 @@ export default function NetbirdPage() {
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [needToken, setNeedToken] = useState(false);
-  const [adminToken, setAdminToken] = useState('');
 
   const [setupKey, setSetupKey] = useState('');
   const [hostname, setHostname] = useState('');
@@ -55,8 +49,7 @@ export default function NetbirdPage() {
 
   const load = useCallback(async (refill: boolean) => {
     const r = await fetch('/api/netbird', { headers: headers(), cache: 'no-store' });
-    if (r.status === 401) { setNeedToken(true); return; }
-    setNeedToken(false);
+    if (r.status === 401) { toLogin(); return; }
     const x = (await r.json()) as NetbirdView;
     setV(x);
     if (refill) fill(x);
@@ -73,7 +66,7 @@ export default function NetbirdPage() {
     try {
       const r = await fetch(url, { method, headers: headers(), body: body ? JSON.stringify(body) : undefined });
       const j = await r.json().catch(() => ({}));
-      if (r.status === 401) { setNeedToken(true); throw new Error(j.error || 'Admin token required.'); }
+      if (r.status === 401) { toLogin(); throw new Error(j.error || 'Sign in required.'); }
       if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
       setV(j as NetbirdView); fill(j as NetbirdView);
       setSetupKey(''); setCfToken('');
@@ -101,22 +94,6 @@ export default function NetbirdPage() {
       ...(enabled !== undefined ? { enabled } : {}),
     };
     send('PUT', '/api/netbird', body, 'Saved. The change is applied now.');
-  }
-
-  if (needToken) {
-    return (
-      <main className="max-w-xl mx-auto p-6 space-y-4">
-        <h1 className="text-2xl font-bold text-slate-900">NetBird</h1>
-        <div className={card}>
-          <label className={label}>Admin token (SIDECAR_ADMIN_TOKEN)</label>
-          <input className={input} type="password" value={adminToken} onChange={(e) => setAdminToken(e.target.value)} />
-          <button className={`${btn} bg-slate-900 text-white`} onClick={() => {
-            window.localStorage.setItem(TOKEN_KEY, adminToken.trim()); load(true).catch(() => {});
-          }}>Unlock</button>
-          {err && <p className="text-sm text-red-700">{err}</p>}
-        </div>
-      </main>
-    );
   }
 
   if (!v) return <main className="mx-auto w-[90%] p-6 text-slate-500">{err || 'Loading…'}</main>;

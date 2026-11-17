@@ -23,10 +23,9 @@
  * storing a usable secret on a host that must use it unattended, not an
  * oversight.
  *
- * Set SIDECAR_SECRET to derive from an operator-supplied passphrase instead of
- * machine material; then the file is useless without it. Without it, the
- * derivation falls back to stable host material so the sidecar can still come
- * back unattended after a reboot.
+ * Since 2.6 the file uses the sidecar's data key (secret-box.ts), like every
+ * other saved token. A v1 file (key from host name + SIDECAR_SECRET) is still
+ * read once and then written again as v2.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -34,6 +33,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createLogger } from './logger';
+import { purposeKey } from './secret-box';
 
 const log = createLogger('openrouter-store');
 
@@ -44,7 +44,8 @@ const STORE_PATH = process.env.OPENROUTER_STORE_PATH
     'openrouter.enc.json',
   );
 
-const MAGIC = 'ss-or-v1';
+const MAGIC = 'ss-or-v2';
+const MAGIC_V1 = 'ss-or-v1';
 const ALGO = 'aes-256-gcm';
 
 export interface StoredMasterConfig {
@@ -57,9 +58,13 @@ export interface StoredMasterConfig {
   domain?: string;
 }
 
-/** Key material: operator passphrase if provided, else stable host material.
- *  scrypt with a fixed salt — the salt is not the secret here, the material is. */
+/** v2 key: the install's data key, kept apart from other uses by HKDF. */
 function derive(): Buffer {
+  return purposeKey('openrouter-store');
+}
+
+/** v1 key (sidecar 2.4.x–2.5.x): operator passphrase if set, else host material. */
+function deriveV1(): Buffer {
   const material = process.env.SIDECAR_SECRET
     || `${os.hostname()}::${os.userInfo().username}::sound-suite-sidecar`;
   return crypto.scryptSync(material, 'sound-suite-openrouter-store', 32);
@@ -102,12 +107,12 @@ export function loadOpenRouterStore(): Map<string, StoredMasterConfig> {
   try {
     if (!fs.existsSync(STORE_PATH)) return out;
     const payload = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'));
-    if (payload?.magic !== MAGIC) {
+    if (payload?.magic !== MAGIC && payload?.magic !== MAGIC_V1) {
       log.warn('OpenRouter store has an unexpected format — ignoring');
       return out;
     }
     const decipher = crypto.createDecipheriv(
-      ALGO, derive(), Buffer.from(payload.iv, 'base64'),
+      ALGO, payload.magic === MAGIC_V1 ? deriveV1() : derive(), Buffer.from(payload.iv, 'base64'),
     );
     decipher.setAuthTag(Buffer.from(payload.tag, 'base64'));
     const plain = Buffer.concat([
@@ -118,6 +123,7 @@ export function loadOpenRouterStore(): Map<string, StoredMasterConfig> {
       if (cfg && typeof cfg.apiKey === 'string' && cfg.apiKey) out.set(url, cfg);
     }
     log.info(`OpenRouter config restored for ${out.size} master(s)`);
+    if (payload.magic === MAGIC_V1 && out.size > 0) saveOpenRouterStore(out);
   } catch (err) {
     // Wrong secret, truncated file, tampering — all the same outcome.
     log.warn(`could not restore OpenRouter config (re-push required): ${(err as Error).message}`);

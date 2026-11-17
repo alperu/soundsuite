@@ -43,4 +43,6 @@ module.exports = {
     }],
   },
   testTimeout: 15000,
+  // secret.key and admin.json go to a temp folder, never next to the jest binary.
+  setupFiles: ['<rootDir>/jest.setup.js'],
 };
