@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useEffect, useState, useCallback } from 'react';
 
 type HostOs = 'mac-docker-ollama' | 'windows-docker-wsl2' | 'linux' | 'unknown';
@@ -573,7 +572,7 @@ export default function SetupPage() {
 
   if (!status) {
     return (
-      <main className="mx-auto max-w-3xl px-4 py-12">
+      <main className="mx-auto w-[90%] px-4 py-12">
         <h1 className="text-2xl font-bold text-slate-900">Sound Suite Setup</h1>
         {error ? (
           <p className="mt-4 text-sm text-red-600">Error loading setup status: {error}</p>
@@ -600,7 +599,7 @@ export default function SetupPage() {
   const osAvailable = availableRuntimesForOs(host.os);
 
   return (
-    <main className="mx-auto max-w-3xl px-4 py-8">
+    <main className="mx-auto w-[90%] px-4 py-8">
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Sound Suite Setup</h1>
@@ -608,7 +607,6 @@ export default function SetupPage() {
             Configure the runtime backend for this sidecar. Selections persist and apply live.
           </p>
         </div>
-        <Link href="/" className="text-sm text-blue-600 hover:underline">← Back to dashboard</Link>
       </div>
 
       {error && (

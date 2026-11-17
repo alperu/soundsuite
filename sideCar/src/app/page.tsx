@@ -541,8 +541,8 @@ export default function Home() {
     : '...';
 
   return (
-    <main className="mx-auto max-w-5xl px-4 py-8">
-      <div className="mb-8">
+    <main className="mx-auto w-[90%] px-4 py-8">
+      <div id="overview" className="mb-8 scroll-mt-4">
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Sound Suite GPU Orchestrator</h1>
@@ -620,20 +620,6 @@ export default function Home() {
                 Restarting sidecar...
               </span>
             )}
-            <a
-              href="/netbird"
-              className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100"
-              title="Join this sidecar to NetBird"
-            >
-              NetBird
-            </a>
-            <a
-              href="/setup"
-              className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100"
-              title="Configure host runtime backend"
-            >
-              Setup
-            </a>
             {updateState === 'rebooting' && (
               <span className="px-3 py-1.5 rounded-md text-sm bg-yellow-100 text-yellow-800 animate-pulse">
                 Rebooting...
@@ -696,30 +682,30 @@ export default function Home() {
         )}
       </div>
 
-      <ServerConnection
+      <div id="masters" className="scroll-mt-4"><ServerConnection
         masters={status?.masters}
         serverUrl={status?.serverUrl ?? null}
         wsConnected={status?.wsConnected ?? false}
         onAdd={handleAddMaster}
         onEdit={handleEditMaster}
         onRemove={handleRemoveMaster}
-      />
+      /></div>
 
       {/* Legacy mode selector removed — per-host role tags live on the
           master's /admin/roleassign page. */}
 
-      <VramPanel vram={status?.vram} />
+      <div id="vram" className="scroll-mt-4"><VramPanel vram={status?.vram} /></div>
 
-      <ContainerTable
+      <div id="containers" className="scroll-mt-4"><ContainerTable
         containers={status?.containers ?? {}}
         onStart={handleContainerStart}
         onStop={handleContainerStop}
         onLoad={handleContainerLoad}
         onPull={handleContainerPull}
         onPullAndLoad={handleContainerPullAndLoad}
-      />
+      /></div>
 
-      <VirtualContainerTable masters={status?.masters} />
+      <div id="virtual" className="scroll-mt-4"><VirtualContainerTable masters={status?.masters} /></div>
 
       {/* Active Tasks */}
       {status?.tasks && status.tasks.filter(t => t.status === 'running').length > 0 && (
@@ -753,12 +739,12 @@ export default function Home() {
         </div>
       )}
 
-      <StatsGrid
+      <div id="stats" className="scroll-mt-4"><StatsGrid
         activeRequests={status?.activeRequests ?? 0}
         mode={status?.mode ?? 'indexing'}
         wsCommandCount={status?.wsCommandCount ?? 0}
         wsConnected={status?.wsConnected ?? false}
-      />
+      /></div>
 
       {/* Minimum Online (read-only — pushed by master) */}
       {status?.minOnline && (
@@ -799,6 +785,7 @@ export default function Home() {
         </div>
       )}
 
+      <div id="timeouts" className="scroll-mt-4" />
       {/* Idle Timeouts */}
       {Object.keys(editingTimeouts).length > 0 && (
         <div className="mb-6 rounded-lg border border-slate-200 bg-white p-4">
@@ -872,7 +859,7 @@ export default function Home() {
         </div>
       )}
 
-      <ActivityLog entries={logs} />
+      <div id="activity" className="scroll-mt-4"><ActivityLog entries={logs} /></div>
     </main>
   );
 }

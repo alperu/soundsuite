@@ -6,7 +6,6 @@
  * Secrets are write-only: the API returns only their last 4 characters.
  */
 import { Fragment, useCallback, useEffect, useState } from 'react';
-import Link from 'next/link';
 import type { NetbirdView } from '@/lib/netbird-runtime';
 
 const TOKEN_KEY = 'sidecarAdminToken';
@@ -120,15 +119,14 @@ export default function NetbirdPage() {
     );
   }
 
-  if (!v) return <main className="max-w-3xl mx-auto p-6 text-slate-500">{err || 'Loading…'}</main>;
+  if (!v) return <main className="mx-auto w-[90%] p-6 text-slate-500">{err || 'Loading…'}</main>;
 
   const st = v.status;
   const cert = v.https.certificate;
   return (
-    <main className="max-w-3xl mx-auto p-6 space-y-5">
+    <main className="mx-auto w-[90%] p-6 space-y-5">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-slate-900">NetBird</h1>
-        <Link href="/" className="text-sm text-blue-700 hover:underline">← Back to dashboard</Link>
       </div>
       <p className="text-sm text-slate-600">
         This sidecar joins NetBird as <span className="font-mono">{v.fqdn}</span>. Masters then reach it, and it reaches

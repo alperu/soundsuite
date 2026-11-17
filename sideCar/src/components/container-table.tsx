@@ -146,7 +146,7 @@ function renderPsCell(container: ContainerInfo) {
       {models.map(m => {
         const rel = formatRelativeUntil(m.until);
         return (
-          <div key={m.name} className="flex items-center gap-2 whitespace-nowrap">
+          <div key={m.name} className="flex flex-wrap items-center gap-x-2">
             <span className="font-mono text-[11px] text-slate-800">{m.name}</span>
             <span className="text-[11px] text-slate-600">{formatVramGB(m.sizeVram || m.sizeBytes)}</span>
             <ProcessorTag m={m} />
@@ -240,7 +240,7 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
                 const rtLabel = runtimeLabel(imageForRuntime);
                 return (
                 <tr key={role} className="border-b border-slate-100 last:border-0">
-                  <td className="py-3 pr-4 font-medium text-slate-700">{role}</td>
+                  <td className="py-3 pr-4 font-medium text-slate-700 whitespace-nowrap">{role}</td>
                   <td className="py-3 pr-4 text-slate-500 font-mono text-xs">
                     <span className="flex items-center gap-1.5">
                       {container.config?.type === 'ollama' && container.status === 'running' && (
@@ -256,13 +256,13 @@ export default function ContainerTable({ containers, onStart, onStop, onLoad, on
                   <td className="py-3 pr-4 text-slate-500 font-mono text-xs">
                     {container.config?.model || <span className="text-slate-300 italic">none</span>}
                   </td>
-                  <td className="py-3 pr-4 text-xs">
+                  <td className="py-3 pr-4 text-xs min-w-[12rem]">
                     {renderPsCell(container)}
                   </td>
                   <td className="py-3 pr-4">
                     <StatusBadge status={container.status} />
                   </td>
-                  <td className="py-3 space-x-1">
+                  <td className="py-3 space-x-1 whitespace-nowrap">
                     {(() => {
                       // Status-aware action buttons. Mirrors the master's
                       // /admin/gpu admin-gpu-fleet panel (task #25) so the
