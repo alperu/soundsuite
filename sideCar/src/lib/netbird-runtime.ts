@@ -192,3 +192,15 @@ export async function applyNow(): Promise<void> {
   G.status = null;
   await runReconcile();
 }
+
+/**
+ * Start the certificate request now: remove <self>-caddy and reconcile, which
+ * creates it again with a fresh token hand-off. Caddy otherwise waits minutes
+ * between retries. The certificate store (named volume) is kept.
+ */
+export async function retryHttpsNow(): Promise<void> {
+  const me = await dockerDeps.self();
+  if (!me.ok) throw new Error(me.detail);
+  await dockerDeps.remove(`${me.name}-caddy`);
+  await applyNow();
+}

@@ -80,7 +80,7 @@ export default function NetbirdPage() {
     }
   }
 
-  async function send(method: 'PUT' | 'DELETE', url: string, body: unknown, done: string) {
+  async function send(method: 'PUT' | 'DELETE' | 'POST', url: string, body: unknown, done: string) {
     setBusy(true); setErr(null); setMsg(null);
     try {
       const r = await fetch(url, { method, headers: headers(), body: body ? JSON.stringify(body) : undefined });
@@ -258,6 +258,10 @@ export default function NetbirdPage() {
           {v.https.enabled && <button disabled={busy} className={`${btn} bg-slate-200`} onClick={() => save(undefined, false)}>Turn off HTTPS</button>}
           {(v.https.hasToken || cfToken.trim()) && (
             <button disabled={busy} className={`${btn} bg-slate-200`} onClick={testToken}>Test token</button>
+          )}
+          {v.https.enabled && (
+            <button disabled={busy} className={`${btn} bg-slate-200`} title="Restart Caddy so it asks for the certificate now instead of waiting for its next retry."
+              onClick={() => send('POST', '/api/netbird/https-retry', null, 'Caddy restarted. The certificate takes about 1 minute.')}>Start HTTPS now</button>
           )}
           {v.https.hasToken && (
             <button disabled={busy} className={`${btn} text-red-700`} onClick={() => {
