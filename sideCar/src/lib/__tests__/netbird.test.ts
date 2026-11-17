@@ -323,4 +323,8 @@ describe('lastLoggedError for NetBird logs', () => {
     ].join('\n');
     expect(lastLoggedError(log)).toBe('failed creating tunnel interface wt0: wgctl: socket: protocol not supported');
   });
+  test('ignores UPnP noise with raw bytes', () => {
+    const log = '\u00072026/11/17 14:27:00 httpu: error while parsing response: malformed HTTP response "\u0000\u0001!"';
+    expect(lastLoggedError(log)).toBeNull();
+  });
 });

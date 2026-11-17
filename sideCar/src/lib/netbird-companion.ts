@@ -188,7 +188,8 @@ export function caddySpec(
 export function lastLoggedError(log: string): string | null {
   let found: string | null = null;
   for (const raw of log.split('\n')) {
-    const line = raw.replace(/[\x00-\x08\x0e-\x1f]/g, '').trim();
+    // Printable text only: NetBird logs raw UPnP/STUN bytes in some lines.
+    const line = raw.replace(/[^\x20-\x7e]/g, '').trim();
     const j = line.indexOf('{');
     if (j >= 0) {
       try {
@@ -204,7 +205,9 @@ export function lastLoggedError(log: string): string | null {
     const nb = /\s(?:ERRO|FATA|PANI)\s+\S+:\d+:\s*(.*)$/.exec(line);
     if (nb) { found = nb[1]; continue; }
     if (/\s(?:INFO|WARN|DEBU|TRAC)\s/.test(line)) continue;
-    if (/\berror\b|no Cloudflare token/i.test(line)) found = line.replace(/^\S*\d{4}-\d\d-\d\dT\S+\s+/, '');
+    // Plain lines: only our own boot script's message. A generic "error"
+    // match caught NetBird's UPnP noise ("httpu: error while parsing response").
+    if (/no Cloudflare token/i.test(line)) found = line.replace(/^\S*\d{4}-\d\d-\d\dT\S+\s+/, '');
   }
   return found ? found.replace(/[A-Za-z0-9_-]{35,}/g, '<hidden>').slice(0, 400) : null;
 }

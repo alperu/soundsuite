@@ -101,6 +101,7 @@ const G = processGlobal('netbird', () => ({
   reconnectPending: false,
   // What the Activity Log was last told, so each change is logged once.
   told: {} as Record<string, string>,
+  connectedSince: null as number | null,
 }));
 
 /** Run one reconcile; concurrent callers share the run in flight. */
@@ -133,10 +134,13 @@ export function runReconcile(): Promise<ReconcileReport> {
   return G.running;
 }
 
-/** Log `text` to the Activity Log once per change of `key`. */
-function tell(key: string, text: string | null, level: 'info' | 'warn' | 'error' = 'info'): void {
-  if (G.told[key] === (text ?? '')) return;
-  G.told[key] = text ?? '';
+/**
+ * Log `text` to the Activity Log once per change of `key`. `same` decides what
+ * counts as a change (default: the text), so peer counts do not log every minute.
+ */
+function tell(key: string, text: string | null, level: 'info' | 'warn' | 'error' = 'info', same: string | null = text): void {
+  if (G.told[key] === (same ?? '')) return;
+  G.told[key] = same ?? '';
   if (text) emitBootEvent(text, level === 'info' ? undefined : { level });
 }
 
@@ -158,11 +162,15 @@ async function reportNetbird(r: ReconcileReport, st: NetbirdStatus | null): Prom
     const nb = r.netbird;
     if (!nb || nb.state === 'off' || nb.state === 'removed' || nb.state === 'error') { tell('conn', null); return; }
     if (st?.connected) {
-      tell('conn', `NetBird connected as ${st.fqdn ?? r.fqdn} (${st.ip}), ${st.peersConnected}/${st.peersTotal} peers`);
+      tell('conn', `NetBird connected as ${st.fqdn ?? r.fqdn} (${st.ip}), ${st.peersConnected}/${st.peersTotal} peers`, 'info', `up ${st.fqdn} ${st.ip}`);
       tell(`${nb.name}:log`, null);
-      if (st.peersTotal === 0) tell('peers', 'NetBird gives this peer 0 peers: add it to a group with an access policy in the NetBird dashboard.', 'warn');
-      else tell('peers', null);
+      G.connectedSince ??= Date.now();
+      // Right after connecting the peer list is still empty; warn only when it stays empty.
+      if (st.peersTotal === 0 && Date.now() - G.connectedSince > 90_000) {
+        tell('peers', 'NetBird gives this peer 0 peers: add it to a group with an access policy in the NetBird dashboard.', 'warn');
+      } else if (st.peersTotal > 0) tell('peers', null);
     } else if (nb.state === 'running') {
+      G.connectedSince = null;
       // Only read the container log while it is not connected: a healthy
       // NetBird logs transient errors too.
       tell('conn', `NetBird not connected (management ${st?.managementConnected ? 'connected' : 'not connected'})`, 'warn');
@@ -188,6 +196,7 @@ export async function connectNetbirdNow(): Promise<void> {
   if (!readSettings(netbirdDir()).enabled) throw new Error('NetBird is off. Turn it on first.');
   emitBootEvent('NetBird: connect requested');
   for (const k of Object.keys(G.told)) delete G.told[k];
+  G.connectedSince = null;
   await dockerDeps.remove(`${me.name}-netbird`);
   await applyNow();
 }
@@ -204,7 +213,12 @@ async function reconnectMastersWhenUp(name: string): Promise<void> {
     for (let i = 0; i < 24; i++) {
       await new Promise((res) => setTimeout(res, 5_000));
       const st = await readNetbirdStatus(dockerDeps, name);
-      if (st?.connected) break;
+      if (st?.connected) {
+        // Tell the Activity Log now, not at the next 60 s reconcile.
+        G.status = { at: Date.now(), value: st };
+        if (G.last) void reportNetbird(G.last, st);
+        break;
+      }
     }
     const { reconnectAllMasters } = await import('./ws-client');
     reconnectAllMasters('NetBird (re)started, so sockets move to the NetBird address');
