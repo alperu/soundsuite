@@ -347,3 +347,64 @@ export function buildCaddyfile(fqdn: string, upstreamPort: number, email: string
 export function writeCaddyfile(dir: string, content: string): void {
   writeAtomic(path.join(dir, 'Caddyfile'), content, 0o644);
 }
+
+export interface CfTestStep { step: string; ok: boolean; detail: string }
+export interface CfTestResult { ok: boolean; zone: string | null; steps: CfTestStep[] }
+
+type FetchFn = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) =>
+  Promise<{ status: number; json(): Promise<unknown> }>;
+
+/**
+ * Check a Cloudflare API token the way Caddy uses it: the token is active, it
+ * sees the zone of `domain`, and it can add and remove a TXT record there.
+ * The test record is `_sidecar-token-test.<domain>` and is removed at once.
+ */
+export async function testCloudflareToken(token: string, domain: string, fetchFn: FetchFn = fetch as unknown as FetchFn): Promise<CfTestResult> {
+  const api = 'https://api.cloudflare.com/client/v4';
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const steps: CfTestStep[] = [];
+  const done = (zone: string | null): CfTestResult => ({ ok: steps.every((s) => s.ok), zone, steps });
+  const cfErr = (j: unknown, status: number) => {
+    const e = isObj(j) && Array.isArray(j.errors) && isObj(j.errors[0]) ? String(j.errors[0].message) : '';
+    return e || `HTTP ${status}`;
+  };
+  const call = async (path: string, method = 'GET', body?: unknown) => {
+    const r = await fetchFn(`${api}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const j = await r.json().catch(() => null);
+    return { status: r.status, j, ok: r.status < 300 && isObj(j) && j.success === true };
+  };
+
+  try {
+    const v = await call('/user/tokens/verify');
+    const active = v.ok && isObj(v.j) && isObj(v.j.result) && v.j.result.status === 'active';
+    steps.push({ step: 'Token is valid', ok: active, detail: active ? 'active' : cfErr(v.j, v.status) });
+    if (!active) return done(null);
+
+    let zone: { id: string; name: string } | null = null;
+    const labels = domain.split('.');
+    for (let i = 0; i < labels.length - 1 && !zone; i++) {
+      const name = labels.slice(i).join('.');
+      const z = await call(`/zones?name=${encodeURIComponent(name)}`);
+      const r = z.ok && isObj(z.j) && Array.isArray(z.j.result) ? z.j.result[0] : null;
+      if (isObj(r) && typeof r.id === 'string') zone = { id: r.id, name: String(r.name) };
+    }
+    steps.push({
+      step: `Token sees the zone of ${domain}`, ok: !!zone,
+      detail: zone ? zone.name : 'No zone found. Give the token Zone → DNS → Edit on that zone (and Zone → Zone → Read).',
+    });
+    if (!zone) return done(null);
+
+    const c = await call(`/zones/${zone.id}/dns_records`, 'POST',
+      { type: 'TXT', name: `_sidecar-token-test.${domain}`, content: 'sidecar token test', ttl: 60 });
+    const id = c.ok && isObj(c.j) && isObj(c.j.result) ? String(c.j.result.id) : null;
+    steps.push({ step: 'Token can add a DNS record', ok: !!id, detail: id ? 'added a test TXT record' : cfErr(c.j, c.status) });
+    if (id) {
+      const d = await call(`/zones/${zone.id}/dns_records/${id}`, 'DELETE');
+      steps.push({ step: 'Token can remove a DNS record', ok: d.ok, detail: d.ok ? 'removed it again' : cfErr(d.j, d.status) });
+    }
+    return done(zone.name);
+  } catch (e) {
+    steps.push({ step: 'Reach api.cloudflare.com', ok: false, detail: (e as Error).message });
+    return done(null);
+  }
+}

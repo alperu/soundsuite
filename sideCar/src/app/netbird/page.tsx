@@ -37,6 +37,7 @@ export default function NetbirdPage() {
   const [email, setEmail] = useState('');
   const [cfToken, setCfToken] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [cfTest, setCfTest] = useState<{ ok: boolean; zone: string | null; steps: { step: string; ok: boolean; detail: string }[] } | null>(null);
 
   const fill = (x: NetbirdView) => {
     setHostname(x.hostnameIsDefault ? '' : x.hostname);
@@ -60,6 +61,24 @@ export default function NetbirdPage() {
     const t = setInterval(() => { load(false).catch(() => {}); }, 10_000);
     return () => clearInterval(t);
   }, [load]);
+
+  async function testToken() {
+    setBusy(true); setErr(null); setCfTest(null);
+    try {
+      const r = await fetch('/api/netbird/https-token/test', {
+        method: 'POST', headers: headers(),
+        body: JSON.stringify({ ...(cfToken.trim() ? { token: cfToken.trim() } : {}), ...(domain.trim() ? { domain: domain.trim() } : {}) }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 401) { toLogin(); return; }
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      setCfTest(j);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function send(method: 'PUT' | 'DELETE', url: string, body: unknown, done: string) {
     setBusy(true); setErr(null); setMsg(null);
@@ -237,12 +256,23 @@ export default function NetbirdPage() {
             {v.https.enabled ? 'Save' : 'Save and turn on HTTPS'}
           </button>
           {v.https.enabled && <button disabled={busy} className={`${btn} bg-slate-200`} onClick={() => save(undefined, false)}>Turn off HTTPS</button>}
+          {(v.https.hasToken || cfToken.trim()) && (
+            <button disabled={busy} className={`${btn} bg-slate-200`} onClick={testToken}>Test token</button>
+          )}
           {v.https.hasToken && (
             <button disabled={busy} className={`${btn} text-red-700`} onClick={() => {
               if (window.confirm('Remove the Cloudflare token? HTTPS turns off.')) send('DELETE', '/api/netbird/https-token', null, 'Token removed.');
             }}>Remove token</button>
           )}
         </div>
+        {cfTest && (
+          <ul className="text-sm space-y-0.5">
+            {cfTest.steps.map((x) => (
+              <li key={x.step} className={x.ok ? 'text-green-700' : 'text-red-700'}>{x.ok ? '✓' : '✗'} {x.step} — {x.detail}</li>
+            ))}
+            <li className="font-medium">{cfTest.ok ? 'The token is good.' : 'The token does not work for this domain.'}</li>
+          </ul>
+        )}
       </section>
     </main>
   );
