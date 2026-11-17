@@ -114,6 +114,8 @@ export function runReconcile(): Promise<ReconcileReport> {
       }
       if (!r.supported && prev?.reason !== r.reason) log.info(`NetBird not available: ${r.reason}`);
       const nb = r.netbird;
+      // Keep the cached status fresh for netbirdSummary() (master heartbeat).
+      if (nb && nb.state !== 'off' && nb.state !== 'removed' && nb.state !== 'error') void cachedStatus(nb.name).catch(() => {});
       if (nb && (nb.state === 'created' || nb.state === 'started' || nb.state === 'restarted')) {
         void reconnectMastersWhenUp(nb.name);
       }
@@ -235,4 +237,29 @@ export async function retryHttpsNow(): Promise<void> {
   if (!me.ok) throw new Error(me.detail);
   await dockerDeps.remove(`${me.name}-caddy`);
   await applyNow();
+}
+
+/**
+ * Small NetBird summary for the master heartbeat (no Docker calls: settings,
+ * the last reconcile and the cached status). Null when NetBird is off.
+ */
+export function netbirdSummary(): {
+  fqdn: string; ip: string | null; connected: boolean | null; httpsUrl: string | null; httpsState: string | null;
+} | null {
+  try {
+    const s = readSettings(netbirdDir());
+    if (!s.enabled) return null;
+    const fqdn = G.status?.value?.fqdn || fqdnOf(effectiveHostname(s, getDockerHostName()), s.https.domain);
+    const r = G.last;
+    const https = s.https.enabled && !!s.https.domain;
+    return {
+      fqdn,
+      ip: G.status?.value?.ip ?? null,
+      connected: G.status ? !!G.status.value?.connected : null,
+      httpsUrl: https ? `https://${fqdn}` : null,
+      httpsState: https ? (r?.caddy?.state ?? null) : null,
+    };
+  } catch {
+    return null;
+  }
 }

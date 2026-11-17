@@ -28,6 +28,7 @@ import { getContainerState, pullImage, createContainer, startContainer, dockerRe
 import { ollamaList, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
 import { saveConfig } from './config';
 import { createLogger } from './logger';
+import { netbirdSummary } from './netbird-runtime';
 import { checkForUpdate, findUpdateSource, orderForUpdates, performUpdate } from './self-update';
 import { tasks } from './task-tracker';
 import { emitBootEvent } from './boot-events';
@@ -337,6 +338,8 @@ async function buildFullStatus(): Promise<Record<string, unknown>> {
     freeVram,
     totalVram,
     wsConnected: anyWs,
+    // NetBird name and HTTPS URL (null when NetBird is off), for the master UI.
+    netbird: netbirdSummary(),
     containerNames: getRegisteredContainers(),
     tasks: tasks.getAll(),
     // Critical: forward dockerMode to the master so the master's
