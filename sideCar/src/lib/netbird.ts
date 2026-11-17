@@ -338,7 +338,10 @@ export function buildCaddyfile(fqdn: string, upstreamPort: number, email: string
     `${global}${fqdn} {\n` +
     // Public resolvers: NetBird DNS answers the NetBird domain itself, so the
     // Cloudflare zone lookup must not go through it.
-    `\ttls {\n\t\tdns cloudflare {env.CF_API_TOKEN}\n\t\tresolvers 1.1.1.1 1.0.0.1\n\t}\n` +
+    // Caddy's own propagation check still times out behind NetBird DNS, so
+    // skip it (timeout -1) and wait 20 s; Let's Encrypt checks the record itself.
+    `\ttls {\n\t\tdns cloudflare {env.CF_API_TOKEN}\n\t\tresolvers 1.1.1.1 1.0.0.1\n` +
+    `\t\tpropagation_delay 20s\n\t\tpropagation_timeout -1\n\t}\n` +
     `\treverse_proxy 127.0.0.1:${upstreamPort}\n` +
     `}\n`
   );

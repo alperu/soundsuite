@@ -51,6 +51,39 @@ creates and enters it, `wt list` shows all worktrees, `wt merge` merges it back
 and removes it, `wt remove` drops it. Commit only your own files, and
 never print secrets (tokens, passwords, keys, `.env` values).
 
+## IDE Integration
+
+Three MCP servers talk to the running JetBrains IDE. Prefer them over shell,
+grep, scripting or screenshots whenever one of them does the job. Their tools
+arrive deferred: at the start of an IDE task, load the ones you need with
+`ToolSearch` (`select:mcp__jetbrains-index__ide_find_references,...`).
+
+Always use the `jetbrains-index` MCP server when applicable for:
+- **Finding references** — Use `ide_find_references` instead of grep/search
+- **Go to definition** — Use `ide_find_definition` for accurate navigation
+- **Renaming symbols** — Use `ide_refactor_rename` for safe, project-wide renames
+- **Type hierarchy** — Use `ide_type_hierarchy` to understand class relationships
+- **Finding implementations** — Use `ide_find_implementations` for interfaces/abstract classes
+- **Diagnostics** — Use `ide_diagnostics` to check for code problems
+- **Call hierarchy** — Use `ide_call_hierarchy` to trace who calls what
+
+The IDE's semantic understanding is far more accurate than text-based search.
+Prefer IDE tools over grep, ripgrep, or manual file searching when working
+with code symbols.
+
+Use the `jetbrains-debugger` MCP server instead of print statements or log
+digging when a bug needs runtime state: `start_debug_session` on a run
+configuration, `set_breakpoint` (with a condition or a log message),
+`step_over` / `step_into` / `step_out`, `evaluate_expression`, read frames and
+variables, then `stop_debug_session`.
+
+Use the built-in `idea` MCP server for the rest of the IDE:
+- `get_file_problems` / `get_inspections` / `apply_quick_fix` after an edit
+- `build_project` to compile and read errors instead of a build from the shell
+- `get_run_configurations` / `execute_run_configuration` to run or test
+- `get_symbol_info` (Quick Documentation) and `analyze_calls`
+- `get_all_open_file_paths`, `get_project_modules`, `get_project_dependencies`
+
 ## What it is
 
 Sound Suite is a local, self-hosted document intelligence platform for legal case management.

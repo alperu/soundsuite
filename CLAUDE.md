@@ -22,6 +22,8 @@ management. Watches folders of court PDFs → OCR/vector ingestion → MCP tools
 + a Next.js dashboard. This file holds only what every session needs. Reference material is in
 `AGENTS.md` (not auto-loaded — read it when you need architecture detail) and `docs/`.
 
+IDE tools: see the IDE Integration section in AGENTS.md.
+
 ## Privacy — NEVER commit case-identifying data
 
 This repo processes real litigation documents. Nothing case-identifying may be committed or

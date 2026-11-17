@@ -88,6 +88,7 @@ describe('settings store', () => {
     expect(c).toContain('x.nb.example.com {');
     expect(c).toContain('dns cloudflare {env.CF_API_TOKEN}');
     expect(c).toContain('resolvers 1.1.1.1 1.0.0.1');
+    expect(c).toContain('propagation_timeout -1');
     expect(c).toContain('reverse_proxy 127.0.0.1:8098');
     expect(c).toContain('email ops@example.com');
   });
