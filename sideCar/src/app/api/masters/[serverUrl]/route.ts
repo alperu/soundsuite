@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { state, removeMaster, rekeyMaster } from '@/lib/state';
 import { saveConfig , blockMaster, persistedOnlyMasters } from '@/lib/config';
-import { disconnectMaster, connectMaster, retireMaster } from '@/lib/ws-client';
+import { disconnectMaster, connectMaster, retireMaster, refreshUpdateSource } from '@/lib/ws-client';
 
 const cors = { 'Access-Control-Allow-Origin': '*' };
 
@@ -57,7 +57,9 @@ export async function DELETE(
     // three timers and marks the slot so nothing that fires late revives it.
     retireMaster(m);
     blockMaster(serverUrl);
+    if (state.updateMaster === serverUrl) state.updateMaster = null;
     saveConfig();
+    if (state.updateSource?.serverUrl === serverUrl) void refreshUpdateSource().catch(() => {});
     return NextResponse.json(
       { ok: true, removed: serverUrl },
       { headers: cors },
@@ -72,7 +74,10 @@ export async function DELETE(
 
 /**
  * PATCH — edit a master's URL (rename) and/or wsPort. Body:
- *   { serverUrl?: string, wsPort?: number | null, authToken?: string }
+ *   { serverUrl?: string, wsPort?: number | null, authToken?: string, updateSource?: boolean }
+ *
+ * updateSource: true pins this master for sidecar updates (asked first);
+ * false removes the pin. Either way the update source is checked again.
  *
  * If serverUrl changes the slot is rekeyed (existing connection state is
  * preserved). If wsPort changes the existing WS is closed and reconnected
@@ -128,6 +133,10 @@ export async function PATCH(
     if (needsReconnect) disconnectMaster(m);
 
     if (authToken !== undefined) m.authToken = authToken;
+    if (typeof body.updateSource === 'boolean') {
+      if (body.updateSource) state.updateMaster = currentUrl;
+      else if (state.updateMaster === currentUrl) state.updateMaster = null;
+    }
     if ('set' in wsPortChange) m.wsPort = wsPortChange.set;
     if ('clear' in wsPortChange) m.wsPort = undefined;
 
@@ -143,9 +152,12 @@ export async function PATCH(
       }
     }
 
+    if (urlChanged && newUrl && state.updateMaster === currentUrl) state.updateMaster = newUrl;
+
     saveConfig();
 
     if (needsReconnect) connectMaster(m);
+    if (typeof body.updateSource === 'boolean' || urlChanged) void refreshUpdateSource().catch(() => {});
 
     return NextResponse.json(
       { master: masterPayload(m), urlChanged, portChanged },

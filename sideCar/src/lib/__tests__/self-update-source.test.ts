@@ -1,4 +1,4 @@
-import { findUpdateSource } from '../self-update';
+import { findUpdateSource, orderForUpdates } from '../self-update';
 
 describe('findUpdateSource', () => {
   const fake = (map: Record<string, { available: boolean; version?: string; served?: boolean }>) =>
@@ -23,5 +23,22 @@ describe('findUpdateSource', () => {
   test('returns null when no master serves builds', async () => {
     expect(await findUpdateSource(['http://a', 'http://b'], fake({}))).toBeNull();
     expect(await findUpdateSource([], fake({}))).toBeNull();
+  });
+});
+
+describe('orderForUpdates', () => {
+  const urls = ['http://a', 'http://b', 'http://c'];
+  test('pinned master goes first, the rest keep their order', () => {
+    expect(orderForUpdates(urls, 'http://c')).toEqual(['http://c', 'http://a', 'http://b']);
+  });
+  test('no pin, or a pin that is not in the list, keeps the list order', () => {
+    expect(orderForUpdates(urls, null)).toEqual(urls);
+    expect(orderForUpdates(urls, 'http://gone')).toEqual(urls);
+  });
+  test('the pinned master is asked first', async () => {
+    const asked: string[] = [];
+    const src = await findUpdateSource(orderForUpdates(urls, 'http://b'), async (u) => { asked.push(u); return { available: true, version: '9.9.9', served: true }; });
+    expect(src?.serverUrl).toBe('http://b');
+    expect(asked).toEqual(['http://b']);
   });
 });

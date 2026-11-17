@@ -87,6 +87,8 @@ export function loadSavedConfig(): Record<string, unknown> | null {
       // Multi-master field (preferred, new)
       for (const e of parseMastersField(data.masters)) addMaster(e);
 
+      if (typeof data.updateMaster === 'string' && data.updateMaster) state.updateMaster = data.updateMaster;
+
       // Legacy single-master field
       if (typeof data.serverUrl === 'string' && data.serverUrl) {
         addMaster({ serverUrl: data.serverUrl });
@@ -221,6 +223,8 @@ export function saveConfig(): void {
       masters,
       // Operator removals must outlive a reboot — see loadBlockedMasters().
       blockedMasters: blockedMasterList(),
+      // Master the operator pinned for sidecar updates (null = none).
+      updateMaster: state.updateMaster,
       // Legacy single-URL field — kept so older parsers still work.
       serverUrl: firstUrl,
       agentUrl: state.savedAgentUrl,

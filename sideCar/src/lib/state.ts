@@ -561,6 +561,12 @@ export const state = processGlobal('state', () => ({
   // state.masters.
   masters: new Map<string, MasterConnection>(),
 
+  // Master the operator pinned for sidecar updates (asked first). null = none.
+  updateMaster: null as string | null,
+  // Master that last answered the update check with a release (shown as the
+  // "updates" tag on Master Connections). null = no master serves updates.
+  updateSource: null as { serverUrl: string; version: string | null; checkedAt: number } | null,
+
   // Aggregate counter across all masters (UI displays it as "ws commands seen")
   wsCommandCount: 0,
 

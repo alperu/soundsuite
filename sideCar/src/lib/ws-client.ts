@@ -28,7 +28,7 @@ import { getContainerState, pullImage, createContainer, startContainer, dockerRe
 import { ollamaList, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
 import { saveConfig } from './config';
 import { createLogger } from './logger';
-import { checkForUpdate, findUpdateSource, performUpdate } from './self-update';
+import { checkForUpdate, findUpdateSource, orderForUpdates, performUpdate } from './self-update';
 import { tasks } from './task-tracker';
 import { emitBootEvent } from './boot-events';
 import { processGlobal } from './process-global';
@@ -1214,15 +1214,28 @@ function stopHttpHeartbeat(m: MasterConnection): void {
   if (m.pollTimer) { clearInterval(m.pollTimer); m.pollTimer = null; }
 }
 
-// ─── Update checks (process-wide, runs against first master) ─────────────
+// ─── Update checks (process-wide) ─────────────────────────────────────────
+
+/** Masters in update order: the pinned master first, then the list order. */
+export function updateCandidates(): string[] {
+  const urls = [...state.masters.values()].filter((m) => !m.retired).map((m) => m.serverUrl);
+  return orderForUpdates(urls, state.updateMaster);
+}
+
+/**
+ * Ask the masters which one serves sidecar releases and remember it, so the UI
+ * can tag it. A master with no builds answers 404 and is skipped.
+ */
+export async function refreshUpdateSource(): Promise<{ serverUrl: string; available: boolean; version?: string } | null> {
+  const src = await findUpdateSource(updateCandidates());
+  state.updateSource = src ? { serverUrl: src.serverUrl, version: src.version ?? null, checkedAt: Date.now() } : null;
+  return src;
+}
 
 function startUpdateChecks(): void {
   if (G.updateCheckInterval) return;
-  // Every master in order, not only the first: the first one that serves a
-  // sidecar release wins (a master with no builds answers 404 and is skipped).
-  const urls = () => [...state.masters.values()].filter((m) => !m.retired).map((m) => m.serverUrl);
   G.updateCheckInterval = setInterval(async () => {
-    const src = await findUpdateSource(urls());
+    const src = await refreshUpdateSource();
     if (src?.available) {
       log.info(`Auto-updating to v${src.version} from ${src.serverUrl}...`);
       await performUpdate(src.serverUrl);
@@ -1230,7 +1243,7 @@ function startUpdateChecks(): void {
   }, 5 * 60 * 1000);
 
   (async () => {
-    const src = await findUpdateSource(urls());
+    const src = await refreshUpdateSource();
     if (src?.available) {
       log.info(`Update available (v${src.version}) from ${src.serverUrl}, will apply on next check cycle`);
     }

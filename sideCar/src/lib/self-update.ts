@@ -82,6 +82,12 @@ export async function findUpdateSource(
   return null;
 }
 
+/** Master URLs in the order the update check asks them: the pinned one first. */
+export function orderForUpdates(urls: string[], pinned: string | null): string[] {
+  if (!pinned || !urls.includes(pinned)) return urls;
+  return [pinned, ...urls.filter((u) => u !== pinned)];
+}
+
 export async function performUpdate(serverUrl: string): Promise<boolean> {
   const installDir = getInstallDir();
   const currentVersion = getCurrentVersion();

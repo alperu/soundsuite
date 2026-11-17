@@ -9,7 +9,15 @@ export interface MasterEntry {
   lastHeartbeatAt?: number | null;
   lastSeenServerVersion?: string | null;
   pendingCommandCount?: number;
+  /** This master supplies sidecar updates (last update check). */
+  updateSource?: boolean;
+  /** Release version this master offers. */
+  updateVersion?: string | null;
+  /** The operator pinned this master for updates. */
+  updatePinned?: boolean;
 }
+
+type MasterPatch = { serverUrl?: string; wsPort?: number | null; updateSource?: boolean };
 
 interface ServerConnectionProps {
   /**
@@ -22,7 +30,7 @@ interface ServerConnectionProps {
   serverUrl: string | null;
   wsConnected: boolean;
   onAdd: (url: string, opts: { authToken?: string; wsPort?: number }) => void;
-  onEdit: (originalUrl: string, patch: { serverUrl?: string; wsPort?: number | null }) => void;
+  onEdit: (originalUrl: string, patch: MasterPatch) => void;
   onRemove: (url: string) => void;
 }
 
@@ -47,13 +55,34 @@ function modeStyle(mode?: string): string {
   return 'bg-red-100 text-red-800';
 }
 
+/** "updates" tag: the master that supplies sidecar updates, or the pinned one. */
+function UpdateTag({ m }: { m: MasterEntry }) {
+  if (m.updateSource) {
+    return (
+      <span
+        className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-800"
+        title={`Sidecar updates come from this master${m.updateVersion ? ` (offers v${m.updateVersion})` : ''}${m.updatePinned ? '. Pinned.' : ''}`}
+      >updates{m.updateVersion ? ` v${m.updateVersion}` : ''}{m.updatePinned ? ' · pinned' : ''}</span>
+    );
+  }
+  if (m.updatePinned) {
+    return (
+      <span
+        className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-800"
+        title="Pinned for updates, but this master serves no sidecar release. Another master is used."
+      >updates pinned · no release</span>
+    );
+  }
+  return null;
+}
+
 function MasterRow({
   m,
   onEdit,
   onRemove,
 }: {
   m: MasterEntry;
-  onEdit: (originalUrl: string, patch: { serverUrl?: string; wsPort?: number | null }) => void;
+  onEdit: (originalUrl: string, patch: MasterPatch) => void;
   onRemove: (url: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -71,7 +100,7 @@ function MasterRow({
   const cancel = () => setEditing(false);
 
   const save = () => {
-    const patch: { serverUrl?: string; wsPort?: number | null } = {};
+    const patch: MasterPatch = {};
     const trimmedUrl = draftUrl.trim();
     if (trimmedUrl && trimmedUrl !== m.serverUrl) patch.serverUrl = trimmedUrl;
 
@@ -126,7 +155,10 @@ function MasterRow({
 
   return (
     <tr className="border-t border-slate-100">
-      <td className="py-2 px-3 font-mono text-xs text-slate-800">{m.serverUrl}</td>
+      <td className="py-2 px-3 text-xs">
+        <span className="font-mono text-slate-800">{m.serverUrl}</span>
+        <UpdateTag m={m} />
+      </td>
       <td className="py-2 px-3 text-slate-600 text-xs">
         {m.wsPort ?? <span className="text-slate-400">{DEFAULT_WS_PORT} <span className="text-[10px]">(default)</span></span>}
       </td>
@@ -142,6 +174,11 @@ function MasterRow({
         )}
       </td>
       <td className="py-2 px-3 text-right space-x-1">
+        <button
+          onClick={() => onEdit(m.serverUrl, { updateSource: !m.updatePinned })}
+          title={m.updatePinned ? 'Stop asking this master first for sidecar updates' : 'Ask this master first for sidecar updates'}
+          className="text-xs px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700"
+        >{m.updatePinned ? 'Unpin updates' : 'Use for updates'}</button>
         <button
           onClick={startEdit}
           className="text-xs px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700"

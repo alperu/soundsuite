@@ -1210,6 +1210,10 @@ export async function handleStatus(): Promise<Record<string, unknown>> {
       lastHeartbeatAt: m.lastHeartbeatAt ?? null,
       lastSeenServerVersion: m.lastSeenServerVersion ?? null,
       pendingCommandCount: m.pendingCommands.size,
+      // "updates" tag: this master supplies sidecar updates / the operator pinned it.
+      updateSource: state.updateSource?.serverUrl === m.serverUrl,
+      updateVersion: state.updateSource?.serverUrl === m.serverUrl ? state.updateSource.version : null,
+      updatePinned: state.updateMaster === m.serverUrl,
       // A master that refuses connections must read as unreachable, not as an
       // ERROR line every cycle. Still being retried on the capped backoff —
       // UNREPORTED is not down, and unreachable is not gone.

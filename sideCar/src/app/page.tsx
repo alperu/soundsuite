@@ -44,6 +44,9 @@ interface MasterStatus {
   lastHeartbeatAt?: number | null;
   lastSeenServerVersion?: string | null;
   pendingCommandCount?: number;
+  updateSource?: boolean;
+  updateVersion?: string | null;
+  updatePinned?: boolean;
   /** Presence-only OpenRouter config status for this master — never the key. */
   virtualInference?: {
     openrouter: 'configured' | 'unset';
@@ -376,13 +379,14 @@ export default function Home() {
 
   const handleEditMaster = async (
     originalUrl: string,
-    patch: { serverUrl?: string; wsPort?: number | null },
+    patch: { serverUrl?: string; wsPort?: number | null; updateSource?: boolean },
   ) => {
     try {
       const summary = [
         patch.serverUrl ? `url=${patch.serverUrl}` : null,
         patch.wsPort === null ? 'wsPort=default' :
           patch.wsPort !== undefined ? `wsPort=${patch.wsPort}` : null,
+        patch.updateSource === true ? 'use for updates' : patch.updateSource === false ? 'unpin updates' : null,
       ].filter(Boolean).join(', ');
       addLog(`Editing master ${originalUrl}: ${summary || '(no changes)'}`);
       const res = await fetch(`/api/masters/${encodeURIComponent(originalUrl)}`, {
