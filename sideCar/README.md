@@ -138,6 +138,7 @@ Add masters with `SIDECAR_MASTERS`, or from the dashboard.
 | [`docs/setup.md`](docs/setup.md) | Installation, starting, auto-updates, dependency checks |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How it works: connection model, roles, VRAM, idle timers, failure modes |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Every environment variable, with defaults and why each exists |
+| [`docs/NETBIRD.md`](docs/NETBIRD.md) | NetBird and HTTPS: the /netbird page, Activity Log events, troubleshooting |
 | [`docs/API.md`](docs/API.md) | Endpoint reference |
 
 ## Development

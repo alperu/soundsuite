@@ -10,6 +10,7 @@ import {
   buildImageFromDockerfile, pullImage, resolveSelfContainer,
 } from './docker';
 import { createLogger } from './logger';
+import { emitBootEvent } from './boot-events';
 import { processGlobal } from './process-global';
 import {
   CF_TOKEN_FILE, SETUP_KEY_FILE, keyHint, readSecret, readSettings,
@@ -98,6 +99,8 @@ const G = processGlobal('netbird', () => ({
   status: null as { at: number; value: NetbirdStatus | null } | null,
   builds: {} as Record<string, { running: boolean; error: string | null; at: number }>,
   reconnectPending: false,
+  // What the Activity Log was last told, so each change is logged once.
+  told: {} as Record<string, string>,
 }));
 
 /** Run one reconcile; concurrent callers share the run in flight. */
@@ -114,8 +117,13 @@ export function runReconcile(): Promise<ReconcileReport> {
       }
       if (!r.supported && prev?.reason !== r.reason) log.info(`NetBird not available: ${r.reason}`);
       const nb = r.netbird;
-      // Keep the cached status fresh for netbirdSummary() (master heartbeat).
-      if (nb && nb.state !== 'off' && nb.state !== 'removed' && nb.state !== 'error') void cachedStatus(nb.name).catch(() => {});
+      // Keep the cached status fresh for netbirdSummary() (master heartbeat),
+      // and tell the Activity Log about changes and errors.
+      if (nb && nb.state !== 'off' && nb.state !== 'removed' && nb.state !== 'error') {
+        void cachedStatus(nb.name).then((st) => reportNetbird(r, st)).catch(() => {});
+      } else {
+        void reportNetbird(r, null);
+      }
       if (nb && (nb.state === 'created' || nb.state === 'started' || nb.state === 'restarted')) {
         void reconnectMastersWhenUp(nb.name);
       }
@@ -123,6 +131,65 @@ export function runReconcile(): Promise<ReconcileReport> {
     })
     .finally(() => { G.running = null; });
   return G.running;
+}
+
+/** Log `text` to the Activity Log once per change of `key`. */
+function tell(key: string, text: string | null, level: 'info' | 'warn' | 'error' = 'info'): void {
+  if (G.told[key] === (text ?? '')) return;
+  G.told[key] = text ?? '';
+  if (text) emitBootEvent(text, level === 'info' ? undefined : { level });
+}
+
+/**
+ * NetBird and HTTPS lines for the Overview Activity Log: companion changes,
+ * errors (from the reconcile or the container log), and the connection state.
+ */
+async function reportNetbird(r: ReconcileReport, st: NetbirdStatus | null): Promise<void> {
+  try {
+    if (!r.supported) { tell('supported', `NetBird not available: ${r.reason}`, 'warn'); return; }
+    tell('supported', null);
+    for (const c of [r.netbird, r.caddy]) {
+      if (!c) continue;
+      const what = c.name.endsWith('-caddy') ? 'HTTPS (Caddy)' : 'NetBird';
+      if (c.state !== 'running') tell(`${c.name}:state`, `${what}: ${c.state}`);
+      if (c.state === 'error' || c.error) tell(`${c.name}:error`, `${what} error: ${c.error}`, 'error');
+      else tell(`${c.name}:error`, null);
+    }
+    const nb = r.netbird;
+    if (!nb || nb.state === 'off' || nb.state === 'removed' || nb.state === 'error') { tell('conn', null); return; }
+    if (st?.connected) {
+      tell('conn', `NetBird connected as ${st.fqdn ?? r.fqdn} (${st.ip}), ${st.peersConnected}/${st.peersTotal} peers`);
+      tell(`${nb.name}:log`, null);
+      if (st.peersTotal === 0) tell('peers', 'NetBird gives this peer 0 peers: add it to a group with an access policy in the NetBird dashboard.', 'warn');
+      else tell('peers', null);
+    } else if (nb.state === 'running') {
+      // Only read the container log while it is not connected: a healthy
+      // NetBird logs transient errors too.
+      tell('conn', `NetBird not connected (management ${st?.managementConnected ? 'connected' : 'not connected'})`, 'warn');
+      const e = await dockerDeps.lastError(nb.name).catch(() => null);
+      if (e) {
+        nb.error = e;
+        tell(`${nb.name}:log`, `NetBird error: ${e}`, 'error');
+      }
+    }
+  } catch (e) {
+    log.warn(`NetBird activity report failed: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * Connect NetBird now: remove <self>-netbird and reconcile, which makes it
+ * again with a fresh setup-key hand-off. The peer identity (named volume) is
+ * kept. Master sockets reconnect when it is up (reconnectMastersWhenUp).
+ */
+export async function connectNetbirdNow(): Promise<void> {
+  const me = await dockerDeps.self();
+  if (!me.ok) throw new Error(me.detail);
+  if (!readSettings(netbirdDir()).enabled) throw new Error('NetBird is off. Turn it on first.');
+  emitBootEvent('NetBird: connect requested');
+  for (const k of Object.keys(G.told)) delete G.told[k];
+  await dockerDeps.remove(`${me.name}-netbird`);
+  await applyNow();
 }
 
 /**

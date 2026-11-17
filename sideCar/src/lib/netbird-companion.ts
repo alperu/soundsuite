@@ -200,6 +200,10 @@ export function lastLoggedError(log: string): string | null {
         if (o.level) continue;
       } catch { /* not JSON */ }
     }
+    // NetBird: "<time> ERRO client/internal/engine.go:657: <message>".
+    const nb = /\s(?:ERRO|FATA|PANI)\s+\S+:\d+:\s*(.*)$/.exec(line);
+    if (nb) { found = nb[1]; continue; }
+    if (/\s(?:INFO|WARN|DEBU|TRAC)\s/.test(line)) continue;
     if (/\berror\b|no Cloudflare token/i.test(line)) found = line.replace(/^\S*\d{4}-\d\d-\d\dT\S+\s+/, '');
   }
   return found ? found.replace(/[A-Za-z0-9_-]{35,}/g, '<hidden>').slice(0, 400) : null;

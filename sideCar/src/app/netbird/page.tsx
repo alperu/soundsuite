@@ -217,6 +217,10 @@ export default function NetbirdPage() {
           <button disabled={busy} className={`${btn} bg-slate-900 text-white`} onClick={() => save(true)}>
             {v.enabled ? 'Save' : 'Save and connect'}
           </button>
+          {v.enabled && v.hasSetupKey && (
+            <button disabled={busy} className={`${btn} bg-slate-200`} title="Make the NetBird container again and connect now. The peer identity is kept. Progress and errors show in the Overview Activity Log."
+              onClick={() => send('POST', '/api/netbird/connect', null, 'Connecting NetBird. See the Overview Activity Log for progress.')}>Connect NetBird</button>
+          )}
           {v.enabled && <button disabled={busy} className={`${btn} bg-slate-200`} onClick={() => save(false)}>Turn off</button>}
           {v.hasSetupKey && (
             <button disabled={busy} className={`${btn} text-red-700`} onClick={() => {

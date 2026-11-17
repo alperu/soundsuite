@@ -313,3 +313,14 @@ describe('testCloudflareToken', () => {
     expect(r.steps[2]).toEqual({ step: 'Token can add a DNS record', ok: false, detail: 'Authentication error' });
   });
 });
+
+describe('lastLoggedError for NetBird logs', () => {
+  test('takes the last ERRO line and skips INFO/WARN', () => {
+    const log = [
+      '2026-11-17T13:12:17.115Z INFO client/internal/routemanager/systemops/systemops_linux.go:101: Using legacy routing setup',
+      '2026-11-17T13:12:17.117Z ERRO client/internal/engine.go:657: failed creating tunnel interface wt0: wgctl: socket: protocol not supported',
+      '2026-11-17T13:12:17.177Z WARN [relay: rels://vpn.bas.co:443] shared/relay/client/client.go:840: relay connection was closed by error',
+    ].join('\n');
+    expect(lastLoggedError(log)).toBe('failed creating tunnel interface wt0: wgctl: socket: protocol not supported');
+  });
+});

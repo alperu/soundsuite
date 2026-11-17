@@ -184,6 +184,19 @@ and HTTP gossip is carrying the connection. It is not an error state.
 Force a WebSocket reconnect or drop to HTTP gossip. Diagnostic; normal operation
 manages this itself.
 
+## NetBird and HTTPS
+
+See [NETBIRD.md](NETBIRD.md). All need an admin session.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /netbird` · `PUT /netbird` | Settings, status, peers (P2P / Relayed), companions, certificate. |
+| `DELETE /netbird/key` | Remove the setup key; NetBird turns off. |
+| `POST /netbird/connect` | Make the NetBird container again and connect now. |
+| `DELETE /netbird/https-token` | Remove the Cloudflare token; HTTPS turns off. |
+| `POST /netbird/https-token/test` `{ token?, domain? }` | Test a Cloudflare token (saved one when `token` is absent). Saves nothing. |
+| `POST /netbird/https-retry` | Restart Caddy so it asks for the certificate now. |
+
 ## Updates
 
 ### `POST /update`
