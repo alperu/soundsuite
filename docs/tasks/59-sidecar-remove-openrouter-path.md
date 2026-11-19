@@ -1,36 +1,98 @@
-# Sidecar: remove the OpenRouter ("virtual inference") path
+# Remove the sidecar OpenRouter proxy; masters and ss-rlm-sandbox call OpenRouter directly
 
-**Status:** BLOCKED on a user decision · **Created:** 2026-11-19
-**Plan:** `mcpfantom/docs/plans/2026-11-19-openrouter-direct-workers.md`, section 8.
+**Status:** in progress · **Created:** 2026-11-19 · **Updated:** 2026-11-19
+**Plan:** `mcpfantom/docs/plans/2026-11-19-openrouter-direct-workers.md`, sections 0.3-0.5 and 8.
+**Goes with:** task 58 (the sandbox slot stays).
 
-## Blocker
-Sound Suite still uses this path:
-- `src/lib/gpu/fleet-router.ts:978` `buildOpenRouterPush()` pushes its key and models.
-- `src/lib/gpu/virtual-embed-dispatch.ts` sends `virtual-embed` shares.
-- `docker/rlm-sandbox/server.py:49` `SS_SIDECAR_URL` → sidecar `/api/v1/chat/completions`.
+## Decisions (user, 2026-11-19)
+- **Sound Suite master** calls OpenRouter itself for embedding, rerank and chat
+  with `src/lib/openrouter/client.ts` (no second client). Provider pins, width
+  checks and spend accounting stay in that client. It stops sending
+  `virtual-embed` and pushes only the sandbox slot (task 58).
+- **Sidecar** drops the proxy: embed / rerank / key-info over WS, the
+  local-acquire fallback to `virtual-inference`, the `/api/v1/chat/completions`
+  route and the "Virtual Containers" UI. It keeps the per-master sandbox slot.
+- **ss-rlm-sandbox** calls `https://openrouter.ai/api/v1/chat/completions`
+  itself with the calling master's key. It gets `{key, model, domain}` from a
+  local hand-off endpoint on the sidecar.
 
-Do this only after Sound Suite calls OpenRouter from its master (it already has
-`src/lib/openrouter/client.ts`) and the RLM sandbox points at the master, or the
-user decides to keep the path for Sound Suite.
+## Hand-off endpoint (sidecar → sandbox)
+`GET /api/rlm-sandbox/master-config?master=<master URL>`
 
-## Remove (sideCar/)
-- `src/lib/virtual-inference.ts` (730), `src/lib/openrouter-client.ts` (231),
-  `src/lib/openrouter-store.ts` (141); keep `secret-box.ts` (other tokens use it).
-- `src/lib/ws-client.ts`: actions `virtual-embed`, `virtual-rerank`,
-  `virtual-key-info` (383-385); `payload.openrouter` handling (483);
-  `clearOpenRouterConfig` in `retireMaster` (1822).
-- `src/lib/handlers.ts`: fallback to `virtual-inference` in local acquire
-  (627-690, incl. `isCloudOnly`), `virtualInference` in status (1224),
-  `handleVirtualEmbed/Rerank/KeyInfo` (1260-1330).
-- `src/app/api/v1/chat/completions/route.ts`.
-- `src/instrumentation.ts:88-96` restore.
-- UI: `src/components/virtual-container-table.tsx`, its use in `src/app/page.tsx`.
-- `src/lib/state.ts` rlm-sandbox comments/role if the container goes too.
-- Tests: `src/lib/__tests__/virtual-*.test.ts` (4 files).
-- Delete `openrouter.enc.json` on boot once (log it).
-- Docs: `sideCar/docs/API.md`, `ARCHITECTURE.md`, `CONFIGURATION.md`, README.
+- Auth: header `X-Sandbox-Token` must equal the token the sidecar passes to the
+  container as env `SS_SANDBOX_TOKEN`. The token is derived from the sidecar's
+  data key (`purposeKey('rlm-sandbox-token')`), so it is stable across sidecar
+  restarts and container re-creates. Missing or wrong → 401.
+- `master` absent → the old rule: the one master with a usable slot, 409 when
+  there are several.
+- 200: `{ "master": "<url>", "apiKey": "<key>", "model": "<id>", "domain": "legal"|"code"|null }`
+- Errors: `{ "error": { "message", "code" }, "handoff": true }` plus header
+  `X-Sandbox-Handoff: 1`. 404 = master has no slot, 409 = ambiguous, 503 = no
+  key or no sandbox model.
+- A 404 **without** the marker means an older sidecar with no such route; only
+  then does the sandbox fall back to the old sidecar chat route.
+- Sandbox caches the answer per master for 60 s. The key is never logged.
+
+## Implementation
+
+### Files
+Master (`src/`):
+- `lib/gpu/fleet-router.ts` `buildOpenRouterPush()` → sandbox slot only;
+  `null` when OpenRouter is off or has no key (a new sidecar then clears the slot).
+- `lib/ingestion/all-sources-embedding-provider.ts` → cloud share calls
+  `OpenRouterEmbeddingProvider.embed()` (pinned, width-checked, charged).
+- Delete `lib/gpu/virtual-embed-dispatch.ts` and its test; delete
+  `lib/openrouter/__tests__/sidecar-constants-drift.test.ts` (the sidecar no
+  longer holds embedding pins).
+- Rerank and chat already call the client directly; comments only.
+
+Sidecar (`sideCar/src/`):
+- New `lib/sandbox-slot.ts` (set / clear / restore / status / resolve).
+  `openrouter-store.ts` and `secret-box.ts` stay; the store keeps its file
+  format so an older sidecar can still read it on rollback.
+- Delete `lib/virtual-inference.ts`, `lib/openrouter-client.ts`,
+  `app/api/v1/chat/completions/route.ts`, `components/virtual-container-table.tsx`.
+- `lib/ws-client.ts`: drop the three `virtual-*` actions (an old master gets
+  `Unknown action`), `null` clears the slot.
+- `lib/handlers.ts`: drop the cloud fallback in acquire and the `virtual*`
+  handlers; status reports the slot.
+- New `app/api/rlm-sandbox/master-config/route.ts`.
+- `lib/docker.ts`: pass `SS_SANDBOX_TOKEN` and `SS_SIDECAR_URL` to the
+  container; token value redacted in drift messages.
+- Image pin `ghcr.io/project-sandstar/rlm-sandbox:0.1.3` in `state.ts` and
+  `mode-templates.ts`.
+
+Sandbox (`docker/rlm-sandbox/server.py`): fetch the master config, call
+OpenRouter directly with `usage: {include: true}`, fall back on a bare 404.
+
+### Order
+1. This doc.
+2. Master, sidecar, sandbox code; tests and type checks pass.
+3. Build and push the sandbox image `0.1.3` (multi-arch, public) **before** the
+   sidecar release, or hosts on the new sidecar cannot pull it.
+4. Deploy the Sound Suite master.
+5. Sidecar release (`buildSidecar.sh patch`, then fleet update).
+
+### Rollback
+- Master: previous release.
+- Sidecar: previous release; `openrouter.enc.json` keeps the old format, so
+  2.7.8 restores the slots. 2.7.8 pins image `0.1.2`, which uses the chat route.
+- Sandbox image `0.1.3` on an old sidecar works through the 404 fallback.
+
+### Tests
+- Sidecar: `sandbox-slot.test.ts`, `rlm-sandbox-master-config.test.ts`
+  (token, 404 marker, 409, 503, 200), existing pin and drift tests.
+- Master: `openrouter-push.test.ts` (sandbox-only shape),
+  `all-sources-embedding-provider.test.ts` (direct cloud share).
+- Sandbox: `python3 -m py_compile server.py`.
+
+## Follow-up
+- Remove the sandbox's 404 fallback to the sidecar chat route once every host
+  runs this release.
+- Delete `openrouter.enc.json` handling only if the sandbox slot moves elsewhere.
 
 ## Acceptance
-- `rg -n "openrouter|virtual-inference" sideCar/src` finds nothing but comments you meant to keep.
+- `rg -n "virtual-embed|virtual-rerank|virtual-key-info|openrouter-client" sideCar/src` finds nothing.
 - Local roles (embedding, code-embedding, reranker, completion, OCR) still serve.
-- A master that still pushes `openrouter` gets no error (field ignored).
+- A master that still pushes the full `openrouter` block gets no error.
+- `/api/status` per master: `serverUrl`, `wsPort`, `virtualInference.openrouter`.
