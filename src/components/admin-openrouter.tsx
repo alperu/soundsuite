@@ -143,6 +143,7 @@ function fmtCtx(v: number | null | undefined): string {
 export default function AdminOpenRouter({ initialConfig }: Props) {
   // --- Settings state ---
   const [apiKeyInput, setApiKeyInput] = useState('');
+  const [sandboxKeyInput, setSandboxKeyInput] = useState('');
   const [enabled, setEnabled] = useState(initialConfig.openRouterEnabled ?? false);
   const [embeddingModel, setEmbeddingModel] = useState(
     initialConfig.openRouterEmbeddingModel || OPENROUTER_EMBEDDING_MODELS[0]?.id || '',
@@ -209,6 +210,12 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
   );
   const keyConfigured = initialConfig.apiKeys?.openrouter?.configured ?? false;
   const keyLast4 = initialConfig.apiKeys?.openrouter?.last4;
+  const [sandboxKeyConfigured, setSandboxKeyConfigured] = useState(
+    initialConfig.apiKeys?.['openrouter-sandbox']?.configured ?? false,
+  );
+  const [sandboxKeyLast4, setSandboxKeyLast4] = useState(
+    initialConfig.apiKeys?.['openrouter-sandbox']?.last4,
+  );
 
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -229,6 +236,8 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
         body: JSON.stringify({
           // Write-only: an empty field means "leave the stored key alone".
           apiKey: apiKeyInput.trim() ? apiKeyInput.trim() : undefined,
+          // Write-only, like the main key. Never the main key (the server refuses it).
+          sandboxApiKey: sandboxKeyInput.trim() ? sandboxKeyInput.trim() : undefined,
           enabled,
           embeddingModel,
           // Was omitted here while being rendered and stored in state, so
@@ -256,6 +265,11 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
       setApiKeyInput('');
+      if (sandboxKeyInput.trim()) {
+        setSandboxKeyConfigured(true);
+        setSandboxKeyLast4(sandboxKeyInput.trim().slice(-4));
+      }
+      setSandboxKeyInput('');
       if (workers !== undefined) setSavedWorkers(workers);
       setSaveMessage({ type: 'success', text: 'OpenRouter settings saved.' });
     } catch (e: any) {
@@ -688,6 +702,30 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
             }}
             options={rlmOptions}
           />
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Sandbox key (low spending limit)
+            </label>
+            <input
+              type="password"
+              autoComplete="off"
+              value={sandboxKeyInput}
+              onChange={(e) => setSandboxKeyInput(e.target.value)}
+              placeholder={sandboxKeyConfigured ? `Configured (••••${sandboxKeyLast4})` : 'sk-or-v1-…'}
+              className="w-full max-w-md px-3 py-2 border border-gray-300 rounded-md text-sm"
+            />
+            {sandboxKeyConfigured ? (
+              <p className="text-xs text-gray-500 mt-1">
+                A sandbox key is stored (ends in {sandboxKeyLast4}). Leave blank to keep it.
+              </p>
+            ) : (
+              <p className="text-xs text-amber-700 mt-1">
+                Sandbox off: no sandbox key. Create a separate OpenRouter key with a low
+                spending limit and paste it here. The sandbox runs model-written code, so it
+                never gets the main key.
+              </p>
+            )}
+          </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               RLM mode — this master&apos;s setting

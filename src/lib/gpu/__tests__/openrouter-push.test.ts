@@ -23,12 +23,14 @@ jest.mock('@/lib/gpu/command-queue', () => ({ queueSidecarCommand: jest.fn() }))
 import { buildOpenRouterPush } from '../fleet-router';
 import type { AppConfig } from '@/lib/db/config';
 
-const KEY = 'sk-or-v1-synthetic-not-a-real-key';
+const MAIN_KEY = 'sk-or-v1-synthetic-main-key';
+const KEY = 'sk-or-v1-synthetic-sandbox-key';
 
 function cfg(over: Partial<AppConfig> = {}): AppConfig {
   return {
     openRouterEnabled: true,
-    openRouterApiKey: KEY,
+    openRouterApiKey: MAIN_KEY,
+    openRouterSandboxApiKey: KEY,
     openRouterEmbeddingModel: 'qwen/qwen3-embedding-4b',
     openRouterCodeEmbeddingModel: 'qwen/qwen3-embedding-4b',
     openRouterRerankModel: 'qwen/qwen3-reranker-8b',
@@ -41,9 +43,17 @@ describe('buildOpenRouterPush', () => {
     expect(buildOpenRouterPush(cfg({ openRouterEnabled: false }))).toBeNull();
   });
 
-  it('returns null when no key is set, even if enabled', () => {
-    expect(buildOpenRouterPush(cfg({ openRouterApiKey: undefined }))).toBeNull();
-    expect(buildOpenRouterPush(cfg({ openRouterApiKey: '' }))).toBeNull();
+  it('returns null when no sandbox key is set, even with a main key', () => {
+    expect(buildOpenRouterPush(cfg({ openRouterSandboxApiKey: undefined }))).toBeNull();
+    expect(buildOpenRouterPush(cfg({ openRouterSandboxApiKey: '' }))).toBeNull();
+  });
+
+  it('never pushes the main key', () => {
+    const out = buildOpenRouterPush(cfg({ rlmSandboxModel: 'x/y' } as Partial<AppConfig>));
+    expect(JSON.stringify(out)).not.toContain(MAIN_KEY);
+    expect(out!.apiKey).toBe(KEY);
+    // A sandbox key equal to the main key is refused, so the main key still never leaves.
+    expect(buildOpenRouterPush(cfg({ openRouterSandboxApiKey: MAIN_KEY }))).toBeNull();
   });
 
   it('pushes only the sandbox slot: key, rlm-sandbox model, domain', () => {

@@ -75,7 +75,7 @@ describe('streamRlm — failover across sandbox hosts', () => {
     mockFleet.mockResolvedValue({
       sidecars: [sandboxSidecar('sidecar-a'), sandboxSidecar('sidecar-b'), sandboxSidecar('sidecar-c')],
     });
-    mockCfg.mockResolvedValue({ virtualInferenceModeRlm: 'cloud-only', rlmSandboxModel: 'deepseek/deepseek-v4-flash' });
+    mockCfg.mockResolvedValue({ virtualInferenceModeRlm: 'cloud-only', rlmSandboxModel: 'deepseek/deepseek-v4-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox' });
   });
 
   afterAll(() => {

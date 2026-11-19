@@ -962,10 +962,16 @@ export function buildOpenRouterPush(cfg: AppConfig): {
   allowedModels: Record<string, { model: string }>;
   domain: 'legal' | 'code';
 } | null {
-  if (!cfg.openRouterEnabled || !cfg.openRouterApiKey) return null;
+  // The sandbox gets its OWN low-limit key (openRouterSandboxApiKey), never
+  // the main key: it runs model-written code that could read it. No sandbox
+  // key means null, which clears this master's slot on every sidecar (and so
+  // also wipes a main key an older build pushed there).
+  const sandboxKey = cfg.openRouterSandboxApiKey?.trim();
+  if (!cfg.openRouterEnabled || !sandboxKey) return null;
+  if (cfg.openRouterApiKey && sandboxKey === cfg.openRouterApiKey.trim()) return null;
   const allowedModels: Record<string, { model: string }> = {};
   if (cfg.rlmSandboxModel) allowedModels['rlm-sandbox'] = { model: cfg.rlmSandboxModel };
-  return { apiKey: cfg.openRouterApiKey, allowedModels, domain: 'legal' };
+  return { apiKey: sandboxKey, allowedModels, domain: 'legal' };
 }
 
 export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {

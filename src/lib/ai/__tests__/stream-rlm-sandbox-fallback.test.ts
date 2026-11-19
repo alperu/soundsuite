@@ -64,7 +64,7 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
     });
     mockGetConfig.mockResolvedValue({
       virtualInferenceModeRlm: 'local-first',
-      rlmSandboxModel: 'deepseek/deepseek-v4.1-flash',
+      rlmSandboxModel: 'deepseek/deepseek-v4.1-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox',
     });
 
     const resolved = await resolveRlmEndpoint();
@@ -90,7 +90,7 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
     mockGetFleetStatus.mockResolvedValue({ sidecars: [sidecar()] });
     mockGetConfig.mockResolvedValue({
       virtualInferenceModeRlm: 'local-only',
-      rlmSandboxModel: 'deepseek/deepseek-v4-flash',
+      rlmSandboxModel: 'deepseek/deepseek-v4-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox',
     });
 
     const resolved = await resolveRlmEndpoint();
@@ -107,11 +107,24 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
     expect(resolved).toBeNull();
   });
 
-  it('returns null when local-first + a model are set but no sidecar has rlm-sandbox running', async () => {
+  it('returns null when a model is set but no sandbox key (never uses the main key)', async () => {
     mockGetFleetStatus.mockResolvedValue({ sidecars: [sidecar()] });
     mockGetConfig.mockResolvedValue({
       virtualInferenceModeRlm: 'local-first',
       rlmSandboxModel: 'deepseek/deepseek-v4-flash',
+      openRouterApiKey: 'sk-or-v1-main',
+    });
+
+    const resolved = await resolveRlmEndpoint();
+
+    expect(resolved).toBeNull();
+  });
+
+  it('returns null when local-first + a model are set but no sidecar has rlm-sandbox running', async () => {
+    mockGetFleetStatus.mockResolvedValue({ sidecars: [sidecar()] });
+    mockGetConfig.mockResolvedValue({
+      virtualInferenceModeRlm: 'local-first',
+      rlmSandboxModel: 'deepseek/deepseek-v4-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox',
     });
 
     const resolved = await resolveRlmEndpoint();
@@ -129,7 +142,7 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
     });
     mockGetConfig.mockResolvedValue({
       virtualInferenceModeRlm: 'local-first',
-      rlmSandboxModel: 'deepseek/deepseek-v4-flash',
+      rlmSandboxModel: 'deepseek/deepseek-v4-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox',
     });
 
     const resolved = await resolveRlmEndpoint();
@@ -162,7 +175,7 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
     });
     mockGetConfig.mockResolvedValue({
       virtualInferenceModeRlm: 'local-first',
-      rlmSandboxModel: 'deepseek/deepseek-v4-flash',
+      rlmSandboxModel: 'deepseek/deepseek-v4-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox',
     });
 
     const resolved = await resolveRlmEndpoint();
@@ -187,7 +200,7 @@ describe('resolveRlmEndpoint — ss-rlm-sandbox fallback', () => {
     });
     mockGetConfig.mockResolvedValue({
       virtualInferenceModeRlm: 'local-first',
-      rlmSandboxModel: 'deepseek/deepseek-v4-flash',
+      rlmSandboxModel: 'deepseek/deepseek-v4-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox',
     });
 
     const resolved = await resolveRlmEndpoint();
@@ -222,7 +235,7 @@ describe('resolveRlmEndpoint — virtualInference.mode.rlm=cloud-only', () => {
     });
     mockGetConfig.mockResolvedValue({
       virtualInferenceModeRlm: 'cloud-only',
-      rlmSandboxModel: 'deepseek/deepseek-v4.1-flash',
+      rlmSandboxModel: 'deepseek/deepseek-v4.1-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox',
     });
 
     const resolved = await resolveRlmEndpoint();
@@ -243,7 +256,7 @@ describe('resolveRlmEndpoint — virtualInference.mode.rlm=cloud-only', () => {
     });
     mockGetConfig.mockResolvedValue({
       virtualInferenceModeRlm: 'cloud-only',
-      rlmSandboxModel: 'deepseek/deepseek-v4.1-flash',
+      rlmSandboxModel: 'deepseek/deepseek-v4.1-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox',
     });
 
     // Deliberate: cloud-only means "do not use ss-rlm". Quietly serving the
@@ -293,7 +306,7 @@ describe('resolveRlmEndpoint — excludeHosts (failover contract)', () => {
 
   it('cloud-only: an excluded sandbox host is passed over even though its cache still says running', async () => {
     mockGetFleetStatus.mockResolvedValue({ sidecars: [sandboxOn('sidecar-a'), sandboxOn('sidecar-b')] });
-    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'cloud-only', rlmSandboxModel: 'deepseek/deepseek-v4-flash' });
+    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'cloud-only', rlmSandboxModel: 'deepseek/deepseek-v4-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox' });
 
     // Without exclusion the first host wins — the pre-fix behaviour, unchanged.
     expect((await resolveRlmEndpoint())?.host).toBe('sidecar-a');
@@ -305,14 +318,14 @@ describe('resolveRlmEndpoint — excludeHosts (failover contract)', () => {
 
   it('returns null once every sandbox host is excluded — the caller must stop, not spin', async () => {
     mockGetFleetStatus.mockResolvedValue({ sidecars: [sandboxOn('sidecar-a'), sandboxOn('sidecar-b')] });
-    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'cloud-only', rlmSandboxModel: 'deepseek/deepseek-v4-flash' });
+    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'cloud-only', rlmSandboxModel: 'deepseek/deepseek-v4-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox' });
 
     expect(await resolveRlmEndpoint({ excludeHosts: ['sidecar-a', 'sidecar-b'] })).toBeNull();
   });
 
   it('local-first: an excluded ss-rlm host is skipped in Phase 1 and does not seed the live-probe list', async () => {
     mockGetFleetStatus.mockResolvedValue({ sidecars: [rlmOn('sidecar-a'), rlmOn('sidecar-b')] });
-    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'local-first', rlmSandboxModel: 'deepseek/deepseek-v4-flash' });
+    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'local-first', rlmSandboxModel: 'deepseek/deepseek-v4-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox' });
 
     const r = await resolveRlmEndpoint({ excludeHosts: ['sidecar-a'] });
     expect(r).toEqual({ endpoint: 'http://sidecar-b:8100', host: 'sidecar-b', contextTokens: RLM_CONTEXT_TOKENS });
@@ -320,7 +333,7 @@ describe('resolveRlmEndpoint — excludeHosts (failover contract)', () => {
 
   it('local-first: excluding the only ss-rlm host falls through to a sandbox on another host', async () => {
     mockGetFleetStatus.mockResolvedValue({ sidecars: [rlmOn('sidecar-a'), sandboxOn('sidecar-b')] });
-    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'local-first', rlmSandboxModel: 'deepseek/deepseek-v4-flash' });
+    mockGetConfig.mockResolvedValue({ virtualInferenceModeRlm: 'local-first', rlmSandboxModel: 'deepseek/deepseek-v4-flash', openRouterSandboxApiKey: 'sk-or-v1-test-sandbox' });
 
     const r = await resolveRlmEndpoint({ excludeHosts: ['sidecar-a'] });
     expect(r?.endpoint).toBe('http://sidecar-b:8101');

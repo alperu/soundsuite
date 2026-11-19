@@ -18,6 +18,10 @@ export interface AppConfig {
   // --- OpenRouter (virtual inference) ---
   /** SECRET. Masked by toPublicConfig() and isSecretConfigKey(). */
   openRouterApiKey?: string;
+  /** SECRET. A separate, low-spending-limit OpenRouter key for ss-rlm-sandbox
+   *  only. The sandbox runs model-written code, so it must never get the main
+   *  key. With no sandbox key set, no key goes to the sidecars. */
+  openRouterSandboxApiKey?: string;
   /** Master kill switch — nothing reaches OpenRouter while this is false. */
   openRouterEnabled: boolean;
   /** Embedding model id for the TEXT embedding role (ss-embedding), used when
@@ -308,6 +312,7 @@ export async function getConfig(): Promise<AppConfig> {
 
     // OpenRouter — default OFF so an upgrade never starts spending on its own.
     openRouterApiKey: configMap.get('openrouter.apiKey'),
+    openRouterSandboxApiKey: configMap.get('openrouter.sandboxApiKey'),
     openRouterEnabled: configMap.get('openrouter.enabled') === 'true',
     openRouterEmbeddingModel: configMap.get('openrouter.embeddingModel') || 'qwen/qwen3-embedding-4b',
     // Defaults to the 4B: it is the only hosted model that matches
@@ -477,6 +482,7 @@ export async function getConfig(): Promise<AppConfig> {
  */
 export const API_KEY_FIELDS = [
   'openRouterApiKey',
+  'openRouterSandboxApiKey',
   'openaiApiKey',
   'claudeApiKey',
   'geminiApiKey',
@@ -489,6 +495,7 @@ export type ApiKeyField = (typeof API_KEY_FIELDS)[number];
 /** Provider label each key field belongs to — mirrors `/api/admin/ai-keys`. */
 export const API_KEY_FIELD_PROVIDER: Record<ApiKeyField, string> = {
   openRouterApiKey: 'openrouter',
+  openRouterSandboxApiKey: 'openrouter-sandbox',
   openaiApiKey: 'openai',
   claudeApiKey: 'anthropic',
   geminiApiKey: 'gemini',
@@ -550,6 +557,7 @@ export async function getPublicConfig(): Promise<PublicConfig> {
  */
 const SECRET_CONFIG_KEYS = new Set([
   'openrouter.apiKey',
+  'openrouter.sandboxApiKey',
   'embedding.openaiApiKey',
   'embedding.claudeApiKey',
   'ai.geminiApiKey',
@@ -663,6 +671,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
 
   if (config.openRouterApiKey !== undefined) {
     updates.push({ key: 'openrouter.apiKey', value: config.openRouterApiKey });
+  }
+  if (config.openRouterSandboxApiKey !== undefined) {
+    updates.push({ key: 'openrouter.sandboxApiKey', value: config.openRouterSandboxApiKey });
   }
   if (config.openRouterEnabled !== undefined) {
     updates.push({ key: 'openrouter.enabled', value: String(config.openRouterEnabled) });

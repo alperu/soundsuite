@@ -417,6 +417,16 @@ function failoverNote(excludeHosts: string[]): string {
     : '';
 }
 
+/** The sandbox model, or undefined when the sandbox cannot run. The sandbox
+ *  needs its own low-limit key; it never gets the main OpenRouter key. */
+function sandboxModelIfKeyed(cfg: { rlmSandboxModel?: string; openRouterSandboxApiKey?: string }): string | undefined {
+  if (!cfg.openRouterSandboxApiKey?.trim()) {
+    console.warn('[RLM] sandbox off: no sandbox key. Set "Sandbox key (low spending limit)" on /admin/openrouter.');
+    return undefined;
+  }
+  return cfg.rlmSandboxModel;
+}
+
 function resolveSandboxEndpoint(
   fleet: FleetLike,
   sandboxModel: string | undefined,
@@ -480,7 +490,7 @@ export async function resolveRlmEndpoint(options?: ResolveRlmOptions): Promise<R
       const { getConfig } = await import('@/lib/db/config');
       const cfg = await getConfig();
       if (cfg.virtualInferenceModeRlm === 'cloud-only') {
-        return resolveSandboxEndpoint(fleet, cfg.rlmSandboxModel, true, excluded);
+        return resolveSandboxEndpoint(fleet, sandboxModelIfKeyed(cfg), true, excluded);
       }
     } catch (err) {
       // A config read failure must not disable RLM — fall through to the
@@ -600,7 +610,7 @@ export async function resolveRlmEndpoint(options?: ResolveRlmOptions): Promise<R
         console.warn('[RLM] sandbox fallback skipped — virtualInference.mode.rlm=local-only (default). Set it on /admin/openrouter to allow.');
         return null;
       }
-      return resolveSandboxEndpoint(fleet, cfg.rlmSandboxModel, false, excluded);
+      return resolveSandboxEndpoint(fleet, sandboxModelIfKeyed(cfg), false, excluded);
     } catch (err) {
       console.warn(`[RLM] sandbox fallback check failed: ${(err as Error).message}`);
     }

@@ -77,6 +77,8 @@ export async function GET(request: NextRequest) {
     const config = await getConfig();
     return NextResponse.json({
       apiKey: maskKey(config.openRouterApiKey),
+      // Low-limit key for ss-rlm-sandbox only (never the main key).
+      sandboxApiKey: maskKey(config.openRouterSandboxApiKey),
       enabled: config.openRouterEnabled,
       embeddingModel: config.openRouterEmbeddingModel,
       codeEmbeddingModel: config.openRouterCodeEmbeddingModel,
@@ -118,6 +120,17 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
 
     const apiKeyWrite = pickWritableKey(body.apiKey ?? body.openRouterApiKey);
+    const sandboxKeyWrite = pickWritableKey(body.sandboxApiKey);
+    if (sandboxKeyWrite) {
+      const cur = await getConfig();
+      const main = (apiKeyWrite ?? cur.openRouterApiKey ?? '').trim();
+      if (main && sandboxKeyWrite === main) {
+        return NextResponse.json(
+          { error: 'The sandbox key must be a separate key, not the main OpenRouter key.' },
+          { status: 400 },
+        );
+      }
+    }
 
     let dailyCapUsd: Record<string, number> | undefined;
     if (body.dailyCapUsd && typeof body.dailyCapUsd === 'object') {
@@ -143,6 +156,7 @@ export async function POST(request: NextRequest) {
 
     await updateConfig({
       openRouterApiKey: apiKeyWrite,
+      openRouterSandboxApiKey: sandboxKeyWrite,
       openRouterEnabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
       openRouterEmbeddingModel: typeof body.embeddingModel === 'string' ? body.embeddingModel : undefined,
       openRouterCodeEmbeddingModel: typeof body.codeEmbeddingModel === 'string' ? body.codeEmbeddingModel : undefined,
