@@ -29,6 +29,10 @@
 - Errors: `{ "error": { "message", "code" }, "handoff": true }` plus header
   `X-Sandbox-Handoff: 1`. 404 = master has no slot, 409 = ambiguous, 503 = no
   key or no sandbox model.
+- The sandbox returns 409 to the master as 409, every other hand-off error as
+  502, so the master still fails over to another host as before.
+- Container env is stripped from `/api/status`, `/api/containers` and the WS
+  `containers` reply (it holds the token).
 - A 404 **without** the marker means an older sidecar with no such route; only
   then does the sandbox fall back to the old sidecar chat route.
 - Sandbox caches the answer per master for 60 s. The key is never logged.
@@ -80,11 +84,14 @@ OpenRouter directly with `usage: {include: true}`, fall back on a bare 404.
 - Sandbox image `0.1.3` on an old sidecar works through the 404 fallback.
 
 ### Tests
-- Sidecar: `sandbox-slot.test.ts`, `rlm-sandbox-master-config.test.ts`
-  (token, 404 marker, 409, 503, 200), existing pin and drift tests.
+- Sidecar: `sandbox-slot.test.ts` (slot rules, restore, resolution, and the
+  hand-off route: token, 404 marker, 409, 200), `container-cmd-drift.test.ts`
+  (token expected, redacted in drift text), existing pin tests.
 - Master: `openrouter-push.test.ts` (sandbox-only shape),
   `all-sources-embedding-provider.test.ts` (direct cloud share).
-- Sandbox: `python3 -m py_compile server.py`.
+- Sandbox: `python3 -m py_compile server.py`; no Python test suite exists.
+- Still open: the docs `docs/ss-rlm-sandbox/01-how-it-works.md` and
+  `02-fantom-integration.md` describe the old chat route.
 
 ## Follow-up
 - Remove the sandbox's 404 fallback to the sidecar chat route once every host

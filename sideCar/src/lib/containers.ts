@@ -598,6 +598,11 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
       refineHostOllamaStatus(states[role], def);
     }
   }
+  // Container env never leaves this host: it can hold SS_SANDBOX_TOKEN (the
+  // guard on every master's OpenRouter key, see sandbox-slot.ts), and these
+  // states feed /api/status, /api/containers and the WS `containers` reply,
+  // which are unauthenticated. Drift checks read getContainerState() directly.
+  for (const s of Object.values(states)) delete s.env;
   return states;
 }
 

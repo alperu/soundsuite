@@ -431,12 +431,16 @@ class Handler(BaseHTTPRequestHandler):
                   "the sidecar will 409 if more than one master has a key", file=sys.stderr)
 
         # This master's key/model/domain from the sidecar (None = legacy route).
-        # Errors keep their status: 404 unknown master, 409 ambiguous, 503 unset.
+        # A sidecar refusal used to surface as a failed sub-call (502), and the
+        # master fails over to another host on 5xx (stream-rlm.ts
+        # isRetryableStatus). Keep that: 404 (no slot on THIS host), 503 and
+        # 401 become 502. 409 (no identity header) is the caller's fault and
+        # the same on every host, so it passes through.
         try:
             cfg = fetch_master_config((caller or MASTER_URL or "").strip() or None)
         except HandoffError as e:
             print(f"[rlm] hand-off refused ({e.status}): {e.message}", file=sys.stderr)
-            self._error(e.status, e.message)
+            self._error(409 if e.status == 409 else 502, f"sidecar hand-off {e.status}: {e.message}")
             return
         if domain is None and cfg:
             domain = cfg.get("domain")

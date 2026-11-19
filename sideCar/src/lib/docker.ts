@@ -872,7 +872,9 @@ export function buildExpectedConfig(role: string): ExpectedConfig {
     config.ExpectsNoCmd = true;
     // A sandbox container created before task 59 has no token and could not
     // reach the hand-off route; expecting it makes drift recreate it.
-    config.Env = [`SS_SANDBOX_TOKEN=${sandboxToken()}`];
+    // If secret.key cannot be unlocked, skip this expectation rather than
+    // break drift detection for the role; createContainer surfaces the error.
+    try { config.Env = [`SS_SANDBOX_TOKEN=${sandboxToken()}`]; } catch { /* see above */ }
   }
 
   // Only docker-runtime roles need GPU/Init drift checks. host and

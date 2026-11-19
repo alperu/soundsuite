@@ -10,8 +10,9 @@
 #                        REPL runs with environment="local" rather than the
 #                        library's DockerREPL, which would need the socket to
 #                        spawn nested containers.
-#   NO API key         — sub-model calls go back through the sidecar, which
-#                        holds the OpenRouter key. Do not add one here.
+#   NO baked API key   — per request the server fetches the calling master's
+#                        key from its sidecar (SS_SANDBOX_TOKEN) and calls
+#                        OpenRouter directly. Do not add a key here.
 #   NO outbound egress — the only route needed is to the sidecar. Lock it down.
 #
 # Build (from repo root), fetching the library from a master:
@@ -22,7 +23,7 @@
 #
 # Run:
 #   docker run --rm -p 8101:8101 \
-#     -e SS_SIDECAR_URL=http://host.docker.internal:8098/api/v1 \
+#     -e SS_SIDECAR_URL=http://host.docker.internal:8098/api/v1 -e SS_SANDBOX_TOKEN=<token> \
 #     rlm-sandbox:0.1.0
 
 FROM python:3.11-slim
