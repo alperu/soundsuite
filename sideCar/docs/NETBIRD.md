@@ -1,7 +1,7 @@
 # NetBird and HTTPS
 
 The sidecar can join a NetBird network and serve itself over HTTPS at
-`https://<hostname>.<domain>` (for example `https://sidecar-alper-mac-mini.vpn.bas.co`).
+`https://<hostname>.<domain>` (for example `https://sidecar-host.vpn.example.com`).
 Set it up on the **NetBird** page (`/netbird`). Needs the sidecar to run in Docker.
 
 ## How it works

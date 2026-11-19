@@ -286,29 +286,29 @@ describe('testCloudflareToken', () => {
     const f = async (url: string, init?: { method?: string }) => {
       calls.push(`${init?.method || 'GET'} ${url.replace('https://api.cloudflare.com/client/v4', '')}`);
       if (url.endsWith('/user/tokens/verify')) return reply(200, { success: true, result: { status: 'active' } });
-      if (url.includes('zones?name=vpn.bas.co')) return reply(200, { success: true, result: [] });
-      if (url.includes('zones?name=bas.co')) return reply(200, { success: true, result: [{ id: 'z1', name: 'bas.co' }] });
+      if (url.includes('zones?name=vpn.example.com')) return reply(200, { success: true, result: [] });
+      if (url.includes('zones?name=example.com')) return reply(200, { success: true, result: [{ id: 'z1', name: 'example.com' }] });
       if (init?.method === 'POST') return reply(200, { success: true, result: { id: 'r1' } });
       return reply(200, { success: true, result: { id: 'r1' } });
     };
-    const r = await testCloudflareToken('t', 'vpn.bas.co', f);
+    const r = await testCloudflareToken('t', 'vpn.example.com', f);
     expect(r.ok).toBe(true);
-    expect(r.zone).toBe('bas.co');
+    expect(r.zone).toBe('example.com');
     expect(calls).toContain('DELETE /zones/z1/dns_records/r1');
   });
   test('bad token stops at the first step with Cloudflare message', async () => {
     const f = async () => reply(401, { success: false, errors: [{ message: 'Invalid API Token' }] });
-    const r = await testCloudflareToken('t', 'vpn.bas.co', f);
+    const r = await testCloudflareToken('t', 'vpn.example.com', f);
     expect(r.ok).toBe(false);
     expect(r.steps).toEqual([{ step: 'Token is valid', ok: false, detail: 'Invalid API Token' }]);
   });
   test('no DNS edit right fails on adding the record', async () => {
     const f = async (url: string, init?: { method?: string }) => {
       if (url.endsWith('/verify')) return reply(200, { success: true, result: { status: 'active' } });
-      if (url.includes('zones?name=')) return reply(200, { success: true, result: [{ id: 'z1', name: 'bas.co' }] });
+      if (url.includes('zones?name=')) return reply(200, { success: true, result: [{ id: 'z1', name: 'example.com' }] });
       return reply(403, { success: false, errors: [{ message: 'Authentication error' }] });
     };
-    const r = await testCloudflareToken('t', 'vpn.bas.co', f);
+    const r = await testCloudflareToken('t', 'vpn.example.com', f);
     expect(r.ok).toBe(false);
     expect(r.steps[2]).toEqual({ step: 'Token can add a DNS record', ok: false, detail: 'Authentication error' });
   });
@@ -319,7 +319,7 @@ describe('lastLoggedError for NetBird logs', () => {
     const log = [
       '2026-11-17T13:12:17.115Z INFO client/internal/routemanager/systemops/systemops_linux.go:101: Using legacy routing setup',
       '2026-11-17T13:12:17.117Z ERRO client/internal/engine.go:657: failed creating tunnel interface wt0: wgctl: socket: protocol not supported',
-      '2026-11-17T13:12:17.177Z WARN [relay: rels://vpn.bas.co:443] shared/relay/client/client.go:840: relay connection was closed by error',
+      '2026-11-17T13:12:17.177Z WARN [relay: rels://vpn.example.com:443] shared/relay/client/client.go:840: relay connection was closed by error',
     ].join('\n');
     expect(lastLoggedError(log)).toBe('failed creating tunnel interface wt0: wgctl: socket: protocol not supported');
   });
