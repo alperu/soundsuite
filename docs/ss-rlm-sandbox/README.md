@@ -4,6 +4,14 @@ Run the **RLM pattern** — hold a context as a REPL variable, chunk/grep/recurs
 sub-query it — against a hosted chat model, instead of self-hosting the
 `mit-oasys/rlm-qwen3-8b-v0.1` fine-tune.
 
+> **Since image 0.1.3 / docs/tasks/59:** the container calls OpenRouter directly. Per
+> request it reads the calling master's key, model and domain from its sidecar's
+> `GET /api/rlm-sandbox/master-config` (header `X-Sandbox-Token` = env
+> `SS_SANDBOX_TOKEN`, cached 60 s). The sidecar chat route `/api/v1/chat/completions`
+> is gone; the container falls back to it only when the hand-off route 404s without
+> the `X-Sandbox-Handoff` marker (an older sidecar). Text below that describes
+> sub-model calls going through the sidecar predates this change.
+
 Two masters share one sandbox per host: **Sound Suite** (`legal`) and
 **Fantom MCP** (`code`). Sound Suite's half is built. Fantom's is not.
 

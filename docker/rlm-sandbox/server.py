@@ -11,13 +11,14 @@ Topology (docs/DESIGN-ss-rlm-sandbox-runtime.md):
 
     master :3000  ──POST /v1/chat/completions──▶  THIS :8101
                                                     │
-                                                    ├─ RLM(environment="local")
-                                                    │  model-written Python,
-                                                    │  in-process
+                                                    ├─ GET sidecar /api/rlm-sandbox/master-config
+                                                    │  (that master's key, model, domain;
+                                                    │   X-Sandbox-Token; cached 60 s)
                                                     │
-                                                    └─ sub-model calls ──▶
-                                                       sidecar /api/v1  ──▶
-                                                       OpenRouter
+                                                    ├─ RLM(environment="local")
+                                                    │  model-written Python, in-process
+                                                    │
+                                                    └─ sub-model calls ──▶ OpenRouter (direct)
 
 Why environment="local" and not the library's DockerREPL: DockerREPL shells out
 to the `docker` CLI to spawn nested containers, which needs /var/run/docker.sock
@@ -25,9 +26,17 @@ inside this container. SPEC-ss-rlm-sandbox.md §4 forbids that, and the sidecar
 does not pass the socket to role containers. This container IS the isolation
 boundary — which is that spec's own reasoning, applied one layer out.
 
-No API key lives here. `SS_SIDECAR_URL` points at the sidecar's virtual-chat
-route, which holds the per-master OpenRouter key and resolves the model. A key
-in this process would be a key inside model-written code.
+Keys (docs/tasks/59): the sidecar holds each master's OpenRouter key, model
+and domain (its per-master sandbox slot). Per request this server fetches the
+calling master's slot from the sidecar's local hand-off route and calls
+OpenRouter directly with it. The key is held in memory only for that master's
+requests, is never logged, and is scrubbed from error text. It does sit in the
+same process as model-written code — a known trade-off of dropping the proxy.
+
+Older sidecars have no hand-off route. When it answers 404 WITHOUT the
+`X-Sandbox-Handoff` marker, this server falls back to the old sidecar chat
+route (`SS_SIDECAR_URL`), which held the key itself. Follow-up: remove that
+fallback once every host runs a sidecar with the hand-off route.
 """
 
 import json
@@ -35,6 +44,9 @@ import os
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from rlm import RLM
@@ -43,15 +55,23 @@ from rlm import RLM
 
 PORT = int(os.getenv("PORT", "8101"))
 
-# Where sub-model calls go. NOT OpenRouter directly — the sidecar route, which
-# holds the key. Trailing /api/v1 because that is where the sidecar's
-# OpenAI-compatible shim lives (Next.js app router: /api/v1/chat/completions).
-SIDECAR_URL = os.getenv("SS_SIDECAR_URL", "http://host.docker.internal:8098/api/v1")
+# This sidecar's API base (`.../api/v1`). The hand-off route is its sibling
+# `.../api/rlm-sandbox/master-config`; `.../api/v1/chat/completions` is the old
+# chat route used only by the legacy fallback.
+SIDECAR_URL = os.getenv("SS_SIDECAR_URL", "http://host.docker.internal:8098/api/v1").rstrip("/")
+SIDECAR_API = SIDECAR_URL[: -len("/v1")] if SIDECAR_URL.endswith("/v1") else SIDECAR_URL
+HANDOFF_URL = SIDECAR_API + "/rlm-sandbox/master-config"
 
-# The sidecar resolves the real model from the calling master's own config and
-# IGNORES whatever we send — deliberately, so a model-written loop cannot talk
-# its way onto an unauthorised model. This value is only for the library's
-# internal bookkeeping (context-limit lookups, per-model usage counters).
+# Shared secret the sidecar passed in when it created this container.
+SANDBOX_TOKEN = os.getenv("SS_SANDBOX_TOKEN", "").strip()
+
+OPENROUTER_URL = os.getenv("SS_OPENROUTER_URL", "https://openrouter.ai/api/v1").rstrip("/")
+
+# Seconds a master's {key, model, domain} is cached here.
+HANDOFF_TTL = 60.0
+
+# The model actually used comes from the hand-off, per master. This value is
+# only a label for /health, /v1/models and the legacy path's bookkeeping.
 MODEL_HINT = os.getenv("SS_SANDBOX_MODEL", "deepseek/deepseek-v4-flash")
 
 # Forwarded as X-SoundSuite-Master so the sidecar knows whose key to spend.
@@ -143,7 +163,65 @@ def tools_for_domain(domain):
     return None
 
 
-def build_rlm(master_url=None, domain=None):
+class HandoffError(Exception):
+    """The sidecar answered the hand-off with a real error (it carries the
+    marker): 401 token, 404 no slot, 409 ambiguous, 503 no key/model."""
+
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+_handoff_cache = {}
+_handoff_lock = threading.Lock()
+
+
+def fetch_master_config(master):
+    """{master, apiKey, model, domain} for `master` (or the sidecar's single
+    configured master when None), cached HANDOFF_TTL seconds. Returns None when
+    the sidecar is too old to have the route (404 without the marker) or no
+    token was passed in — the caller then uses the legacy chat route."""
+    if not SANDBOX_TOKEN:
+        return None
+    cache_key = master or ""
+    now = time.time()
+    with _handoff_lock:
+        hit = _handoff_cache.get(cache_key)
+        if hit and now - hit[0] < HANDOFF_TTL:
+            return hit[1]
+
+    url = HANDOFF_URL + (("?master=" + urllib.parse.quote(master, safe="")) if master else "")
+    req = urllib.request.Request(url, headers={"X-Sandbox-Token": SANDBOX_TOKEN})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as res:
+            cfg = json.loads(res.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        marked = e.headers.get("X-Sandbox-Handoff") == "1"
+        if e.code == 404 and not marked:
+            return None  # older sidecar: no hand-off route
+        try:
+            msg = json.loads(e.read() or b"{}").get("error", {}).get("message") or str(e)
+        except Exception:
+            msg = str(e)
+        raise HandoffError(e.code, msg)
+    except (urllib.error.URLError, OSError) as e:
+        raise HandoffError(502, f"sidecar hand-off unreachable: {e}")
+
+    if not cfg.get("apiKey") or not cfg.get("model"):
+        raise HandoffError(503, "sidecar hand-off returned no key or model")
+    with _handoff_lock:
+        _handoff_cache[cache_key] = (now, cfg)
+    return cfg
+
+
+def redact(text, cfg):
+    """Strip the master's key from any text that may reach a log or a caller."""
+    key = (cfg or {}).get("apiKey")
+    return text.replace(key, "<redacted>") if key and text else text
+
+
+def build_rlm(master_url=None, domain=None, cfg=None):
     """A fresh RLM per request: completion() spawns and tears down its own
     environment and LM handler, and sharing one across concurrent requests would
     share REPL state between unrelated callers.
@@ -163,7 +241,25 @@ def build_rlm(master_url=None, domain=None):
     tools rather than a guess.
     """
     effective_master = (master_url or MASTER_URL or "").strip()
+    # The header wins (as before); the domain the master declared in its
+    # config push fills in when the header is absent.
+    if not domain and cfg:
+        domain = cfg.get("domain")
     effective_domain = domain if domain in VALID_DOMAINS else None
+
+    if cfg:
+        # Direct to OpenRouter with this master's key and model. Master
+        # identity headers stay off: OpenRouter does not need them.
+        # `usage: {include: true}` is what max_budget reads (usage.cost); the
+        # library only adds it for another base URL, so pass it ourselves.
+        backend_kwargs = {
+            "model_name": cfg["model"],
+            "api_key": cfg["apiKey"],
+            "base_url": OPENROUTER_URL,
+            "sampling_args": {"extra_body": {"usage": {"include": True}}},
+        }
+    else:
+        backend_kwargs = None
 
     default_headers = {}
     if effective_master:
@@ -175,14 +271,19 @@ def build_rlm(master_url=None, domain=None):
         default_headers["X-SoundSuite-Domain"] = effective_domain
         default_headers["X-FantomMCP-Domain"] = effective_domain
 
-    return RLM(
-        backend="openai",
-        backend_kwargs={
+    if backend_kwargs is None:
+        # Legacy (older sidecar): its chat route holds the key and resolves the
+        # model; identity headers tell it whose slot to use.
+        backend_kwargs = {
             "model_name": MODEL_HINT,
             "api_key": PLACEHOLDER_KEY,
             "base_url": SIDECAR_URL,
             **({"default_headers": default_headers} if default_headers else {}),
-        },
+        }
+
+    return RLM(
+        backend="openai",
+        backend_kwargs=backend_kwargs,
         environment="local",
         max_depth=MAX_DEPTH,
         max_iterations=MAX_ITERATIONS,
@@ -284,7 +385,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.rstrip("/") in ("/health", "/healthz"):
-            self._send(200, {"ok": True, "model": MODEL_HINT, "sidecar": SIDECAR_URL})
+            self._send(200, {"ok": True, "model": MODEL_HINT, "sidecar": SIDECAR_API,
+                             "handoff": bool(SANDBOX_TOKEN)})
         elif self.path.rstrip("/") in ("/v1/models", "/models"):
             self._send(200, {"object": "list", "data": [{"id": MODEL_HINT, "object": "model"}]})
         else:
@@ -327,6 +429,17 @@ class Handler(BaseHTTPRequestHandler):
         if not caller and not MASTER_URL:
             print(f"[rlm] no {'/'.join(MASTER_HEADERS)} on request and no SS_MASTER_URL — "
                   "the sidecar will 409 if more than one master has a key", file=sys.stderr)
+
+        # This master's key/model/domain from the sidecar (None = legacy route).
+        # Errors keep their status: 404 unknown master, 409 ambiguous, 503 unset.
+        try:
+            cfg = fetch_master_config((caller or MASTER_URL or "").strip() or None)
+        except HandoffError as e:
+            print(f"[rlm] hand-off refused ({e.status}): {e.message}", file=sys.stderr)
+            self._error(e.status, e.message)
+            return
+        if domain is None and cfg:
+            domain = cfg.get("domain")
         if domain and domain not in VALID_DOMAINS:
             # Loud, because the consequence is silent: an unrecognised domain
             # gets no tools, and a caller expecting retrieval sees a plausible
@@ -334,16 +447,17 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[rlm] domain {domain!r} is not one of {VALID_DOMAINS} — no tools will be "
                   "injected. Check the header value.", file=sys.stderr)
         elif not domain:
-            print("[rlm] no domain header — no tools will be injected. Send "
+            print("[rlm] no domain header — using the domain from the master slot, if any. Send "
                   f"{DOMAIN_HEADERS[0]} (or {DOMAIN_HEADERS[1]}).", file=sys.stderr)
 
         started = time.time()
         try:
-            result = build_rlm(caller, domain).completion(prompt)
+            result = build_rlm(caller, domain, cfg).completion(prompt)
         except Exception as e:
             took = time.time() - started
-            print(f"[rlm] failed after {took:.1f}s: {type(e).__name__}: {e}", file=sys.stderr)
-            self._error(502, f"{type(e).__name__}: {e}")
+            msg = redact(f"{type(e).__name__}: {e}", cfg)
+            print(f"[rlm] failed after {took:.1f}s: {msg}", file=sys.stderr)
+            self._error(502, msg)
             return
 
         took = time.time() - started
@@ -352,20 +466,24 @@ class Handler(BaseHTTPRequestHandler):
         # had nothing to say.
         err = getattr(result, "error", None)
         if err:
-            print(f"[rlm] completed with error after {took:.1f}s: {err}", file=sys.stderr)
-            self._error(502, str(err))
+            msg = redact(str(err), cfg)
+            print(f"[rlm] completed with error after {took:.1f}s: {msg}", file=sys.stderr)
+            self._error(502, msg)
             return
 
         text = getattr(result, "response", "") or ""
-        print(f"[rlm] answered in {took:.1f}s ({len(text)} chars)", file=sys.stderr)
-        self._send(200, openai_response(text, MODEL_HINT, getattr(result, "usage_summary", None)))
+        model = cfg["model"] if cfg else MODEL_HINT
+        print(f"[rlm] answered in {took:.1f}s ({len(text)} chars) via "
+              f"{'OpenRouter direct' if cfg else 'sidecar route (legacy)'}", file=sys.stderr)
+        self._send(200, openai_response(text, model, getattr(result, "usage_summary", None)))
 
 
 def main():
     print(
         f"[boot] ss-rlm-sandbox on :{PORT}\n"
-        f"       sub-model calls -> {SIDECAR_URL}\n"
-        f"       model hint       {MODEL_HINT} (the sidecar resolves the real one)\n"
+        f"       sub-model calls -> {OPENROUTER_URL} (key/model per master from {HANDOFF_URL})\n"
+        f"       hand-off token   {'set' if SANDBOX_TOKEN else 'UNSET — legacy sidecar route ' + SIDECAR_URL}\n"
+        f"       model hint       {MODEL_HINT} (the hand-off names the real one)\n"
         f"       master           {MASTER_URL or '(unset — sidecar must have exactly one configured)'}\n"
         f"       rails            timeout={MAX_TIMEOUT}s iterations={MAX_ITERATIONS} "
         f"errors={MAX_ERRORS} depth={MAX_DEPTH} budget={MAX_BUDGET_USD or 'unset'}\n"

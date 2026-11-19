@@ -20,6 +20,9 @@
 
 import { state } from '../state';
 import { buildExpectedConfig, detectConfigDrift, type ContainerState } from '../docker';
+import { sandboxToken } from '../sandbox-slot';
+
+const TOKEN_ENV = () => [`SS_SANDBOX_TOKEN=${sandboxToken()}`];
 
 const STALE_VLLM_CMD = ['deepseek/deepseek-v4-flash', '--host', '0.0.0.0', '--port', '8101'];
 
@@ -57,7 +60,7 @@ describe('ss-rlm-sandbox expects NO Cmd', () => {
 
   it('is clean when the container has no Cmd', () => {
     const { hasDrift } = detectConfigDrift(
-      containerState('rlm-sandbox', { cmd: undefined }),
+      containerState('rlm-sandbox', { cmd: undefined, env: TOKEN_ENV() }),
       buildExpectedConfig('rlm-sandbox'),
     );
     expect(hasDrift).toBe(false);
@@ -65,10 +68,20 @@ describe('ss-rlm-sandbox expects NO Cmd', () => {
 
   it('treats an empty Cmd array as absence, not a leftover', () => {
     const { hasDrift } = detectConfigDrift(
-      containerState('rlm-sandbox', { cmd: [] }),
+      containerState('rlm-sandbox', { cmd: [], env: TOKEN_ENV() }),
       buildExpectedConfig('rlm-sandbox'),
     );
     expect(hasDrift).toBe(false);
+  });
+
+  it('flags a container without the hand-off token, and never prints the token', () => {
+    const { hasDrift, drifts } = detectConfigDrift(
+      containerState('rlm-sandbox', { cmd: undefined, env: [] }),
+      buildExpectedConfig('rlm-sandbox'),
+    );
+    expect(hasDrift).toBe(true);
+    expect(drifts.join(' ')).toContain('SS_SANDBOX_TOKEN=<redacted>');
+    expect(drifts.join(' ')).not.toContain(sandboxToken());
   });
 });
 

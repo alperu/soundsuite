@@ -223,16 +223,12 @@ export const defaultRegistry: Record<string, ContainerDef> = {
   // dedicated ContainerDef type for generic HTTP utility servers, migrate
   // this role to it instead of re-litigating 'utility' vs 'vllm' here.
   //
-  // Security (non-negotiable, from the design note): this container gets NO
-  // Docker socket mount, NO OpenRouter API key, and needs NO outbound
-  // internet — its sub-model calls route back through THIS sidecar's own
-  // virtual-inference (the same path other roles use to reach OpenRouter),
-  // not a direct connection. Whoever builds the image/compose config for
-  // `image` below must not add a socket mount, an env-injected API key, or
-  // an egress-open network policy — that would defeat the whole point of
-  // sandboxing an LLM-driven Python REPL. The host-side proxy that lets the
-  // sandbox call back into the sidecar (and the Fantom HTTP tool exposure)
-  // is NOT built yet — see docs referenced in the design note, steps 3-4.
+  // Security: this container gets NO Docker socket mount and NO env-injected
+  // API key. Since docs/tasks/59 it calls OpenRouter directly (outbound HTTPS):
+  // per request it fetches the calling master's key/model/domain from this
+  // sidecar's GET /api/rlm-sandbox/master-config, gated on SS_SANDBOX_TOKEN
+  // (docker.ts). Do not add a socket mount — that would defeat the point of
+  // sandboxing an LLM-driven Python REPL.
   //
   // image: PUBLISHED 2026-09-15 to ghcr.io/project-sandstar/rlm-sandbox.
   // Built from docker/rlm-sandbox/ — python:3.11-slim + the vendored `rlms`
@@ -254,7 +250,7 @@ export const defaultRegistry: Record<string, ContainerDef> = {
   // push replaces state.registry[role] wholesale, so editing only this file is
   // silently dropped at runtime.
   'rlm-sandbox': {
-    image: 'ghcr.io/project-sandstar/rlm-sandbox:0.1.2',
+    image: 'ghcr.io/project-sandstar/rlm-sandbox:0.1.3',
     model: null,
     port: 8101,
     vram: 0,

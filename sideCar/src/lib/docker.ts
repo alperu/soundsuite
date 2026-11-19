@@ -3,6 +3,7 @@ import fs from 'fs';
 import { state } from './state';
 import { createLogger } from './logger';
 import { processGlobal } from './process-global';
+import { sandboxToken } from './sandbox-slot';
 
 const log = createLogger('docker');
 
@@ -869,6 +870,9 @@ export function buildExpectedConfig(role: string): ExpectedConfig {
   // not the same as having no expectation — see ExpectsNoCmd.
   if (def.usesImageCmd) {
     config.ExpectsNoCmd = true;
+    // A sandbox container created before task 59 has no token and could not
+    // reach the hand-off route; expecting it makes drift recreate it.
+    config.Env = [`SS_SANDBOX_TOKEN=${sandboxToken()}`];
   }
 
   // Only docker-runtime roles need GPU/Init drift checks. host and
@@ -968,7 +972,9 @@ export function detectConfigDrift(
     const actualEnv = new Set(actual.env || []);
     const missing = expected.Env.filter(v => !actualEnv.has(v));
     if (missing.length > 0) {
-      drifts.push(`env missing: ${missing.join(', ')}`);
+      // Never print a secret value into a drift message (it reaches logs/UI).
+      const shown = missing.map(v => (/^SS_SANDBOX_TOKEN=/.test(v) ? 'SS_SANDBOX_TOKEN=<redacted>' : v));
+      drifts.push(`env missing: ${shown.join(', ')}`);
     }
   }
 
@@ -1043,19 +1049,23 @@ export async function createContainer(role: string): Promise<{ Id?: string; exis
 
   if (def.usesImageCmd) {
     const hc = config.HostConfig as Record<string, unknown>;
-    // The container has to reach THIS sidecar to make its sub-model calls (it
-    // holds no API key by design). `host.docker.internal` is only resolvable
+    // The container has to reach THIS sidecar to fetch the calling master's
+    // OpenRouter key and model (GET /api/rlm-sandbox/master-config, gated on
+    // SS_SANDBOX_TOKEN). `host.docker.internal` is only resolvable
     // out of the box on Docker Desktop; on Linux/WSL2 engines it needs the
     // gateway alias explicitly — the same `--add-host` the sidecar's own
     // launcher passes to itself (public/sideCar/scripts/start.sh:112).
     hc.ExtraHosts = ['host.docker.internal:host-gateway'];
 
     const derived: Record<string, string> = {
+      // Base of this sidecar's API: the sandbox reads `${SS_SIDECAR_URL}/../rlm-sandbox/master-config`
+      // and, only when that route 404s without the hand-off marker (an older
+      // sidecar), the old chat route `${SS_SIDECAR_URL}/chat/completions`.
       SS_SIDECAR_URL: `http://host.docker.internal:${SIDECAR_SELF_PORT}/api/v1`,
-      // A hint only: the sidecar's own /api/v1 route resolves the authoritative
-      // model from the calling master's allowedModels and ignores whatever the
-      // container asks for. Passed so logs and the library's bookkeeping name
-      // the right model.
+      // Shared secret for the hand-off route. Stable (derived from the data
+      // key), so it does not drift and recreate the container.
+      SS_SANDBOX_TOKEN: sandboxToken(),
+      // A hint only: the hand-off returns the authoritative model per master.
       ...(def.model ? { SS_SANDBOX_MODEL: def.model } : {}),
     };
     const merged = { ...derived, ...(def.env ?? {}) };

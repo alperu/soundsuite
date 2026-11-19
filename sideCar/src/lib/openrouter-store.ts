@@ -1,5 +1,7 @@
 /**
- * Encrypted at-rest persistence for per-master OpenRouter config.
+ * Encrypted at-rest persistence for per-master OpenRouter config. Since
+ * docs/tasks/59 it holds only the ss-rlm-sandbox slot (sandbox-slot.ts); the
+ * file format is unchanged so an older sidecar can read it after a rollback.
  *
  * WHY THIS EXISTS
  * ---------------
@@ -53,7 +55,7 @@ export interface StoredMasterConfig {
   allowedModels: Record<string, unknown>;
   modeByRole: Record<string, string>;
   /** This master's declared ss-rlm-sandbox domain ('legal' | 'code'), if any.
-   *  See virtual-inference.ts's SandboxDomain. Optional for back-compat with
+   *  See sandbox-slot.ts's SandboxDomain. Optional for back-compat with
    *  a store file written before this field existed. */
   domain?: string;
 }

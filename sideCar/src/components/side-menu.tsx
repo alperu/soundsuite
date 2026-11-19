@@ -12,7 +12,6 @@ const DASHBOARD = [
   { id: 'masters', label: 'Master connections' },
   { id: 'vram', label: 'VRAM' },
   { id: 'containers', label: 'Containers' },
-  { id: 'virtual', label: 'Virtual containers' },
   { id: 'stats', label: 'Stats' },
   { id: 'timeouts', label: 'Idle timeouts' },
   { id: 'activity', label: 'Activity log' },

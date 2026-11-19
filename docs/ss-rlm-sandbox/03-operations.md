@@ -63,7 +63,7 @@ docker buildx build --builder ssmulti \
   --platform linux/amd64,linux/arm64 \
   --build-arg MASTER_URL=http://<master>:3000 \
   --build-arg RLMS_SHA256=$(node -p "require('./public/rlm/manifest.json').sha256") \
-  -t ghcr.io/project-sandstar/rlm-sandbox:0.1.2 \
+  -t ghcr.io/project-sandstar/rlm-sandbox:0.1.3 \
   -t ghcr.io/project-sandstar/rlm-sandbox:latest \
   --push docker/rlm-sandbox
 ```
@@ -72,7 +72,7 @@ docker buildx build --builder ssmulti \
 (Mac). Verify:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/project-sandstar/rlm-sandbox:0.1.2
+docker buildx imagetools inspect ghcr.io/project-sandstar/rlm-sandbox:0.1.3
 # must list linux/amd64 AND linux/arm64
 # two extra unknown/unknown entries are buildx attestations — expected
 ```
@@ -102,7 +102,7 @@ Verify anonymously, which is what a sidecar is:
 TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:project-sandstar/rlm-sandbox:pull&service=ghcr.io" | jq -r .token)
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
   -H 'Accept: application/vnd.oci.image.index.v1+json' \
-  https://ghcr.io/v2/project-sandstar/rlm-sandbox/manifests/0.1.2
+  https://ghcr.io/v2/project-sandstar/rlm-sandbox/manifests/0.1.3
 # 200 = pullable by the fleet
 ```
 
