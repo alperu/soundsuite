@@ -23,6 +23,7 @@ import {
   OPENROUTER_CHAT_MODELS,
 } from '@/lib/openrouter/models';
 import type { OpenRouterCatalogueModel } from '@/app/api/openrouter/models/route';
+import { OpenRouterWorkersCard, workersInputError } from '@/components/admin-openrouter-workers';
 
 interface Props {
   initialConfig: PublicConfig;
@@ -201,6 +202,11 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
   const [dailyCapUsd, setDailyCapUsd] = useState<Record<string, number>>(
     initialConfig.openRouterDailyCapUsd ?? {},
   );
+  // Seeded from the saved config only; the stats poll never touches it.
+  const [savedWorkers, setSavedWorkers] = useState<number | undefined>(initialConfig.openRouterWorkers);
+  const [workersDraft, setWorkersDraft] = useState(
+    initialConfig.openRouterWorkers !== undefined ? String(initialConfig.openRouterWorkers) : '',
+  );
   const keyConfigured = initialConfig.apiKeys?.openrouter?.configured ?? false;
   const keyLast4 = initialConfig.apiKeys?.openrouter?.last4;
 
@@ -208,6 +214,12 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
   const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const handleSave = async () => {
+    const workersErr = workersInputError(workersDraft);
+    if (workersErr) {
+      setSaveMessage({ type: 'error', text: `Workers: ${workersErr}` });
+      return;
+    }
+    const workers = workersDraft.trim() === '' ? undefined : Number(workersDraft);
     setSaving(true);
     setSaveMessage(null);
     try {
@@ -238,11 +250,13 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           virtualInferenceModeReranker: rerankerMode,
           virtualInferenceModeCompletion: completionMode,
           dailyCapUsd,
+          workers,
         }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
       setApiKeyInput('');
+      if (workers !== undefined) setSavedWorkers(workers);
       setSaveMessage({ type: 'success', text: 'OpenRouter settings saved.' });
     } catch (e: any) {
       setSaveMessage({ type: 'error', text: e.message || 'Failed to save' });
@@ -483,6 +497,9 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
           {saving ? 'Saving…' : 'Save Settings'}
         </button>
       </section>
+
+      {/* --- Worker pool: Workers setting + live stats --- */}
+      <OpenRouterWorkersCard draft={workersDraft} setDraft={setWorkersDraft} saved={savedWorkers} />
 
       {/* --- Credits + spend --- */}
       <section className="bg-white border border-gray-200 rounded-lg p-6 space-y-4">

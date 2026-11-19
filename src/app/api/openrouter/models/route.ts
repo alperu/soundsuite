@@ -9,6 +9,8 @@
  * returned — never the raw upstream objects.
  */
 
+import { openRouterPool } from '@/lib/openrouter/worker-pool';
+import { OPENROUTER_BASE_URL } from '@/lib/openrouter/client';
 import { NextRequest, NextResponse } from 'next/server';
 import { getRedis, isRedisAvailable } from '@/lib/redis';
 import { requireAdminApiAccess } from '@/lib/api/route-guard';
@@ -64,8 +66,12 @@ function trim(models: UpstreamModel[]): OpenRouterCatalogueModel[] {
 }
 
 async function fetchCatalogue(): Promise<OpenRouterCatalogueModel[]> {
-  const res = await fetch('https://openrouter.ai/api/v1/models', {
-    signal: AbortSignal.timeout(15_000),
+  // Through the worker pool's interactive lane like every other direct
+  // OpenRouter call, so it shows in the pool stats.
+  const res = await openRouterPool().submit({
+    role: 'admin',
+    lane: 'interactive',
+    run: () => fetch(`${OPENROUTER_BASE_URL}/models`, { signal: AbortSignal.timeout(15_000) }),
   });
   if (!res.ok) {
     throw new Error(`OpenRouter /models failed: ${res.status}`);

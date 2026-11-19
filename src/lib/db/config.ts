@@ -8,6 +8,7 @@
  */
 
 import { prisma } from './prisma';
+import { clampWorkerCount } from '@/lib/openrouter/pool-settings';
 
 export interface AppConfig {
   embeddingProvider: 'transformers' | 'openai' | 'claude' | 'ollama' | 'openrouter';
@@ -47,6 +48,9 @@ export interface AppConfig {
    * leave headroom for the other master on the same key.
    */
   openRouterMaxConcurrency: number;
+  /** OpenRouter worker pool: bulk requests in flight (1-8, default 6).
+   *  See src/lib/openrouter/worker-pool.ts. */
+  openRouterWorkers: number;
   /**
    * Routing mode for the two embedding roles — see
    * docs/SPEC-openrouter-virtual-inference.md §3.
@@ -316,6 +320,7 @@ export async function getConfig(): Promise<AppConfig> {
       const n = parseInt(configMap.get('openrouter.maxConcurrency') || '', 10);
       return Number.isFinite(n) && n > 0 ? Math.min(n, 64) : 8;
     })(),
+    openRouterWorkers: clampWorkerCount(configMap.get('openrouter.workers')),
     openRouterDailyCapUsd: (() => {
       const raw = configMap.get('openrouter.dailyCapUsd');
       if (!raw) return {};
@@ -676,6 +681,9 @@ export async function updateConfig(config: Partial<AppConfig>): Promise<void> {
   }
   if (config.openRouterMaxConcurrency !== undefined) {
     updates.push({ key: 'openrouter.maxConcurrency', value: String(config.openRouterMaxConcurrency) });
+  }
+  if (config.openRouterWorkers !== undefined) {
+    updates.push({ key: 'openrouter.workers', value: String(clampWorkerCount(config.openRouterWorkers)) });
   }
   if (config.openRouterDailyCapUsd !== undefined) {
     updates.push({ key: 'openrouter.dailyCapUsd', value: JSON.stringify(config.openRouterDailyCapUsd) });

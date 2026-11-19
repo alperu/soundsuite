@@ -54,10 +54,11 @@ describe('rerankDocuments — transient failures', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('recovers on the third attempt', async () => {
+  it('recovers on the third attempt after two 429s', async () => {
+    // Retries live in the worker pool: 429 up to 3 times, 5xx once.
     fetchMock
-      .mockReturnValueOnce(fail(503, 'overloaded'))
-      .mockReturnValueOnce(fail(503, 'overloaded'))
+      .mockReturnValueOnce(fail(429, 'rate limited'))
+      .mockReturnValueOnce(fail(429, 'rate limited'))
       .mockReturnValueOnce(ok(RESULT));
 
     await expect(rerankDocuments('q', ['a'], 'qwen/qwen3-reranker-8b')).resolves.toBeDefined();
@@ -70,12 +71,12 @@ describe('rerankDocuments — transient failures', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('gives up after 3 attempts rather than retrying forever', async () => {
+  it('gives up on a 5xx after one retry rather than retrying forever', async () => {
     // A rerank that lands after the answer has rendered is worthless — the
     // reranker runs inside a 40s interactive budget.
     fetchMock.mockReturnValue(fail(503, 'overloaded'));
     await expect(rerankDocuments('q', ['a'], 'qwen/qwen3-reranker-8b')).rejects.toThrow(OpenRouterError);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

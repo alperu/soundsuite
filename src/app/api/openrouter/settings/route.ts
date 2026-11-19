@@ -12,6 +12,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getConfig, updateConfig } from '@/lib/db/config';
 import { requireAdminApiAccess } from '@/lib/api/route-guard';
+import { POOL_LIMITS, validateWorkerCount } from '@/lib/openrouter/pool-settings';
+import { openRouterPool } from '@/lib/openrouter/worker-pool';
 
 function maskKey(value: string | undefined): { configured: boolean; last4?: string } {
   if (typeof value !== 'string' || value.length === 0) return { configured: false };
@@ -97,6 +99,10 @@ export async function GET(request: NextRequest) {
       virtualInferenceModeReranker: config.virtualInferenceModeReranker,
       virtualInferenceModeCompletion: config.virtualInferenceModeCompletion,
       dailyCapUsd: config.openRouterDailyCapUsd ?? {},
+      // Worker pool: bulk OpenRouter requests in flight. Live stats are on
+      // GET /api/openrouter/workers.
+      workers: config.openRouterWorkers,
+      workersLimits: POOL_LIMITS.workerCount,
     });
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Failed to load OpenRouter settings';
@@ -123,6 +129,17 @@ export async function POST(request: NextRequest) {
     }
 
     const rerankerMode = pickEmbeddingMode(body.virtualInferenceModeReranker);
+
+    // Range check before anything is written: a bad Workers value fails the
+    // save with a clear message instead of being silently clamped.
+    const workersError = validateWorkerCount(body.workers);
+    if (workersError) {
+      return NextResponse.json({ error: workersError }, { status: 400 });
+    }
+    const workers =
+      body.workers === undefined || body.workers === null || body.workers === ''
+        ? undefined
+        : Number(body.workers);
 
     await updateConfig({
       openRouterApiKey: apiKeyWrite,
@@ -167,7 +184,9 @@ export async function POST(request: NextRequest) {
         : undefined,
       virtualInferenceModeCompletion: pickCompletionMode(body.virtualInferenceModeCompletion),
       openRouterDailyCapUsd: dailyCapUsd,
+      openRouterWorkers: workers,
     });
+    if (workers !== undefined) openRouterPool().setWorkerCount(workers);
 
     // Push the new settings to every connected sidecar straight away.
     //

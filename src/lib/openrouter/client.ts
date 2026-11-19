@@ -26,6 +26,7 @@
 import { getConfig } from '@/lib/db/config';
 import { createLogger } from '@/lib/logger';
 import { findChatModel, findEmbeddingModel, findRerankModel } from './models';
+import { openRouterPool, type Lane } from './worker-pool';
 
 const logger = createLogger('OpenRouter');
 
@@ -42,6 +43,8 @@ export class OpenRouterError extends Error {
      *  callers should fall back to local, NOT treat it as a config error.
      *  'unknown-model' = the id is wrong (400). That IS a config error. */
     readonly kind: 'no-providers' | 'unknown-model' | 'auth' | 'rate-limit' | 'server' | 'network',
+    /** From the Retry-After header on a 429, when OpenRouter sent one. */
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = 'OpenRouterError';
@@ -347,17 +350,50 @@ export async function assertSpendAllowed(role: string): Promise<void> {
 // Core request
 // ---------------------------------------------------------------------------
 
-async function post<T>(path: string, body: unknown, timeoutMs: number): Promise<T> {
-  const key = await getOpenRouterKey();
+/** Retry-After as ms: seconds or an HTTP date. Undefined when absent/bad. */
+function parseRetryAfter(res: Response): number | undefined {
+  const raw = (res as Partial<Response>).headers?.get?.('retry-after');
+  if (!raw) return undefined;
+  const secs = Number(raw);
+  if (Number.isFinite(secs) && secs >= 0) return secs * 1000;
+  const at = Date.parse(raw);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
+}
+
+/**
+ * One OpenRouter POST, run through the worker pool (worker-pool.ts).
+ *
+ * The pool owns concurrency and retries: 429 up to 3 times with a shared
+ * backoff, other 5xx / network errors once, 4xx never. `lane` picks bulk
+ * (ingestion batches, counted against the Workers setting) or interactive
+ * (searches, chat, answers — their own slots, never behind bulk). The
+ * timeout starts when a worker picks the job up, not while it is queued.
+ */
+async function post<T>(
+  path: string,
+  body: unknown,
+  timeoutMs: number,
+  opts: { role: string; lane: Lane },
+): Promise<T> {
+  const cfg = await getConfig();
+  const rawKey = (cfg as any).openRouterApiKey as string | undefined;
+  const key = rawKey && rawKey.trim() ? rawKey.trim() : undefined;
   if (!key) throw new OpenRouterError('No OpenRouter API key configured', 401, 'auth');
 
+  const pool = openRouterPool();
+  pool.setWorkerCount((cfg as any).openRouterWorkers);
+  const payload = JSON.stringify(body);
+  return pool.submit<T>({ role: opts.role, lane: opts.lane, run: () => postOnce<T>(path, payload, timeoutMs, key) });
+}
+
+async function postOnce<T>(path: string, payload: string, timeoutMs: number, key: string): Promise<T> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const res = await fetch(`${OPENROUTER_BASE_URL}${path}`, {
       method: 'POST',
       headers: authHeaders(key),
-      body: JSON.stringify(body),
+      body: payload,
       signal: ctl.signal,
     });
     const text = await res.text();
@@ -372,6 +408,7 @@ async function post<T>(path: string, body: unknown, timeoutMs: number): Promise<
         `OpenRouter ${path} failed: ${res.status} ${text.slice(0, 600)}`,
         res.status,
         classify(res.status, text),
+        res.status === 429 ? parseRetryAfter(res) : undefined,
       );
     }
     noteSuccess();
@@ -411,7 +448,12 @@ export async function validateModel(id: string, timeoutMs = 10_000): Promise<Mod
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    const res = await fetch(`${OPENROUTER_BASE_URL}/models/${id}/endpoints`, { signal: ctl.signal });
+    // Interactive lane: an admin page check must not wait behind ingestion.
+    const res = await openRouterPool().submit({
+      role: 'admin',
+      lane: 'interactive',
+      run: () => fetch(`${OPENROUTER_BASE_URL}/models/${id}/endpoints`, { signal: ctl.signal }),
+    });
     const text = await res.text();
     if (!res.ok) {
       const kind = classify(res.status, text);
@@ -460,7 +502,11 @@ export async function getCredits(timeoutMs = 10_000): Promise<CreditsInfo> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    const res = await fetch(`${OPENROUTER_BASE_URL}/credits`, { headers: authHeaders(key), signal: ctl.signal });
+    const res = await openRouterPool().submit({
+      role: 'admin',
+      lane: 'interactive',
+      run: () => fetch(`${OPENROUTER_BASE_URL}/credits`, { headers: authHeaders(key), signal: ctl.signal }),
+    });
     const text = await res.text();
     if (!res.ok) throw new OpenRouterError(`credits failed: ${res.status}`, res.status, classify(res.status, text));
     const j = JSON.parse(text) as { data?: { total_credits?: number; total_usage?: number } };
@@ -492,9 +538,13 @@ export interface EmbedResult {
 export async function embed(
   texts: string[],
   model: string,
-  opts: { pinProvider?: string; expectedDims?: number; timeoutMs?: number; role?: string } = {},
+  opts: { pinProvider?: string; expectedDims?: number; timeoutMs?: number; role?: string; lane?: Lane } = {},
 ): Promise<EmbedResult> {
   const role = opts.role ?? 'embedding';
+  // A single text is a query embed (search, MCP tools) → interactive lane.
+  // Batches come from ingestion and re-index → bulk lane, counted against
+  // the Workers setting. Callers that know better pass `lane`.
+  const lane: Lane = opts.lane ?? (texts.length <= 1 ? 'interactive' : 'bulk');
   await assertSpendAllowed(role);
 
   const body: Record<string, unknown> = { model, input: texts };
@@ -514,7 +564,7 @@ export async function embed(
     const json = await post<{
       data: Array<{ embedding: number[]; index: number }>;
       usage?: { total_tokens?: number };
-    }>('/embeddings', body, opts.timeoutMs ?? 60_000);
+    }>('/embeddings', body, opts.timeoutMs ?? 60_000, { role, lane });
 
     const sorted = [...json.data].sort((a, b) => a.index - b.index);
     const vectors = sorted.map((d) => d.embedding);
@@ -550,61 +600,12 @@ export interface RerankResponse {
   usage?: { total_tokens: number };
 }
 
-/**
- * Which OpenRouterError kinds are worth trying again.
- *
- * 'server' covers the 503 "service overloaded, please try again later" that
- * Fireworks returns under load — a message that literally asks you to retry and
- * was, until this existed, treated as terminal on the first attempt.
- *
- * Everything else is permanent within the life of one request: a bad key, a
- * model that does not exist, or a model nobody serves will not fix itself in
- * 400 ms, and retrying them just burns the caller's latency budget.
+/*
+ * Rerank retries live in the worker pool now (worker-pool.ts): 429 up to 3
+ * times, 503 "service overloaded" and other 5xx once, 4xx never.
+ * `qwen/qwen3-reranker-8b` is served by exactly ONE provider (Fireworks,
+ * verified 2026-09-16), so retrying it is the only fallback there is.
  */
-const RETRYABLE_KINDS = new Set<OpenRouterError['kind']>(['rate-limit', 'server', 'network']);
-
-/**
- * `post()` with bounded retry on transient failures.
- *
- * Why this exists at all, and only here for now: `qwen/qwen3-reranker-8b` is
- * served by exactly ONE provider (Fireworks — verified 2026-09-16; the 4b and
- * 0.6b variants have zero), and OpenRouter's catalogue lists no alternative
- * rerank model to fail over to. So a single transient 503 took rerank out
- * entirely and search silently degraded to first-stage order. With no second
- * provider to try, retrying the first one is the only fallback available.
- *
- * Bounded deliberately: the reranker runs inside a 40 s interactive budget, so
- * three attempts with 400 ms / 1200 ms backoff costs at most ~1.6 s of waiting
- * on top of the attempts themselves. Do not turn this into an unbounded retry —
- * a rerank that arrives after the answer has been rendered is worthless.
- */
-async function postWithRetry<T>(
-  path: string,
-  body: unknown,
-  timeoutMs: number,
-  label: string,
-  attempts = 3,
-): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await post<T>(path, body, timeoutMs);
-    } catch (err) {
-      lastErr = err;
-      const kind = err instanceof OpenRouterError ? err.kind : 'network';
-      if (!RETRYABLE_KINDS.has(kind) || attempt === attempts) throw err;
-      // 400ms, 1200ms — plus jitter so several concurrent rerank calls do not
-      // retry in lockstep and re-overload the one provider that just failed.
-      const backoff = 400 * Math.pow(3, attempt - 1) + Math.floor(Math.random() * 200);
-      console.warn(
-        `[OpenRouter] ${label} attempt ${attempt}/${attempts} failed (${kind}) — retrying in ${backoff}ms: ` +
-        `${(err as Error).message.slice(0, 500)}`,
-      );
-      await new Promise((r) => setTimeout(r, backoff));
-    }
-  }
-  throw lastErr;
-}
 
 export async function rerankDocuments(
   query: string,
@@ -620,8 +621,8 @@ export async function rerankDocuments(
   const startedAt = Date.now();
   beginCall(role);
   try {
-    const out = await postWithRetry<RerankResponse>(
-      '/rerank', body, opts.timeoutMs ?? 60_000, `rerank(${model})`,
+    const out = await post<RerankResponse>(
+      '/rerank', body, opts.timeoutMs ?? 60_000, { role, lane: 'interactive' },
     );
     chargeTokens(role, out.usage?.total_tokens, findRerankModel(model)?.pricePerMTokens);
     endCall(role, {
@@ -650,7 +651,7 @@ export interface ChatResult {
 export async function chat(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   model: string,
-  opts: { temperature?: number; maxTokens?: number; timeoutMs?: number; role?: string } = {},
+  opts: { temperature?: number; maxTokens?: number; timeoutMs?: number; role?: string; lane?: Lane } = {},
 ): Promise<ChatResult> {
   const guardRole = opts.role ?? 'completion';
   await assertSpendAllowed(guardRole);
@@ -665,7 +666,7 @@ export async function chat(
       choices: Array<{ message?: { content?: string } }>;
       model?: string;
       usage?: ChatResult['usage'];
-    }>('/chat/completions', body, opts.timeoutMs ?? 120_000);
+    }>('/chat/completions', body, opts.timeoutMs ?? 120_000, { role: guardRole, lane: opts.lane ?? 'interactive' });
 
     // Chat is priced asymmetrically, so in/out tokens are charged separately
     // rather than against a single per-M rate.
