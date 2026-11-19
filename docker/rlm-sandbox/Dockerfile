@@ -15,9 +15,11 @@
 #                        OpenRouter directly. Do not add a key here.
 #   NO outbound egress — the only route needed is to the sidecar. Lock it down.
 #
-# Build (from repo root), fetching the library from a master:
+# Build (from repo root). Copy the vendored library into the build context first
+# (rlms.tar.gz is gitignored). No host name goes into any ARG, layer or history
+# line: the image is public.
+#   cp public/rlm/rlms-latest.tar.gz docker/rlm-sandbox/rlms.tar.gz
 #   docker build -t rlm-sandbox:0.1.0 \
-#     --build-arg MASTER_URL=http://<master>:3000 \
 #     --build-arg RLMS_SHA256=$(node -p "require('./public/rlm/manifest.json').sha256") \
 #     docker/rlm-sandbox
 #
@@ -28,15 +30,12 @@
 
 FROM python:3.11-slim
 
-ARG MASTER_URL
 ARG RLMS_SHA256
 
-# The library is vendored at public/rlm/ and served from disk by any master, so
-# a build host needs a route to a master and nothing else — not GitHub, not
-# PyPI. The checksum is verified the way install.sh verifies the sidecar
-# tarball: fetching a dependency over HTTP without checking it is the defect
-# class those rules exist for.
-ADD ${MASTER_URL}/rlm/rlms-latest.tar.gz /tmp/rlms.tar.gz
+# The library is vendored at public/rlm/; the build copies it from the context,
+# so a build host needs no route to a master, GitHub or PyPI. The checksum is
+# still verified, the way install.sh verifies the sidecar tarball.
+COPY rlms.tar.gz /tmp/rlms.tar.gz
 RUN set -eux; \
     echo "${RLMS_SHA256}  /tmp/rlms.tar.gz" | sha256sum -c -; \
     mkdir -p /tmp/rlms; \

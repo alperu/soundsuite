@@ -59,9 +59,11 @@ docker buildx create --name ssmulti --driver docker-container --use
 gh auth refresh -s write:packages                       # once, if not already
 gh auth token | docker login ghcr.io -u <user> --password-stdin
 
+# the image is public: no host name may go into an ARG or layer
+cp public/rlm/rlms-latest.tar.gz docker/rlm-sandbox/rlms.tar.gz
+
 docker buildx build --builder ssmulti \
   --platform linux/amd64,linux/arm64 \
-  --build-arg MASTER_URL=http://<master>:3000 \
   --build-arg RLMS_SHA256=$(node -p "require('./public/rlm/manifest.json').sha256") \
   -t ghcr.io/project-sandstar/rlm-sandbox:0.1.3 \
   -t ghcr.io/project-sandstar/rlm-sandbox:latest \
