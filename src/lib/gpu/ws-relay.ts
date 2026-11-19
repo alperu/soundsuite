@@ -617,6 +617,10 @@ export function startWsRelay(): WebSocketServer {
             const { isFollowMode } = await import('@/lib/db/fleet-source');
             if (await isFollowMode()) {
               logger.info('Follow mode: config push to the new sidecar left to sidecarmaster', { agentUrl: msg.agentUrl });
+              // This master's own sandbox slot still goes out (sidecarmaster
+              // does not hold its sandbox key).
+              const { pushSandboxSlot } = await import('@/lib/gpu/fleet-router');
+              pushSandboxSlot(msg.agentUrl).catch(() => {});
               return;
             }
             const { getConfig } = await import('@/lib/db/config');

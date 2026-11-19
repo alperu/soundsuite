@@ -974,9 +974,24 @@ export function buildOpenRouterPush(cfg: AppConfig): {
   return { apiKey: sandboxKey, allowedModels, domain: 'legal' };
 }
 
+/**
+ * Push ONLY this master's ss-rlm-sandbox slot (`{openrouter: …}`) to one
+ * sidecar. Not fleet config, so it runs in follow mode too: sidecarmaster does
+ * not hold this master's sandbox key and never pushes it. The sidecar applies
+ * each config field only when present, so the rest of its config is untouched.
+ */
+export async function pushSandboxSlot(agentUrl: string): Promise<any> {
+  const cfg = await getConfig();
+  return sendToSidecar(agentUrl, '/config', { openrouter: buildOpenRouterPush(cfg) });
+}
+
 export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {
-  // Follow mode: sidecarmaster pushes config; a second master must not.
-  if (await isFollowMode()) return followSkip('full-config push', agentUrl);
+  // Follow mode: sidecarmaster pushes config; a second master must not. The
+  // sandbox slot is this master's own and still goes out.
+  if (await isFollowMode()) {
+    pushSandboxSlot(agentUrl).catch(() => {});
+    return followSkip('full-config push', agentUrl);
+  }
   // Seed on demand for fresh sidecars so the first push isn't empty.
   const hostOs = detectHostOs(agentUrl);
   try {
