@@ -10,7 +10,6 @@
 
 import { createLogger } from '@/lib/logger';
 import { getConfig, setConfigValue, type AppConfig } from '@/lib/db/config';
-import { findEmbeddingModel, findRerankModel } from '@/lib/openrouter/models';
 import * as wsRelay from '@/lib/gpu/ws-relay';
 import { queueSidecarCommand } from '@/lib/gpu/command-queue';
 import * as statusCache from '@/lib/gpu/status-cache';
@@ -941,127 +940,32 @@ export async function pushModelRegistry(agentUrl: string): Promise<any> {
  * per-host assignment, preserving back-compat for built-in role names.
  */
 /**
- * The `openrouter` block pushed to a sidecar so its `virtualInference` can serve
- * a role when the local model is unavailable.
+ * The `openrouter` block pushed to a sidecar: the ss-rlm-sandbox slot only
+ * (docs/tasks/58, 59).
  *
- * Returns `null` — which the sidecar reads as "not configured" — unless the
- * feature is enabled AND a key exists. A sidecar with no block never calls out,
- * which is the required default.
+ * This master calls OpenRouter itself for embedding, rerank and chat
+ * (src/lib/openrouter/client.ts). The one thing a sidecar still needs from it
+ * is what the sandbox container uses for THIS master's requests: the key, the
+ * sandbox model and the retrieval domain. The sidecar files the block under
+ * this master's `serverUrl`, keeps it encrypted at rest, and hands it to the
+ * sandbox over a local endpoint; the sandbox then calls OpenRouter directly.
  *
- * Per-MASTER by construction: the receiving sidecar files this under the
- * `serverUrl` of whichever master sent it, so two masters pushing different
- * allow-lists to the same sidecar do not overwrite each other. That is what lets
- * Sound Suite and the Fantom MCP server expose different model sets through one
- * host.
+ * `null` when OpenRouter is off or has no key. A sidecar from task 58 on reads
+ * `null` as "clear this master's slot", so turning OpenRouter off also takes
+ * the key off every host. Older sidecars ignore `null`.
  *
- * The key rides the same WebSocket as the rest of the config and is held in
- * memory on the sidecar only — never written to its config.json, never surfaced
- * by /api/status.
- *
- * `domain` (added for ss-rlm-sandbox): this master's self-declaration of
- * which retrieval domain it drives the RLM sandbox pattern over — 'legal'
- * for Sound Suite (query_case_knowledge / query_case_graph). The Fantom MCP
- * master declares 'code' (search_code / search_symbols / search_files) from
- * its OWN codebase — this repo cannot and does not speak for it. See
- * docs/SPEC-ss-rlm-sandbox.md for the full two-master contract and why the
- * sidecar must treat a master with no `domain` as unconfigured rather than
- * defaulting to either side.
- *
- * `rlm-sandbox`'s model/mode ride this SAME per-master channel (allowedModels
- * / modeByRole), not the global `modelOverrides` used for the other modes —
- * deliberately. Two masters can pick different sandbox models (legal
- * reasoning over pleadings vs. code reasoning over an unfamiliar language
- * are not obviously the same choice), and `modelOverrides` has exactly one
- * value per sidecar — it would let one master's pick silently clobber the
- * other's. The per-master map already exists precisely to avoid that.
+ * `domain: 'legal'` is a fact about this software (Sound Suite retrieves over
+ * case documents), not an operator choice. Fantom declares 'code' for itself.
  */
 export function buildOpenRouterPush(cfg: AppConfig): {
   apiKey: string;
-  allowedModels: Record<string, { model: string; provider?: string; dims?: number }>;
-  modeByRole: Record<string, string>;
+  allowedModels: Record<string, { model: string }>;
   domain: 'legal' | 'code';
 } | null {
   if (!cfg.openRouterEnabled || !cfg.openRouterApiKey) return null;
-
-  const allowedModels: Record<string, { model: string; provider?: string; dims?: number }> = {};
-  const add = (role: string, id: string | undefined) => {
-    if (!id) return;
-    const e = findEmbeddingModel(id);
-    if (e) {
-      // Provider and dims travel with the model: the sidecar pins embedding
-      // calls to that provider (so one vector space cannot silently split across
-      // two) and enforces the width on the response.
-      allowedModels[role] = { model: id, provider: e.pinProvider, dims: e.dims };
-      return;
-    }
-    const r = findRerankModel(id);
-    allowedModels[role] = r ? { model: id, provider: r.pinProvider } : { model: id };
-  };
-
-  // The two embedding roles are configured separately — ss-embedding and
-  // ss-code-embedding run different local models at different widths.
-  add('embedding', cfg.openRouterEmbeddingModel);
-  add('code-embedding', cfg.openRouterCodeEmbeddingModel);
-  add('reranker', cfg.openRouterRerankModel);
-  // ss-rlm-sandbox — this master's own model choice (set on /admin/openrouter,
-  // not a fleet-wide global; see that page's note). `add()` falls through to
-  // the bare `{ model: id }` shape for a chat model like this, same as an
-  // unrecognized rerank id.
-  add('rlm-sandbox', cfg.rlmSandboxModel);
-  // completion — the chat model. Omitted until 2026-09-16, which left the
-  // sidecar's /api/status reporting neither a mode nor a model for a role the
-  // admin page showed as cloud-only: two sources of truth disagreeing about
-  // what the operator had configured.
-  //
-  // Not a functional break for THIS master, which reaches OpenRouter for
-  // completion on its own via resolveEndpoint Phase 0/4 reading master config
-  // (cloud-provider.ts → openRouterChatModel) and never consults the sidecar's
-  // copy. It matters for the sidecar's own /api/v1/chat/completions route,
-  // which resolves its model from allowedModels — so without this a
-  // sidecar-proxied chat caller gets a 503 "has not configured a model".
-  add('completion', cfg.openRouterChatModel);
-
-  // Modes come from `virtualInference.mode.<role>`. This used to push a
-  // hardcoded 'local-first' for every role, so the sidecar reported a mode the
-  // operator had never chosen and the configured one was silently ignored.
-  //
-  // `all-sources` is a MASTER-side concept: the ingestion provider fans batches
-  // across local and cloud. From the sidecar's side the observable behaviour is
-  // the same as local-first (serve when asked, prefer local otherwise), and its
-  // RoutingMode union has no 'all-sources' member — so it is mapped here rather
-  // than passed through. Do not widen the sidecar enum for this unless the
-  // sidecar itself gains fan-out.
-  // Defaults to local-only when the config value is missing: an undefined mode
-  // would serialize to an absent key, and the sidecar would then infer its own
-  // default for a role we explicitly listed — safe here, but a silent
-  // disagreement between the two sides about what was configured.
-  const sidecarMode = (m: string | undefined): string =>
-    !m ? 'local-only' : m === 'all-sources' ? 'local-first' : m;
-
-  const modeByRole: Record<string, string> = {};
-  if (allowedModels['embedding']) {
-    modeByRole['embedding'] = sidecarMode(cfg.virtualInferenceModeEmbedding);
-  }
-  if (allowedModels['code-embedding']) {
-    modeByRole['code-embedding'] = sidecarMode(cfg.virtualInferenceModeCodeEmbedding);
-  }
-  if (allowedModels['reranker']) {
-    // Reranking has no mode key: Policy 1 gates on openRouterEnabled plus a
-    // Reranking now has its own policy key, so this is no longer hardcoded:
-    // an operator choosing "SideCar Only" must actually stop the sidecar
-    // serving it, not merely stop reranker.ts from asking. Both sides enforce
-    // it — either alone would do, but a stale discovery row cannot then quietly
-    // route around the choice.
-    modeByRole['reranker'] = sidecarMode(cfg.virtualInferenceModeReranker);
-  }
-  if (allowedModels['rlm-sandbox']) {
-    modeByRole['rlm-sandbox'] = sidecarMode(cfg.virtualInferenceModeRlm);
-  }
-  if (allowedModels['completion']) {
-    modeByRole['completion'] = sidecarMode(cfg.virtualInferenceModeCompletion);
-  }
-
-  return { apiKey: cfg.openRouterApiKey, allowedModels, modeByRole, domain: 'legal' };
+  const allowedModels: Record<string, { model: string }> = {};
+  if (cfg.rlmSandboxModel) allowedModels['rlm-sandbox'] = { model: cfg.rlmSandboxModel };
+  return { apiKey: cfg.openRouterApiKey, allowedModels, domain: 'legal' };
 }
 
 export async function pushFullConfig(agentUrl: string, timeouts: IdleTimeouts): Promise<any> {

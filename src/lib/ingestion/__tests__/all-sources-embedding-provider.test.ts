@@ -22,17 +22,8 @@ jest.mock('@/lib/openrouter/client', () => {
   return { ...actual, embed: jest.fn() };
 });
 
-// This suite is about the local/cloud SPLIT and width-safety, not fleet
-// dispatch (that's virtual-embed-dispatch.test.ts). Real
-// `@/lib/gpu/virtual-embed-dispatch` pulls in fleet-router.ts's full
-// dependency chain (role-registry → mode-catalog-server → 'server-only',
-// unresolvable under Jest — see the fleet-router test suites, which mock the
-// same chain for the same reason). Stub it to just call `directFallback`,
-// i.e. behave exactly like the pre-fan-out direct `this.cloud.embed()` call
-// this provider used to make — preserving every existing assertion below.
-jest.mock('@/lib/gpu/virtual-embed-dispatch', () => ({
-  dispatchVirtualEmbed: jest.fn(({ texts, directFallback }) => directFallback(texts)),
-}));
+// The cloud share goes straight to the master's own OpenRouter client
+// (docs/tasks/59); sidecars no longer proxy embeddings.
 
 const mockEmbed = openRouterEmbed as jest.MockedFunction<typeof openRouterEmbed>;
 
@@ -148,6 +139,19 @@ describe('AllSourcesEmbeddingProvider.embed', () => {
     expect(mockEmbed).toHaveBeenCalledWith(['chunk three', 'chunk four'], OPENROUTER_MODEL, expect.anything());
   });
 
+  it('calls OpenRouter directly, pinned and width-checked, charged to its own role', async () => {
+    mockEmbed.mockResolvedValue({ vectors: fakeVectors(1, 2560), model: OPENROUTER_MODEL, dims: 2560 });
+    const provider = await AllSourcesEmbeddingProvider.createIfSafe({
+      local: new FakeLocalProvider(2560), openRouterModel: OPENROUTER_MODEL, role: 'code-embedding',
+    });
+    mockEmbed.mockClear();
+    mockEmbed.mockResolvedValue({ vectors: fakeVectors(1, 2560), model: OPENROUTER_MODEL, dims: 2560 });
+    await provider!.embed(['a', 'b']);
+    expect(mockEmbed).toHaveBeenCalledWith(['b'], OPENROUTER_MODEL, expect.objectContaining({
+      pinProvider: expect.any(String), expectedDims: 2560, role: 'code-embedding',
+    }));
+  });
+
   it('sends a lone text to local only, skipping the network round trip', async () => {
     const provider = await buildProvider();
     mockEmbed.mockClear();
@@ -171,12 +175,9 @@ describe('AllSourcesEmbeddingProvider.embed', () => {
     await expect(provider.embed(['a', 'b', 'c', 'd'])).rejects.toThrow(/refusing to return a mixed-width batch/);
   });
 
-  it('falls back to the local provider for the cloud share when fleet dispatch AND its direct-OpenRouter fallback both fail', async () => {
+  it('falls back to the local provider for the cloud share when OpenRouter fails', async () => {
     const provider = await buildProvider();
     mockEmbed.mockClear();
-    // dispatchVirtualEmbed is mocked (module top) to call directFallback,
-    // which is `this.cloud.embed` → the real OpenRouter client mock. Make
-    // that reject to exercise the provider's own last-resort local rescue.
     mockEmbed.mockRejectedValue(new Error('openrouter down'));
 
     const vectors = await provider.embed(['a', 'b', 'c', 'd']);
@@ -193,15 +194,13 @@ describe('AllSourcesEmbeddingProvider.embed', () => {
  * operator observed "a couple" of cloud calls and then nothing.
  */
 describe('single-text calls alternate between sources', () => {
-  const { dispatchVirtualEmbed } = jest.requireMock('@/lib/gpu/virtual-embed-dispatch');
-
   async function build() {
     mockEmbed.mockResolvedValue({ vectors: fakeVectors(1, 2560), model: OPENROUTER_MODEL, dims: 2560 });
     const local = new FakeLocalProvider(2560);
     const localSpy = jest.spyOn(local, 'embed');
     const provider = await AllSourcesEmbeddingProvider.createIfSafe({ local, openRouterModel: OPENROUTER_MODEL });
     localSpy.mockClear();
-    (dispatchVirtualEmbed as jest.Mock).mockClear();
+    mockEmbed.mockClear();
     return { provider: provider!, localSpy };
   }
 
@@ -211,8 +210,8 @@ describe('single-text calls alternate between sources', () => {
     const { provider, localSpy } = await build();
     for (let i = 0; i < 6; i++) await provider.embed([`synthetic chunk ${i}`]);
 
-    const cloudSingletons = (dispatchVirtualEmbed as jest.Mock).mock.calls
-      .filter((c: any[]) => c[0].texts.length === 1).length;
+    const cloudSingletons = mockEmbed.mock.calls
+      .filter((c) => c[0].length === 1).length;
     const localSingletons = localSpy.mock.calls.filter((c) => c[0].length === 1).length;
 
     expect(cloudSingletons).toBeGreaterThan(0);
@@ -222,7 +221,7 @@ describe('single-text calls alternate between sources', () => {
 
   it('falls back to local when a singleton cloud call fails', async () => {
     const { provider, localSpy } = await build();
-    (dispatchVirtualEmbed as jest.Mock).mockRejectedValue(new Error('upstream down'));
+    mockEmbed.mockRejectedValue(new Error('upstream down'));
     // Two calls guarantees at least one takes the cloud branch.
     const a = await provider.embed(['x']);
     const b = await provider.embed(['y']);

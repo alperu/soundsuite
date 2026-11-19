@@ -36,7 +36,6 @@
 import { EmbeddingProvider } from './embedding-provider';
 import { OpenRouterEmbeddingProvider } from './openrouter-embedding-provider';
 import { findEmbeddingModel } from '@/lib/openrouter/models';
-import { dispatchVirtualEmbed } from '@/lib/gpu/virtual-embed-dispatch';
 import { createLogger } from '../logger';
 
 const logger = createLogger('AllSourcesEmbeddingProvider');
@@ -61,8 +60,6 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
     private readonly local: EmbeddingProvider,
     private readonly cloud: OpenRouterEmbeddingProvider,
     private readonly dims: number,
-    private readonly openRouterModel: string,
-    private readonly role: string,
   ) {
     super();
   }
@@ -87,7 +84,7 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
 
     let cloud: OpenRouterEmbeddingProvider;
     try {
-      cloud = new OpenRouterEmbeddingProvider({ model: config.openRouterModel, timeoutMs: config.timeoutMs });
+      cloud = new OpenRouterEmbeddingProvider({ model: config.openRouterModel, timeoutMs: config.timeoutMs, role: config.role || 'embedding' });
     } catch (err) {
       logger.warn('all-sources: failed to construct OpenRouterEmbeddingProvider — falling back to local-only', {
         model: config.openRouterModel,
@@ -122,7 +119,7 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
         model: config.openRouterModel,
         localModel: config.local.getModelName(),
       });
-      return new AllSourcesEmbeddingProvider(config.local, cloud, localDims, config.openRouterModel, config.role || 'embedding');
+      return new AllSourcesEmbeddingProvider(config.local, cloud, localDims);
     } catch (err) {
       logger.warn('all-sources: verification probe failed — refusing, falling back to local-only', {
         model: config.openRouterModel,
@@ -138,16 +135,12 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
    * (chunk → embedding zip) rely on that, same contract as every other
    * provider.
    *
-   * The cloud half goes through `dispatchVirtualEmbed`, which spreads it
-   * round-robin across every connected sidecar whose pushed config
-   * allow-lists this role (each sidecar spending its own OpenRouter key) and
-   * falls back to `this.cloud` (a direct master-side OpenRouter call) when no
-   * sidecar is eligible or every eligible sidecar fails for its share. This
-   * is what makes "each file to a separate sidecar" true — see
-   * virtual-embed-dispatch.ts. If BOTH of those fail (fleet dispatch throws
-   * and the direct OpenRouter call it fell back to also throws), the cloud
-   * share falls back once more to `this.local` — an embedding batch must
-   * never come back partially filled just because the cloud side is down.
+   * The cloud half goes to `this.cloud` — this master calling OpenRouter
+   * itself (provider pinned, width checked, spend charged in
+   * src/lib/openrouter/client.ts; docs/tasks/59). Sidecars no longer proxy
+   * embeddings. If that call throws, the cloud share falls back to
+   * `this.local` — an embedding batch must never come back partially filled
+   * just because the cloud side is down.
    */
   async embed(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
@@ -171,13 +164,7 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
       const useCloud = this.singletonTurn++ % 2 === 1;
       if (!useCloud) return this.local.embed(texts);
       try {
-        return await dispatchVirtualEmbed({
-          role: this.role,
-          model: this.openRouterModel,
-          texts,
-          expectedDims: this.dims,
-          directFallback: (t) => this.cloud.embed(t),
-        });
+        return await this.cloud.embed(texts);
       } catch (err) {
         logger.warn('all-sources: singleton cloud embed failed — serving locally instead', {
           error: (err as Error).message,
@@ -191,14 +178,8 @@ export class AllSourcesEmbeddingProvider extends EmbeddingProvider {
     const cloudTexts = texts.slice(splitAt);
 
     const cloudPromise = cloudTexts.length
-      ? dispatchVirtualEmbed({
-          role: this.role,
-          model: this.openRouterModel,
-          texts: cloudTexts,
-          expectedDims: this.dims,
-          directFallback: (t) => this.cloud.embed(t),
-        }).catch((err) => {
-          logger.warn('all-sources: cloud share failed on every sidecar and the direct OpenRouter fallback — falling back to local for this share', {
+      ? this.cloud.embed(cloudTexts).catch((err) => {
+          logger.warn('all-sources: OpenRouter cloud share failed — falling back to local for this share', {
             error: (err as Error).message,
             count: cloudTexts.length,
           });

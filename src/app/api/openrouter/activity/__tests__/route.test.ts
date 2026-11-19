@@ -4,14 +4,12 @@
  * `GET /api/openrouter/activity` just fans `getActivity()` out over the four
  * roles the admin panel shows — the interesting behavior (call attribution,
  * fleet-vs-direct split) is covered where it actually happens
- * (`src/lib/openrouter/__tests__/client.test.ts`,
- * `src/lib/gpu/__tests__/virtual-embed-dispatch.test.ts`). This test only
+ * (`src/lib/openrouter/__tests__/client.test.ts`). This test only
  * checks the route composes that correctly and gates access.
  *
  * `@/lib/openrouter/client` is mocked to avoid the real module's
  * `@/lib/db/config` → `@/lib/db/prisma` chain (eager PrismaClient
- * construction at import time — see the mock note in
- * virtual-embed-dispatch.test.ts for the same reason).
+ * construction at import time).
  */
 
 const mockGetActivity = jest.fn();

@@ -3,14 +3,9 @@
  * `buildOpenRouterPush()` decides whether a live API key leaves this master and
  * travels to a fleet host, so its default matters more than its happy path.
  *
- * Two failure modes this guards:
- *   1. Pushing a key when the operator has not enabled the feature — the key
- *      would land in memory on every sidecar for nothing, and sidecar
- *      /api/status is unauthenticated on the LAN.
- *   2. Dropping `provider`/`dims` from an embedding entry — the sidecar uses
- *      them to pin the provider (so one vector space cannot silently split
- *      across two) and to enforce the response width (so a wrong-width vector
- *      never reaches addChunks(), which drops and recreates the table).
+ * Since docs/tasks/59 the push is the ss-rlm-sandbox slot only: this master
+ * calls OpenRouter itself for every other role, so no embedding, rerank or
+ * chat model (and no routing mode) may reach a sidecar any more.
  */
 // fleet-router transitively imports mode-catalog-server, which imports
 // 'server-only' — a Next.js build-time marker with no Jest resolution. Stubbing
@@ -51,190 +46,23 @@ describe('buildOpenRouterPush', () => {
     expect(buildOpenRouterPush(cfg({ openRouterApiKey: '' }))).toBeNull();
   });
 
-  it('maps the two embedding roles separately', () => {
-    // ss-embedding and ss-code-embedding are distinct roles; a push that
-    // collapsed them would silently serve code search from the text model.
-    const out = buildOpenRouterPush(
-      cfg({
-        openRouterEmbeddingModel: 'openai/text-embedding-3-small',
-        openRouterCodeEmbeddingModel: 'qwen/qwen3-embedding-4b',
-      }),
-    )!;
-    expect(out.allowedModels['embedding'].model).toBe('openai/text-embedding-3-small');
-    expect(out.allowedModels['code-embedding'].model).toBe('qwen/qwen3-embedding-4b');
-  });
-
-  it('carries provider and measured dims on every embedding entry', () => {
-    const out = buildOpenRouterPush(cfg())!;
-    expect(out.allowedModels['code-embedding']).toEqual({
-      model: 'qwen/qwen3-embedding-4b',
-      provider: 'DeepInfra',
-      dims: 2560,
+  it('pushes only the sandbox slot: key, rlm-sandbox model, domain', () => {
+    const out = buildOpenRouterPush(cfg({
+      rlmSandboxModel: 'deepseek/deepseek-v4.1-flash',
+      openRouterChatModel: 'some/chat-model',
+    } as Partial<AppConfig>))!;
+    expect(out).toEqual({
+      apiKey: KEY,
+      allowedModels: { 'rlm-sandbox': { model: 'deepseek/deepseek-v4.1-flash' } },
+      domain: 'legal',
     });
+    expect(out).not.toHaveProperty('modeByRole');
   });
 
-  it('carries the provider pin for rerank but no dims', () => {
-    const out = buildOpenRouterPush(cfg())!;
-    expect(out.allowedModels['reranker'].provider).toBe('Fireworks');
-    expect(out.allowedModels['reranker'].dims).toBeUndefined();
-  });
-
-  it('marks only roles that have a model, leaving the rest local-only', () => {
-    const out = buildOpenRouterPush(
-      cfg({ openRouterCodeEmbeddingModel: undefined, openRouterRerankModel: undefined }),
-    )!;
-    expect(Object.keys(out.modeByRole).sort()).toEqual(['embedding']);
-    // Mode now comes from config, not a hardcoded value. cfg() leaves the mode
-    // fields unset, so this is the AppConfig default.
-    expect(out.modeByRole['embedding']).toBe('local-only');
-    // An unlisted role must not appear at all — the sidecar defaults an unknown
-    // role to local-only, which is the safe state.
-    expect(out.allowedModels['reranker']).toBeUndefined();
-  });
-
-  it('passes the key through unchanged when enabled', () => {
-    expect(buildOpenRouterPush(cfg())!.apiKey).toBe(KEY);
-  });
-});
-
-describe('buildOpenRouterPush — ss-rlm-sandbox two-master contract', () => {
-  it('always declares this master (Sound Suite) as the legal domain', () => {
-    // Fantom's own master declares 'code' from its own codebase — this repo
-    // cannot and must not speak for it. See docs/SPEC-ss-rlm-sandbox.md.
-    expect(buildOpenRouterPush(cfg())!.domain).toBe('legal');
-    // Even when nothing else is configured, as long as the feature is on.
-    expect(
-      buildOpenRouterPush(
-        cfg({ openRouterEmbeddingModel: undefined, openRouterCodeEmbeddingModel: undefined, openRouterRerankModel: undefined }),
-      )!.domain,
-    ).toBe('legal');
-  });
-
-  it('maps rlm.sandboxModel to the rlm-sandbox role, separately from every other role', () => {
-    const out = buildOpenRouterPush(cfg({ rlmSandboxModel: 'deepseek/deepseek-v4-flash' } as Partial<AppConfig>))!;
-    expect(out.allowedModels['rlm-sandbox']).toEqual({ model: 'deepseek/deepseek-v4-flash' });
-  });
-
-  it('rlm-sandbox does not appear at all when no sandbox model is configured', () => {
-    const out = buildOpenRouterPush(cfg())!;
-    expect(out.allowedModels['rlm-sandbox']).toBeUndefined();
-    expect(out.modeByRole['rlm-sandbox']).toBeUndefined();
-  });
-
-  it("rlm-sandbox's mode comes from virtualInference.mode.rlm, not a hardcoded value (unlike reranker)", () => {
-    const out = buildOpenRouterPush(
-      cfg({
-        rlmSandboxModel: 'deepseek/deepseek-v4-flash',
-        virtualInferenceModeRlm: 'local-first',
-      } as Partial<AppConfig>),
-    )!;
-    expect(out.modeByRole['rlm-sandbox']).toBe('local-first');
-  });
-
-  it('rlm-sandbox mode defaults to local-only when virtualInferenceModeRlm is unset', () => {
-    const out = buildOpenRouterPush(cfg({ rlmSandboxModel: 'deepseek/deepseek-v4-flash' } as Partial<AppConfig>))!;
-    expect(out.modeByRole['rlm-sandbox']).toBe('local-only');
-  });
-
-  it('the sandbox model rides the same per-master channel as embedding/reranker, not a separate one', () => {
-    // This is the architectural point: rlm-sandbox is just another entry in
-    // allowedModels/modeByRole, the SAME per-serverUrl map that already keeps
-    // Sound Suite and Fantom from clobbering each other's embedding/rerank
-    // config. No new field shape, no new push path.
-    const out = buildOpenRouterPush(
-      cfg({
-        openRouterEmbeddingModel: 'qwen/qwen3-embedding-4b',
-        openRouterCodeEmbeddingModel: undefined,
-        openRouterRerankModel: undefined,
-        rlmSandboxModel: 'deepseek/deepseek-v4-flash',
-      } as Partial<AppConfig>),
-    )!;
-    expect(Object.keys(out.allowedModels).sort()).toEqual(['embedding', 'rlm-sandbox']);
-  });
-});
-
-describe('buildOpenRouterPush — modes come from config', () => {
-  it('passes the configured mode through per role', () => {
-    const out = buildOpenRouterPush(
-      cfg({
-        virtualInferenceModeEmbedding: 'cloud-only',
-        virtualInferenceModeCodeEmbedding: 'local-first',
-      } as Partial<AppConfig>),
-    )!;
-    expect(out.modeByRole['embedding']).toBe('cloud-only');
-    expect(out.modeByRole['code-embedding']).toBe('local-first');
-  });
-
-  it('maps all-sources to local-first for the sidecar', () => {
-    // all-sources is a MASTER-side fan-out; the sidecar's RoutingMode union has
-    // no such member, and its observable behaviour is local-first. Pushing the
-    // raw string would be an unparseable mode.
-    const out = buildOpenRouterPush(
-      cfg({ virtualInferenceModeEmbedding: 'all-sources' } as Partial<AppConfig>),
-    )!;
-    expect(out.modeByRole['embedding']).toBe('local-first');
-  });
-
-  // Reranking gained its own policy key, so this is no longer hardcoded. The
-  // point of the key is that "SideCar Only" reaches the sidecar: telling
-  // reranker.ts to stop asking is not enough on its own, because a stale
-  // discovery row could still route around it.
-  it('pushes the configured reranker mode rather than a fixed one', () => {
-    const out = buildOpenRouterPush(
-      cfg({ virtualInferenceModeReranker: 'local-only' } as Partial<AppConfig>),
-    )!;
-    expect(out.modeByRole['reranker']).toBe('local-only');
-  });
-
-  it('maps the reranker all-sources choice to local-first for the sidecar', () => {
-    // Rerank is one call with no fan-out, so the sidecar has no distinct
-    // behaviour to implement for it — and its RoutingMode union has no
-    // 'all-sources' member to receive anyway.
-    const out = buildOpenRouterPush(
-      cfg({ virtualInferenceModeReranker: 'all-sources' } as Partial<AppConfig>),
-    )!;
-    expect(out.modeByRole['reranker']).toBe('local-first');
-  });
-});
-
-/**
- * `completion` was missing from the push until 2026-09-16.
- *
- * The admin page showed completion as cloud-only while the sidecar's
- * /api/status reported neither a mode nor a model for it — two sources of truth
- * disagreeing about what the operator had configured.
- *
- * Not a functional break for this master, which reaches OpenRouter for
- * completion itself via resolveEndpoint (reading master config, never the
- * sidecar's copy). It matters for the sidecar's own /api/v1/chat/completions
- * route, which resolves its model out of allowedModels — so without this a
- * sidecar-proxied chat caller got a 503 "has not configured a model".
- */
-describe('buildOpenRouterPush — completion', () => {
-  it('pushes the chat model and its mode', () => {
-    const out = buildOpenRouterPush(cfg({
-      openRouterChatModel: 'deepseek/deepseek-v4.1-flash',
-      virtualInferenceModeCompletion: 'cloud-only',
-    } as Partial<AppConfig>))!;
-    expect(out.allowedModels['completion']).toEqual({ model: 'deepseek/deepseek-v4.1-flash' });
-    expect(out.modeByRole['completion']).toBe('cloud-only');
-  });
-
-  it('omits completion entirely when no chat model is configured', () => {
-    // An absent key is honest; the sidecar then infers nothing for a role we
-    // never listed. A listed role with no model would be the disagreement.
-    const out = buildOpenRouterPush(cfg({ openRouterChatModel: undefined } as Partial<AppConfig>))!;
-    expect(out.allowedModels['completion']).toBeUndefined();
-    expect(out.modeByRole['completion']).toBeUndefined();
-  });
-
-  it('does not disturb the other roles', () => {
-    const out = buildOpenRouterPush(cfg({
-      openRouterChatModel: 'deepseek/deepseek-v4.1-flash',
-    } as Partial<AppConfig>))!;
-    // completion is a chat id, so it must NOT pick up embedding dims or a
-    // pinned rerank provider from add()'s lookup chain.
-    expect(out.allowedModels['completion']).not.toHaveProperty('dims');
-    expect(out.allowedModels['completion']).not.toHaveProperty('provider');
+  it('omits the sandbox model when none is set (the sidecar then reports unset)', () => {
+    const out = buildOpenRouterPush(cfg({ rlmSandboxModel: '' } as Partial<AppConfig>))!;
+    expect(out.allowedModels).toEqual({});
+    expect(out.apiKey).toBe(KEY);
+    expect(out.domain).toBe('legal');
   });
 });

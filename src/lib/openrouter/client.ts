@@ -83,9 +83,9 @@ function classify(status: number, body: string): OpenRouterError['kind'] {
 // ---------------------------------------------------------------------------
 
 /** Who actually made the HTTP call to OpenRouter for a given completed call —
- *  the master process itself, or a named sidecar spending its own key via
- *  the `virtual-embed` WS command (see virtual-embed-dispatch.ts). This is
- *  the "fleet vs direct" distinction the admin panel surfaces. */
+ *  the master process itself, or (before docs/tasks/59) a named sidecar
+ *  spending its own key. Since task 59 every call is 'master-direct'; the
+ *  sidecar form stays only so older activity records still render. */
 export type ServedBy = 'master-direct' | `sidecar:${string}`;
 
 export interface LastCallInfo {
@@ -265,12 +265,10 @@ function chargeTokens(role: string, tokens: number | undefined, pricePerMTokens:
  * Price and record an embedding call's tokens against `role`, by looking up
  * `model` in the curated catalogue — the same pricing `embed()` uses below.
  *
- * Exported for `virtual-embed-dispatch.ts`: when a sidecar serves a share of
- * an embedding batch, the HTTPS call to OpenRouter happens on the sidecar
- * (it spends its own key), so nothing in `embed()` below ever runs for that
- * share. Without this, sidecar-served embedding tokens were priced nowhere
- * and `getSpendToday('embedding')` stayed at 0 while the account was
- * actually being billed — see the module header's spend-guard note.
+ * Exported for callers that make an embedding call outside `embed()` below
+ * (sidecars used to, until docs/tasks/59): tokens priced nowhere would leave
+ * `getSpendToday('embedding')` at 0 while the account is billed — see the
+ * module header's spend-guard note.
  */
 export function chargeEmbeddingTokens(role: string, model: string, tokens: number | undefined): void {
   chargeTokens(role, tokens, findEmbeddingModel(model)?.pricePerMTokens);

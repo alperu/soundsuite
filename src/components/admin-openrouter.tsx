@@ -649,9 +649,9 @@ export default function AdminOpenRouter({ initialConfig }: Props) {
 
               THIS IS SOUND SUITE'S OWN SETTING, not a fleet-wide global. A
               sidecar can serve multiple masters (Sound Suite + Fantom MCP),
-              and each pushes its own model/mode for ss-rlm-sandbox over the
-              same per-master channel embedding/reranker already use — see
-              buildOpenRouterPush() in fleet-router.ts and
+              and each pushes its own key and model for ss-rlm-sandbox over a
+              per-master slot (the only OpenRouter config a sidecar still
+              holds) — see buildOpenRouterPush() in fleet-router.ts and
               docs/SPEC-ss-rlm-sandbox.md. Changing it here never touches
               what another master has configured. */}
           <Picker

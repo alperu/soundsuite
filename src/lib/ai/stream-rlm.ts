@@ -92,18 +92,17 @@ const RLM_SANDBOX_PORT = 8101;
 /**
  * Header naming the calling master, sent only on the ss-rlm-sandbox path.
  *
- * The sandbox makes sub-model calls back through its sidecar, and `apiKey`,
- * `allowedModels` and the spend are all **per master** so Sound Suite and
- * Fantom cannot charge each other. Over a WebSocket the sidecar gets the
- * caller's identity for free; over HTTP it has none, so it refuses with 409
- * rather than guess whose budget to spend.
+ * The sandbox calls OpenRouter itself with the key and model of the master
+ * that asked (docs/tasks/59): it fetches them per master from its sidecar's
+ * local hand-off endpoint. Key, model and spend are **per master** so Sound
+ * Suite and Fantom cannot charge each other. Without this header the sidecar
+ * cannot tell whose slot to hand out and refuses with 409 rather than guess.
  *
  * That refusal is not theoretical: as of 2026-09-16 every sidecar has keys from
  * BOTH masters (:3000 Sound Suite and :3848 Fantom), so without this header the
  * sandbox path returns 409 on every host.
  *
- * Matches `x-soundsuite-master` in
- * sideCar/src/app/api/v1/chat/completions/route.ts. Distinct from
+ * Read by docker/rlm-sandbox/server.py (MASTER_HEADERS). Distinct from
  * MASTER_URL_HEADER in master-identity.ts, which identifies the master to a
  * sidecar's own endpoints; this one is forwarded *through* the sandbox.
  */
@@ -1049,7 +1048,7 @@ export async function* runRlmWithTools(opts: {
     // vLLM ceiling and would otherwise re-trigger the 400 we just dodged.
     // The sandbox does not stream: its /v1/chat/completions returns 400
     // "stream is not supported — request a non-streaming completion" for
-    // stream=true (sideCar/src/app/api/v1/chat/completions/route.ts). The
+    // stream=true (docker/rlm-sandbox/server.py). The
     // re-POST below exists only for token-by-token UX on the vLLM path — the
     // complete answer is already in hand from the non-streaming round that
     // produced no tool calls. So for the sandbox, emit that and finish. This

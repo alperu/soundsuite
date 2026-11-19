@@ -43,6 +43,8 @@ export interface OpenRouterEmbeddingConfig {
    *  guessed). Only useful for tests. */
   dims?: number;
   timeoutMs?: number;
+  /** Spend/activity bucket: 'embedding' (default) or 'code-embedding'. */
+  role?: string;
 }
 
 export class OpenRouterEmbeddingProvider extends EmbeddingProvider {
@@ -50,6 +52,7 @@ export class OpenRouterEmbeddingProvider extends EmbeddingProvider {
   private readonly model: string;
   private readonly dims: number;
   private readonly timeoutMs?: number;
+  private readonly role: string;
 
   constructor(config: OpenRouterEmbeddingConfig) {
     super();
@@ -66,6 +69,7 @@ export class OpenRouterEmbeddingProvider extends EmbeddingProvider {
     this.model = entry.id;
     this.dims = config.dims ?? entry.dims;
     this.timeoutMs = config.timeoutMs;
+    this.role = config.role || 'embedding';
   }
 
   /**
@@ -83,7 +87,7 @@ export class OpenRouterEmbeddingProvider extends EmbeddingProvider {
         pinProvider: this.modelEntry.pinProvider,
         expectedDims: this.dims,
         timeoutMs: this.timeoutMs,
-        role: 'embedding',
+        role: this.role,
       });
 
       logger.info(
