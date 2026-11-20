@@ -4,6 +4,7 @@ import { state } from './state';
 import { createLogger } from './logger';
 import { processGlobal } from './process-global';
 import { sandboxToken } from './sandbox-slot';
+import { composeLabels } from './compose-labels';
 
 const log = createLogger('docker');
 
@@ -1028,6 +1029,9 @@ export async function createContainer(role: string): Promise<{ Id?: string; exis
   const config: Record<string, unknown> = {
     Image: def.image,
     Hostname: name,
+    // Docker Desktop group only. Not part of buildExpectedConfig, so a
+    // container without the labels is never seen as drift.
+    Labels: composeLabels(role),
     ExposedPorts: { [`${def.port}/tcp`]: {} },
     HostConfig: {
       // Init: true → docker spawns tini as PID-1 inside the container so

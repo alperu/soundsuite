@@ -26,9 +26,23 @@ docker build -t "$AGENT_NAME" "$SCRIPT_DIR/.."
 
 # Run the sidecar
 echo "Starting $AGENT_NAME on port $AGENT_PORT..."
+# Compose labels put the agent in the same Docker Desktop group as the
+# containers it creates (sideCar/src/lib/compose-labels.ts).
+COMPOSE_PROJECT="${SS_COMPOSE_PROJECT:-sidecar}"
+# Letters are listed, not a-z: in a UTF-8 locale bash 3.2 lets [a-z] match capitals.
+case "$COMPOSE_PROJECT" in
+  *[!abcdefghijklmnopqrstuvwxyz0123456789_-]*|[!abcdefghijklmnopqrstuvwxyz0123456789]*)
+    echo "[WARN] SS_COMPOSE_PROJECT='$COMPOSE_PROJECT' is not a valid compose project name; using 'sidecar'."
+    COMPOSE_PROJECT=sidecar ;;
+esac
 docker run -d \
   --name "$AGENT_NAME" \
   --restart unless-stopped \
+  --label "com.docker.compose.project=$COMPOSE_PROJECT" \
+  --label com.docker.compose.service=sidecar \
+  --label com.docker.compose.oneoff=False \
+  --label com.docker.compose.container-number=1 \
+  -e SS_COMPOSE_PROJECT="$COMPOSE_PROJECT" \
   -p "$AGENT_PORT:$AGENT_PORT" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e AGENT_PORT="$AGENT_PORT" \
