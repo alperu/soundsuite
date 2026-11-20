@@ -55,6 +55,37 @@ Three failed WebSocket heartbeats force a reconnect. This matters for a subtle
 reason covered under [Failure modes](#failure-modes): the socket can be dead
 without either end being told.
 
+### GPU roles wait for a master
+
+Rule: anything that uses the GPU waits for a master. The master decides what
+runs.
+
+The gate is `masterReady()` in `src/lib/state.ts`: at least one master is
+connected now (WebSocket open, or HTTP gossip with a good heartbeat) **and**
+that master has sent its config at least once since this boot.
+
+- **Boot and reconnect.** `autoProvision` may pull images and create
+  containers. It does not start a GPU container or load a model into VRAM
+  until the gate is open. Host-runtime roles (native Ollama) wait too. When
+  the first config arrives from a connected master, the held start part runs.
+- **Automatic starters.** The heartbeat model auto-load and the gpuOnly
+  remediation reload check the same gate. Idle timers only stop or unload, so
+  they need no gate. `switchMode` is a label only and starts nothing.
+- **Master commands.** `acquire`, `start`, `loadModel`, `pullModel` and
+  `provision` from a master always work. A command can only come from a
+  connected master.
+- **All masters drop.** Running work is not stopped; a job may still be
+  finishing. The sidecar starts nothing new until a master is back and sends
+  its config.
+- **Log.** When a start is held, the sidecar logs one line:
+  `Waiting for a master before starting GPU roles`.
+
+Restart policy: role containers are created with `RestartPolicy: no`, so
+Docker does not start them on host boot. Role containers from older versions
+that have `unless-stopped` are changed to `no` (`docker update`) on the next
+provision run. `ss-cuda` keeps `unless-stopped`: it runs `sleep infinity` so
+the sidecar can call `nvidia-smi`, and it holds no VRAM.
+
 ## Roles, containers and modes
 
 A role is a capability, not a process. `GET /status` reports per role:
