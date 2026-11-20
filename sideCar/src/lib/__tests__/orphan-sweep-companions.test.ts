@@ -19,7 +19,7 @@ jest.mock('../docker', () => {
 });
 
 import { state } from '../state';
-import { stopOrphanContainers } from '../containers';
+import { listOrphanContainers, stopOrphanContainers } from '../containers';
 import * as docker from '../docker';
 
 const list = docker.listContainersByPrefix as unknown as jest.Mock;
@@ -70,5 +70,16 @@ describe('orphan sweep and the NetBird / Caddy companions', () => {
     expect(stopped.map((s) => s.name)).toEqual(['ss-old-role']);
     expect(stop).toHaveBeenCalledTimes(1);
     expect(stop).toHaveBeenCalledWith('ss-old-role');
+  });
+
+  it('the orphan list leaves out the companions too', async () => {
+    list.mockResolvedValue([
+      running('ss-sidecar-netbird'),
+      running('ss-sidecar-caddy'),
+      running('ss-old-role'),
+    ]);
+    const orphans = await listOrphanContainers();
+    expect(orphans.map((o) => o.name)).toEqual(['ss-old-role']);
+    expect(stop).not.toHaveBeenCalled();
   });
 });
