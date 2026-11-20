@@ -9,6 +9,7 @@ import { saveConfig } from './config';
 import { createLogger } from './logger';
 import { tasks } from './task-tracker';
 import { processGlobal } from './process-global';
+import { LABEL_ROLE } from './netbird-companion';
 
 /**
  * Build a synthetic ContainerState for a host-runtime role. The sidecar
@@ -792,10 +793,19 @@ export async function stopOrphanContainers(): Promise<OrphanInfo[]> {
   }
   claimed.add(`${CONTAINER_PREFIX}sidecar`);
   claimed.add(state.CONTAINER_NAME);
+  // The NetBird and HTTPS (Caddy) companions are named after the sidecar's own
+  // container (netbird-companion.ts: `${me.name}-netbird`, `${me.name}-caddy`).
+  // They are never in a master's role registry, so without this every config
+  // push stopped them and the host fell off the VPN.
+  for (const self of [`${CONTAINER_PREFIX}sidecar`, state.CONTAINER_NAME]) {
+    if (!self) continue;
+    claimed.add(`${self}-netbird`);
+    claimed.add(`${self}-caddy`);
+  }
 
   const stopped: OrphanInfo[] = [];
   for (const c of candidates) {
-    if (claimed.has(c.name)) continue;
+    if (claimed.has(c.name) || isCompanion(c)) continue;
     if (c.state !== 'running') continue;
     log.info(`Orphan sweep: stopping unassigned container ${c.name} (image=${c.image}, was ${c.state})`);
     try {
@@ -809,6 +819,17 @@ export async function stopOrphanContainers(): Promise<OrphanInfo[]> {
     log.info(`Orphan sweep: stopped ${stopped.length} container(s) not in current registry`);
   }
   return stopped;
+}
+
+/**
+ * A NetBird or Caddy companion of any sidecar on this Docker host. The label
+ * is set in netbird-companion.ts, and it marks the companion whatever the
+ * sidecar's container name is (the name list above knows only ss-sidecar and
+ * state.CONTAINER_NAME). A companion of another sidecar on the same host is
+ * not ours to stop either.
+ */
+function isCompanion(c: { labels?: Record<string, string> }): boolean {
+  return !!c.labels?.[LABEL_ROLE];
 }
 
 /**
@@ -835,7 +856,16 @@ export async function listOrphanContainers(): Promise<Array<{
   }
   claimed.add(`${CONTAINER_PREFIX}sidecar`);
   claimed.add(state.CONTAINER_NAME);
+  // The NetBird and HTTPS (Caddy) companions are named after the sidecar's own
+  // container (netbird-companion.ts: `${me.name}-netbird`, `${me.name}-caddy`).
+  // They are never in a master's role registry, so without this every config
+  // push stopped them and the host fell off the VPN.
+  for (const self of [`${CONTAINER_PREFIX}sidecar`, state.CONTAINER_NAME]) {
+    if (!self) continue;
+    claimed.add(`${self}-netbird`);
+    claimed.add(`${self}-caddy`);
+  }
   return candidates
-    .filter((c) => !claimed.has(c.name))
+    .filter((c) => !claimed.has(c.name) && !isCompanion(c))
     .map((c) => ({ name: c.name, image: c.image, state: c.state, status: c.status }));
 }
