@@ -246,8 +246,12 @@ async function reconnectMastersWhenUp(name: string): Promise<void> {
     const { reconnectAllMasters, reconnectMastersWhere } = await import('./ws-client');
     if (ip && ip === prevIp && upAt !== null) {
       G.lastUpAt = Date.now();
+      // A socket whose local IP is the NetBird IP already runs over the
+      // tunnel: keep it. Without this, sockets that reopened right after the
+      // last full drop (so after upAt) were all dropped again at the next start.
       reconnectMastersWhere(
-        (s) => s.openedAt === null || s.openedAt > upAt,
+        (s) => s.localAddress?.replace(/^::ffff:/, '') !== ip
+          && (s.openedAt === null || s.openedAt > upAt),
         'NetBird restarted, so sockets opened while it was down move to the NetBird address',
       );
       return;

@@ -893,6 +893,9 @@ export interface MasterConnection {
    *  same IP, only sockets opened while the tunnel was down reconnect
    *  (netbird-runtime.ts). */
   wsOpenedAt?: number;
+  /** Local IP of the current WebSocket, when known. A socket whose local IP
+   *  is the NetBird IP already runs over the tunnel (netbird-runtime.ts). */
+  wsLocalAddress?: string;
   /**
    * Set when a slot is taken out of service for good (operator removal, or a
    * duplicate of a master we are already connected to). A retired connection

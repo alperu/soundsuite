@@ -32,11 +32,12 @@ function status() {
   return { connected: true, fqdn: 'demo.nb.example.com', ip, managementConnected: true, peersConnected: 1, peersTotal: 1, peers: [] };
 }
 
-/** An open master socket, opened now. */
-function open(url: string) {
+/** An open master socket, opened now, with its local address if known. */
+function open(url: string, localAddress?: string) {
   const m = ensureMaster(url);
   m.ws = { terminate: () => { terminated.push(url); m.ws = null; }, readyState: 1 } as never;
   m.wsOpenedAt = Date.now();
+  m.wsLocalAddress = localAddress;
 }
 
 /** One reconcile with the helper in `st`, then the 5 s wait for the tunnel. */
@@ -98,6 +99,35 @@ describe('master sockets after a NetBird (re)start', () => {
     open('http://master-b.example:3000');
     terminated.length = 0;
     await tick('restarted');
+    expect(terminated).toEqual(['http://master-b.example:3000']);
+  });
+
+  it('two starts in a row keep sockets that reopened over the tunnel', async () => {
+    open('http://master-a.example:3000');
+    open('http://master-b.example:3000');
+    await tick('created');
+    // The sockets reopen about 1 s after the tunnel is confirmed up, over it.
+    await jest.advanceTimersByTimeAsync(1_000);
+    open('http://master-a.example:3000', ip);
+    open('http://master-b.example:3000', `::ffff:${ip}`);
+    terminated.length = 0;
+    // The helper stops again before any reconcile sees it running.
+    await jest.advanceTimersByTimeAsync(55_000);
+    await tick('started');
+    expect(terminated).toEqual([]);
+  });
+
+  it('two starts in a row still drop a socket opened off the tunnel', async () => {
+    open('http://master-a.example:3000');
+    await tick('created');
+    await jest.advanceTimersByTimeAsync(1_000);
+    open('http://master-a.example:3000', ip);
+    await jest.advanceTimersByTimeAsync(30_000);
+    // NetBird is down; this socket gets the Docker bridge address.
+    open('http://master-b.example:3000', '172.17.0.5');
+    terminated.length = 0;
+    await jest.advanceTimersByTimeAsync(25_000);
+    await tick('started');
     expect(terminated).toEqual(['http://master-b.example:3000']);
   });
 
