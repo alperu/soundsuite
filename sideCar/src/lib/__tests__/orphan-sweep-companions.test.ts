@@ -43,8 +43,8 @@ afterAll(() => {
   state.hostOs = savedOs;
 });
 
-function running(name: string) {
-  return { name, image: 'some/image:1', state: 'running' };
+function running(name: string, labels?: Record<string, string>) {
+  return { name, image: 'some/image:1', state: 'running', labels };
 }
 
 describe('orphan sweep and the NetBird / Caddy companions', () => {
@@ -70,6 +70,20 @@ describe('orphan sweep and the NetBird / Caddy companions', () => {
     expect(stopped.map((s) => s.name)).toEqual(['ss-old-role']);
     expect(stop).toHaveBeenCalledTimes(1);
     expect(stop).toHaveBeenCalledWith('ss-old-role');
+  });
+
+  it('keeps the companions of a sidecar with another container name', async () => {
+    // Companions are named after the sidecar's real container name, which
+    // need not be ss-sidecar. Their companion label marks them.
+    list.mockResolvedValue([
+      running('ss-demo-netbird', { 'sidecar.companion': 'netbird' }),
+      running('ss-demo-caddy', { 'sidecar.companion': 'caddy' }),
+      running('ss-old-role'),
+    ]);
+    const stopped = await stopOrphanContainers();
+    expect(stopped.map((s) => s.name)).toEqual(['ss-old-role']);
+    const orphans = await listOrphanContainers();
+    expect(orphans.map((o) => o.name)).toEqual(['ss-old-role']);
   });
 
   it('the orphan list leaves out the companions too', async () => {

@@ -528,6 +528,7 @@ export interface ContainerListItem {
   image: string;
   state: string;   // "running" | "exited" | "created" | ...
   status: string;  // free-form "Up 2 hours", "Exited (0) 5 min ago", etc.
+  labels?: Record<string, string>;
 }
 export async function listContainersByPrefix(prefix: string): Promise<ContainerListItem[]> {
   try {
@@ -538,12 +539,13 @@ export async function listContainersByPrefix(prefix: string): Promise<ContainerL
       Image: string;
       State: string;
       Status: string;
+      Labels?: Record<string, string> | null;
     }> = JSON.parse(body);
     const out: ContainerListItem[] = [];
     for (const c of raw) {
       const name = c.Names?.[0]?.replace(/^\//, '') ?? '';
       if (name && name.startsWith(prefix)) {
-        out.push({ name, image: c.Image || '', state: c.State || '', status: c.Status || '' });
+        out.push({ name, image: c.Image || '', state: c.State || '', status: c.Status || '', labels: c.Labels ?? {} });
       }
     }
     return out;
