@@ -938,6 +938,14 @@ export interface MasterConnection {
    * gate below asks "has this master sent its config at least once since boot".
    */
   configReceivedAt?: number;
+  /**
+   * True once this master proved to be the GPU authority (sidecarmaster): its
+   * config carried `authority: { name: 'sidecarmaster', canonicalUrl }` and that
+   * URL matched SS_GPU_AUTHORITY, or (when that env is unset) the URL this same
+   * master announced in its master-identity frame. Only the authority decides
+   * which GPU roles run. See gpuAuthorityOf().
+   */
+  gpuAuthority?: boolean;
 }
 
 // ─── GPU start gate ───────────────────────────────────────────────────────
@@ -947,9 +955,10 @@ export interface MasterConnection {
 // it must not START a GPU container or load a model into VRAM until
 // masterReady() is true.
 //
-// masterReady() = at least one master is connected now AND that master has
-// sent a fleet config (registry, enabledModes, minOnline, ...) at least once
-// since this boot. A sandbox-slot-only push ({openrouter}) does not count.
+// masterReady() = the GPU authority (sidecarmaster, see gpuAuthorityOf) is
+// connected now AND has sent its role assignment at least once since this
+// boot. A config from any other master, or a sandbox-slot-only push, does not
+// count.
 //
 // When ALL masters disconnect later, the gate closes again. Running work is
 // NOT stopped (a job may still be finishing); the sidecar only starts nothing
@@ -978,10 +987,54 @@ export function masterConnected(m: MasterConnection): boolean {
   return false;
 }
 
-/** The single GPU start gate. See the block comment above. */
+// ─── GPU authority (user decision 2026-11-20) ─────────────────────────────
+//
+// sidecarmaster is the single source of truth for GPU work. Only its role
+// assignment opens the gate below and changes GPU roles; other masters may
+// connect, push their sandbox slot and USE (acquire) a role sidecarmaster runs,
+// but never add, remove, start or stop GPU roles. ss-cuda (nvidia-smi only, no
+// VRAM) and the NetBird / Caddy companions are not GPU roles.
+
+const stripSlash = (u: string) => u.trim().replace(/\/+$/, '').toLowerCase();
+
+/** SS_GPU_AUTHORITY: the canonical URL of the authority master, or null. */
+export function configuredGpuAuthority(env: NodeJS.ProcessEnv = process.env): string | null {
+  const v = env.SS_GPU_AUTHORITY;
+  return v && v.trim() ? stripSlash(v) : null;
+}
+
+/**
+ * Whether a config payload from master `m` comes from the GPU authority.
+ * The payload must carry `authority: { name: 'sidecarmaster', canonicalUrl }`.
+ * With SS_GPU_AUTHORITY set, canonicalUrl must equal it. Without it,
+ * canonicalUrl must equal the URL this master announced about itself in its
+ * master-identity frame (or its slot URL), so a master cannot claim another
+ * master's identity in the config alone.
+ */
+export function gpuAuthorityOf(
+  m: MasterConnection,
+  payload: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const a = payload.authority as { name?: unknown; canonicalUrl?: unknown } | undefined;
+  if (!a || a.name !== 'sidecarmaster' || typeof a.canonicalUrl !== 'string' || !a.canonicalUrl.trim()) return false;
+  const claimed = stripSlash(a.canonicalUrl);
+  const pinned = configuredGpuAuthority(env);
+  if (pinned) return claimed === pinned;
+  const own = [m.announcedCanonicalUrl, m.serverUrl].filter((u): u is string => !!u).map(stripSlash);
+  return own.includes(claimed);
+}
+
+/** Config fields that decide which GPU roles run. Only the authority may send them. */
+export const GPU_CONFIG_FIELDS = [
+  'registry', 'enabledModes', 'minOnline', 'idleTimeouts', 'modelOverrides', 'runtimes',
+  'gpuMemUtils', 'rerankEnforceEager', 'containerName', 'hostOsOverride', 'gpuRoles',
+] as const;
+
+/** The single GPU start gate: the authority is connected and has sent its role assignment. */
 export function masterReady(): boolean {
   for (const m of state.masters.values()) {
-    if (masterConnected(m) && m.configReceivedAt !== undefined) return true;
+    if (m.gpuAuthority && masterConnected(m) && m.configReceivedAt !== undefined) return true;
   }
   return false;
 }
@@ -997,7 +1050,7 @@ export function gpuStartsAllowed(what?: string): boolean {
   }
   if (!gpuGate.heldLogged) {
     gpuGate.heldLogged = true;
-    stateLog.info(`Waiting for a master before starting GPU roles${what ? ` (held: ${what})` : ''}`);
+    stateLog.info(`Waiting for sidecarmaster before starting GPU roles${what ? ` (held: ${what})` : ''}`);
   }
   return false;
 }

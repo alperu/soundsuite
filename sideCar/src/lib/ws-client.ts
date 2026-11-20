@@ -19,7 +19,7 @@ import os from 'os';
 import http from 'http';
 import https from 'https';
 import WebSocket from 'ws';
-import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, ensureSet, masterReady, gpuStartsAllowed, type MasterConnection } from './state';
+import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, ensureSet, masterReady, gpuStartsAllowed, gpuAuthorityOf, GPU_CONFIG_FIELDS, type MasterConnection } from './state';
 import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, handlePullModel, handleLoadModel, getTotalActiveRequests } from './handlers';
 import { switchMode, provisionContainers, getAllContainerStates, containersForMode } from './containers';
 import { handleUpdateImage } from './ollama-image-update';
@@ -366,6 +366,34 @@ export function anyWebSocketConnected(): boolean {
 
 // ─── Command execution ────────────────────────────────────────────────────
 
+/** Actions that start, stop, create or load GPU work. */
+const GPU_WRITE_ACTIONS = new Set(['start', 'stop', 'mode', 'provision', 'updateImage', 'pullModel', 'pullAndLoad', 'loadModel']);
+
+/**
+ * GPU authority rule for commands (state.ts gpuAuthorityOf). The authority's
+ * commands always run. Another master may USE a role the authority assigned
+ * (acquire/release/status/...), but may not start, stop, provision or load GPU
+ * work, and may not acquire a role the authority has not assigned.
+ * Returns the refusal text, or null when the command may run.
+ */
+export function gpuCommandRefusal(m: MasterConnection, action: string, role: string | undefined): string | null {
+  if (m.gpuAuthority) return null;
+  if (GPU_WRITE_ACTIONS.has(action)) {
+    return `only sidecarmaster (the GPU authority) may ${action} GPU roles on this sidecar`;
+  }
+  if (action === 'acquire' && role && !authorityAssigned(role)) {
+    return `role "${role}" is not assigned to this host in sidecarmaster /roleassign`;
+  }
+  return null;
+}
+
+/** True when the GPU authority assigned `role` to this host (it is in the registry and not opted out). */
+export function authorityAssigned(role: string): boolean {
+  const authority = [...state.masters.values()].some((x) => x.gpuAuthority && x.configReceivedAt !== undefined);
+  if (!authority) return false;
+  return !!state.registry[role] && (state.minOnline?.[role] ?? 1) > 0;
+}
+
 async function executeCommand(
   m: MasterConnection,
   cmd: { id: string; action: string; payload?: Record<string, unknown> },
@@ -375,6 +403,12 @@ async function executeCommand(
   const role = payload.role as string | undefined;
 
   log.info(`[${m.serverUrl}] Executing command: ${action} (id: ${cmd.id})`);
+
+  const refused = gpuCommandRefusal(m, action, role);
+  if (refused) {
+    log.info(`[${m.serverUrl}] ${action}${role ? ` ${role}` : ''} REFUSED: ${refused}`);
+    return { error: refused };
+  }
 
   switch (action) {
     // The master's serverUrl owns any lease this command opens, so a dropped
@@ -416,6 +450,19 @@ async function executeCommand(
       return updated ? { ok: true, message: `Updating to v${version}` } : { error: 'Update failed' };
     }
     case 'config': {
+      // GPU authority (state.ts gpuAuthorityOf): only sidecarmaster decides which
+      // GPU roles run. From any other master, drop every GPU field and keep the
+      // rest (serverUrl, sandbox slot, ...).
+      if (gpuAuthorityOf(m, payload)) {
+        if (!m.gpuAuthority) log.info(`[${m.serverUrl}] GPU authority: this master (sidecarmaster) decides which GPU roles run`);
+        m.gpuAuthority = true;
+      } else {
+        const dropped = GPU_CONFIG_FIELDS.filter((k) => payload[k] !== undefined);
+        if (dropped.length > 0) {
+          log.info(`[${m.serverUrl}] Config from a master that is not the GPU authority: ignored ${dropped.join(', ')} (sidecarmaster decides GPU roles)`);
+          for (const k of dropped) delete payload[k];
+        }
+      }
       // config-push targets ONLY this master's slot — never adds a 2nd master.
       // If payload.serverUrl != current key, we re-key this slot in place.
       // SHARED FIELDS (idleTimeouts, minOnline, registry) still mutate global
@@ -482,7 +529,7 @@ async function executeCommand(
       // masterReady()). Only a push with fleet fields counts. A follow-mode
       // master sends just its sandbox slot ({openrouter}); that master does
       // not decide what runs, so it must not open the gate.
-      if (['registry', 'enabledModes', 'minOnline', 'idleTimeouts', 'modelOverrides', 'runtimes']
+      if (m.gpuAuthority && ['registry', 'enabledModes', 'minOnline', 'idleTimeouts', 'modelOverrides', 'runtimes']
         .some((k) => payload[k] !== undefined)) {
         m.configReceivedAt = Date.now();
       }
@@ -842,7 +889,8 @@ async function executeCommand(
       // We STOP (not REMOVE) so re-enabling the role is a fast `docker
       // start` — image + config preserved. Fire-and-forget; errors are
       // logged but don't fail the push.
-      try {
+      // Only the GPU authority's role list may stop containers.
+      if (m.gpuAuthority) try {
         const { stopOrphanContainers } = await import('./containers');
         void stopOrphanContainers().catch((err) => {
           log.warn(`[${m.serverUrl}] orphan sweep failed: ${(err as Error).message}`);

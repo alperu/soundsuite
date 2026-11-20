@@ -55,34 +55,48 @@ Three failed WebSocket heartbeats force a reconnect. This matters for a subtle
 reason covered under [Failure modes](#failure-modes): the socket can be dead
 without either end being told.
 
-### GPU roles wait for a master
+### sidecarmaster is the GPU authority
 
-Rule: anything that uses the GPU waits for a master. The master decides what
-runs.
+Rule (2026-11-20): sidecarmaster is the single source of truth for GPU work.
+The GPU roles a host runs are set only in sidecarmaster's `/roleassign`. A
+sidecar starts no GPU role until sidecarmaster sends its role assignment.
+`ss-cuda` (only `nvidia-smi`, no VRAM) and the NetBird / Caddy companions are
+not GPU roles.
 
-The gate is `masterReady()` in `src/lib/state.ts`: at least one master is
-connected now (WebSocket open, or HTTP gossip with a good heartbeat) **and**
-that master has sent a fleet config (`registry`, `enabledModes`, `minOnline`,
-...) at least once since this boot. A push with only the sandbox slot
-(`openrouter`) does not count.
+**Who is the authority.** `gpuAuthorityOf()` in `src/lib/state.ts`. A config
+counts as sidecarmaster's when it carries
+`authority: { name: "sidecarmaster", canonicalUrl }` and that URL matches:
+
+- `SS_GPU_AUTHORITY` (the authority's canonical URL), when it is set;
+- otherwise the URL the same master announced about itself in its
+  `master-identity` frame, or its slot URL. So a master cannot take the role by
+  claiming another master's URL in a config alone.
+
+**The gate.** `masterReady()`: the authority is connected now (WebSocket open,
+or HTTP gossip with a good heartbeat) **and** has sent its role assignment at
+least once since this boot. A config from any other master, or a push with only
+the sandbox slot, does not open it.
 
 - **Boot and reconnect.** `autoProvision` may pull images and create
-  containers. It does not start a GPU container or load a model into VRAM
-  until the gate is open. Host-runtime roles (native Ollama) wait too. When
-  the first config arrives from a connected master, the held start part runs.
+  containers. It starts no GPU container and loads no model until the gate is
+  open. Host-runtime roles (native Ollama) wait too. When the authority's first
+  config arrives, the held start part runs.
 - **Automatic starters.** The heartbeat model auto-load and the gpuOnly
-  remediation reload check the same gate. Idle timers only stop or unload, so
-  they need no gate. `switchMode` is a label only and starts nothing.
-- **Master commands.** `acquire`, `start`, `loadModel`, `pullModel` and
-  `provision` are not gated. They come from a master, but also from the local
-  HTTP routes `/api/acquire`, `/api/start`, `/api/provision` and
-  `/api/containers`. These routes have no auth check today, so a caller on
-  the network can start a role with no master connected.
-- **All masters drop.** Running work is not stopped; a job may still be
-  finishing. The sidecar starts nothing new until a master is back and sends
-  its config.
-- **Log.** When a start is held, the sidecar logs one line:
-  `Waiting for a master before starting GPU roles`.
+  remediation reload check the same gate.
+- **Configs from other masters.** Every GPU field (`registry`, `enabledModes`,
+  `minOnline`, `idleTimeouts`, `modelOverrides`, `runtimes`, `gpuMemUtils`,
+  `gpuRoles`, ...) is dropped, with one log line. The rest (serverUrl, sandbox
+  slot) is kept. The orphan sweep runs only after the authority's config.
+- **Commands.** The authority's commands always run. Another master may use a
+  role the authority assigned (`acquire`, `release`, `status`, `health`), but
+  `start`, `stop`, `mode`, `provision`, `updateImage`, `pullModel`,
+  `pullAndLoad` and `loadModel` are refused, and so is `acquire` of a role the
+  authority did not assign.
+- **Local HTTP routes.** `/api/start` and `/api/acquire` refuse a role the
+  authority did not assign (403). `/api/provision` waits for the authority (409).
+- **The authority drops.** Running work is not stopped; a job may still be
+  finishing. Nothing new starts until it is back.
+- **Log.** When a start is held: `Waiting for sidecarmaster before starting GPU roles`.
 
 Restart policy: role containers are created with `RestartPolicy: no`, so
 Docker does not start them on host boot. Role containers from older versions

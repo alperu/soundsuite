@@ -122,6 +122,15 @@ Ollama:
 | `IDLE_TIMEOUT_MS` | per role | How long a role stays up with no active requests. Raise it if cold starts hurt more than idle VRAM does. |
 | `LOG_LEVEL` | `info` | `debug` for connection and routing detail. |
 
+## GPU authority
+
+| Env | Meaning |
+|---|---|
+| `SS_GPU_AUTHORITY` | Canonical URL of sidecarmaster, for example `https://sidecarmaster.example.test`. Only a config that claims this URL decides GPU roles. Unset: the master whose `master-identity` URL matches its config claim. |
+
+Before you roll this version out, assign every GPU role a host needs in
+sidecarmaster `/roleassign`: a role that is not assigned there stops.
+
 ## Restart policy
 
 The sidecar container has no restart policy by default, so a host reboot leaves it

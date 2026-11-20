@@ -145,7 +145,7 @@ function dropMaster(m: MasterConnection): void {
 }
 
 async function sendConfig(m: MasterConnection): Promise<void> {
-  await __testExecuteCommand(m, { id: 'cfg-1', action: 'config', payload: { idleTimeouts: {} } });
+  await __testExecuteCommand(m, { id: 'cfg-1', action: 'config', payload: { idleTimeouts: {}, authority: { name: 'sidecarmaster', canonicalUrl: m.serverUrl } } });
   await __testHeldGpuStartsSettled();
 }
 
@@ -190,7 +190,7 @@ describe('boot with no master', () => {
     await __testAutoProvision();
     await __testAutoProvision();
 
-    const held = mockLogLines.filter((l) => l.startsWith('Waiting for a master before starting GPU roles'));
+    const held = mockLogLines.filter((l) => l.startsWith('Waiting for sidecarmaster before starting GPU roles'));
     expect(held).toHaveLength(1);
   });
 
@@ -292,15 +292,26 @@ describe('a host-runtime (native Ollama) role also waits', () => {
   });
 });
 
-describe('an explicit start from a master always works', () => {
-  it('starts the container even before the master sent its config', async () => {
+describe('an explicit start', () => {
+  it('from sidecarmaster works, even before the gate opened on its config', async () => {
     mockDocker.created.add('ss-test-reranker');
     const m = connectMaster();
+    m.gpuAuthority = true;
 
     const result = await __testExecuteCommand(m, { id: 'cmd-1', action: 'start', payload: { role: 'reranker' } });
 
     expect(result.error).toBeUndefined();
     expect(mockStartContainer).toHaveBeenCalledWith('ss-test-reranker');
+  });
+
+  it('from a master that is not the GPU authority is refused', async () => {
+    mockDocker.created.add('ss-test-reranker');
+    const m = connectMaster();
+
+    const result = await __testExecuteCommand(m, { id: 'cmd-1', action: 'start', payload: { role: 'reranker' } });
+
+    expect(String(result.error)).toContain('sidecarmaster');
+    expect(mockStartContainer).not.toHaveBeenCalled();
   });
 });
 
