@@ -786,6 +786,15 @@ export async function stopOrphanContainers(): Promise<OrphanInfo[]> {
   }
   claimed.add(`${CONTAINER_PREFIX}sidecar`);
   claimed.add(state.CONTAINER_NAME);
+  // The NetBird and HTTPS (Caddy) companions are named after the sidecar's own
+  // container (netbird-companion.ts: `${me.name}-netbird`, `${me.name}-caddy`).
+  // They are never in a master's role registry, so without this every config
+  // push stopped them and the host fell off the VPN.
+  for (const self of [`${CONTAINER_PREFIX}sidecar`, state.CONTAINER_NAME]) {
+    if (!self) continue;
+    claimed.add(`${self}-netbird`);
+    claimed.add(`${self}-caddy`);
+  }
 
   const stopped: OrphanInfo[] = [];
   for (const c of candidates) {
@@ -829,6 +838,15 @@ export async function listOrphanContainers(): Promise<Array<{
   }
   claimed.add(`${CONTAINER_PREFIX}sidecar`);
   claimed.add(state.CONTAINER_NAME);
+  // The NetBird and HTTPS (Caddy) companions are named after the sidecar's own
+  // container (netbird-companion.ts: `${me.name}-netbird`, `${me.name}-caddy`).
+  // They are never in a master's role registry, so without this every config
+  // push stopped them and the host fell off the VPN.
+  for (const self of [`${CONTAINER_PREFIX}sidecar`, state.CONTAINER_NAME]) {
+    if (!self) continue;
+    claimed.add(`${self}-netbird`);
+    claimed.add(`${self}-caddy`);
+  }
   return candidates
     .filter((c) => !claimed.has(c.name))
     .map((c) => ({ name: c.name, image: c.image, state: c.state, status: c.status }));
