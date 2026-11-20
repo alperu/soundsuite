@@ -1,4 +1,4 @@
-import { state, dockerSupportsGpu, CONTAINER_PREFIX, type ContainerDef } from './state';
+import { state, dockerSupportsGpu, CONTAINER_PREFIX, gpuStartsAllowed, type ContainerDef } from './state';
 import { getContainerState, startContainer, stopContainer, removeContainer, pullImage, createContainer, dockerRequest, buildExpectedConfig, detectConfigDrift, listContainersByPrefix, type ContainerState } from './docker';
 import { ollamaPs, ollamaList, ollamaPsCached, ollamaListCached, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama, ollamaIsReady } from './ollama-api';
 import { dmrIsReady, dmrListModels } from './dmr-api';
@@ -433,7 +433,9 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
           } else if (allCpu) {
             log.warn(`CPU OFFLOAD: ${role} model ${m.name} is running entirely on CPU — inference will be very slow`);
           }
-          if (def.gpuOnly && (partial || allCpu) && !state.modelLoading.has(role)) {
+          // Remediation reloads into VRAM: it waits for a master like every
+          // other automatic GPU start (masterReady() in state.ts).
+          if (def.gpuOnly && (partial || allCpu) && !state.modelLoading.has(role) && gpuStartsAllowed(`remediate ${role}`)) {
             const last = G.lastRemediateAttempt[role] || 0;
             if (Date.now() - last >= REMEDIATE_COOLDOWN_MS) {
               G.lastRemediateAttempt[role] = Date.now();
@@ -494,7 +496,11 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
           const reason = optedOut ? 'minOnline=0' : 'manually stopped';
           log.info(`heartbeat: skipping ${role} auto-load — ${reason} (operator opted out)`);
         }
-        if (!optedOut && !userStopped && model && models.length === 0 && !state.modelLoading.has(role) && !hasActiveTask && (Date.now() - lastAttempt) > MODEL_ATTEMPT_COOLDOWN && pullFails < 3) {
+        // GPU start gate: the heartbeat runs whether or not a master is
+        // connected, so without this check it would load every role's model
+        // into VRAM on its own. Wait for a master (masterReady() in state.ts).
+        const wantsAutoLoad = !optedOut && !userStopped && model && models.length === 0 && !state.modelLoading.has(role) && !hasActiveTask && (Date.now() - lastAttempt) > MODEL_ATTEMPT_COOLDOWN && pullFails < 3;
+        if (wantsAutoLoad && gpuStartsAllowed(`heartbeat auto-load ${role}`)) {
           log.info(`heartbeat: ${role} model ${model} not in VRAM (0 models loaded), checking disk...`);
           state.lastModelAttempt[role] = Date.now();
           const modelBase = model.split(':')[0];

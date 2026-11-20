@@ -125,6 +125,13 @@ async function ensureCudaContainer(): Promise<boolean> {
     Cmd: ['sleep', 'infinity'],
     HostConfig: {
       DeviceRequests: [{ Driver: '', Count: -1, Capabilities: [['gpu']] }],
+      // Kept 'unless-stopped' on purpose. ss-cuda only runs `sleep infinity`
+      // so the sidecar can `docker exec nvidia-smi` for GPU stats; it makes
+      // no CUDA context and holds no VRAM. Letting Docker bring it back on
+      // host boot starts no GPU work, and the sidecar needs it to report GPUs
+      // to the master before any master decides anything. Role containers are
+      // different: they use RestartPolicy 'no' (docker.ts createContainer) and
+      // wait for a master (masterReady() in state.ts).
       RestartPolicy: { Name: 'unless-stopped' },
     },
   });

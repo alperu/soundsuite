@@ -925,6 +925,71 @@ export interface MasterConnection {
    * site no string comparison can catch.
    */
   announcedCanonicalUrl?: string;
+  /**
+   * When this master last sent a `config` command (epoch ms). Set by the
+   * config handler in ws-client.ts. Never cleared while the process runs: the
+   * gate below asks "has this master sent its config at least once since boot".
+   */
+  configReceivedAt?: number;
+}
+
+// ─── GPU start gate ───────────────────────────────────────────────────────
+//
+// Rule: anything that uses the GPU waits for a master. The master decides
+// what runs. The sidecar may pull images and CREATE containers on its own, but
+// it must not START a GPU container or load a model into VRAM until
+// masterReady() is true.
+//
+// masterReady() = at least one master is connected now AND that master has
+// sent its config at least once since this boot.
+//
+// When ALL masters disconnect later, the gate closes again. Running work is
+// NOT stopped (a job may still be finishing); the sidecar only starts nothing
+// new until a master is back. Explicit commands from a master (acquire, start,
+// loadModel, pullModel, provision) are not gated: a command can only arrive
+// from a connected master.
+//
+// Every automatic starter (boot autoProvision, heartbeat model auto-load,
+// gpuOnly remediation reload) must call gpuStartsAllowed() first.
+
+const gpuGate = processGlobal('gpu-gate', () => ({ heldLogged: false }));
+
+/** True when this master is connected right now (WebSocket open, or HTTP
+ *  gossip with a recent good heartbeat). */
+export function masterConnected(m: MasterConnection): boolean {
+  if (m.retired) return false;
+  if (m.connectionMode === 'websocket') {
+    // 1 === WebSocket.OPEN; state.ts only imports the ws type.
+    return !!m.ws && (m.ws as unknown as { readyState: number }).readyState === 1;
+  }
+  if (m.connectionMode === 'http') {
+    return !m.unreachable && m.httpHeartbeatFailCount === 0 && m.lastHeartbeatAt !== undefined;
+  }
+  return false;
+}
+
+/** The single GPU start gate. See the block comment above. */
+export function masterReady(): boolean {
+  for (const m of state.masters.values()) {
+    if (masterConnected(m) && m.configReceivedAt !== undefined) return true;
+  }
+  return false;
+}
+
+/**
+ * Call before any AUTOMATIC GPU start or VRAM load. Returns masterReady().
+ * When the gate is closed it logs one line per closed period.
+ */
+export function gpuStartsAllowed(what?: string): boolean {
+  if (masterReady()) {
+    gpuGate.heldLogged = false;
+    return true;
+  }
+  if (!gpuGate.heldLogged) {
+    gpuGate.heldLogged = true;
+    stateLog.info(`Waiting for a master before starting GPU roles${what ? ` (held: ${what})` : ''}`);
+  }
+  return false;
 }
 
 export function getMaster(url: string): MasterConnection | undefined {

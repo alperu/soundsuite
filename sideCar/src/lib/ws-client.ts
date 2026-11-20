@@ -19,12 +19,12 @@ import os from 'os';
 import http from 'http';
 import https from 'https';
 import WebSocket from 'ws';
-import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, ensureSet, type MasterConnection } from './state';
+import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, ensureSet, masterReady, gpuStartsAllowed, type MasterConnection } from './state';
 import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, handlePullModel, handleLoadModel, getTotalActiveRequests } from './handlers';
 import { switchMode, provisionContainers, getAllContainerStates, containersForMode } from './containers';
 import { handleUpdateImage } from './ollama-image-update';
 import { discoverGpus } from './gpu';
-import { getContainerState, pullImage, createContainer, startContainer, dockerRequest, getDockerHostName } from './docker';
+import { getContainerState, pullImage, createContainer, startContainer, dockerRequest, getDockerHostName, clearRestartPolicy } from './docker';
 import { ollamaList, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
 import { saveConfig } from './config';
 import { createLogger } from './logger';
@@ -53,6 +53,12 @@ const G = processGlobal('ws-client', () => ({
   watchdogTimer: null as ReturnType<typeof setInterval> | null,
   currentAgentUrl: null as string | null,
   addressStability: new AddressStabilityTracker(),
+  // GPU start gate (see masterReady() in state.ts). True when a boot or
+  // reconnect autoProvision created containers but held the start part
+  // because no master was ready yet. The first config from a connected master
+  // runs the held start part.
+  gpuStartPending: false,
+  provisionInFlight: null as Promise<void> | null,
 }));
 
 // Update-check is a process-wide concern, not per-master. Run it once against
@@ -472,6 +478,8 @@ async function executeCommand(
       }
       if (payload.containerName) state.CONTAINER_NAME = payload.containerName as string;
       state.lastConfigPushAt = Date.now();
+      // GPU start gate: this master has now sent its config (see masterReady()).
+      m.configReceivedAt = Date.now();
 
       // ─── ss-rlm-sandbox slot (per master; docs/tasks/58) ──────────────
       // Object → store, null → clear, absent → no change. Scoped to
@@ -842,6 +850,9 @@ async function executeCommand(
           handleAcquire(r).catch(err => log.warn(`Auto-acquire after config push failed for ${r}: ${(err as Error).message}`));
         }
       }
+      // First config from a connected master: run the GPU starts that boot
+      // (or a reconnect) held back. No-op when nothing is held.
+      runHeldGpuStarts(m);
       return { ok: true, idleTimeouts: state.idleTimeouts, containerName: state.CONTAINER_NAME };
     }
     case 'pullModel': {
@@ -960,6 +971,13 @@ async function autoProvision(): Promise<void> {
       if (cs.exists) {
         log.info(`${role}: container ${def.containerName} exists (${cs.status})`);
         if (cs.status === 'running') vramUsed += def.vram;
+        // Containers made by older sidecars carry RestartPolicy
+        // `unless-stopped`, so Docker itself starts them on host boot, before
+        // any master is there. Set it to `no`: the sidecar decides.
+        if (cs.restartPolicy && cs.restartPolicy !== 'no') {
+          await clearRestartPolicy(def.containerName).catch((err) =>
+            log.warn(`${role}: could not clear restart policy: ${(err as Error).message}`));
+        }
         continue;
       }
 
@@ -998,6 +1016,19 @@ async function autoProvision(): Promise<void> {
       log.error(`${role}: provision failed: ${(err as Error).message}`);
     }
   }
+
+  // ─── GPU start gate ────────────────────────────────────────────────────
+  // Everything above only pulls images and CREATES containers. Everything
+  // below STARTS containers and loads models into VRAM (docker and host-runtime
+  // roles alike), so it waits for a master: see masterReady() in state.ts.
+  // When the gate is closed, the start part is held; the first config from a
+  // connected master runs it (runHeldGpuStarts).
+  if (!gpuStartsAllowed('auto-provision start')) {
+    G.gpuStartPending = true;
+    log.info(`Auto-provision: containers ready; start of ${activeRoles.length} active role(s) held until a master connects and sends its config`);
+    return;
+  }
+  G.gpuStartPending = false;
 
   const sortedActive = [...activeRoles].sort((a, b) => {
     const va = state.registry[a]?.vram || 0;
@@ -1089,6 +1120,32 @@ async function autoProvision(): Promise<void> {
   }
 
   log.info(`Auto-provision complete. VRAM allocated: ~${vramUsed}MB / ${availableVram === Infinity ? '??' : availableVram}MB`);
+}
+
+/**
+ * Run the start part of autoProvision that was held because no master was
+ * ready. Called after every config command; does nothing unless a start is
+ * held, the gate is open and no provision run is in flight.
+ */
+function runHeldGpuStarts(m?: MasterConnection): void {
+  if (!G.gpuStartPending || G.provisionInFlight || !masterReady()) return;
+  log.info(`${m ? `[${m.serverUrl}] ` : ''}Master connected and sent its config — starting held GPU roles`);
+  runAutoProvision('Held GPU start');
+}
+
+/**
+ * Run autoProvision once at a time. When a run ends with its start part held
+ * and a master became ready meanwhile (its config arrived while this run was
+ * still creating containers), run the held start part at once.
+ */
+function runAutoProvision(label: string): Promise<void> {
+  G.provisionInFlight = autoProvision()
+    .catch((err) => log.error(`${label} failed: ${(err as Error).message}`))
+    .finally(() => {
+      G.provisionInFlight = null;
+      runHeldGpuStarts();
+    });
+  return G.provisionInFlight;
 }
 
 // ─── Per-master HTTP heartbeat + command poll ────────────────────────────
@@ -1919,13 +1976,35 @@ export async function startGossipClient(): Promise<void> {
   // went away still needs the sweep to drain what they left behind.
   startSweeper();
 
-  try {
-    await autoProvision();
-  } catch (err) {
-    log.error(`Auto-provision failed: ${(err as Error).message}`);
-  }
+  // Creates containers at once; the GPU start part waits for a master (see
+  // the gate in autoProvision and masterReady() in state.ts).
+  await runAutoProvision('Auto-provision');
 
   startWatchdog();
+}
+
+/** Test seam: run autoProvision once (boot or reconnect path). */
+export async function __testAutoProvision(): Promise<void> {
+  await autoProvision();
+}
+
+/** Test seam: run one master command as if it came over the socket. */
+export async function __testExecuteCommand(
+  m: MasterConnection,
+  cmd: { id: string; action: string; payload?: Record<string, unknown> },
+): Promise<Record<string, unknown>> {
+  return executeCommand(m, cmd);
+}
+
+/** Test seam: wait for a held GPU start that a config command kicked off. */
+export async function __testHeldGpuStartsSettled(): Promise<void> {
+  while (G.provisionInFlight) await G.provisionInFlight;
+}
+
+/** Test seam: reset the held-start flag between tests. */
+export function __testResetGpuGate(): void {
+  G.gpuStartPending = false;
+  G.provisionInFlight = null;
 }
 
 /** Test seam: drive one HTTP heartbeat, the transport the master's
