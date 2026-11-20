@@ -23,10 +23,25 @@ echo Building %AGENT_NAME% image...
 docker build -t %AGENT_NAME% "%~dp0.."
 if %errorlevel% neq 0 goto :failed
 
+REM Compose labels put the agent in the same Docker Desktop group as the
+REM containers it creates (sideCar/src/lib/compose-labels.ts).
+set "COMPOSE_PROJECT=%SS_COMPOSE_PROJECT%"
+if "%COMPOSE_PROJECT%"=="" set "COMPOSE_PROJECT=sidecar"
+echo.%COMPOSE_PROJECT%| findstr /r /x /c:"[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_-]*" >nul
+if errorlevel 1 (
+    echo [WARN] SS_COMPOSE_PROJECT=%COMPOSE_PROJECT% is not a valid compose project name; using sidecar.
+    set "COMPOSE_PROJECT=sidecar"
+)
+
 echo Starting %AGENT_NAME% on port %AGENT_PORT%...
 docker run -d ^
   --name %AGENT_NAME% ^
   --restart unless-stopped ^
+  --label com.docker.compose.project=%COMPOSE_PROJECT% ^
+  --label com.docker.compose.service=sidecar ^
+  --label com.docker.compose.oneoff=False ^
+  --label com.docker.compose.container-number=1 ^
+  -e SS_COMPOSE_PROJECT=%COMPOSE_PROJECT% ^
   -p %AGENT_PORT%:%AGENT_PORT% ^
   -v /var/run/docker.sock:/var/run/docker.sock ^
   -e AGENT_PORT=%AGENT_PORT% ^

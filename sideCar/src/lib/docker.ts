@@ -4,6 +4,7 @@ import { state } from './state';
 import { createLogger } from './logger';
 import { processGlobal } from './process-global';
 import { sandboxToken } from './sandbox-slot';
+import { composeLabels } from './compose-labels';
 
 const log = createLogger('docker');
 
@@ -416,6 +417,8 @@ export interface ContainerState {
   // ExpectedConfig and triggers a remove+recreate.
   hasGpuDeviceRequest?: boolean;
   hasInit?: boolean;
+  /** HostConfig.RestartPolicy.Name ('no', 'unless-stopped', ...). */
+  restartPolicy?: string;
   role?: string;
   config?: { image: string; model: string | null; port: number; vram: number; type: string; gpuOnly?: boolean };
   loadedModels?: Array<{ name: string; size: string; sizeBytes?: number; sizeVram?: number; gpuPercent?: number; processor: string; until: string }>;
@@ -450,10 +453,24 @@ export async function getContainerState(containerName?: string): Promise<Contain
       env: data.Config?.Env || undefined,
       hasGpuDeviceRequest,
       hasInit: hc.Init === true,
+      restartPolicy: hc.RestartPolicy?.Name || undefined,
     };
   } catch (err) {
     return { exists: false, status: 'error', name, error: (err as Error).message };
   }
+}
+
+/**
+ * Set a container's restart policy to `no` (POST /containers/{id}/update).
+ * Used for role containers made by older sidecars with `unless-stopped`, so
+ * Docker stops starting them on host boot. Does not start or stop anything.
+ */
+export async function clearRestartPolicy(containerName: string): Promise<void> {
+  const { status, body } = await dockerRequestWithBody('POST', `/containers/${containerName}/update`, {
+    RestartPolicy: { Name: 'no' },
+  });
+  if (status !== 200) throw new Error(`update ${containerName} failed (${status}): ${body.slice(0, 200)}`);
+  log.info(`Container ${containerName}: restart policy set to 'no' (the sidecar decides when it runs)`);
 }
 
 /** Check if a Docker error is a port conflict (bind: address already in use). */
@@ -528,6 +545,7 @@ export interface ContainerListItem {
   image: string;
   state: string;   // "running" | "exited" | "created" | ...
   status: string;  // free-form "Up 2 hours", "Exited (0) 5 min ago", etc.
+  labels?: Record<string, string>;
 }
 export async function listContainersByPrefix(prefix: string): Promise<ContainerListItem[]> {
   try {
@@ -538,12 +556,13 @@ export async function listContainersByPrefix(prefix: string): Promise<ContainerL
       Image: string;
       State: string;
       Status: string;
+      Labels?: Record<string, string> | null;
     }> = JSON.parse(body);
     const out: ContainerListItem[] = [];
     for (const c of raw) {
       const name = c.Names?.[0]?.replace(/^\//, '') ?? '';
       if (name && name.startsWith(prefix)) {
-        out.push({ name, image: c.Image || '', state: c.State || '', status: c.Status || '' });
+        out.push({ name, image: c.Image || '', state: c.State || '', status: c.Status || '', labels: c.Labels ?? {} });
       }
     }
     return out;
@@ -1010,6 +1029,9 @@ export async function createContainer(role: string): Promise<{ Id?: string; exis
   const config: Record<string, unknown> = {
     Image: def.image,
     Hostname: name,
+    // Docker Desktop group only. Not part of buildExpectedConfig, so a
+    // container without the labels is never seen as drift.
+    Labels: composeLabels(role),
     ExposedPorts: { [`${def.port}/tcp`]: {} },
     HostConfig: {
       // Init: true → docker spawns tini as PID-1 inside the container so
@@ -1021,7 +1043,11 @@ export async function createContainer(role: string): Promise<{ Id?: string; exis
       // recreated to pick this up.
       Init: true,
       PortBindings: { [`${def.port}/tcp`]: [{ HostPort: hostPort }] },
-      RestartPolicy: { Name: 'unless-stopped' },
+      // 'no', not 'unless-stopped': with 'unless-stopped' Docker starts every
+      // role container on host boot, before any master is connected, and the
+      // GPU roles load into VRAM with nobody deciding. The sidecar starts a
+      // role only when a master is ready (masterReady() in state.ts) or asks.
+      RestartPolicy: { Name: 'no' },
       // Omitted when the role opted out via requiresGpu:false (currently
       // only ss-rlm-sandbox) — Docker on a GPU-less host (Mac, Windows
       // without WSL2 passthrough) rejects DeviceRequests for a GPU it

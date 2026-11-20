@@ -2,6 +2,7 @@ import { state, dockerSupportsGpu, type GpuInfo } from './state';
 import { dockerRequest, dockerRequestWithBody, pullImage, execInContainer, getContainerState } from './docker';
 import { createLogger } from './logger';
 import { processGlobal } from './process-global';
+import { composeLabels } from './compose-labels';
 
 const log = createLogger('gpu');
 
@@ -123,8 +124,16 @@ async function ensureCudaContainer(): Promise<boolean> {
   const { status, body } = await dockerRequestWithBody('POST', `/containers/create?name=${GPU_CONTAINER}`, {
     Image: GPU_IMAGE,
     Cmd: ['sleep', 'infinity'],
+    Labels: composeLabels('cuda'),
     HostConfig: {
       DeviceRequests: [{ Driver: '', Count: -1, Capabilities: [['gpu']] }],
+      // Kept 'unless-stopped' on purpose. ss-cuda only runs `sleep infinity`
+      // so the sidecar can `docker exec nvidia-smi` for GPU stats; it makes
+      // no CUDA context and holds no VRAM. Letting Docker bring it back on
+      // host boot starts no GPU work, and the sidecar needs it to report GPUs
+      // to the master before any master decides anything. Role containers are
+      // different: they use RestartPolicy 'no' (docker.ts createContainer) and
+      // wait for a master (masterReady() in state.ts).
       RestartPolicy: { Name: 'unless-stopped' },
     },
   });

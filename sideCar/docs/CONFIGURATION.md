@@ -122,6 +122,15 @@ Ollama:
 | `IDLE_TIMEOUT_MS` | per role | How long a role stays up with no active requests. Raise it if cold starts hurt more than idle VRAM does. |
 | `LOG_LEVEL` | `info` | `debug` for connection and routing detail. |
 
+## GPU authority
+
+| Env | Meaning |
+|---|---|
+| `SS_GPU_AUTHORITY` | Canonical URL of sidecarmaster, for example `https://sidecarmaster.example.test`. Only a config that claims this URL decides GPU roles. Unset: the master whose `master-identity` URL matches its config claim. |
+
+Before you roll this version out, assign every GPU role a host needs in
+sidecarmaster `/roleassign`: a role that is not assigned there stops.
+
 ## Restart policy
 
 The sidecar container has no restart policy by default, so a host reboot leaves it
@@ -133,6 +142,73 @@ docker update --restart unless-stopped ss-sidecar
 
 `unless-stopped` rather than `always`, so an operator who stopped it deliberately
 is respected.
+
+## Docker Desktop group
+
+The sidecar puts four compose labels on every container it creates, so Docker
+Desktop shows them as one group, like a compose stack:
+
+| Label | Value |
+|---|---|
+| `com.docker.compose.project` | `SS_COMPOSE_PROJECT`, default `sidecar` |
+| `com.docker.compose.service` | the role (`embedding`, `rlm-sandbox`, ...), `cuda`, `netbird`, `caddy`, or `sidecar` for the agent |
+| `com.docker.compose.oneoff` | `False` |
+| `com.docker.compose.container-number` | `1` |
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SS_COMPOSE_PROJECT` | `sidecar` | Group name. Allowed: `a-z`, `0-9`, `_`, `-`, first a letter or digit. A bad value falls back to `sidecar` with a warning. The launchers `start.sh`, the standalone `public/sideCar/scripts/start.bat` and `start-docker-agent.*` label the agent and pass the name into it, so the agent and its children share one group. |
+
+**Windows hosts installed from the tarball:** the `start.bat` in the tarball
+comes from `scripts/buildSidecar.sh`, not from `public/sideCar/scripts/start.bat`,
+and does not set the labels yet. On those hosts `ss-sidecar` stays outside the
+group, and `SS_COMPOSE_PROJECT` does not reach the agent, so its children always
+use `sidecar`.
+
+Docker Desktop groups on `com.docker.compose.project`. We did not test this
+against Docker Desktop in this change.
+
+**The labels do not let `docker compose` take over the containers.** Compose
+lists its own containers with the project label AND `com.docker.compose.config-hash`
+(`getDefaultFilters` in `docker/compose` `pkg/compose/containers.go`; checked in
+v2.20.0 and `main`). The one sweep without `config-hash` (`removePreStartHookContainers` in
+`down.go`) also needs a pre_start hook label. The sidecar sets only the four
+labels above: never `config-hash`, a hook label, `config_files` or `working_dir`.
+So `docker compose -p sidecar ps`, `down` and `up --remove-orphans` do not select
+them, even if a compose file in a `sidecar/` folder uses the same project name.
+
+**Docker Desktop's group buttons do act on all of them.** Stop or Delete on the
+group row stops or deletes every container in it, the agent too. Use the buttons
+on one row to act on one container.
+
+### When an existing container joins the group
+
+Docker cannot add labels to a running container, and the sidecar does not
+recreate a container only to add them. The labels are not part of drift
+detection or of the companion spec hash.
+
+| Container | Joins the group |
+|---|---|
+| Role containers (`ss-embedding`, `ss-reranker`, ...) | Next time the sidecar creates it: after it is removed, after a drift recreate, or on an update that changes its image or config. |
+| `ss-cuda` | Next time it is created (it is removed and made again when missing or broken). |
+| `ss-sidecar-netbird`, `ss-sidecar-caddy` | When their spec changes, or when the agent container is recreated (the owner id changes). |
+| `ss-sidecar` (the agent) | Only when a launcher runs again. Self-update does not recreate the container. |
+
+Manual step, to move everything now (example host `gpu-box-1`). This stops the
+roles for a short time; the sidecar starts them again on demand:
+
+```bash
+# on gpu-box-1
+docker rm -f ss-cuda ss-embedding ss-reranker ss-sidecar-netbird ss-sidecar-caddy
+docker rm -f ss-sidecar
+./start.sh --docker http://master.example.test:3000
+```
+
+On a Windows tarball host, `start.bat` brings the roles back into the group but
+not `ss-sidecar` (see above).
+
+Remove only the containers that exist on the host. The `ss-sidecar-config`
+volume keeps the config.
 
 ## What is not configurable, and why
 

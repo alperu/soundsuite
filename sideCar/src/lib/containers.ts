@@ -1,4 +1,4 @@
-import { state, dockerSupportsGpu, CONTAINER_PREFIX, type ContainerDef } from './state';
+import { state, dockerSupportsGpu, CONTAINER_PREFIX, gpuStartsAllowed, type ContainerDef } from './state';
 import { getContainerState, startContainer, stopContainer, removeContainer, pullImage, createContainer, dockerRequest, buildExpectedConfig, detectConfigDrift, listContainersByPrefix, type ContainerState } from './docker';
 import { ollamaPs, ollamaList, ollamaPsCached, ollamaListCached, ollamaPull, ollamaLoad, ollamaUnload, waitForOllama, ollamaIsReady } from './ollama-api';
 import { dmrIsReady, dmrListModels } from './dmr-api';
@@ -9,6 +9,7 @@ import { saveConfig } from './config';
 import { createLogger } from './logger';
 import { tasks } from './task-tracker';
 import { processGlobal } from './process-global';
+import { LABEL_ROLE } from './netbird-companion';
 
 /**
  * Build a synthetic ContainerState for a host-runtime role. The sidecar
@@ -433,7 +434,9 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
           } else if (allCpu) {
             log.warn(`CPU OFFLOAD: ${role} model ${m.name} is running entirely on CPU — inference will be very slow`);
           }
-          if (def.gpuOnly && (partial || allCpu) && !state.modelLoading.has(role)) {
+          // Remediation reloads into VRAM: it waits for a master like every
+          // other automatic GPU start (masterReady() in state.ts).
+          if (def.gpuOnly && (partial || allCpu) && !state.modelLoading.has(role) && gpuStartsAllowed(`remediate ${role}`)) {
             const last = G.lastRemediateAttempt[role] || 0;
             if (Date.now() - last >= REMEDIATE_COOLDOWN_MS) {
               G.lastRemediateAttempt[role] = Date.now();
@@ -494,7 +497,11 @@ export async function getAllContainerStates(): Promise<Record<string, ContainerS
           const reason = optedOut ? 'minOnline=0' : 'manually stopped';
           log.info(`heartbeat: skipping ${role} auto-load — ${reason} (operator opted out)`);
         }
-        if (!optedOut && !userStopped && model && models.length === 0 && !state.modelLoading.has(role) && !hasActiveTask && (Date.now() - lastAttempt) > MODEL_ATTEMPT_COOLDOWN && pullFails < 3) {
+        // GPU start gate: the heartbeat runs whether or not a master is
+        // connected, so without this check it would load every role's model
+        // into VRAM on its own. Wait for a master (masterReady() in state.ts).
+        const wantsAutoLoad = !optedOut && !userStopped && model && models.length === 0 && !state.modelLoading.has(role) && !hasActiveTask && (Date.now() - lastAttempt) > MODEL_ATTEMPT_COOLDOWN && pullFails < 3;
+        if (wantsAutoLoad && gpuStartsAllowed(`heartbeat auto-load ${role}`)) {
           log.info(`heartbeat: ${role} model ${model} not in VRAM (0 models loaded), checking disk...`);
           state.lastModelAttempt[role] = Date.now();
           const modelBase = model.split(':')[0];
@@ -798,7 +805,7 @@ export async function stopOrphanContainers(): Promise<OrphanInfo[]> {
 
   const stopped: OrphanInfo[] = [];
   for (const c of candidates) {
-    if (claimed.has(c.name)) continue;
+    if (claimed.has(c.name) || isCompanion(c)) continue;
     if (c.state !== 'running') continue;
     log.info(`Orphan sweep: stopping unassigned container ${c.name} (image=${c.image}, was ${c.state})`);
     try {
@@ -812,6 +819,17 @@ export async function stopOrphanContainers(): Promise<OrphanInfo[]> {
     log.info(`Orphan sweep: stopped ${stopped.length} container(s) not in current registry`);
   }
   return stopped;
+}
+
+/**
+ * A NetBird or Caddy companion of any sidecar on this Docker host. The label
+ * is set in netbird-companion.ts, and it marks the companion whatever the
+ * sidecar's container name is (the name list above knows only ss-sidecar and
+ * state.CONTAINER_NAME). A companion of another sidecar on the same host is
+ * not ours to stop either.
+ */
+function isCompanion(c: { labels?: Record<string, string> }): boolean {
+  return !!c.labels?.[LABEL_ROLE];
 }
 
 /**
@@ -848,6 +866,6 @@ export async function listOrphanContainers(): Promise<Array<{
     claimed.add(`${self}-caddy`);
   }
   return candidates
-    .filter((c) => !claimed.has(c.name))
+    .filter((c) => !claimed.has(c.name) && !isCompanion(c))
     .map((c) => ({ name: c.name, image: c.image, state: c.state, status: c.status }));
 }

@@ -889,6 +889,13 @@ export interface MasterConnection {
    * disconnect re-armed the reconnect it had just cancelled.
    */
   wsEpoch: number;
+  /** When the current WebSocket opened (ms). After a NetBird restart with the
+   *  same IP, only sockets opened while the tunnel was down reconnect
+   *  (netbird-runtime.ts). */
+  wsOpenedAt?: number;
+  /** Local IP of the current WebSocket, when known. A socket whose local IP
+   *  is the NetBird IP already runs over the tunnel (netbird-runtime.ts). */
+  wsLocalAddress?: string;
   /**
    * Set when a slot is taken out of service for good (operator removal, or a
    * duplicate of a master we are already connected to). A retired connection
@@ -925,6 +932,127 @@ export interface MasterConnection {
    * site no string comparison can catch.
    */
   announcedCanonicalUrl?: string;
+  /**
+   * When this master last sent a `config` command (epoch ms). Set by the
+   * config handler in ws-client.ts. Never cleared while the process runs: the
+   * gate below asks "has this master sent its config at least once since boot".
+   */
+  configReceivedAt?: number;
+  /**
+   * True once this master proved to be the GPU authority (sidecarmaster): its
+   * config carried `authority: { name: 'sidecarmaster', canonicalUrl }` and that
+   * URL matched SS_GPU_AUTHORITY, or (when that env is unset) the URL this same
+   * master announced in its master-identity frame. Only the authority decides
+   * which GPU roles run. See gpuAuthorityOf().
+   */
+  gpuAuthority?: boolean;
+}
+
+// ─── GPU start gate ───────────────────────────────────────────────────────
+//
+// Rule: anything that uses the GPU waits for a master. The master decides
+// what runs. The sidecar may pull images and CREATE containers on its own, but
+// it must not START a GPU container or load a model into VRAM until
+// masterReady() is true.
+//
+// masterReady() = the GPU authority (sidecarmaster, see gpuAuthorityOf) is
+// connected now AND has sent its role assignment at least once since this
+// boot. A config from any other master, or a sandbox-slot-only push, does not
+// count.
+//
+// When ALL masters disconnect later, the gate closes again. Running work is
+// NOT stopped (a job may still be finishing); the sidecar only starts nothing
+// new until a master is back. Explicit commands (acquire, start, loadModel,
+// pullModel, provision) are not gated. They come from a master over WS/HTTP
+// poll, but ALSO from the local HTTP routes /api/acquire, /api/start,
+// /api/provision and /api/containers, which have no auth check today; a
+// caller on the network can start a role through them with no master.
+//
+// Every automatic starter (boot autoProvision, heartbeat model auto-load,
+// gpuOnly remediation reload) must call gpuStartsAllowed() first.
+
+const gpuGate = processGlobal('gpu-gate', () => ({ heldLogged: false }));
+
+/** True when this master is connected right now (WebSocket open, or HTTP
+ *  gossip with a recent good heartbeat). */
+export function masterConnected(m: MasterConnection): boolean {
+  if (m.retired) return false;
+  if (m.connectionMode === 'websocket') {
+    // 1 === WebSocket.OPEN; state.ts only imports the ws type.
+    return !!m.ws && (m.ws as unknown as { readyState: number }).readyState === 1;
+  }
+  if (m.connectionMode === 'http') {
+    return !m.unreachable && m.httpHeartbeatFailCount === 0 && m.lastHeartbeatAt !== undefined;
+  }
+  return false;
+}
+
+// ─── GPU authority (user decision 2026-11-20) ─────────────────────────────
+//
+// sidecarmaster is the single source of truth for GPU work. Only its role
+// assignment opens the gate below and changes GPU roles; other masters may
+// connect, push their sandbox slot and USE (acquire) a role sidecarmaster runs,
+// but never add, remove, start or stop GPU roles. ss-cuda (nvidia-smi only, no
+// VRAM) and the NetBird / Caddy companions are not GPU roles.
+
+const stripSlash = (u: string) => u.trim().replace(/\/+$/, '').toLowerCase();
+
+/** SS_GPU_AUTHORITY: the canonical URL of the authority master, or null. */
+export function configuredGpuAuthority(env: NodeJS.ProcessEnv = process.env): string | null {
+  const v = env.SS_GPU_AUTHORITY;
+  return v && v.trim() ? stripSlash(v) : null;
+}
+
+/**
+ * Whether a config payload from master `m` comes from the GPU authority.
+ * The payload must carry `authority: { name: 'sidecarmaster', canonicalUrl }`.
+ * With SS_GPU_AUTHORITY set, canonicalUrl must equal it. Without it,
+ * canonicalUrl must equal the URL this master announced about itself in its
+ * master-identity frame (or its slot URL), so a master cannot claim another
+ * master's identity in the config alone.
+ */
+export function gpuAuthorityOf(
+  m: MasterConnection,
+  payload: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const a = payload.authority as { name?: unknown; canonicalUrl?: unknown } | undefined;
+  if (!a || a.name !== 'sidecarmaster' || typeof a.canonicalUrl !== 'string' || !a.canonicalUrl.trim()) return false;
+  const claimed = stripSlash(a.canonicalUrl);
+  const pinned = configuredGpuAuthority(env);
+  if (pinned) return claimed === pinned;
+  const own = [m.announcedCanonicalUrl, m.serverUrl].filter((u): u is string => !!u).map(stripSlash);
+  return own.includes(claimed);
+}
+
+/** Config fields that decide which GPU roles run. Only the authority may send them. */
+export const GPU_CONFIG_FIELDS = [
+  'registry', 'enabledModes', 'minOnline', 'idleTimeouts', 'modelOverrides', 'runtimes',
+  'gpuMemUtils', 'rerankEnforceEager', 'containerName', 'hostOsOverride', 'gpuRoles',
+] as const;
+
+/** The single GPU start gate: the authority is connected and has sent its role assignment. */
+export function masterReady(): boolean {
+  for (const m of state.masters.values()) {
+    if (m.gpuAuthority && masterConnected(m) && m.configReceivedAt !== undefined) return true;
+  }
+  return false;
+}
+
+/**
+ * Call before any AUTOMATIC GPU start or VRAM load. Returns masterReady().
+ * When the gate is closed it logs one line per closed period.
+ */
+export function gpuStartsAllowed(what?: string): boolean {
+  if (masterReady()) {
+    gpuGate.heldLogged = false;
+    return true;
+  }
+  if (!gpuGate.heldLogged) {
+    gpuGate.heldLogged = true;
+    stateLog.info(`Waiting for sidecarmaster before starting GPU roles${what ? ` (held: ${what})` : ''}`);
+  }
+  return false;
 }
 
 export function getMaster(url: string): MasterConnection | undefined {

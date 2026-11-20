@@ -19,12 +19,12 @@ import os from 'os';
 import http from 'http';
 import https from 'https';
 import WebSocket from 'ws';
-import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, ensureSet, type MasterConnection } from './state';
+import { state, dockerSupportsGpu, ensureMaster, rekeyMaster, removeMaster, ensureSet, masterReady, gpuStartsAllowed, gpuAuthorityOf, GPU_CONFIG_FIELDS, type MasterConnection } from './state';
 import { handleAcquire, handleRelease, handleResetCounters, handleStart, handleStop, handleStatus, handlePullModel, handleLoadModel, getTotalActiveRequests } from './handlers';
 import { switchMode, provisionContainers, getAllContainerStates, containersForMode } from './containers';
 import { handleUpdateImage } from './ollama-image-update';
 import { discoverGpus } from './gpu';
-import { getContainerState, pullImage, createContainer, startContainer, dockerRequest, getDockerHostName } from './docker';
+import { getContainerState, pullImage, createContainer, startContainer, dockerRequest, getDockerHostName, clearRestartPolicy } from './docker';
 import { ollamaList, ollamaPull, ollamaLoad, waitForOllama } from './ollama-api';
 import { saveConfig } from './config';
 import { createLogger } from './logger';
@@ -53,6 +53,12 @@ const G = processGlobal('ws-client', () => ({
   watchdogTimer: null as ReturnType<typeof setInterval> | null,
   currentAgentUrl: null as string | null,
   addressStability: new AddressStabilityTracker(),
+  // GPU start gate (see masterReady() in state.ts). True when a boot or
+  // reconnect autoProvision created containers but held the start part
+  // because no master was ready yet. The first config from a connected master
+  // runs the held start part.
+  gpuStartPending: false,
+  provisionInFlight: null as Promise<void> | null,
 }));
 
 // Update-check is a process-wide concern, not per-master. Run it once against
@@ -360,6 +366,34 @@ export function anyWebSocketConnected(): boolean {
 
 // ─── Command execution ────────────────────────────────────────────────────
 
+/** Actions that start, stop, create or load GPU work. */
+const GPU_WRITE_ACTIONS = new Set(['start', 'stop', 'mode', 'provision', 'updateImage', 'pullModel', 'pullAndLoad', 'loadModel']);
+
+/**
+ * GPU authority rule for commands (state.ts gpuAuthorityOf). The authority's
+ * commands always run. Another master may USE a role the authority assigned
+ * (acquire/release/status/...), but may not start, stop, provision or load GPU
+ * work, and may not acquire a role the authority has not assigned.
+ * Returns the refusal text, or null when the command may run.
+ */
+export function gpuCommandRefusal(m: MasterConnection, action: string, role: string | undefined): string | null {
+  if (m.gpuAuthority) return null;
+  if (GPU_WRITE_ACTIONS.has(action)) {
+    return `only sidecarmaster (the GPU authority) may ${action} GPU roles on this sidecar`;
+  }
+  if (action === 'acquire' && role && !authorityAssigned(role)) {
+    return `role "${role}" is not assigned to this host in sidecarmaster /roleassign`;
+  }
+  return null;
+}
+
+/** True when the GPU authority assigned `role` to this host (it is in the registry and not opted out). */
+export function authorityAssigned(role: string): boolean {
+  const authority = [...state.masters.values()].some((x) => x.gpuAuthority && x.configReceivedAt !== undefined);
+  if (!authority) return false;
+  return !!state.registry[role] && (state.minOnline?.[role] ?? 1) > 0;
+}
+
 async function executeCommand(
   m: MasterConnection,
   cmd: { id: string; action: string; payload?: Record<string, unknown> },
@@ -369,6 +403,12 @@ async function executeCommand(
   const role = payload.role as string | undefined;
 
   log.info(`[${m.serverUrl}] Executing command: ${action} (id: ${cmd.id})`);
+
+  const refused = gpuCommandRefusal(m, action, role);
+  if (refused) {
+    log.info(`[${m.serverUrl}] ${action}${role ? ` ${role}` : ''} REFUSED: ${refused}`);
+    return { error: refused };
+  }
 
   switch (action) {
     // The master's serverUrl owns any lease this command opens, so a dropped
@@ -410,6 +450,19 @@ async function executeCommand(
       return updated ? { ok: true, message: `Updating to v${version}` } : { error: 'Update failed' };
     }
     case 'config': {
+      // GPU authority (state.ts gpuAuthorityOf): only sidecarmaster decides which
+      // GPU roles run. From any other master, drop every GPU field and keep the
+      // rest (serverUrl, sandbox slot, ...).
+      if (gpuAuthorityOf(m, payload)) {
+        if (!m.gpuAuthority) log.info(`[${m.serverUrl}] GPU authority: this master (sidecarmaster) decides which GPU roles run`);
+        m.gpuAuthority = true;
+      } else {
+        const dropped = GPU_CONFIG_FIELDS.filter((k) => payload[k] !== undefined);
+        if (dropped.length > 0) {
+          log.info(`[${m.serverUrl}] Config from a master that is not the GPU authority: ignored ${dropped.join(', ')} (sidecarmaster decides GPU roles)`);
+          for (const k of dropped) delete payload[k];
+        }
+      }
       // config-push targets ONLY this master's slot — never adds a 2nd master.
       // If payload.serverUrl != current key, we re-key this slot in place.
       // SHARED FIELDS (idleTimeouts, minOnline, registry) still mutate global
@@ -472,6 +525,14 @@ async function executeCommand(
       }
       if (payload.containerName) state.CONTAINER_NAME = payload.containerName as string;
       state.lastConfigPushAt = Date.now();
+      // GPU start gate: this master has now sent its fleet config (see
+      // masterReady()). Only a push with fleet fields counts. A follow-mode
+      // master sends just its sandbox slot ({openrouter}); that master does
+      // not decide what runs, so it must not open the gate.
+      if (m.gpuAuthority && ['registry', 'enabledModes', 'minOnline', 'idleTimeouts', 'modelOverrides', 'runtimes']
+        .some((k) => payload[k] !== undefined)) {
+        m.configReceivedAt = Date.now();
+      }
 
       // ─── ss-rlm-sandbox slot (per master; docs/tasks/58) ──────────────
       // Object → store, null → clear, absent → no change. Scoped to
@@ -828,7 +889,8 @@ async function executeCommand(
       // We STOP (not REMOVE) so re-enabling the role is a fast `docker
       // start` — image + config preserved. Fire-and-forget; errors are
       // logged but don't fail the push.
-      try {
+      // Only the GPU authority's role list may stop containers.
+      if (m.gpuAuthority) try {
         const { stopOrphanContainers } = await import('./containers');
         void stopOrphanContainers().catch((err) => {
           log.warn(`[${m.serverUrl}] orphan sweep failed: ${(err as Error).message}`);
@@ -842,6 +904,9 @@ async function executeCommand(
           handleAcquire(r).catch(err => log.warn(`Auto-acquire after config push failed for ${r}: ${(err as Error).message}`));
         }
       }
+      // First config from a connected master: run the GPU starts that boot
+      // (or a reconnect) held back. No-op when nothing is held.
+      runHeldGpuStarts(m);
       return { ok: true, idleTimeouts: state.idleTimeouts, containerName: state.CONTAINER_NAME };
     }
     case 'pullModel': {
@@ -948,6 +1013,17 @@ async function autoProvision(): Promise<void> {
     // sometimes auto-started — defeating the operator's policy.
     if ((state.minOnline?.[role] ?? 1) === 0) {
       log.info(`autoProvision: skipping ${role} — minOnline=0 (operator opted this role out)`);
+      // An opted-out role can still have an old container with RestartPolicy
+      // `unless-stopped`; Docker would start it on every host boot. Fix the
+      // policy here too (it starts nothing).
+      try {
+        const cs = await getContainerState(def.containerName);
+        if (cs.exists && cs.restartPolicy && cs.restartPolicy !== 'no') {
+          await clearRestartPolicy(def.containerName);
+        }
+      } catch (err) {
+        log.warn(`${role}: could not clear restart policy: ${(err as Error).message}`);
+      }
       continue;
     }
 
@@ -960,6 +1036,13 @@ async function autoProvision(): Promise<void> {
       if (cs.exists) {
         log.info(`${role}: container ${def.containerName} exists (${cs.status})`);
         if (cs.status === 'running') vramUsed += def.vram;
+        // Containers made by older sidecars carry RestartPolicy
+        // `unless-stopped`, so Docker itself starts them on host boot, before
+        // any master is there. Set it to `no`: the sidecar decides.
+        if (cs.restartPolicy && cs.restartPolicy !== 'no') {
+          await clearRestartPolicy(def.containerName).catch((err) =>
+            log.warn(`${role}: could not clear restart policy: ${(err as Error).message}`));
+        }
         continue;
       }
 
@@ -998,6 +1081,19 @@ async function autoProvision(): Promise<void> {
       log.error(`${role}: provision failed: ${(err as Error).message}`);
     }
   }
+
+  // ─── GPU start gate ────────────────────────────────────────────────────
+  // Everything above only pulls images and CREATES containers. Everything
+  // below STARTS containers and loads models into VRAM (docker and host-runtime
+  // roles alike), so it waits for a master: see masterReady() in state.ts.
+  // When the gate is closed, the start part is held; the first config from a
+  // connected master runs it (runHeldGpuStarts).
+  if (!gpuStartsAllowed('auto-provision start')) {
+    G.gpuStartPending = true;
+    log.info(`Auto-provision: containers ready; start of ${activeRoles.length} active role(s) held until a master connects and sends its config`);
+    return;
+  }
+  G.gpuStartPending = false;
 
   const sortedActive = [...activeRoles].sort((a, b) => {
     const va = state.registry[a]?.vram || 0;
@@ -1089,6 +1185,32 @@ async function autoProvision(): Promise<void> {
   }
 
   log.info(`Auto-provision complete. VRAM allocated: ~${vramUsed}MB / ${availableVram === Infinity ? '??' : availableVram}MB`);
+}
+
+/**
+ * Run the start part of autoProvision that was held because no master was
+ * ready. Called after every config command; does nothing unless a start is
+ * held, the gate is open and no provision run is in flight.
+ */
+function runHeldGpuStarts(m?: MasterConnection): void {
+  if (!G.gpuStartPending || G.provisionInFlight || !masterReady()) return;
+  log.info(`${m ? `[${m.serverUrl}] ` : ''}Master connected and sent its config — starting held GPU roles`);
+  runAutoProvision('Held GPU start');
+}
+
+/**
+ * Run autoProvision once at a time. When a run ends with its start part held
+ * and a master became ready meanwhile (its config arrived while this run was
+ * still creating containers), run the held start part at once.
+ */
+function runAutoProvision(label: string): Promise<void> {
+  G.provisionInFlight = autoProvision()
+    .catch((err) => log.error(`${label} failed: ${(err as Error).message}`))
+    .finally(() => {
+      G.provisionInFlight = null;
+      runHeldGpuStarts();
+    });
+  return G.provisionInFlight;
 }
 
 // ─── Per-master HTTP heartbeat + command poll ────────────────────────────
@@ -1380,6 +1502,10 @@ export function connectMaster(m: MasterConnection): void {
     const headers: Record<string, string> = {};
     if (m.authToken) headers['Authorization'] = `Bearer ${m.authToken}`;
     const ws = new WebSocket(wsUrl, { headers });
+    // The local IP shows whether this socket runs over the NetBird tunnel
+    // (netbird-runtime.ts keeps such sockets when NetBird restarts).
+    let localAddress: string | undefined;
+    ws.on('upgrade', (res) => { localAddress = res.socket?.localAddress; });
 
     const connectTimeout = setTimeout(async () => {
       if (stale()) {
@@ -1405,6 +1531,8 @@ export function connectMaster(m: MasterConnection): void {
       m.httpHeartbeatFailCount = 0;
       m.wsReconnectDelay = 1000;
       m.ws = ws;
+      m.wsOpenedAt = Date.now();
+      m.wsLocalAddress = localAddress;
       m.connectionMode = 'websocket';
       m.connectionStatus = 'Connected via WebSocket';
       if (!G.firstConnectEmitted.has(m.serverUrl)) {
@@ -1847,12 +1975,27 @@ export function disconnectAllMasters(): void {
  * bound to the Docker bridge address and cannot reach a NetBird master.
  */
 export function reconnectAllMasters(reason: string): void {
+  reconnectMastersWhere(() => true, reason);
+}
+
+/**
+ * Like reconnectAllMasters, but drop only the open sockets for which `drop`
+ * says yes. Returns how many sockets were dropped.
+ */
+export function reconnectMastersWhere(
+  drop: (s: { openedAt: number | null; localAddress: string | null }) => boolean,
+  reason: string,
+): number {
+  let n = 0;
   for (const m of state.masters.values()) {
     if (m.retired || !m.ws) continue;
+    if (!drop({ openedAt: m.wsOpenedAt ?? null, localAddress: m.wsLocalAddress ?? null })) continue;
     log.info(`[${m.serverUrl}] Reconnecting: ${reason}`);
     m.wsReconnectDelay = 1000;
     try { m.ws.terminate(); } catch { /* ignore */ }
+    n++;
   }
+  return n;
 }
 
 // ─── Back-compat shims for legacy single-master callsites ────────────────
@@ -1919,13 +2062,35 @@ export async function startGossipClient(): Promise<void> {
   // went away still needs the sweep to drain what they left behind.
   startSweeper();
 
-  try {
-    await autoProvision();
-  } catch (err) {
-    log.error(`Auto-provision failed: ${(err as Error).message}`);
-  }
+  // Creates containers at once; the GPU start part waits for a master (see
+  // the gate in autoProvision and masterReady() in state.ts).
+  await runAutoProvision('Auto-provision');
 
   startWatchdog();
+}
+
+/** Test seam: run autoProvision once (boot or reconnect path). */
+export async function __testAutoProvision(): Promise<void> {
+  await autoProvision();
+}
+
+/** Test seam: run one master command as if it came over the socket. */
+export async function __testExecuteCommand(
+  m: MasterConnection,
+  cmd: { id: string; action: string; payload?: Record<string, unknown> },
+): Promise<Record<string, unknown>> {
+  return executeCommand(m, cmd);
+}
+
+/** Test seam: wait for a held GPU start that a config command kicked off. */
+export async function __testHeldGpuStartsSettled(): Promise<void> {
+  while (G.provisionInFlight) await G.provisionInFlight;
+}
+
+/** Test seam: reset the held-start flag between tests. */
+export function __testResetGpuGate(): void {
+  G.gpuStartPending = false;
+  G.provisionInFlight = null;
 }
 
 /** Test seam: drive one HTTP heartbeat, the transport the master's

@@ -36,6 +36,7 @@
 import crypto from 'crypto';
 import path from 'path';
 import tls from 'tls';
+import { composeLabels } from './compose-labels';
 import {
   CF_TOKEN_FILE, RUN_DIR, SETUP_KEY_FILE, buildCaddyfile, handoffAgeMs, removeHandoff, writeHandoff, defaultHostname, parseNetbirdStatus,
   readSecret, readSettings, secretFingerprint, writeCaddyfile,
@@ -146,7 +147,8 @@ export function netbirdSpec(
     body: {
       Image: NETBIRD_IMAGE,
       Env: env,
-      Labels: { [LABEL_ROLE]: 'netbird', [LABEL_OWNER]: selfId, [LABEL_HASH]: h },
+      // Compose labels are outside the hash: they never force a recreate.
+      Labels: { ...composeLabels('netbird'), [LABEL_ROLE]: 'netbird', [LABEL_OWNER]: selfId, [LABEL_HASH]: h },
       HostConfig: host,
     },
   };
@@ -175,7 +177,7 @@ export function caddySpec(
       Image: CADDY_IMAGE,
       Entrypoint: ['/bin/sh', '-c', boot],
       Cmd: [],
-      Labels: { [LABEL_ROLE]: 'caddy', [LABEL_OWNER]: selfId, [LABEL_HASH]: h },
+      Labels: { ...composeLabels('caddy'), [LABEL_ROLE]: 'caddy', [LABEL_OWNER]: selfId, [LABEL_HASH]: h },
       HostConfig: host,
     },
   };
