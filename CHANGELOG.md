@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.5.0](https://github.com/alperu/soundsuite/compare/v1.4.1...v1.5.0) (2026-11-20)
+
+
+### Features
+
+* **sidecar:** group sidecar containers in Docker Desktop with compose labels ([f8dfac3](https://github.com/alperu/soundsuite/commit/f8dfac3926976b48bb7608f0b49da682ad8b77aa))
+
+
+### Bug Fixes
+
+* **sidecar:** a NetBird restart with the same IP keeps sockets already on the tunnel ([2e69ccd](https://github.com/alperu/soundsuite/commit/2e69ccd65e658fddb7f0f4d1184bea78fdff615c))
+* **sidecar:** launcher project-name check matches the TypeScript rule ([34c58bf](https://github.com/alperu/soundsuite/commit/34c58bfa6792b65386353105aaaf2be0795cd17a))
+* **sidecar:** the orphan sweep never stops the NetBird and Caddy companions ([409b190](https://github.com/alperu/soundsuite/commit/409b190270c97e4f9bf43ebf6290ce74845e5ecb))
+
 ## [1.4.1](https://github.com/alperu/soundsuite/compare/v1.4.0...v1.4.1) (2026-09-19)
 
 > Requested as "Sound Suite 1.4.01". Semantic versioning has no leading zeros, so the tag and
