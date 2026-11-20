@@ -148,7 +148,13 @@ Desktop shows them as one group, like a compose stack:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SS_COMPOSE_PROJECT` | `sidecar` | Group name. Allowed: `a-z`, `0-9`, `_`, `-`, first a letter or digit. A bad value falls back to `sidecar` with a warning. The launchers (`start.sh`, `start.bat`, `start-docker-agent.*`) pass it into the agent, so the agent and its children share one group. |
+| `SS_COMPOSE_PROJECT` | `sidecar` | Group name. Allowed: `a-z`, `0-9`, `_`, `-`, first a letter or digit. A bad value falls back to `sidecar` with a warning. The launchers `start.sh`, the standalone `public/sideCar/scripts/start.bat` and `start-docker-agent.*` label the agent and pass the name into it, so the agent and its children share one group. |
+
+**Windows hosts installed from the tarball:** the `start.bat` in the tarball
+comes from `scripts/buildSidecar.sh`, not from `public/sideCar/scripts/start.bat`,
+and does not set the labels yet. On those hosts `ss-sidecar` stays outside the
+group, and `SS_COMPOSE_PROJECT` does not reach the agent, so its children always
+use `sidecar`.
 
 Docker Desktop groups on `com.docker.compose.project`. We did not test this
 against Docker Desktop in this change.
@@ -186,8 +192,11 @@ roles for a short time; the sidecar starts them again on demand:
 # on gpu-box-1
 docker rm -f ss-cuda ss-embedding ss-reranker ss-sidecar-netbird ss-sidecar-caddy
 docker rm -f ss-sidecar
-./start.sh --docker http://master.example.test:3000   # or start.bat on Windows
+./start.sh --docker http://master.example.test:3000
 ```
+
+On a Windows tarball host, `start.bat` brings the roles back into the group but
+not `ss-sidecar` (see above).
 
 Remove only the containers that exist on the host. The `ss-sidecar-config`
 volume keeps the config.
