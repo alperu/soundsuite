@@ -2,6 +2,7 @@ import { state, dockerSupportsGpu, type GpuInfo } from './state';
 import { dockerRequest, dockerRequestWithBody, pullImage, execInContainer, getContainerState } from './docker';
 import { createLogger } from './logger';
 import { processGlobal } from './process-global';
+import { composeLabels } from './compose-labels';
 
 const log = createLogger('gpu');
 
@@ -123,6 +124,7 @@ async function ensureCudaContainer(): Promise<boolean> {
   const { status, body } = await dockerRequestWithBody('POST', `/containers/create?name=${GPU_CONTAINER}`, {
     Image: GPU_IMAGE,
     Cmd: ['sleep', 'infinity'],
+    Labels: composeLabels('cuda'),
     HostConfig: {
       DeviceRequests: [{ Driver: '', Count: -1, Capabilities: [['gpu']] }],
       RestartPolicy: { Name: 'unless-stopped' },

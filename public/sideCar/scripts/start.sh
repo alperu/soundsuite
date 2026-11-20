@@ -104,6 +104,21 @@ if [ "$USE_DOCKER" = "1" ]; then
   export DOCKER_BUILDKIT=0
   export BUILDX_NO_DEFAULT_ATTESTATIONS=1
   DOCKER_ARGS="-d --name ss-sidecar --restart unless-stopped"
+  # Docker Desktop group: the same compose labels the sidecar puts on the
+  # containers it creates (sideCar/src/lib/compose-labels.ts). The project
+  # name is passed in too, so the agent and its children share one group.
+  # No config-hash label: `docker compose` does not treat these as its own.
+  case "${SS_COMPOSE_PROJECT:-}" in
+    "") SS_COMPOSE_PROJECT=sidecar ;;
+    [a-z0-9]*[!a-z0-9_-]*|[!a-z0-9]*)
+      echo "[WARN] SS_COMPOSE_PROJECT='$SS_COMPOSE_PROJECT' is not a valid compose project name; using 'sidecar'."
+      SS_COMPOSE_PROJECT=sidecar ;;
+  esac
+  DOCKER_ARGS="$DOCKER_ARGS --label com.docker.compose.project=$SS_COMPOSE_PROJECT"
+  DOCKER_ARGS="$DOCKER_ARGS --label com.docker.compose.service=sidecar"
+  DOCKER_ARGS="$DOCKER_ARGS --label com.docker.compose.oneoff=False"
+  DOCKER_ARGS="$DOCKER_ARGS --label com.docker.compose.container-number=1"
+  DOCKER_ARGS="$DOCKER_ARGS -e SS_COMPOSE_PROJECT=$SS_COMPOSE_PROJECT"
   if [ "$(uname)" = "Linux" ]; then
     DOCKER_ARGS="$DOCKER_ARGS --network host"
   else

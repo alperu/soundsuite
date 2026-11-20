@@ -94,6 +94,20 @@ if !USE_DOCKER!==1 (
     )
 
     set "DOCKER_CMD=docker run -d --name ss-sidecar --restart unless-stopped"
+    REM Docker Desktop group: same compose labels the sidecar puts on the
+    REM containers it creates (sideCar/src/lib/compose-labels.ts). No
+    REM config-hash label, so docker compose does not treat them as its own.
+    if not defined SS_COMPOSE_PROJECT set "SS_COMPOSE_PROJECT=sidecar"
+    echo !SS_COMPOSE_PROJECT!| findstr /r /x /c:"[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_-]*" >nul
+    if errorlevel 1 (
+        echo [WARN] SS_COMPOSE_PROJECT=!SS_COMPOSE_PROJECT! is not a valid compose project name; using sidecar.
+        set "SS_COMPOSE_PROJECT=sidecar"
+    )
+    set "DOCKER_CMD=!DOCKER_CMD! --label com.docker.compose.project=!SS_COMPOSE_PROJECT!"
+    set "DOCKER_CMD=!DOCKER_CMD! --label com.docker.compose.service=sidecar"
+    set "DOCKER_CMD=!DOCKER_CMD! --label com.docker.compose.oneoff=False"
+    set "DOCKER_CMD=!DOCKER_CMD! --label com.docker.compose.container-number=1"
+    set "DOCKER_CMD=!DOCKER_CMD! -e SS_COMPOSE_PROJECT=!SS_COMPOSE_PROJECT!"
     set "DOCKER_CMD=!DOCKER_CMD! -p !PORT!:8098"
     set "DOCKER_CMD=!DOCKER_CMD! --add-host=host.docker.internal:host-gateway"
     set "DOCKER_CMD=!DOCKER_CMD! -v /var/run/docker.sock:/var/run/docker.sock"
