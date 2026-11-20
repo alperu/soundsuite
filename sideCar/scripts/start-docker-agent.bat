@@ -27,7 +27,7 @@ REM Compose labels put the agent in the same Docker Desktop group as the
 REM containers it creates (sideCar/src/lib/compose-labels.ts).
 set "COMPOSE_PROJECT=%SS_COMPOSE_PROJECT%"
 if "%COMPOSE_PROJECT%"=="" set "COMPOSE_PROJECT=sidecar"
-echo %COMPOSE_PROJECT%| findstr /r /x /c:"[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_-]*" >nul
+echo.%COMPOSE_PROJECT%| findstr /r /x /c:"[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_-]*" >nul
 if errorlevel 1 (
     echo [WARN] SS_COMPOSE_PROJECT=%COMPOSE_PROJECT% is not a valid compose project name; using sidecar.
     set "COMPOSE_PROJECT=sidecar"

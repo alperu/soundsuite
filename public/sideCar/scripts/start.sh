@@ -108,9 +108,10 @@ if [ "$USE_DOCKER" = "1" ]; then
   # containers it creates (sideCar/src/lib/compose-labels.ts). The project
   # name is passed in too, so the agent and its children share one group.
   # No config-hash label: `docker compose` does not treat these as its own.
+  # Letters are listed, not a-z: in a UTF-8 locale bash 3.2 lets [a-z] match capitals.
   case "${SS_COMPOSE_PROJECT:-}" in
     "") SS_COMPOSE_PROJECT=sidecar ;;
-    [a-z0-9]*[!a-z0-9_-]*|[!a-z0-9]*)
+    *[!abcdefghijklmnopqrstuvwxyz0123456789_-]*|[!abcdefghijklmnopqrstuvwxyz0123456789]*)
       echo "[WARN] SS_COMPOSE_PROJECT='$SS_COMPOSE_PROJECT' is not a valid compose project name; using 'sidecar'."
       SS_COMPOSE_PROJECT=sidecar ;;
   esac

@@ -98,7 +98,7 @@ if !USE_DOCKER!==1 (
     REM containers it creates (sideCar/src/lib/compose-labels.ts). No
     REM config-hash label, so docker compose does not treat them as its own.
     if not defined SS_COMPOSE_PROJECT set "SS_COMPOSE_PROJECT=sidecar"
-    echo !SS_COMPOSE_PROJECT!| findstr /r /x /c:"[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_-]*" >nul
+    echo.!SS_COMPOSE_PROJECT!| findstr /r /x /c:"[abcdefghijklmnopqrstuvwxyz0123456789][abcdefghijklmnopqrstuvwxyz0123456789_-]*" >nul
     if errorlevel 1 (
         echo [WARN] SS_COMPOSE_PROJECT=!SS_COMPOSE_PROJECT! is not a valid compose project name; using sidecar.
         set "SS_COMPOSE_PROJECT=sidecar"
