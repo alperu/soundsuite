@@ -478,8 +478,14 @@ async function executeCommand(
       }
       if (payload.containerName) state.CONTAINER_NAME = payload.containerName as string;
       state.lastConfigPushAt = Date.now();
-      // GPU start gate: this master has now sent its config (see masterReady()).
-      m.configReceivedAt = Date.now();
+      // GPU start gate: this master has now sent its fleet config (see
+      // masterReady()). Only a push with fleet fields counts. A follow-mode
+      // master sends just its sandbox slot ({openrouter}); that master does
+      // not decide what runs, so it must not open the gate.
+      if (['registry', 'enabledModes', 'minOnline', 'idleTimeouts', 'modelOverrides', 'runtimes']
+        .some((k) => payload[k] !== undefined)) {
+        m.configReceivedAt = Date.now();
+      }
 
       // ─── ss-rlm-sandbox slot (per master; docs/tasks/58) ──────────────
       // Object → store, null → clear, absent → no change. Scoped to

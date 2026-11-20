@@ -391,3 +391,42 @@ describe('HTTP gossip master', () => {
     expect(masterReady()).toBe(false);
   });
 });
+
+describe('a sandbox-slot-only push does not open the gate', () => {
+  it('a follow-mode master that sends only {openrouter} is not ready', async () => {
+    await __testAutoProvision();
+    const m = connectMaster();
+    await __testExecuteCommand(m, { id: 'sb-1', action: 'config', payload: { openrouter: null } });
+    await __testHeldGpuStartsSettled();
+
+    expect(masterReady()).toBe(false);
+    expect(mockStartContainer).not.toHaveBeenCalled();
+  });
+});
+
+describe('gpuOnly remediation reload waits for a master', () => {
+  beforeEach(() => {
+    state.registry = {
+      embedding: { ...testRegistry().embedding, gpuOnly: true },
+    } as unknown as typeof state.registry;
+    mockDocker.created.add('ss-test-embedding');
+    mockDocker.running.add('ss-test-embedding');
+    // Model is loaded but entirely on CPU.
+    mockOllamaPs.mockResolvedValue([{ name: 'test-embed:1b', size: 1e9, sizeVram: 0, processor: '100% CPU' }]);
+  });
+
+  it('does not reload into VRAM with no master', async () => {
+    await getAllContainerStates();
+    await new Promise((r) => setTimeout(r, 1_700));
+    expect(mockOllamaLoad).not.toHaveBeenCalled();
+  });
+
+  it('reloads into VRAM once a master is ready', async () => {
+    const m = connectMaster();
+    await sendConfig(m);
+    mockOllamaLoad.mockClear();
+    await getAllContainerStates();
+    await new Promise((r) => setTimeout(r, 1_700));
+    expect(mockOllamaLoad).toHaveBeenCalled();
+  });
+});

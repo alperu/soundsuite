@@ -941,13 +941,16 @@ export interface MasterConnection {
 // masterReady() is true.
 //
 // masterReady() = at least one master is connected now AND that master has
-// sent its config at least once since this boot.
+// sent a fleet config (registry, enabledModes, minOnline, ...) at least once
+// since this boot. A sandbox-slot-only push ({openrouter}) does not count.
 //
 // When ALL masters disconnect later, the gate closes again. Running work is
 // NOT stopped (a job may still be finishing); the sidecar only starts nothing
-// new until a master is back. Explicit commands from a master (acquire, start,
-// loadModel, pullModel, provision) are not gated: a command can only arrive
-// from a connected master.
+// new until a master is back. Explicit commands (acquire, start, loadModel,
+// pullModel, provision) are not gated. They come from a master over WS/HTTP
+// poll, but ALSO from the local HTTP routes /api/acquire, /api/start,
+// /api/provision and /api/containers, which have no auth check today; a
+// caller on the network can start a role through them with no master.
 //
 // Every automatic starter (boot autoProvision, heartbeat model auto-load,
 // gpuOnly remediation reload) must call gpuStartsAllowed() first.

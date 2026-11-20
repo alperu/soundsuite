@@ -62,7 +62,9 @@ runs.
 
 The gate is `masterReady()` in `src/lib/state.ts`: at least one master is
 connected now (WebSocket open, or HTTP gossip with a good heartbeat) **and**
-that master has sent its config at least once since this boot.
+that master has sent a fleet config (`registry`, `enabledModes`, `minOnline`,
+...) at least once since this boot. A push with only the sandbox slot
+(`openrouter`) does not count.
 
 - **Boot and reconnect.** `autoProvision` may pull images and create
   containers. It does not start a GPU container or load a model into VRAM
@@ -72,8 +74,10 @@ that master has sent its config at least once since this boot.
   remediation reload check the same gate. Idle timers only stop or unload, so
   they need no gate. `switchMode` is a label only and starts nothing.
 - **Master commands.** `acquire`, `start`, `loadModel`, `pullModel` and
-  `provision` from a master always work. A command can only come from a
-  connected master.
+  `provision` are not gated. They come from a master, but also from the local
+  HTTP routes `/api/acquire`, `/api/start`, `/api/provision` and
+  `/api/containers`. These routes have no auth check today, so a caller on
+  the network can start a role with no master connected.
 - **All masters drop.** Running work is not stopped; a job may still be
   finishing. The sidecar starts nothing new until a master is back and sends
   its config.
