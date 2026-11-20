@@ -959,6 +959,17 @@ async function autoProvision(): Promise<void> {
     // sometimes auto-started — defeating the operator's policy.
     if ((state.minOnline?.[role] ?? 1) === 0) {
       log.info(`autoProvision: skipping ${role} — minOnline=0 (operator opted this role out)`);
+      // An opted-out role can still have an old container with RestartPolicy
+      // `unless-stopped`; Docker would start it on every host boot. Fix the
+      // policy here too (it starts nothing).
+      try {
+        const cs = await getContainerState(def.containerName);
+        if (cs.exists && cs.restartPolicy && cs.restartPolicy !== 'no') {
+          await clearRestartPolicy(def.containerName);
+        }
+      } catch (err) {
+        log.warn(`${role}: could not clear restart policy: ${(err as Error).message}`);
+      }
       continue;
     }
 

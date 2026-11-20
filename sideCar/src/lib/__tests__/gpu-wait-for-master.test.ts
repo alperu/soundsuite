@@ -328,3 +328,66 @@ describe('all masters drop', () => {
     expect(mockDocker.running.has('ss-test-embedding')).toBe(true);
   });
 });
+
+describe('opted-out role (minOnline=0) with an old restart policy', () => {
+  it('sets the policy to no and starts nothing', async () => {
+    state.minOnline = { embedding: 0 };
+    mockDocker.created.add('ss-test-embedding');
+    mockDocker.restartPolicy.set('ss-test-embedding', 'unless-stopped');
+
+    await __testAutoProvision();
+
+    expect(mockClearRestartPolicy).toHaveBeenCalledWith('ss-test-embedding');
+    expect(mockStartContainer).not.toHaveBeenCalledWith('ss-test-embedding');
+  });
+});
+
+describe('several masters', () => {
+  it('opens when one master is connected and has sent its config', async () => {
+    const a = ensureMaster('http://master-a.example.test:3000');
+    a.connectionMode = 'disconnected';
+    a.configReceivedAt = Date.now(); // sent config earlier, now gone
+    const b = ensureMaster('http://master-b.example.test:3000');
+    b.connectionMode = 'websocket';
+    b.ws = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as MasterConnection['ws'];
+
+    // b is connected but sent no config; a sent config but is gone.
+    expect(masterReady()).toBe(false);
+
+    await sendConfig(b);
+    expect(masterReady()).toBe(true);
+  });
+});
+
+describe('reconnect after all masters drop', () => {
+  it('a held start runs when the master comes back and sends config', async () => {
+    const m = connectMaster();
+    await sendConfig(m);
+    dropMaster(m);
+
+    // A new role shows up while no master is there: created, not started.
+    mockStartContainer.mockClear();
+    await __testAutoProvision();
+    expect(mockStartContainer).not.toHaveBeenCalled();
+
+    m.connectionMode = 'websocket';
+    m.ws = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as MasterConnection['ws'];
+    await sendConfig(m);
+
+    expect(mockStartContainer).toHaveBeenCalledWith('ss-test-embedding');
+  });
+});
+
+describe('HTTP gossip master', () => {
+  it('counts as connected only with a good heartbeat', async () => {
+    const m = ensureMaster(MASTER_URL);
+    m.connectionMode = 'http';
+    m.httpHeartbeatFailCount = 0;
+    m.lastHeartbeatAt = Date.now();
+    await sendConfig(m);
+    expect(masterReady()).toBe(true);
+
+    m.httpHeartbeatFailCount = 2;
+    expect(masterReady()).toBe(false);
+  });
+});
