@@ -1405,6 +1405,7 @@ export function connectMaster(m: MasterConnection): void {
       m.httpHeartbeatFailCount = 0;
       m.wsReconnectDelay = 1000;
       m.ws = ws;
+      m.wsOpenedAt = Date.now();
       m.connectionMode = 'websocket';
       m.connectionStatus = 'Connected via WebSocket';
       if (!G.firstConnectEmitted.has(m.serverUrl)) {
@@ -1847,12 +1848,27 @@ export function disconnectAllMasters(): void {
  * bound to the Docker bridge address and cannot reach a NetBird master.
  */
 export function reconnectAllMasters(reason: string): void {
+  reconnectMastersWhere(() => true, reason);
+}
+
+/**
+ * Like reconnectAllMasters, but drop only the open sockets for which `drop`
+ * says yes. Returns how many sockets were dropped.
+ */
+export function reconnectMastersWhere(
+  drop: (s: { openedAt: number | null }) => boolean,
+  reason: string,
+): number {
+  let n = 0;
   for (const m of state.masters.values()) {
     if (m.retired || !m.ws) continue;
+    if (!drop({ openedAt: m.wsOpenedAt ?? null })) continue;
     log.info(`[${m.serverUrl}] Reconnecting: ${reason}`);
     m.wsReconnectDelay = 1000;
     try { m.ws.terminate(); } catch { /* ignore */ }
+    n++;
   }
+  return n;
 }
 
 // ─── Back-compat shims for legacy single-master callsites ────────────────

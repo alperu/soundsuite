@@ -889,6 +889,10 @@ export interface MasterConnection {
    * disconnect re-armed the reconnect it had just cancelled.
    */
   wsEpoch: number;
+  /** When the current WebSocket opened (ms). After a NetBird restart with the
+   *  same IP, only sockets opened while the tunnel was down reconnect
+   *  (netbird-runtime.ts). */
+  wsOpenedAt?: number;
   /**
    * Set when a slot is taken out of service for good (operator removal, or a
    * duplicate of a master we are already connected to). A retired connection

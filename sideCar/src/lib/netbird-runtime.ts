@@ -102,6 +102,10 @@ const G = processGlobal('netbird', () => ({
   // What the Activity Log was last told, so each change is logged once.
   told: {} as Record<string, string>,
   connectedSince: null as number | null,
+  // The NetBird IP and the time NetBird was last seen running and connected.
+  // After a restart with the same IP only sockets opened since then reconnect.
+  lastIp: null as string | null,
+  lastUpAt: null as number | null,
 }));
 
 /** Run one reconcile; concurrent callers share the run in flight. */
@@ -121,7 +125,15 @@ export function runReconcile(): Promise<ReconcileReport> {
       // Keep the cached status fresh for netbirdSummary() (master heartbeat),
       // and tell the Activity Log about changes and errors.
       if (nb && nb.state !== 'off' && nb.state !== 'removed' && nb.state !== 'error') {
-        void cachedStatus(nb.name).then((st) => reportNetbird(r, st)).catch(() => {});
+        void cachedStatus(nb.name).then((st) => {
+          // Only a helper that was already running: after a (re)start,
+          // reconnectMastersWhenUp must see the IP from before it.
+          if (nb.state === 'running' && st?.connected && st.ip) {
+            G.lastIp = st.ip;
+            G.lastUpAt = Date.now();
+          }
+          return reportNetbird(r, st);
+        }).catch(() => {});
       } else {
         void reportNetbird(r, null);
       }
@@ -202,14 +214,24 @@ export async function connectNetbirdNow(): Promise<void> {
 }
 
 /**
- * After NetBird (re)starts, wait until its tunnel is up, then reconnect every
- * master socket. Sockets opened earlier keep the Docker bridge address and
- * cannot reach a master on the NetBird network; they stay OPEN and silent.
+ * After NetBird (re)starts, wait until its tunnel is up, then reconnect master
+ * sockets. Sockets opened while the tunnel was down keep the Docker bridge
+ * address and cannot reach a master on the NetBird network; they stay OPEN and
+ * silent.
+ *
+ * Every socket reconnects when the NetBird IP is new or unknown (first start in
+ * this process, an IP change, or no status after the wait). When the IP is the
+ * same, only sockets opened since NetBird was last seen up reconnect: the older
+ * ones already use that IP. Dropping all of them on every helper start made
+ * every master register again and push its config again.
  */
 async function reconnectMastersWhenUp(name: string): Promise<void> {
   if (G.reconnectPending) return;
   G.reconnectPending = true;
+  const prevIp = G.lastIp;
+  const upAt = G.lastUpAt;
   try {
+    let ip: string | null = null;
     for (let i = 0; i < 24; i++) {
       await new Promise((res) => setTimeout(res, 5_000));
       const st = await readNetbirdStatus(dockerDeps, name);
@@ -217,10 +239,20 @@ async function reconnectMastersWhenUp(name: string): Promise<void> {
         // Tell the Activity Log now, not at the next 60 s reconcile.
         G.status = { at: Date.now(), value: st };
         if (G.last) void reportNetbird(G.last, st);
+        ip = st.ip;
         break;
       }
     }
-    const { reconnectAllMasters } = await import('./ws-client');
+    const { reconnectAllMasters, reconnectMastersWhere } = await import('./ws-client');
+    if (ip && ip === prevIp && upAt !== null) {
+      G.lastUpAt = Date.now();
+      reconnectMastersWhere(
+        (s) => s.openedAt === null || s.openedAt > upAt,
+        'NetBird restarted, so sockets opened while it was down move to the NetBird address',
+      );
+      return;
+    }
+    if (ip) { G.lastIp = ip; G.lastUpAt = Date.now(); }
     reconnectAllMasters('NetBird (re)started, so sockets move to the NetBird address');
   } catch (e) {
     log.warn(`reconnect after NetBird start failed: ${(e as Error).message}`);
